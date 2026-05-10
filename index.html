@@ -30,8 +30,13 @@
 </script>
 <script src="https://unpkg.com/lucide@latest/dist/umd/lucide.min.js"></script>
 <style>
-  html,body { height: 100%; }
-  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, system-ui, sans-serif; -webkit-tap-highlight-color: transparent; background: #f8fafc; }
+  html,body { height: 100%; max-width: 100vw; overflow-x: clip; }
+  /* Fallback für Browser ohne overflow:clip-Support */
+  @supports not (overflow: clip) { html,body { overflow-x: hidden; } }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, system-ui, sans-serif; -webkit-tap-highlight-color: transparent; background: #f8fafc; width: 100%; position: relative; }
+  /* Defense gegen breite Inline-Inhalte (lange URLs, Code-Snippets) */
+  pre, code { max-width: 100%; }
+  img, svg { max-width: 100%; }
   *:focus { outline: none; }
   .safe-bottom { padding-bottom: max(env(safe-area-inset-bottom), 0.5rem); }
   .safe-top    { padding-top:    max(env(safe-area-inset-top), 0.5rem); }
@@ -168,7 +173,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v1.0.1';
+const APP_VERSION = 'v1.0.2';
 // Read-Token absichtlich gesplittet, damit GitHub Secret-Scanning beim Push nicht blockt.
 // Der Token ist read-only und Base-scoped → bewusst eingebettet (Architektur-Entscheidung).
 const _RK = 'patu8KWM8aWB' + 'yxCGL.69fae5d9fa4b94c2' + '66b426dadd71a51f574945d840b33569058ab5e9d89ebef3';
