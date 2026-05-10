@@ -209,7 +209,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v1.7.0';
+const APP_VERSION = 'v1.8.0';
 // Read-Token absichtlich gesplittet, damit GitHub Secret-Scanning beim Push nicht blockt.
 // Der Token ist read-only und Base-scoped → bewusst eingebettet (Architektur-Entscheidung).
 const _RK = 'patu8KWM8aWB' + 'yxCGL.69fae5d9fa4b94c2' + '66b426dadd71a51f574945d840b33569058ab5e9d89ebef3';
@@ -241,7 +241,12 @@ let APP_STATE = {
   page:           'tickets',
   accounts:       [],         // cached accounts for current user
   currentAccount: 'all',      // 'all' or accountRecordId
-  ticketStatus:   'open',     // 'open'|'pending'|'resolved'|'closed'|'all'
+  filters: {
+    status:      'open',      // 'all'|'open'|'pending'|'resolved'|'closed'
+    groupId:     null,        // number = specific group, null = alle
+    type:        null,        // string = specific type, null = alle
+    responderId: null,        // number = specific agent, 'unassigned', null = alle
+  },
 };
 
 const SESSION_STORAGE_KEY = 'fdh_session_' + APP_CONFIG.PROJECT_ID;
@@ -949,19 +954,33 @@ const FD_PRIORITY = {
   4: { label:'Dringend', cls:'bg-red-100 text-red-700' },
 };
 
+function buildSearchQuery(filters, opts = {}) {
+  if (!filters) return '';
+  const parts = [];
+  const statusMap = { open: 2, pending: 3, resolved: 4, closed: 5 };
+  if (filters.status && filters.status !== 'all' && statusMap[filters.status]) {
+    parts.push('status:' + statusMap[filters.status]);
+  }
+  // Account-spezifische Filter (group_id, agent_id) nur anwenden, wenn skip nicht gesetzt.
+  // Beim "Alle Accounts"-Modus überspringen, weil IDs zwischen Accounts nicht passen.
+  if (!opts.skipAccountSpecific) {
+    if (filters.groupId) parts.push('group_id:' + filters.groupId);
+    if (filters.responderId === 'unassigned') parts.push('agent_id:null');
+    else if (filters.responderId) parts.push('agent_id:' + filters.responderId);
+  }
+  if (filters.type) parts.push("type:'" + String(filters.type).replace(/'/g, "\\'") + "'");
+  return parts.join(' AND ');
+}
+
 async function fetchTicketsForAccount(accountId, opts = {}) {
-  // Status-Filter: 2 offen, 3 wartet, 4 gelöst, 5 geschlossen
-  const filterMap = { open: 2, pending: 3, resolved: 4, closed: 5 };
-  const statusVal = opts.status && filterMap[opts.status];
+  const filters = opts.filters || APP_STATE.filters;
+  const q = buildSearchQuery(filters, { skipAccountSpecific: !!opts.skipAccountSpecific });
 
   let path;
-  if (statusVal) {
-    // Server-seitige Suche — der reguläre /tickets-Endpoint kann NICHT nach Status
-    // filtern und liefert nur die letzten 30 Tage; clientseitiges Filtern verfehlt
-    // Tickets, die in der Stichprobe der letzten N nicht enthalten sind.
-    const q = '"status:' + statusVal + '"';
+  if (q) {
+    // Server-seitige Suche kombiniert alle Filter via AND
     path = '/freshdesk/' + encodeURIComponent(accountId) +
-      '/api/v2/search/tickets?query=' + encodeURIComponent(q);
+      '/api/v2/search/tickets?query=' + encodeURIComponent('"' + q + '"');
   } else {
     const params = new URLSearchParams();
     params.set('per_page', String(opts.perPage || 30));
@@ -973,7 +992,7 @@ async function fetchTicketsForAccount(accountId, opts = {}) {
   const data = await proxyJson(path);
   let list = Array.isArray(data) ? data : (data.results || []);
   // Search-API gibt nicht nach updated_at sortiert zurück → manuell sortieren
-  if (statusVal) list.sort((a, b) => new Date(b.updated_at || 0) - new Date(a.updated_at || 0));
+  if (q) list.sort((a, b) => new Date(b.updated_at || 0) - new Date(a.updated_at || 0));
 
   const acc = APP_STATE.accounts.find(a => a.id === accountId);
   return list.map(t => ({ ...t, _accountId: accountId, _accountName: acc?.name || '?', _accountColor: acc?.color || '#64748b' }));
@@ -1069,13 +1088,15 @@ async function ensureTypesLoaded(accountId) {
 async function fetchTicketsAllAccounts(opts = {}) {
   const all = APP_STATE.accounts;
   if (!all.length) return [];
-  const results = await Promise.allSettled(all.map(a => fetchTicketsForAccount(a.id, opts)));
+  // Bei Multi-Account: account-spezifische Filter (Gruppe/Assignee) ignorieren —
+  // IDs sind nicht zwischen Accounts vergleichbar.
+  const accOpts = { ...opts, skipAccountSpecific: true };
+  const results = await Promise.allSettled(all.map(a => fetchTicketsForAccount(a.id, accOpts)));
   const merged = [];
   results.forEach((r, i) => {
     if (r.status === 'fulfilled') merged.push(...r.value);
     else console.warn('Ticket-Fetch fehlgeschlagen für', all[i].name, r.reason);
   });
-  // Sort by updated_at desc
   merged.sort((a, b) => new Date(b.updated_at || 0) - new Date(a.updated_at || 0));
   return merged;
 }
@@ -1188,20 +1209,34 @@ async function renderTicketsPage() {
         `).join('')}
       </div>
 
-      <!-- Status Filter -->
+      <!-- Filter-Chips -->
       <div class="flex gap-2 overflow-x-auto scrollbar-hidden -mx-1 px-1">
-        ${[
-          { k: 'open',     label:'Offen' },
-          { k: 'pending',  label:'Wartet' },
-          { k: 'resolved', label:'Gelöst' },
-          { k: 'closed',   label:'Geschlossen' },
-          { k: 'all',      label:'Alle' },
-        ].map(s => `
-          <button onclick="setTicketStatus('${s.k}')" class="shrink-0 px-3 py-1 rounded-md text-xs font-medium ${APP_STATE.ticketStatus===s.k?'bg-brand-500 text-white':'bg-white text-ink-700 border border-ink-200'}">${escapeHtml(s.label)}</button>
-        `).join('')}
-        <button onclick="renderTicketsPage()" class="shrink-0 ml-auto px-2 py-1 rounded-md text-xs font-medium bg-white text-ink-700 border border-ink-200" title="Neu laden">
-          <i data-lucide="refresh-cw" class="w-3.5 h-3.5"></i>
-        </button>
+        ${(() => {
+          const f = APP_STATE.filters;
+          const isMulti = (acc === 'all');
+          const chip = (active, label, value, onclick, icon = 'chevron-down') =>
+            `<button onclick="${onclick}" class="shrink-0 px-2.5 py-1 rounded-md text-[11px] font-medium inline-flex items-center gap-1 border ${active ? 'bg-brand-500 text-white border-brand-500' : 'bg-white text-ink-700 border-ink-200'}">
+              <span class="opacity-70">${escapeHtml(label)}:</span> ${escapeHtml(value)}
+              <i data-lucide="${icon}" class="w-3 h-3 ${active ? 'opacity-90' : 'opacity-60'}"></i>
+            </button>`;
+          const statusLabels = { open:'Offen', pending:'Wartet', resolved:'Gelöst', closed:'Geschlossen', all:'alle' };
+          const statusActive = f.status && f.status !== 'all';
+          let html = chip(statusActive, 'Status', statusLabels[f.status] || 'alle', "openFilterStatus()");
+          html += chip(!!f.type, 'Typ', f.type || 'alle', "openFilterType()");
+          if (!isMulti) {
+            const groupLabel = f.groupId ? (getGroupName(acc, f.groupId) || ('#' + f.groupId)) : 'alle';
+            html += chip(!!f.groupId, 'Gruppe', groupLabel, "openFilterGroup()");
+            const respLabel = f.responderId === 'unassigned' ? 'unzugewiesen'
+              : (f.responderId ? (getAgentName(acc, f.responderId) || ('#' + f.responderId)) : 'alle');
+            html += chip(!!f.responderId, 'Wer', respLabel, "openFilterAssignee()");
+          }
+          const anyActive = statusActive || f.type || f.groupId || f.responderId;
+          if (anyActive) {
+            html += `<button onclick="resetFilters()" class="shrink-0 px-2 py-1 rounded-md text-[11px] font-medium bg-ink-50 text-ink-600 border border-ink-200 inline-flex items-center gap-1"><i data-lucide="x" class="w-3 h-3"></i> Reset</button>`;
+          }
+          html += `<button onclick="renderTicketsPage()" class="shrink-0 ml-auto px-2 py-1 rounded-md text-[11px] font-medium bg-white text-ink-700 border border-ink-200" title="Neu laden"><i data-lucide="refresh-cw" class="w-3.5 h-3.5"></i></button>`;
+          return html;
+        })()}
       </div>
 
       <!-- Ticket List -->
@@ -1216,7 +1251,7 @@ async function renderTicketsPage() {
 
   // Load tickets (parallel mit Agent-Cache)
   try {
-    const opts = { perPage: 50, status: APP_STATE.ticketStatus === 'all' ? null : APP_STATE.ticketStatus };
+    const opts = { perPage: 50, filters: APP_STATE.filters };
     const ticketsPromise = (acc === 'all')
       ? fetchTicketsAllAccounts(opts)
       : fetchTicketsForAccount(acc, opts);
@@ -1236,13 +1271,127 @@ async function renderTicketsPage() {
 }
 
 function setCurrentAccount(id) {
+  if (id !== APP_STATE.currentAccount) {
+    // Account-spezifische Filter zurücksetzen, da Group-/Agent-IDs nicht zwischen Accounts gelten
+    APP_STATE.filters.groupId = null;
+    APP_STATE.filters.responderId = null;
+  }
   APP_STATE.currentAccount = id;
   localStorage.setItem(LAST_ACCOUNT_KEY, id);
   renderTicketsPage();
 }
-function setTicketStatus(k) {
-  APP_STATE.ticketStatus = k;
+
+function resetFilters() {
+  APP_STATE.filters = { status: 'all', groupId: null, type: null, responderId: null };
   renderTicketsPage();
+}
+
+/* === Filter-Picker (generisches Bottom-Sheet) === */
+let FILTER_OPTIONS_TMP = [];
+let FILTER_PICKER_KEY = null;
+
+function openFilterPicker(title, key, options) {
+  FILTER_OPTIONS_TMP = options;
+  FILTER_PICKER_KEY = key;
+  let host = document.getElementById('subModalHost');
+  if (!host) {
+    host = document.createElement('div');
+    host.id = 'subModalHost';
+    document.body.appendChild(host);
+  }
+  const currentValue = APP_STATE.filters[key];
+  host.innerHTML = `
+    <div class="fixed inset-0 z-[60] flex items-end justify-center bg-black/40" onclick="if(event.target===this)closeFilterPicker()">
+      <div class="bg-white w-full max-w-md rounded-t-2xl shadow-2xl flex flex-col safe-bottom" style="max-height:80vh">
+        <div class="px-4 py-3 border-b border-ink-200 flex items-center justify-between">
+          <h3 class="font-bold text-ink-900">${escapeHtml(title)}</h3>
+          <button onclick="closeFilterPicker()" class="w-9 h-9 rounded-lg hover:bg-ink-100 flex items-center justify-center">
+            <i data-lucide="x" class="w-5 h-5 text-ink-700"></i>
+          </button>
+        </div>
+        <div class="flex-1 overflow-y-auto">
+          ${options.map((o, i) => {
+            const isCurrent = (o.value === currentValue) || (o.value === null && (currentValue == null || currentValue === 'all'));
+            return `<button onclick="applyFilterByIndex(${i})" class="w-full text-left px-4 py-3 active:bg-ink-50 border-b border-ink-100 flex items-center gap-3 ${isCurrent ? 'bg-brand-50' : ''}">
+              <span class="w-9 h-9 rounded-full bg-ink-100 flex items-center justify-center shrink-0">
+                <i data-lucide="${o.icon || 'circle'}" class="w-4 h-4 text-ink-600"></i>
+              </span>
+              <div class="flex-1 min-w-0">
+                <p class="font-medium text-ink-900 text-sm truncate">${escapeHtml(o.label)}</p>
+                ${o.sub ? `<p class="text-[11px] text-ink-500 truncate">${escapeHtml(o.sub)}</p>` : ''}
+              </div>
+              ${isCurrent ? '<i data-lucide="check" class="w-4 h-4 text-brand-600 shrink-0"></i>' : ''}
+            </button>`;
+          }).join('')}
+        </div>
+      </div>
+    </div>`;
+  if (window.lucide) lucide.createIcons();
+}
+
+function closeFilterPicker() {
+  const host = document.getElementById('subModalHost');
+  if (host) host.innerHTML = '';
+  FILTER_OPTIONS_TMP = [];
+  FILTER_PICKER_KEY = null;
+}
+
+function applyFilterByIndex(idx) {
+  const opt = FILTER_OPTIONS_TMP[idx];
+  if (!opt || !FILTER_PICKER_KEY) return;
+  APP_STATE.filters[FILTER_PICKER_KEY] = opt.value;
+  closeFilterPicker();
+  renderTicketsPage();
+}
+
+function openFilterStatus() {
+  openFilterPicker('Status filtern', 'status', [
+    { value: 'all',      label: 'alle Status', icon: 'list' },
+    { value: 'open',     label: 'Offen',       icon: 'circle' },
+    { value: 'pending',  label: 'Wartet',      icon: 'clock' },
+    { value: 'resolved', label: 'Gelöst',      icon: 'check-circle-2' },
+    { value: 'closed',   label: 'Geschlossen', icon: 'lock' },
+  ]);
+}
+
+function openFilterType() {
+  // Union der Typen aus relevanten Accounts
+  const acc = APP_STATE.currentAccount;
+  const set = new Set();
+  if (acc === 'all') {
+    APP_STATE.accounts.forEach(a => (APP_STATE.typesCache?.[a.id]?.types || []).forEach(t => set.add(t)));
+  } else {
+    (APP_STATE.typesCache?.[acc]?.types || []).forEach(t => set.add(t));
+  }
+  openFilterPicker('Typ filtern', 'type', [
+    { value: null, label: 'alle Typen', icon: 'list' },
+    ...Array.from(set).sort((a, b) => a.localeCompare(b, 'de')).map(t => ({ value: t, label: t, icon: 'tag' })),
+  ]);
+}
+
+function openFilterGroup() {
+  const acc = APP_STATE.currentAccount;
+  if (acc === 'all') return;
+  const cache = APP_STATE.groupsCache?.[acc] || { groups: [] };
+  openFilterPicker('Gruppe filtern', 'groupId', [
+    { value: null, label: 'alle Gruppen', icon: 'list' },
+    ...cache.groups.slice().sort((a, b) => a.name.localeCompare(b.name, 'de')).map(g => ({
+      value: g.id, label: g.name, icon: 'users', sub: g.description || ''
+    })),
+  ]);
+}
+
+function openFilterAssignee() {
+  const acc = APP_STATE.currentAccount;
+  if (acc === 'all') return;
+  const cache = APP_STATE.agentsCache?.[acc] || { agents: [] };
+  openFilterPicker('Zuweisung filtern', 'responderId', [
+    { value: null, label: 'alle', icon: 'list' },
+    { value: 'unassigned', label: 'unzugewiesen', icon: 'user-x' },
+    ...cache.agents.slice().sort((a, b) => a.name.localeCompare(b.name, 'de')).map(a => ({
+      value: a.id, label: a.name, icon: 'user', sub: a.email || ''
+    })),
+  ]);
 }
 
 function renderTicketList(tickets) {
