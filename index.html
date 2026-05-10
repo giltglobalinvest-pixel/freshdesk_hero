@@ -221,7 +221,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.1.1';
+const APP_VERSION = 'v2.1.2';
 // Read-Token absichtlich gesplittet, damit GitHub Secret-Scanning beim Push nicht blockt.
 // Der Token ist read-only und Base-scoped → bewusst eingebettet (Architektur-Entscheidung).
 const _RK = 'patu8KWM8aWB' + 'yxCGL.69fae5d9fa4b94c2' + '66b426dadd71a51f574945d840b33569058ab5e9d89ebef3';
@@ -1676,12 +1676,12 @@ function renderMultiSelectBar() {
   if (window.lucide) lucide.createIcons();
 }
 
-// Generisches Bulk-Execute mit Live-Progress-Toast
+// Generisches Bulk-Execute mit Live-Progress-Toast und Fehler-Details
 async function bulkExecute(items, perItemFn, labelDone, labelOne) {
   if (!items.length) return;
   const total = items.length;
-  let done = 0, failed = 0;
-  // Permanente Progress-Toast
+  let done = 0;
+  const failures = []; // { item, message, status }
   const c = $('toastContainer');
   const el = document.createElement('div');
   el.className = 'toast-enter pointer-events-auto rounded-xl px-4 py-2.5 shadow-lg flex items-center gap-2 text-sm bg-ink-900 text-white';
@@ -1689,12 +1689,74 @@ async function bulkExecute(items, perItemFn, labelDone, labelOne) {
   c.appendChild(el);
   for (const it of items) {
     try { await perItemFn(it); done++; }
-    catch (e) { failed++; console.warn('Bulk-Item fehlgeschlagen', it, e); }
-    el.querySelector('span.flex-1').textContent = (done + failed) + ' / ' + total + ' ' + labelOne + '…';
+    catch (e) {
+      failures.push({ item: it, message: e.message || String(e), status: e.status });
+      console.warn('Bulk-Item fehlgeschlagen', it, e);
+    }
+    el.querySelector('span.flex-1').textContent = (done + failures.length) + ' / ' + total + ' ' + labelOne + '…';
   }
   el.remove();
-  toast(done + ' ' + labelDone + (failed ? ' · ' + failed + ' fehlgeschlagen' : ''), failed ? 'warn' : 'success', 4000);
+  if (!failures.length) {
+    toast(done + ' ' + labelDone, 'success', 4000);
+  } else {
+    // Wenn alle Fehler identisch: direkt in den Toast packen
+    const firstMsg = failures[0].message;
+    const allSame = failures.every(f => f.message === firstMsg);
+    const summary = done + ' OK · ' + failures.length + ' fehlgeschlagen' + (allSame ? ' (' + firstMsg.slice(0, 80) + ')' : '');
+    toast(summary, 'warn', 10000, { label: 'Details', onClick: () => showBulkErrorsModal(failures, total, labelOne) });
+  }
   msExit();
+}
+
+function showBulkErrorsModal(failures, total, labelOne) {
+  let host = document.getElementById('subModalHost');
+  if (!host) { host = document.createElement('div'); host.id = 'subModalHost'; document.body.appendChild(host); }
+  // Gruppiere nach Fehler-Message
+  const groups = {};
+  failures.forEach(f => {
+    const key = (f.status ? '[' + f.status + '] ' : '') + (f.message || 'Unbekannter Fehler');
+    if (!groups[key]) groups[key] = [];
+    groups[key].push(f);
+  });
+  host.innerHTML = `
+    <div class="fixed inset-0 z-[60] flex items-end justify-center bg-black/40" onclick="if(event.target===this)closeBulkErrorsModal()">
+      <div class="bg-white w-full max-w-md rounded-t-2xl shadow-2xl flex flex-col safe-bottom" style="max-height:80vh">
+        <div class="px-4 py-3 border-b border-ink-200 flex items-center justify-between">
+          <div>
+            <h3 class="font-bold text-ink-900">${failures.length} Fehler</h3>
+            <p class="text-[11px] text-ink-500">von ${total} bei „${escapeHtml(labelOne)}"</p>
+          </div>
+          <button onclick="closeBulkErrorsModal()" class="w-9 h-9 rounded-lg hover:bg-ink-100 flex items-center justify-center"><i data-lucide="x" class="w-5 h-5 text-ink-700"></i></button>
+        </div>
+        <div class="flex-1 overflow-y-auto p-3 space-y-3">
+          ${Object.entries(groups).map(([key, list]) => `
+            <div class="bg-red-50 border border-red-200 rounded-lg p-3 text-xs">
+              <p class="font-semibold text-red-900 mb-1">${escapeHtml(key)}</p>
+              <p class="text-red-700 mb-2 text-[10px]">${list.length} Ticket${list.length===1?'':'s'} betroffen:</p>
+              <div class="space-y-1 max-h-32 overflow-y-auto">
+                ${list.map(f => `<p class="font-mono text-ink-700">#${escapeHtml(String(f.item.ticketId))} <span class="text-ink-400">·</span> Acc ${escapeHtml((f.item.accountId||'').slice(0,8))}…</p>`).join('')}
+              </div>
+            </div>`).join('')}
+        </div>
+        <div class="p-3 border-t border-ink-100 flex gap-2">
+          <button onclick="copyBulkErrors(${JSON.stringify(failures.map(f => `#${f.item.ticketId}: ${f.message}`)).replace(/'/g,'&#39;')})" class="flex-1 bg-white border border-ink-200 px-3 py-2 rounded-lg text-xs font-medium hover:bg-ink-50">
+            <i data-lucide="copy" class="inline w-3.5 h-3.5"></i> Alles kopieren
+          </button>
+          <button onclick="closeBulkErrorsModal()" class="flex-1 bg-brand-500 text-white px-3 py-2 rounded-lg text-xs font-semibold">Schließen</button>
+        </div>
+      </div>
+    </div>`;
+  if (window.lucide) lucide.createIcons();
+}
+
+function closeBulkErrorsModal() {
+  const host = document.getElementById('subModalHost');
+  if (host) host.innerHTML = '';
+}
+
+async function copyBulkErrors(lines) {
+  try { await navigator.clipboard.writeText(lines.join('\n')); toast('In Zwischenablage kopiert', 'success', 2000); }
+  catch (_) { toast('Kopieren fehlgeschlagen', 'warn'); }
 }
 
 async function bulkClose() {
