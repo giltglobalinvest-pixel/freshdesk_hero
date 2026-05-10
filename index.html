@@ -209,7 +209,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v1.6.0';
+const APP_VERSION = 'v1.7.0';
 // Read-Token absichtlich gesplittet, damit GitHub Secret-Scanning beim Push nicht blockt.
 // Der Token ist read-only und Base-scoped → bewusst eingebettet (Architektur-Entscheidung).
 const _RK = 'patu8KWM8aWB' + 'yxCGL.69fae5d9fa4b94c2' + '66b426dadd71a51f574945d840b33569058ab5e9d89ebef3';
@@ -1041,6 +1041,31 @@ function getGroupName(accountId, groupId) {
   return c?.byId?.[groupId]?.name || ('#' + groupId);
 }
 
+/* === Ticket-Typen-Cache (string-basiert via ticket_fields) === */
+async function ensureTypesLoaded(accountId) {
+  if (!APP_STATE.typesCache) APP_STATE.typesCache = {};
+  if (APP_STATE.typesCache[accountId]) return APP_STATE.typesCache[accountId];
+  try {
+    const data = await proxyJson('/freshdesk/' + encodeURIComponent(accountId) + '/api/v2/ticket_fields');
+    const fields = Array.isArray(data) ? data : [];
+    const typeField = fields.find(f =>
+      f.name === 'ticket_type' || f.type === 'default_ticket_type' || (f.default && /type/i.test(f.label || ''))
+    );
+    let types = [];
+    if (typeField && Array.isArray(typeField.choices)) {
+      types = typeField.choices
+        .map(c => Array.isArray(c) ? c[0] : (typeof c === 'string' ? c : (c?.value || c?.label || '')))
+        .filter(Boolean);
+    }
+    APP_STATE.typesCache[accountId] = { types };
+    return APP_STATE.typesCache[accountId];
+  } catch (e) {
+    console.warn('Type-Load fehlgeschlagen für ' + accountId + ':', e.message);
+    APP_STATE.typesCache[accountId] = { types: [] };
+    return APP_STATE.typesCache[accountId];
+  }
+}
+
 async function fetchTicketsAllAccounts(opts = {}) {
   const all = APP_STATE.accounts;
   if (!all.length) return [];
@@ -1196,8 +1221,8 @@ async function renderTicketsPage() {
       ? fetchTicketsAllAccounts(opts)
       : fetchTicketsForAccount(acc, opts);
     const cachesPromise = (acc === 'all')
-      ? Promise.allSettled(APP_STATE.accounts.flatMap(a => [ensureAgentsLoaded(a.id), ensureGroupsLoaded(a.id)]))
-      : Promise.all([ensureAgentsLoaded(acc), ensureGroupsLoaded(acc)]);
+      ? Promise.allSettled(APP_STATE.accounts.flatMap(a => [ensureAgentsLoaded(a.id), ensureGroupsLoaded(a.id), ensureTypesLoaded(a.id)]))
+      : Promise.all([ensureAgentsLoaded(acc), ensureGroupsLoaded(acc), ensureTypesLoaded(acc)]);
     const [tickets] = await Promise.all([ticketsPromise, cachesPromise]);
     renderTicketList(tickets);
   } catch (e) {
@@ -1269,6 +1294,9 @@ function renderTicketList(tickets) {
                     ${groupName
                       ? `<button data-action="group" data-account-id="${escapeAttr(t._accountId)}" data-ticket-id="${t.id}" data-group-id="${t.group_id || ''}" class="text-[10px] uppercase tracking-wider px-1.5 py-0.5 rounded font-semibold bg-brand-50 text-brand-700 border border-brand-200 active:bg-brand-100 inline-flex items-center gap-1"><i data-lucide="users" class="w-2.5 h-2.5"></i>${escapeHtml(groupName)} <i data-lucide="chevron-down" class="w-2.5 h-2.5"></i></button>`
                       : `<button data-action="group" data-account-id="${escapeAttr(t._accountId)}" data-ticket-id="${t.id}" data-group-id="" class="text-[10px] uppercase tracking-wider px-1.5 py-0.5 rounded font-semibold bg-ink-50 text-ink-500 border border-ink-200 active:bg-ink-100 inline-flex items-center gap-1">keine Gruppe <i data-lucide="chevron-down" class="w-2.5 h-2.5"></i></button>`}
+                    ${t.type
+                      ? `<button data-action="type" data-account-id="${escapeAttr(t._accountId)}" data-ticket-id="${t.id}" data-type="${escapeAttr(t.type)}" class="text-[10px] uppercase tracking-wider px-1.5 py-0.5 rounded font-semibold bg-purple-50 text-purple-700 border border-purple-200 active:bg-purple-100 inline-flex items-center gap-1"><i data-lucide="tag" class="w-2.5 h-2.5"></i>${escapeHtml(t.type)} <i data-lucide="chevron-down" class="w-2.5 h-2.5"></i></button>`
+                      : `<button data-action="type" data-account-id="${escapeAttr(t._accountId)}" data-ticket-id="${t.id}" data-type="" class="text-[10px] uppercase tracking-wider px-1.5 py-0.5 rounded font-semibold bg-ink-50 text-ink-500 border border-ink-200 active:bg-ink-100 inline-flex items-center gap-1">kein Typ <i data-lucide="chevron-down" class="w-2.5 h-2.5"></i></button>`}
                     <span class="text-[10px] text-ink-400">#${t.id}</span>
                     ${showAccount ? `<span class="text-[10px] text-ink-500 ml-auto">${escapeHtml(t._accountName)}</span>` : ''}
                   </div>
@@ -1381,6 +1409,11 @@ function attachSwipeToCards() {
           if (_openSwipedContent) _resetSwipe();
           openGroupModal(accId, tId, gId, true);
         }
+        else if (action === 'type') {
+          const tType = btn.dataset.type || null;
+          if (_openSwipedContent) _resetSwipe();
+          openTypeModal(accId, tId, tType, true);
+        }
       });
     });
   });
@@ -1464,6 +1497,7 @@ async function openTicketDetail(accountId, ticketId) {
       fetchTicketDetail(accountId, ticketId),
       ensureAgentsLoaded(accountId),
       ensureGroupsLoaded(accountId),
+      ensureTypesLoaded(accountId),
     ]);
     ticket._accountId = accountId;
     CURRENT_TICKET = ticket;
@@ -1502,7 +1536,7 @@ function renderTicketDetailBody(ticket) {
             <p class="font-semibold text-ink-900 truncate mt-0.5">${escapeHtml(req.name || '–')}</p>
             ${req.email ? `<p class="text-ink-500 truncate text-[11px]">${escapeHtml(req.email)}</p>` : ''}
           </div>
-          <div class="grid grid-cols-2 gap-3">
+          <div class="grid grid-cols-3 gap-2">
             <button onclick="openAssigneeModal()" class="min-w-0 text-left -m-1 p-1 rounded-lg active:bg-ink-50 hover:bg-ink-50 transition">
               <p class="text-ink-500 text-[10px] uppercase tracking-wider flex items-center gap-1">
                 Zugewiesen <i data-lucide="chevron-down" class="w-3 h-3"></i>
@@ -1514,6 +1548,12 @@ function renderTicketDetailBody(ticket) {
                 Gruppe <i data-lucide="chevron-down" class="w-3 h-3"></i>
               </p>
               <p class="font-semibold ${groupName ? 'text-ink-900' : 'text-ink-500'} truncate mt-0.5">${escapeHtml(groupName || 'keine')}</p>
+            </button>
+            <button onclick="openTypeModal()" class="min-w-0 text-left -m-1 p-1 rounded-lg active:bg-ink-50 hover:bg-ink-50 transition">
+              <p class="text-ink-500 text-[10px] uppercase tracking-wider flex items-center gap-1">
+                Typ <i data-lucide="chevron-down" class="w-3 h-3"></i>
+              </p>
+              <p class="font-semibold ${ticket.type ? 'text-ink-900' : 'text-ink-500'} truncate mt-0.5">${escapeHtml(ticket.type || 'keiner')}</p>
             </button>
           </div>
         </div>
@@ -1795,6 +1835,118 @@ async function assignGroupAndClose(groupId) {
   } catch (e) {
     closeGroupModal();
     toast('Gruppen-Zuordnung fehlgeschlagen: ' + e.message, 'error', 6000);
+  }
+}
+
+/* === Typ-Modal (Bottom-Sheet) === */
+let TYPE_CTX = null;
+
+async function openTypeModal(accountId, ticketId, currentType, fromList = false) {
+  if (accountId === undefined) {
+    if (!CURRENT_TICKET) return;
+    accountId = CURRENT_TICKET._accountId;
+    ticketId = CURRENT_TICKET.id;
+    currentType = CURRENT_TICKET.type || null;
+    fromList = false;
+  }
+  if (!accountId || !ticketId) return;
+  TYPE_CTX = { accountId, ticketId, currentType: currentType || null, fromList };
+
+  let host = document.getElementById('subModalHost');
+  if (!host) {
+    host = document.createElement('div');
+    host.id = 'subModalHost';
+    document.body.appendChild(host);
+  }
+  host.innerHTML = `
+    <div class="fixed inset-0 z-[60] flex items-end justify-center bg-black/40" onclick="if(event.target===this)closeTypeModal()">
+      <div class="bg-white w-full max-w-md rounded-t-2xl shadow-2xl flex flex-col safe-bottom" style="max-height:80vh">
+        <div class="px-4 py-3 border-b border-ink-200 flex items-center justify-between">
+          <div>
+            <h3 class="font-bold text-ink-900">Ticket #${ticketId} → Typ</h3>
+            <p class="text-[11px] text-ink-500">${escapeHtml(currentType || 'kein Typ')}</p>
+          </div>
+          <button onclick="closeTypeModal()" class="w-9 h-9 rounded-lg hover:bg-ink-100 flex items-center justify-center">
+            <i data-lucide="x" class="w-5 h-5 text-ink-700"></i>
+          </button>
+        </div>
+        <div class="px-3 py-2 border-b border-ink-100">
+          <input id="typeFilter" type="search" placeholder="Suchen…" autocomplete="off"
+                 class="w-full px-3 py-2 border border-ink-200 rounded-lg text-sm focus:ring-2 focus:ring-brand-500/30 focus:border-brand-500">
+        </div>
+        <div id="typeList" class="flex-1 overflow-y-auto"></div>
+      </div>
+    </div>`;
+  if (window.lucide) lucide.createIcons();
+
+  if (!APP_STATE.typesCache?.[accountId]) {
+    $('typeList').innerHTML = `<div class="text-center py-8 text-sm text-ink-500"><span class="spinner inline-block w-4 h-4 border-[2px] text-brand-500"></span> Lade Typen…</div>`;
+    await ensureTypesLoaded(accountId);
+  }
+  renderTypeList('');
+  $('typeFilter').addEventListener('input', e => renderTypeList(e.target.value));
+}
+
+function renderTypeList(filter) {
+  if (!TYPE_CTX) return;
+  const cache = APP_STATE.typesCache?.[TYPE_CTX.accountId] || { types: [] };
+  const currentType = TYPE_CTX.currentType || null;
+  const f = (filter || '').trim().toLowerCase();
+  const filtered = cache.types
+    .filter(t => !f || t.toLowerCase().includes(f))
+    .slice().sort((a, b) => a.localeCompare(b, 'de'));
+
+  $('typeList').innerHTML = `
+    <button onclick="assignTypeAndClose(null)" class="w-full text-left px-4 py-3 active:bg-ink-50 border-b border-ink-100 flex items-center gap-3 ${!currentType ? 'bg-brand-50' : ''}">
+      <span class="w-9 h-9 rounded-full bg-ink-100 flex items-center justify-center shrink-0">
+        <i data-lucide="tag" class="w-4 h-4 text-ink-500"></i>
+      </span>
+      <div class="flex-1 min-w-0">
+        <p class="font-medium text-ink-900 text-sm">Kein Typ</p>
+        <p class="text-[11px] text-ink-500">Typ entfernen</p>
+      </div>
+      ${!currentType ? '<i data-lucide="check" class="w-4 h-4 text-brand-600 shrink-0"></i>' : ''}
+    </button>
+    ${filtered.length ? filtered.map(t => `
+      <button onclick="assignTypeAndClose('${escapeAttr(t).replace(/'/g, "&#39;")}')" class="w-full text-left px-4 py-3 active:bg-ink-50 border-b border-ink-100 flex items-center gap-3 ${currentType === t ? 'bg-brand-50' : ''}">
+        <span class="w-9 h-9 rounded-full bg-gradient-to-br from-purple-400 to-purple-600 flex items-center justify-center shrink-0 text-white">
+          <i data-lucide="tag" class="w-4 h-4"></i>
+        </span>
+        <div class="flex-1 min-w-0">
+          <p class="font-medium text-ink-900 text-sm truncate">${escapeHtml(t)}</p>
+        </div>
+        ${currentType === t ? '<i data-lucide="check" class="w-4 h-4 text-brand-600 shrink-0"></i>' : ''}
+      </button>
+    `).join('') : `<p class="text-center text-sm text-ink-500 py-8">${cache.types.length ? 'Keine Treffer' : 'Keine Typen geladen'}</p>`}`;
+  if (window.lucide) lucide.createIcons();
+}
+
+function closeTypeModal() {
+  const host = document.getElementById('subModalHost');
+  if (host) host.innerHTML = '';
+  TYPE_CTX = null;
+}
+
+async function assignTypeAndClose(typeName) {
+  if (!TYPE_CTX) return;
+  const { accountId, ticketId, fromList } = TYPE_CTX;
+  const list = $('typeList');
+  if (list) list.innerHTML = `<div class="text-center py-8 text-sm text-ink-500"><span class="spinner inline-block w-4 h-4 border-[2px] text-brand-500"></span> Speichere…</div>`;
+  try {
+    await proxyJson('/freshdesk/' + encodeURIComponent(accountId) + '/api/v2/tickets/' + ticketId, {
+      method: 'PUT',
+      body: JSON.stringify({ type: typeName })
+    });
+    closeTypeModal();
+    toast(typeName ? 'Typ: ' + typeName : 'Typ entfernt', 'success');
+    if (CURRENT_TICKET && CURRENT_TICKET.id === ticketId) {
+      CURRENT_TICKET.type = typeName;
+      renderTicketDetailBody(CURRENT_TICKET);
+    }
+    if (fromList) renderTicketsPage();
+  } catch (e) {
+    closeTypeModal();
+    toast('Typ-Änderung fehlgeschlagen: ' + e.message, 'error', 6000);
   }
 }
 
