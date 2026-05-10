@@ -209,7 +209,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v1.5.1';
+const APP_VERSION = 'v1.5.2';
 // Read-Token absichtlich gesplittet, damit GitHub Secret-Scanning beim Push nicht blockt.
 // Der Token ist read-only und Base-scoped → bewusst eingebettet (Architektur-Entscheidung).
 const _RK = 'patu8KWM8aWB' + 'yxCGL.69fae5d9fa4b94c2' + '66b426dadd71a51f574945d840b33569058ab5e9d89ebef3';
@@ -1238,8 +1238,8 @@ function renderTicketList(tickets) {
                   <div class="flex items-center gap-1.5 mt-1.5 flex-wrap">
                     <span class="text-[10px] uppercase tracking-wider px-1.5 py-0.5 rounded font-semibold border ${st.cls}">${escapeHtml(st.label)}</span>
                     ${assigneeFirst
-                      ? `<span class="text-[10px] uppercase tracking-wider px-1.5 py-0.5 rounded font-semibold bg-ink-100 text-ink-700 inline-flex items-center gap-1"><i data-lucide="user" class="w-2.5 h-2.5"></i>${escapeHtml(assigneeFirst)}</span>`
-                      : `<span class="text-[10px] uppercase tracking-wider px-1.5 py-0.5 rounded font-semibold bg-amber-50 text-amber-700 border border-amber-200">unzugewiesen</span>`}
+                      ? `<button data-action="assign" data-account-id="${escapeAttr(t._accountId)}" data-ticket-id="${t.id}" data-responder-id="${t.responder_id || ''}" class="text-[10px] uppercase tracking-wider px-1.5 py-0.5 rounded font-semibold bg-ink-100 text-ink-700 active:bg-ink-200 inline-flex items-center gap-1"><i data-lucide="user" class="w-2.5 h-2.5"></i>${escapeHtml(assigneeFirst)} <i data-lucide="chevron-down" class="w-2.5 h-2.5"></i></button>`
+                      : `<button data-action="assign" data-account-id="${escapeAttr(t._accountId)}" data-ticket-id="${t.id}" data-responder-id="" class="text-[10px] uppercase tracking-wider px-1.5 py-0.5 rounded font-semibold bg-amber-50 text-amber-700 border border-amber-200 active:bg-amber-100 inline-flex items-center gap-1">unzugewiesen <i data-lucide="chevron-down" class="w-2.5 h-2.5"></i></button>`}
                     <span class="text-[10px] text-ink-400">#${t.id}</span>
                     ${showAccount ? `<span class="text-[10px] text-ink-500 ml-auto">${escapeHtml(t._accountName)}</span>` : ''}
                   </div>
@@ -1330,7 +1330,7 @@ function attachSwipeToCards() {
       openTicketDetail(accountId, parseInt(ticketId, 10));
     });
 
-    // Action-Buttons binden
+    // Action-Buttons binden (Schließen, SPAM in Action-Panel; Assign in Card-Content)
     card.querySelectorAll('button[data-action]').forEach(btn => {
       btn.addEventListener('click', (e) => {
         e.stopPropagation();
@@ -1338,8 +1338,14 @@ function attachSwipeToCards() {
         const action = btn.dataset.action;
         const accId  = btn.dataset.accountId;
         const tId    = parseInt(btn.dataset.ticketId, 10);
-        if (action === 'close') ticketActionClose(accId, tId, btn);
-        else if (action === 'spam') ticketActionSpam(accId, tId, btn);
+        if (action === 'close')      ticketActionClose(accId, tId, btn);
+        else if (action === 'spam')  ticketActionSpam(accId, tId, btn);
+        else if (action === 'assign') {
+          const respRaw = btn.dataset.responderId;
+          const respId  = respRaw ? parseInt(respRaw, 10) : null;
+          if (_openSwipedContent) _resetSwipe();
+          openAssigneeModal(accId, tId, respId, true);
+        }
       });
     });
   });
@@ -1521,9 +1527,20 @@ function renderTicketDetailBody(ticket) {
 }
 
 /* === Assignee-Modal (Bottom-Sheet) === */
-function openAssigneeModal() {
-  if (!CURRENT_TICKET) return;
-  const accountId = CURRENT_TICKET._accountId;
+let ASSIGNEE_CTX = null;
+
+async function openAssigneeModal(accountId, ticketId, currentResponderId, fromList = false) {
+  // Backward-compat: ohne Args = Detail-View, nutze CURRENT_TICKET
+  if (accountId === undefined) {
+    if (!CURRENT_TICKET) return;
+    accountId = CURRENT_TICKET._accountId;
+    ticketId = CURRENT_TICKET.id;
+    currentResponderId = CURRENT_TICKET.responder_id || null;
+    fromList = false;
+  }
+  if (!accountId || !ticketId) return;
+  ASSIGNEE_CTX = { accountId, ticketId, currentResponderId: currentResponderId || null, fromList };
+
   let host = document.getElementById('subModalHost');
   if (!host) {
     host = document.createElement('div');
@@ -1534,7 +1551,10 @@ function openAssigneeModal() {
     <div class="fixed inset-0 z-[60] flex items-end justify-center bg-black/40" onclick="if(event.target===this)closeAssigneeModal()">
       <div class="bg-white w-full max-w-md rounded-t-2xl shadow-2xl flex flex-col safe-bottom" style="max-height:80vh">
         <div class="px-4 py-3 border-b border-ink-200 flex items-center justify-between">
-          <h3 class="font-bold text-ink-900">Ticket zuweisen</h3>
+          <div>
+            <h3 class="font-bold text-ink-900">Ticket #${ticketId} zuweisen</h3>
+            <p class="text-[11px] text-ink-500">${escapeHtml(getAgentName(accountId, currentResponderId) || 'unzugewiesen')}</p>
+          </div>
           <button onclick="closeAssigneeModal()" class="w-9 h-9 rounded-lg hover:bg-ink-100 flex items-center justify-center">
             <i data-lucide="x" class="w-5 h-5 text-ink-700"></i>
           </button>
@@ -1547,15 +1567,20 @@ function openAssigneeModal() {
       </div>
     </div>`;
   if (window.lucide) lucide.createIcons();
+
+  // Falls Agents für diesen Account noch nicht im Cache → nachladen
+  if (!APP_STATE.agentsCache?.[accountId]) {
+    $('assigneeList').innerHTML = `<div class="text-center py-8 text-sm text-ink-500"><span class="spinner inline-block w-4 h-4 border-[2px] text-brand-500"></span> Lade Agents…</div>`;
+    await ensureAgentsLoaded(accountId);
+  }
   renderAssigneeList('');
   $('assigneeFilter').addEventListener('input', e => renderAssigneeList(e.target.value));
-  $('assigneeFilter').focus();
 }
 
 function renderAssigneeList(filter) {
-  if (!CURRENT_TICKET) return;
-  const cache = APP_STATE.agentsCache?.[CURRENT_TICKET._accountId] || { agents: [] };
-  const currentId = CURRENT_TICKET.responder_id || null;
+  if (!ASSIGNEE_CTX) return;
+  const cache = APP_STATE.agentsCache?.[ASSIGNEE_CTX.accountId] || { agents: [] };
+  const currentId = ASSIGNEE_CTX.currentResponderId || null;
   const f = (filter || '').trim().toLowerCase();
   const filtered = cache.agents
     .filter(a => !f || a.name.toLowerCase().includes(f) || (a.email||'').toLowerCase().includes(f))
@@ -1590,22 +1615,26 @@ function renderAssigneeList(filter) {
 function closeAssigneeModal() {
   const host = document.getElementById('subModalHost');
   if (host) host.innerHTML = '';
+  ASSIGNEE_CTX = null;
 }
 
 async function assignAndClose(agentId) {
-  if (!CURRENT_TICKET) return;
-  const accountId = CURRENT_TICKET._accountId;
-  const ticketId = CURRENT_TICKET.id;
-  $('assigneeList').innerHTML = `<div class="text-center py-8 text-sm text-ink-500"><span class="spinner inline-block w-4 h-4 border-[2px] text-brand-500"></span> Speichere…</div>`;
+  if (!ASSIGNEE_CTX) return;
+  const { accountId, ticketId, fromList } = ASSIGNEE_CTX;
+  const list = $('assigneeList');
+  if (list) list.innerHTML = `<div class="text-center py-8 text-sm text-ink-500"><span class="spinner inline-block w-4 h-4 border-[2px] text-brand-500"></span> Speichere…</div>`;
   try {
     await proxyJson('/freshdesk/' + encodeURIComponent(accountId) + '/api/v2/tickets/' + ticketId, {
       method: 'PUT',
       body: JSON.stringify({ responder_id: agentId })
     });
-    CURRENT_TICKET.responder_id = agentId;
     closeAssigneeModal();
     toast(agentId ? 'Zugewiesen an ' + getAgentName(accountId, agentId) : 'Zuweisung entfernt', 'success');
-    renderTicketDetailBody(CURRENT_TICKET);
+    if (CURRENT_TICKET && CURRENT_TICKET.id === ticketId) {
+      CURRENT_TICKET.responder_id = agentId;
+      renderTicketDetailBody(CURRENT_TICKET);
+    }
+    if (fromList) renderTicketsPage();
   } catch (e) {
     closeAssigneeModal();
     toast('Zuweisung fehlgeschlagen: ' + e.message, 'error', 6000);
