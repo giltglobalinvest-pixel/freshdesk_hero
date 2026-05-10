@@ -209,7 +209,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.0.0';
+const APP_VERSION = 'v2.0.1';
 // Read-Token absichtlich gesplittet, damit GitHub Secret-Scanning beim Push nicht blockt.
 // Der Token ist read-only und Base-scoped → bewusst eingebettet (Architektur-Entscheidung).
 const _RK = 'patu8KWM8aWB' + 'yxCGL.69fae5d9fa4b94c2' + '66b426dadd71a51f574945d840b33569058ab5e9d89ebef3';
@@ -1592,6 +1592,11 @@ function renderTicketList(tickets) {
                 <i data-lucide="sparkles" class="w-5 h-5"></i>
               </div>
             </div>
+            <div data-snooze-indicator class="absolute inset-y-0 flex items-center pointer-events-none" style="left:160px; opacity:0; transition: opacity .12s">
+              <div class="ml-2 w-11 h-11 rounded-full bg-gradient-to-br from-indigo-500 to-purple-600 flex items-center justify-center text-white shadow-lg">
+                <i data-lucide="clock" class="w-5 h-5"></i>
+              </div>
+            </div>
             <div data-swipe-content data-account-id="${escapeAttr(t._accountId)}" data-ticket-id="${t.id}"
                  class="bg-white border border-ink-200 rounded-2xl p-3 active:bg-ink-50 cursor-pointer">
               <div class="flex items-start gap-2">
@@ -1624,7 +1629,7 @@ function renderTicketList(tickets) {
           </div>`;
       }).join('')}
     </div>
-    <p class="text-[10px] text-center text-ink-400 mt-3">${tickets.length} Ticket${tickets.length===1?'':'s'} · rechts wischen für Schließen/SPAM · links wischen für KI-Assistent</p>`;
+    <p class="text-[10px] text-center text-ink-400 mt-3">${tickets.length} Ticket${tickets.length===1?'':'s'} · rechts wischen: Schließen/SPAM · weiter rechts: Wiedervorlage · links: KI-Assistent</p>`;
   if (window.lucide) lucide.createIcons();
   attachSwipeToCards();
 }
@@ -1633,6 +1638,7 @@ function renderTicketList(tickets) {
 let _openSwipedContent = null;
 const SWIPE_OPEN_PX = 160;      // Endposition wenn offen (zwei 80px-Buttons)
 const SWIPE_THRESHOLD_PX = 60;  // Rechts: snap-Schwelle
+const SWIPE_FAR_TRIGGER = 220;  // Rechts weiter: Wiedervorlage-Trigger
 const SWIPE_LEFT_TRIGGER = 80;  // Links: Trigger-Schwelle für AI-Assistent
 
 function _resetSwipe() {
@@ -1672,16 +1678,25 @@ function attachSwipeToCards() {
         isHorizontal = Math.abs(dx) > dy;
         if (!isHorizontal) { dragActive = false; content.classList.remove('is-dragging'); content.style.transform = ''; return; }
       }
-      // Rechts: reveal-Panel, Links: Trigger-Geste (AI-Assistent)
+      // Rechts: reveal-Panel + Far-Trigger Wiedervorlage, Links: AI-Assistent
       const baseOffset = (_openSwipedContent === content) ? SWIPE_OPEN_PX : 0;
       let newX = baseOffset + dx;
-      newX = Math.max(-SWIPE_LEFT_TRIGGER * 1.6, Math.min(SWIPE_OPEN_PX * 1.3, newX));
+      newX = Math.max(-SWIPE_LEFT_TRIGGER * 1.6, Math.min(SWIPE_OPEN_PX * 2.0, newX));
       currentDx = newX;
       content.style.transform = `translateX(${newX}px)`;
-      // Visual feedback: AI-Indikator wird mit Linkswisch sichtbar
       const card = content.parentElement;
-      const ind = card && card.querySelector('[data-ai-indicator]');
-      if (ind) ind.style.opacity = newX < 0 ? Math.min(-newX / SWIPE_LEFT_TRIGGER, 1) : 0;
+      // Links: AI-Indikator
+      const aiInd = card && card.querySelector('[data-ai-indicator]');
+      if (aiInd) aiInd.style.opacity = newX < 0 ? Math.min(-newX / SWIPE_LEFT_TRIGGER, 1) : 0;
+      // Rechts weiter: Wiedervorlage-Indikator (zwischen SWIPE_OPEN_PX und SWIPE_FAR_TRIGGER)
+      const wvInd = card && card.querySelector('[data-snooze-indicator]');
+      if (wvInd) {
+        if (newX > SWIPE_OPEN_PX) {
+          wvInd.style.opacity = Math.min((newX - SWIPE_OPEN_PX) / (SWIPE_FAR_TRIGGER - SWIPE_OPEN_PX), 1);
+        } else {
+          wvInd.style.opacity = 0;
+        }
+      }
     }, { passive: true });
 
     content.addEventListener('touchend', () => {
@@ -1690,9 +1705,16 @@ function attachSwipeToCards() {
       content.classList.remove('is-dragging');
       if (isHorizontal) suppressClickUntil = Date.now() + 350;
       const card = content.parentElement;
-      const ind = card && card.querySelector('[data-ai-indicator]');
-      if (ind) ind.style.opacity = 0;
-      if (currentDx > SWIPE_THRESHOLD_PX) {
+      const aiInd = card && card.querySelector('[data-ai-indicator]');
+      if (aiInd) aiInd.style.opacity = 0;
+      const wvInd = card && card.querySelector('[data-snooze-indicator]');
+      if (wvInd) wvInd.style.opacity = 0;
+      if (currentDx > SWIPE_FAR_TRIGGER) {
+        // Far-Right → Wiedervorlage-Picker (Card snappt zurück)
+        content.style.transform = 'translateX(0)';
+        if (_openSwipedContent === content) _openSwipedContent = null;
+        setTimeout(() => openWiedervorlagePicker(accountId, parseInt(ticketId, 10), true), 80);
+      } else if (currentDx > SWIPE_THRESHOLD_PX) {
         // Rechts → reveal close/spam-Panel
         content.style.transform = `translateX(${SWIPE_OPEN_PX}px)`;
         _openSwipedContent = content;
