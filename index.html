@@ -205,7 +205,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v1.2.0';
+const APP_VERSION = 'v1.2.1';
 // Read-Token absichtlich gesplittet, damit GitHub Secret-Scanning beim Push nicht blockt.
 // Der Token ist read-only und Base-scoped → bewusst eingebettet (Architektur-Entscheidung).
 const _RK = 'patu8KWM8aWB' + 'yxCGL.69fae5d9fa4b94c2' + '66b426dadd71a51f574945d840b33569058ab5e9d89ebef3';
@@ -536,10 +536,17 @@ async function valtownSetEnvVar(token, valId, key, value, description = '') {
 // Orchestrator — alle Steps mit Live-Progress
 async function valtownAutoSetup({ token, onProgress }) {
   const log = (msg, kind = 'info') => onProgress?.(msg, kind);
-  log('Validiere API-Key…');
-  const me = await valtownMe(token);
-  if (!me.username) throw new Error('Val.town /me lieferte keinen Username');
-  log('Eingeloggt als ' + me.username, 'ok');
+  // /v1/me ist nur ein optionaler Pre-Flight (braucht Users:Read).
+  // Wir brauchen den Username nicht — Endpoint-URL kommt aus der File-Creation.
+  log('Pre-Flight (optional)…');
+  let username = null;
+  try {
+    const me = await valtownMe(token);
+    username = me.username || null;
+    log('Eingeloggt als ' + (username || '?'), 'ok');
+  } catch (e) {
+    log('Pre-Flight übersprungen (Users:Read fehlt — egal, fahre fort)', 'warn');
+  }
 
   // 1) Existierenden Val updaten oder neuen erstellen
   let valId = APP_KEYS.valtownValId;
@@ -630,7 +637,7 @@ async function valtownAutoSetup({ token, onProgress }) {
     }
   }
 
-  return { valId, endpointUrl: cleanUrl, username: me.username, isUpdate };
+  return { valId, endpointUrl: cleanUrl, username: username || '', isUpdate };
 }
 
 /* ============================================================
@@ -1544,7 +1551,7 @@ async function renderSettingsPage() {
         <div class="space-y-2.5">
           <div>
             <label class="text-xs font-semibold text-ink-700">Val.town API-Key</label>
-            <p class="text-[11px] text-ink-500 mb-1.5">In val.town: oben rechts Avatar → <a href="https://www.val.town/settings/api" target="_blank" class="text-brand-600 underline">Settings → API Tokens</a> → „New token" mit Scopes <code class="bg-white border border-ink-200 px-1 rounded text-[10px]">vals:read</code>, <code class="bg-white border border-ink-200 px-1 rounded text-[10px]">vals:write</code>, <code class="bg-white border border-ink-200 px-1 rounded text-[10px]">environment_variables:write</code>.</p>
+            <p class="text-[11px] text-ink-500 mb-1.5">In val.town: oben rechts Avatar → <a href="https://www.val.town/settings/api" target="_blank" class="text-brand-600 underline">Settings → API Tokens</a> → „New token" → Permission <strong>Vals: Read and write</strong> (deckt Code + Env-Vars ab). Andere Permissions können auf <em>None</em> bleiben.</p>
             <input id="valtownKeyInput" type="password" value="${escapeAttr(APP_KEYS.valtownKey || '')}" placeholder="vt_pat_..." autocomplete="off" class="w-full px-3 py-2 border border-ink-200 rounded-lg text-sm font-mono bg-white focus:ring-2 focus:ring-brand-500/30 focus:border-brand-500">
           </div>
           <div class="flex gap-2 flex-wrap">
