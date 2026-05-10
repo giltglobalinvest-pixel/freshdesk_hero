@@ -221,7 +221,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.1.0';
+const APP_VERSION = 'v2.1.1';
 // Read-Token absichtlich gesplittet, damit GitHub Secret-Scanning beim Push nicht blockt.
 // Der Token ist read-only und Base-scoped → bewusst eingebettet (Architektur-Entscheidung).
 const _RK = 'patu8KWM8aWB' + 'yxCGL.69fae5d9fa4b94c2' + '66b426dadd71a51f574945d840b33569058ab5e9d89ebef3';
@@ -1709,8 +1709,16 @@ async function bulkClose() {
 async function bulkSpam() {
   const items = msSelectedList();
   await bulkExecute(items, async ({ accountId, ticketId }) => {
-    await proxyJson('/freshdesk/' + encodeURIComponent(accountId) + '/api/v2/tickets/' + ticketId, { method: 'DELETE' });
-  }, 'in Papierkorb verschoben', 'verschiebe');
+    const base = '/freshdesk/' + encodeURIComponent(accountId) + '/api/v2/tickets/' + ticketId;
+    try {
+      await proxyJson(base, { method: 'DELETE' });
+    } catch (e) {
+      // Alter Proxy-Code blockiert DELETE mit 405 → Fallback: schließen
+      if (e.status === 405 || /method is not allowed/i.test(e.message || '')) {
+        await proxyJson(base, { method: 'PUT', body: JSON.stringify({ status: 5 }) });
+      } else throw e;
+    }
+  }, 'verarbeitet', 'verarbeite');
 }
 
 function bulkWiedervorlage() {
@@ -2064,13 +2072,22 @@ async function ticketActionClose(accountId, ticketId, btn) {
 
 async function ticketActionSpam(accountId, ticketId, btn) {
   if (btn) setBusy(btn, true, '…');
+  const base = '/freshdesk/' + encodeURIComponent(accountId) + '/api/v2/tickets/' + ticketId;
   try {
-    // Soft-Delete in Papierkorb — funktioniert plan-übergreifend, im FD-Web reversibel
-    await proxyJson('/freshdesk/' + encodeURIComponent(accountId) + '/api/v2/tickets/' + ticketId, {
-      method: 'DELETE'
-    });
-    _resetSwipe();
-    toast('Ticket #' + ticketId + ' in Papierkorb verschoben', 'success');
+    try {
+      await proxyJson(base, { method: 'DELETE' });
+      _resetSwipe();
+      toast('Ticket #' + ticketId + ' in Papierkorb verschoben', 'success');
+    } catch (e1) {
+      // Häufig: alter Proxy-Code blockiert DELETE mit 405. Fallback auf Schließen.
+      if (e1.status === 405 || /method is not allowed/i.test(e1.message || '')) {
+        await proxyJson(base, { method: 'PUT', body: JSON.stringify({ status: 5 }) });
+        _resetSwipe();
+        toast('Ticket #' + ticketId + ' geschlossen (Papierkorb blockiert — Admin → Einstellungen → Proxy-Code aktualisieren)', 'warn', 8000);
+      } else {
+        throw e1;
+      }
+    }
     renderTicketsPage();
   } catch (e) {
     if (btn) setBusy(btn, false);
