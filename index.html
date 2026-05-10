@@ -209,7 +209,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v1.9.0';
+const APP_VERSION = 'v1.9.1';
 // Read-Token absichtlich gesplittet, damit GitHub Secret-Scanning beim Push nicht blockt.
 // Der Token ist read-only und Base-scoped → bewusst eingebettet (Architektur-Entscheidung).
 const _RK = 'patu8KWM8aWB' + 'yxCGL.69fae5d9fa4b94c2' + '66b426dadd71a51f574945d840b33569058ab5e9d89ebef3';
@@ -993,6 +993,9 @@ async function fetchTicketsForAccount(accountId, opts = {}) {
   let list = Array.isArray(data) ? data : (data.results || []);
   // Search-API gibt nicht nach updated_at sortiert zurück → manuell sortieren
   if (q) list.sort((a, b) => new Date(b.updated_at || 0) - new Date(a.updated_at || 0));
+  // Deleted/SPAM clientseitig ausschließen — Freshdesk-Search-API hat deleted/spam
+  // nicht als gültige Query-Felder, also kommen sie im Status-Filter mit rein.
+  list = list.filter(t => !t.deleted && !t.spam);
 
   const acc = APP_STATE.accounts.find(a => a.id === accountId);
   return list.map(t => ({ ...t, _accountId: accountId, _accountName: acc?.name || '?', _accountColor: acc?.color || '#64748b' }));
