@@ -209,7 +209,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v1.9.1';
+const APP_VERSION = 'v2.0.0';
 // Read-Token absichtlich gesplittet, damit GitHub Secret-Scanning beim Push nicht blockt.
 // Der Token ist read-only und Base-scoped → bewusst eingebettet (Architektur-Entscheidung).
 const _RK = 'patu8KWM8aWB' + 'yxCGL.69fae5d9fa4b94c2' + '66b426dadd71a51f574945d840b33569058ab5e9d89ebef3';
@@ -246,7 +246,9 @@ let APP_STATE = {
     groupId:     null,        // number = specific group, null = alle
     type:        null,        // string = specific type, null = alle
     responderId: null,        // number = specific agent, 'unassigned', null = alle
+    visibility:  'active',    // 'active' (verbirgt Wiedervorlage) | 'wiedervorlage' | 'all'
   },
+  wiedervorlageMap: new Map(),
 };
 
 const SESSION_STORAGE_KEY = 'fdh_session_' + APP_CONFIG.PROJECT_ID;
@@ -311,7 +313,7 @@ function relTime(iso) {
   return d.toLocaleDateString('de', { day:'2-digit', month:'2-digit', year:'2-digit' });
 }
 
-function toast(msg, kind = 'info', ttl = 3500) {
+function toast(msg, kind = 'info', ttl = 3500, action = null) {
   const c = $('toastContainer'); if (!c) return;
   const palettes = {
     success: 'bg-emerald-600 text-white',
@@ -322,7 +324,18 @@ function toast(msg, kind = 'info', ttl = 3500) {
   const ic = { success:'check-circle-2', error:'alert-circle', warn:'alert-triangle', info:'info' }[kind] || 'info';
   const el = document.createElement('div');
   el.className = `toast-enter pointer-events-auto rounded-xl px-4 py-2.5 shadow-lg flex items-center gap-2 text-sm max-w-md ${palettes[kind] || palettes.info}`;
-  el.innerHTML = `<i data-lucide="${ic}" class="w-4 h-4 shrink-0"></i><span class="flex-1">${escapeHtml(msg)}</span>`;
+  let actionHtml = '';
+  if (action && action.label) {
+    actionHtml = `<button class="ml-2 bg-white/20 hover:bg-white/30 active:bg-white/40 px-2 py-1 rounded font-semibold text-xs whitespace-nowrap">${escapeHtml(action.label)}</button>`;
+  }
+  el.innerHTML = `<i data-lucide="${ic}" class="w-4 h-4 shrink-0"></i><span class="flex-1">${escapeHtml(msg)}</span>${actionHtml}`;
+  if (action && action.onClick) {
+    el.querySelector('button')?.addEventListener('click', () => {
+      try { action.onClick(); } catch (_) {}
+      el.style.transition = 'opacity .2s'; el.style.opacity = '0';
+      setTimeout(() => el.remove(), 200);
+    });
+  }
   c.appendChild(el);
   if (window.lucide) lucide.createIcons();
   setTimeout(() => { el.style.transition='opacity .3s'; el.style.opacity='0'; setTimeout(()=>el.remove(),300); }, ttl);
@@ -885,6 +898,8 @@ async function proxyJson(path, init = {}) {
 const ACCOUNTS_TABLE = 'Accounts';
 const ACCOUNT_COLORS = ['#0ea5e9','#10b981','#f59e0b','#ef4444','#8b5cf6','#ec4899','#14b8a6','#6366f1','#f97316','#84cc16'];
 
+const WIEDERVORLAGE_TABLE = 'Wiedervorlage';
+
 async function ensureAppTables() {
   // Accounts-Tabelle anlegen falls nicht vorhanden
   await ensureTable(ACCOUNTS_TABLE, [
@@ -895,7 +910,124 @@ async function ensureAppTables() {
     { name: 'api_key',             type: 'singleLineText' },
     { name: 'created',             type: 'singleLineText' },
   ]);
+  await ensureTable(WIEDERVORLAGE_TABLE, [
+    { name: 'api_key',     type: 'singleLineText' },  // User-Owner
+    { name: 'account_id',  type: 'singleLineText' },  // Airtable record ID des FD-Accounts
+    { name: 'ticket_id',   type: 'singleLineText' },  // Freshdesk-Ticket-ID
+    { name: 'frist_am',    type: 'singleLineText' },  // ISO-Datum, wann Ticket wieder sichtbar wird
+    { name: 'grund',       type: 'singleLineText' },  // manuell | antwort | notiz | zuweisung | sonstiges
+    { name: 'angelegt_am', type: 'singleLineText' },  // ISO-Datum der Anlage
+  ]);
 }
+
+/* ============================================================
+   WIEDERVORLAGE — persönliches Ausblenden bis Frist
+   ============================================================ */
+function _wvKey(accountId, ticketId) { return accountId + '|' + ticketId; }
+
+async function loadWiedervorlage() {
+  APP_STATE.wiedervorlageMap = new Map();
+  if (!APP_KEYS.user?.api_key) return;
+  const filter = "{api_key}='" + escapeFormula(APP_KEYS.user.api_key) + "'";
+  let recs = [];
+  try {
+    recs = await airtableRead(WIEDERVORLAGE_TABLE, { filter });
+  } catch (_) { recs = []; }
+  recs.forEach(r => {
+    const f = r.fields || {};
+    if (!f.account_id || !f.ticket_id || !f.frist_am) return;
+    APP_STATE.wiedervorlageMap.set(_wvKey(f.account_id, f.ticket_id), {
+      recordId:    r.id,
+      account_id:  f.account_id,
+      ticket_id:   f.ticket_id,
+      frist_am:    f.frist_am,
+      grund:       f.grund || 'manuell',
+      angelegt_am: f.angelegt_am || '',
+    });
+  });
+  // Auto-Cleanup: Einträge älter als 30 Tage löschen (Frist lange vorbei)
+  const cutoff = Date.now() - 30 * 86400e3;
+  for (const [k, v] of APP_STATE.wiedervorlageMap.entries()) {
+    if (new Date(v.frist_am).getTime() < cutoff) {
+      airtableDelete(WIEDERVORLAGE_TABLE, v.recordId).catch(() => {});
+      APP_STATE.wiedervorlageMap.delete(k);
+    }
+  }
+}
+
+function getWiedervorlage(accountId, ticketId) {
+  return APP_STATE.wiedervorlageMap?.get(_wvKey(accountId, ticketId)) || null;
+}
+
+function isOnWiedervorlage(accountId, ticketId, now = Date.now()) {
+  const wv = getWiedervorlage(accountId, ticketId);
+  if (!wv) return false;
+  return new Date(wv.frist_am).getTime() > now;
+}
+
+function wasRecentlyReturned(accountId, ticketId, now = Date.now()) {
+  const wv = getWiedervorlage(accountId, ticketId);
+  if (!wv) return false;
+  const fristMs = new Date(wv.frist_am).getTime();
+  return fristMs <= now && fristMs > (now - 24 * 3600e3); // letzte 24h
+}
+
+async function addWiedervorlage(accountId, ticketId, fristIso, grund = 'manuell') {
+  if (!accountId || !ticketId) return;
+  // Wenn schon vorhanden → updaten statt neuen Record
+  const existing = getWiedervorlage(accountId, ticketId);
+  const fields = {
+    api_key:     APP_KEYS.user.api_key,
+    account_id:  accountId,
+    ticket_id:   String(ticketId),
+    frist_am:    fristIso,
+    grund:       grund,
+    angelegt_am: nowIso(),
+  };
+  if (existing) {
+    await airtableUpdate(WIEDERVORLAGE_TABLE, existing.recordId, { frist_am: fristIso, grund, angelegt_am: nowIso() });
+    APP_STATE.wiedervorlageMap.set(_wvKey(accountId, ticketId), { ...existing, frist_am: fristIso, grund });
+  } else {
+    const rec = await airtableWrite(WIEDERVORLAGE_TABLE, fields);
+    APP_STATE.wiedervorlageMap.set(_wvKey(accountId, ticketId), { recordId: rec.id, ...fields });
+  }
+}
+
+async function removeWiedervorlage(accountId, ticketId) {
+  const existing = getWiedervorlage(accountId, ticketId);
+  if (!existing) return;
+  try { await airtableDelete(WIEDERVORLAGE_TABLE, existing.recordId); } catch (_) {}
+  APP_STATE.wiedervorlageMap.delete(_wvKey(accountId, ticketId));
+}
+
+// Convenience: Tage in die Zukunft, gegebenenfalls auf "morgen früh 8 Uhr" runden
+function _daysToFrist(days, opts = {}) {
+  const d = new Date();
+  d.setDate(d.getDate() + days);
+  if (opts.morning) { d.setHours(8, 0, 0, 0); }
+  return d.toISOString();
+}
+
+function _fmtFrist(iso) {
+  if (!iso) return '';
+  const d = new Date(iso);
+  if (isNaN(d)) return iso;
+  const now = new Date();
+  const diffMs = d.getTime() - now.getTime();
+  const diffDays = Math.round(diffMs / 86400e3);
+  if (diffMs < 0) return 'überfällig';
+  if (diffDays === 0) return 'heute';
+  if (diffDays === 1) return 'morgen';
+  if (diffDays < 7) return 'in ' + diffDays + ' Tagen';
+  return d.toLocaleDateString('de', { day: '2-digit', month: '2-digit', year: '2-digit' });
+}
+
+const GRUND_LABEL = {
+  manuell:   'manuell',
+  antwort:   'wegen Antwort',
+  notiz:     'wegen Notiz',
+  zuweisung: 'wegen Zuweisung',
+};
 
 async function loadAccounts() {
   if (!APP_KEYS.user?.api_key) { APP_STATE.accounts = []; return; }
@@ -996,6 +1128,18 @@ async function fetchTicketsForAccount(accountId, opts = {}) {
   // Deleted/SPAM clientseitig ausschließen — Freshdesk-Search-API hat deleted/spam
   // nicht als gültige Query-Felder, also kommen sie im Status-Filter mit rein.
   list = list.filter(t => !t.deleted && !t.spam);
+
+  // Wiedervorlage-Sichtbarkeit clientseitig anwenden
+  const visMode = (filters && filters.visibility) || 'active';
+  if (visMode !== 'all') {
+    const now = Date.now();
+    list = list.filter(t => {
+      const onWv = isOnWiedervorlage(accountId, t.id, now);
+      if (visMode === 'active') return !onWv;
+      if (visMode === 'wiedervorlage') return onWv;
+      return true;
+    });
+  }
 
   const acc = APP_STATE.accounts.find(a => a.id === accountId);
   return list.map(t => ({ ...t, _accountId: accountId, _accountName: acc?.name || '?', _accountColor: acc?.color || '#64748b' }));
@@ -1225,6 +1369,9 @@ async function renderTicketsPage() {
           const statusLabels = { open:'Offen', pending:'Wartet', resolved:'Gelöst', closed:'Geschlossen', all:'alle' };
           const statusActive = f.status && f.status !== 'all';
           let html = chip(statusActive, 'Status', statusLabels[f.status] || 'alle', "openFilterStatus()");
+          const visLabels = { active:'Aktiv', wiedervorlage:'Wiedervorlage', all:'alle' };
+          const visActive = f.visibility && f.visibility !== 'active';
+          html += chip(visActive, 'Sicht', visLabels[f.visibility] || 'Aktiv', "openFilterVisibility()");
           html += chip(!!f.type, 'Typ', f.type || 'alle', "openFilterType()");
           if (!isMulti) {
             const groupLabel = f.groupId ? (getGroupName(acc, f.groupId) || ('#' + f.groupId)) : 'alle';
@@ -1233,7 +1380,7 @@ async function renderTicketsPage() {
               : (f.responderId ? (getAgentName(acc, f.responderId) || ('#' + f.responderId)) : 'alle');
             html += chip(!!f.responderId, 'Wer', respLabel, "openFilterAssignee()");
           }
-          const anyActive = statusActive || f.type || f.groupId || f.responderId;
+          const anyActive = statusActive || visActive || f.type || f.groupId || f.responderId;
           if (anyActive) {
             html += `<button onclick="resetFilters()" class="shrink-0 px-2 py-1 rounded-md text-[11px] font-medium bg-ink-50 text-ink-600 border border-ink-200 inline-flex items-center gap-1"><i data-lucide="x" class="w-3 h-3"></i> Reset</button>`;
           }
@@ -1285,7 +1432,7 @@ function setCurrentAccount(id) {
 }
 
 function resetFilters() {
-  APP_STATE.filters = { status: 'all', groupId: null, type: null, responderId: null };
+  APP_STATE.filters = { status: 'all', groupId: null, type: null, responderId: null, visibility: 'active' };
   renderTicketsPage();
 }
 
@@ -1357,6 +1504,15 @@ function openFilterStatus() {
   ]);
 }
 
+function openFilterVisibility() {
+  const wvCount = APP_STATE.wiedervorlageMap?.size || 0;
+  openFilterPicker('Sicht', 'visibility', [
+    { value: 'active',        label: 'Aktiv',          icon: 'eye',       sub: 'Wiedervorlage-Tickets ausgeblendet' },
+    { value: 'wiedervorlage', label: 'Wiedervorlage',  icon: 'clock',     sub: wvCount + ' Ticket' + (wvCount === 1 ? '' : 's') + ' auf Wiedervorlage' },
+    { value: 'all',           label: 'Alles',          icon: 'list',      sub: 'aktive + ausgeblendete zusammen' },
+  ]);
+}
+
 function openFilterType() {
   // Union der Typen aus relevanten Accounts
   const acc = APP_STATE.currentAccount;
@@ -1416,6 +1572,9 @@ function renderTicketList(tickets) {
         const desc = htmlToText(t.description_text || t.description || '').slice(0, 140);
         const assigneeFirst = getAgentFirstName(t._accountId, t.responder_id);
         const groupName = getGroupName(t._accountId, t.group_id);
+        const wv = getWiedervorlage(t._accountId, t.id);
+        const onWv = wv && new Date(wv.frist_am).getTime() > Date.now();
+        const recentlyBack = wasRecentlyReturned(t._accountId, t.id);
         return `
           <div data-swipe-card class="shadow-sm">
             <div class="absolute inset-y-0 left-0 flex items-stretch">
@@ -1443,8 +1602,10 @@ function renderTicketList(tickets) {
                     <span class="text-[10px] text-ink-400 shrink-0">${escapeHtml(relTime(t.updated_at))}</span>
                   </div>
                   ${desc ? `<p class="text-[12px] text-ink-500 mt-0.5 line-clamp-2">${escapeHtml(desc)}</p>` : ''}
+                  ${recentlyBack ? `<div class="mt-1 inline-flex items-center gap-1 text-[10px] font-bold uppercase tracking-wider bg-gradient-to-r from-brand-100 to-emerald-100 text-brand-800 border border-brand-300 px-1.5 py-0.5 rounded"><i data-lucide="rotate-cw" class="w-2.5 h-2.5"></i> Heute fällig${wv && wv.grund && GRUND_LABEL[wv.grund] ? ' · ' + GRUND_LABEL[wv.grund] : ''}</div>` : ''}
                   <div class="flex items-center gap-1.5 mt-1.5 flex-wrap">
                     <span class="text-[10px] uppercase tracking-wider px-1.5 py-0.5 rounded font-semibold border ${st.cls}">${escapeHtml(st.label)}</span>
+                    ${onWv ? `<span class="text-[10px] uppercase tracking-wider px-1.5 py-0.5 rounded font-semibold bg-indigo-50 text-indigo-700 border border-indigo-200 inline-flex items-center gap-1"><i data-lucide="clock" class="w-2.5 h-2.5"></i> WV ${escapeHtml(_fmtFrist(wv.frist_am))}</span>` : ''}
                     ${assigneeFirst
                       ? `<button data-action="assign" data-account-id="${escapeAttr(t._accountId)}" data-ticket-id="${t.id}" data-responder-id="${t.responder_id || ''}" class="text-[10px] uppercase tracking-wider px-1.5 py-0.5 rounded font-semibold bg-ink-100 text-ink-700 active:bg-ink-200 inline-flex items-center gap-1"><i data-lucide="user" class="w-2.5 h-2.5"></i>${escapeHtml(assigneeFirst)} <i data-lucide="chevron-down" class="w-2.5 h-2.5"></i></button>`
                       : `<button data-action="assign" data-account-id="${escapeAttr(t._accountId)}" data-ticket-id="${t.id}" data-responder-id="" class="text-[10px] uppercase tracking-wider px-1.5 py-0.5 rounded font-semibold bg-amber-50 text-amber-700 border border-amber-200 active:bg-amber-100 inline-flex items-center gap-1">unzugewiesen <i data-lucide="chevron-down" class="w-2.5 h-2.5"></i></button>`}
@@ -1628,6 +1789,126 @@ async function ticketActionSpam(accountId, ticketId, btn) {
   }
 }
 
+/* === Wiedervorlage-Picker (Bottom-Sheet) === */
+let WV_CTX = null;
+
+function openWiedervorlagePicker(accountId, ticketId, fromList = false) {
+  if (accountId === undefined && CURRENT_TICKET) {
+    accountId = CURRENT_TICKET._accountId;
+    ticketId  = CURRENT_TICKET.id;
+  }
+  if (!accountId || !ticketId) return;
+  WV_CTX = { accountId, ticketId, fromList };
+  const existing = getWiedervorlage(accountId, ticketId);
+  const isOn = existing && new Date(existing.frist_am).getTime() > Date.now();
+
+  let host = document.getElementById('subModalHost');
+  if (!host) {
+    host = document.createElement('div');
+    host.id = 'subModalHost';
+    document.body.appendChild(host);
+  }
+  host.innerHTML = `
+    <div class="fixed inset-0 z-[60] flex items-end justify-center bg-black/40" onclick="if(event.target===this)closeWiedervorlagePicker()">
+      <div class="bg-white w-full max-w-md rounded-t-2xl shadow-2xl flex flex-col safe-bottom" style="max-height:80vh">
+        <div class="px-4 py-3 border-b border-ink-200 flex items-center justify-between">
+          <div>
+            <h3 class="font-bold text-ink-900">Auf Wiedervorlage</h3>
+            <p class="text-[11px] text-ink-500">Ticket #${ticketId} ${isOn ? '· aktuell bis ' + escapeHtml(_fmtFrist(existing.frist_am)) : ''}</p>
+          </div>
+          <button onclick="closeWiedervorlagePicker()" class="w-9 h-9 rounded-lg hover:bg-ink-100 flex items-center justify-center">
+            <i data-lucide="x" class="w-5 h-5 text-ink-700"></i>
+          </button>
+        </div>
+        <div class="flex-1 overflow-y-auto py-1">
+          ${[
+            { days: 1, label: 'Morgen früh',  sub: 'in 1 Tag' },
+            { days: 3, label: 'In 3 Tagen',   sub: 'für Kunden-Reaktion' },
+            { days: 7, label: 'In 1 Woche',   sub: 'längere Pause' },
+            { days: 14, label: 'In 2 Wochen', sub: 'noch länger ruhen' },
+          ].map(o => `
+            <button onclick="setWiedervorlageDays(${o.days})" class="w-full text-left px-4 py-3 active:bg-ink-50 border-b border-ink-100 flex items-center gap-3">
+              <span class="w-9 h-9 rounded-full bg-gradient-to-br from-indigo-400 to-indigo-600 flex items-center justify-center shrink-0 text-white">
+                <i data-lucide="clock" class="w-4 h-4"></i>
+              </span>
+              <div class="flex-1 min-w-0">
+                <p class="font-medium text-ink-900 text-sm">${escapeHtml(o.label)}</p>
+                <p class="text-[11px] text-ink-500">${escapeHtml(o.sub)}</p>
+              </div>
+              <i data-lucide="chevron-right" class="w-4 h-4 text-ink-400 shrink-0"></i>
+            </button>
+          `).join('')}
+          <div class="px-4 py-3 border-b border-ink-100">
+            <label class="text-[10px] uppercase font-semibold text-ink-500 tracking-wider">Eigene Frist</label>
+            <div class="flex gap-2 mt-1">
+              <input id="wvCustomDate" type="date" class="flex-1 px-3 py-2 border border-ink-200 rounded-lg text-sm" min="${new Date(Date.now() + 86400e3).toISOString().slice(0,10)}">
+              <button onclick="setWiedervorlageCustom()" class="px-3 py-2 bg-brand-500 hover:bg-brand-600 text-white rounded-lg text-sm font-medium">OK</button>
+            </div>
+          </div>
+          ${isOn ? `
+            <button onclick="clearWiedervorlage()" class="w-full text-left px-4 py-3 active:bg-red-50 flex items-center gap-3 text-red-700">
+              <span class="w-9 h-9 rounded-full bg-red-100 flex items-center justify-center shrink-0">
+                <i data-lucide="rotate-ccw" class="w-4 h-4"></i>
+              </span>
+              <div class="flex-1 min-w-0">
+                <p class="font-medium text-sm">Wieder einblenden</p>
+                <p class="text-[11px] text-red-600">Wiedervorlage aufheben</p>
+              </div>
+            </button>` : ''}
+        </div>
+      </div>
+    </div>`;
+  if (window.lucide) lucide.createIcons();
+}
+
+function closeWiedervorlagePicker() {
+  const host = document.getElementById('subModalHost');
+  if (host) host.innerHTML = '';
+  WV_CTX = null;
+}
+
+async function setWiedervorlageDays(days) {
+  if (!WV_CTX) return;
+  const { accountId, ticketId, fromList } = WV_CTX;
+  try {
+    await addWiedervorlage(accountId, ticketId, _daysToFrist(days, { morning: true }), 'manuell');
+    closeWiedervorlagePicker();
+    toast('Wiedervorlage in ' + days + ' Tag' + (days === 1 ? '' : 'en'), 'success');
+    if (fromList) renderTicketsPage();
+    else if (CURRENT_TICKET && CURRENT_TICKET.id === ticketId) closeModal();
+  } catch (e) { toast('Fehler: ' + e.message, 'error', 6000); }
+}
+
+async function setWiedervorlageCustom() {
+  if (!WV_CTX) return;
+  const inp = $('wvCustomDate');
+  const val = inp?.value;
+  if (!val) return toast('Datum fehlt', 'warn');
+  const d = new Date(val);
+  d.setHours(8, 0, 0, 0);
+  if (d.getTime() < Date.now()) return toast('Frist muss in der Zukunft liegen', 'warn');
+  const { accountId, ticketId, fromList } = WV_CTX;
+  try {
+    await addWiedervorlage(accountId, ticketId, d.toISOString(), 'manuell');
+    closeWiedervorlagePicker();
+    toast('Wiedervorlage bis ' + d.toLocaleDateString('de'), 'success');
+    if (fromList) renderTicketsPage();
+    else if (CURRENT_TICKET && CURRENT_TICKET.id === ticketId) closeModal();
+  } catch (e) { toast('Fehler: ' + e.message, 'error', 6000); }
+}
+
+async function clearWiedervorlage() {
+  if (!WV_CTX) return;
+  const { accountId, ticketId, fromList } = WV_CTX;
+  try {
+    await removeWiedervorlage(accountId, ticketId);
+    closeWiedervorlagePicker();
+    toast('Wiedervorlage aufgehoben', 'success');
+    if (fromList) renderTicketsPage();
+    else if (CURRENT_TICKET && CURRENT_TICKET.id === ticketId) renderTicketDetailBody(CURRENT_TICKET);
+  } catch (e) { toast('Fehler: ' + e.message, 'error', 6000); }
+}
+
 function openInFreshdesk(accountId, ticketId) {
   const acc = APP_STATE.accounts.find(a => a.id === accountId);
   if (!acc) return toast('Account nicht gefunden', 'error');
@@ -1650,6 +1931,9 @@ async function openTicketDetail(accountId, ticketId) {
             <h1 class="font-bold text-ink-900 leading-tight truncate">Ticket #${ticketId}</h1>
             ${acc ? `<p class="text-[11px] text-ink-500 flex items-center gap-1.5 truncate"><span class="w-2 h-2 rounded-full inline-block" style="background:${escapeAttr(acc.color)}"></span>${escapeHtml(acc.name)}</p>` : ''}
           </div>
+          <button onclick="openWiedervorlagePicker('${accountId}', ${ticketId})" class="w-9 h-9 rounded-lg hover:bg-ink-100 flex items-center justify-center" aria-label="Auf Wiedervorlage">
+            <i data-lucide="clock" class="w-4.5 h-4.5 text-ink-700"></i>
+          </button>
           <button onclick="openInFreshdesk('${accountId}', ${ticketId})" class="w-9 h-9 rounded-lg hover:bg-ink-100 flex items-center justify-center" aria-label="In Freshdesk öffnen">
             <i data-lucide="external-link" class="w-4.5 h-4.5 text-ink-700"></i>
           </button>
@@ -2432,24 +2716,50 @@ async function executeAssistantAction(btn) {
 
   setBusy(btn, true, 'Sende…');
   const base = '/freshdesk/' + encodeURIComponent(ctx.accountId) + '/api/v2/tickets/' + ctx.ticketId;
+  // Auto-Wiedervorlage: Default-Dauer pro Aktionstyp (nur Sicht-Hide, kein Status-Change)
+  const autoWvDays = { reply: 3, note: 1, assign: 7 };
   try {
+    let successMsg = '';
+    let wvDays = 0;
+    let wvGrund = null;
     if (a.action === 'reply') {
       await proxyJson(base + '/reply', { method: 'POST', body: JSON.stringify({ body: textToHtmlForFreshdesk(a.body) }) });
-      toast('Antwort gesendet', 'success');
+      successMsg = 'Antwort gesendet';
+      wvDays = autoWvDays.reply; wvGrund = 'antwort';
     } else if (a.action === 'note') {
       await proxyJson(base + '/notes', { method: 'POST', body: JSON.stringify({ body: textToHtmlForFreshdesk(a.body), private: true }) });
-      toast('Notiz hinzugefügt', 'success');
+      successMsg = 'Notiz hinzugefügt';
+      wvDays = autoWvDays.note; wvGrund = 'notiz';
     } else if (a.action === 'forward') {
       await proxyJson(base + '/forward', { method: 'POST', body: JSON.stringify({ to_emails: a.forward_to, body: textToHtmlForFreshdesk(a.body) }) });
-      toast('Weitergeleitet an ' + a.forward_to.join(', '), 'success');
+      successMsg = 'Weitergeleitet an ' + a.forward_to.join(', ');
     } else if (a.action === 'assign') {
       await proxyJson(base, { method: 'PUT', body: JSON.stringify({ responder_id: a.agent_id }) });
-      toast('Zugewiesen an ' + (getAgentName(ctx.accountId, a.agent_id) || ('#' + a.agent_id)), 'success');
+      successMsg = 'Zugewiesen an ' + (getAgentName(ctx.accountId, a.agent_id) || ('#' + a.agent_id));
+      wvDays = autoWvDays.assign; wvGrund = 'zuweisung';
     } else if (a.action === 'status') {
+      // Status-Änderung: keine Auto-Wiedervorlage (Status-Filter handhabt das)
       await proxyJson(base, { method: 'PUT', body: JSON.stringify({ status: a.status }) });
-      toast('Status geändert', 'success');
+      successMsg = 'Status geändert';
     }
     closeAssistantModal();
+    // Auto-Wiedervorlage anhängen (nur bei reply/note/assign)
+    if (wvDays > 0 && wvGrund) {
+      try {
+        const frist = _daysToFrist(wvDays, { morning: true });
+        await addWiedervorlage(ctx.accountId, ctx.ticketId, frist, wvGrund);
+        toast(successMsg + ' · ' + wvDays + ' Tag' + (wvDays === 1 ? '' : 'e') + ' auf Wiedervorlage', 'success', 6000, {
+          label: 'Doch zeigen',
+          onClick: async () => {
+            try { await removeWiedervorlage(ctx.accountId, ctx.ticketId); renderTicketsPage(); toast('Wiedervorlage aufgehoben', 'info', 2000); } catch (_) {}
+          }
+        });
+      } catch (wvErr) {
+        toast(successMsg + ' (Wiedervorlage fehlgeschlagen: ' + wvErr.message + ')', 'warn', 5000);
+      }
+    } else {
+      toast(successMsg, 'success');
+    }
     renderTicketsPage();
   } catch (e) {
     setBusy(btn, false);
@@ -3632,6 +3942,8 @@ async function showApp() {
     ensureAppTables().catch(e => console.warn('ensureAppTables:', e.message));
   }
   await loadAccounts();
+  // Wiedervorlage-Cache laden (im Hintergrund, blockiert UI nicht)
+  loadWiedervorlage().catch(e => console.warn('Wiedervorlage-Load:', e.message));
   navTo('tickets');
   // Update-Check (lautlos)
   checkForUpdate(false);
