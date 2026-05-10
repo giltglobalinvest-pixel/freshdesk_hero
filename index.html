@@ -221,7 +221,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.1.3';
+const APP_VERSION = 'v2.2.0';
 // Read-Token absichtlich gesplittet, damit GitHub Secret-Scanning beim Push nicht blockt.
 // Der Token ist read-only und Base-scoped → bewusst eingebettet (Architektur-Entscheidung).
 const _RK = 'patu8KWM8aWB' + 'yxCGL.69fae5d9fa4b94c2' + '66b426dadd71a51f574945d840b33569058ab5e9d89ebef3';
@@ -265,7 +265,15 @@ let APP_STATE = {
     active:   false,
     selected: new Set(),  // 'accountId|ticketId'
   },
+  // Pagination-State: ein page-Zähler global, pro Account-Tracking welche schon "leer" sind
+  pageState: {
+    page:      1,                // aktuell zuletzt geladene Seite
+    hasMore:   false,
+    exhausted: new Set(),        // Account-IDs deren letzte Seite < perPage war
+    tickets:   [],               // akkumuliert (alle bisherigen Seiten, sortiert)
+  },
 };
+const TICKETS_PER_PAGE = 30;
 
 const SESSION_STORAGE_KEY = 'fdh_session_' + APP_CONFIG.PROJECT_ID;
 const LEGACY_USER_KEY     = 'user_key_'    + APP_CONFIG.PROJECT_ID;
@@ -1122,16 +1130,19 @@ function buildSearchQuery(filters, opts = {}) {
 
 async function fetchTicketsForAccount(accountId, opts = {}) {
   const filters = opts.filters || APP_STATE.filters;
+  const page = opts.page || 1;
+  const perPage = opts.perPage || 30;
   const q = buildSearchQuery(filters, { skipAccountSpecific: !!opts.skipAccountSpecific });
 
   let path;
   if (q) {
-    // Server-seitige Suche kombiniert alle Filter via AND
+    // Search-API: max 30 per_page, max page=10
     path = '/freshdesk/' + encodeURIComponent(accountId) +
-      '/api/v2/search/tickets?query=' + encodeURIComponent('"' + q + '"');
+      '/api/v2/search/tickets?query=' + encodeURIComponent('"' + q + '"') + '&page=' + page;
   } else {
     const params = new URLSearchParams();
-    params.set('per_page', String(opts.perPage || 30));
+    params.set('per_page', String(Math.min(perPage, 100)));
+    params.set('page', String(page));
     params.set('order_by', opts.orderBy || 'updated_at');
     params.set('order_type', opts.orderType || 'desc');
     path = '/freshdesk/' + encodeURIComponent(accountId) + '/api/v2/tickets?' + params.toString();
@@ -1139,6 +1150,7 @@ async function fetchTicketsForAccount(accountId, opts = {}) {
 
   const data = await proxyJson(path);
   let list = Array.isArray(data) ? data : (data.results || []);
+  const rawCount = list.length;
   // Search-API gibt nicht nach updated_at sortiert zurück → manuell sortieren
   if (q) list.sort((a, b) => new Date(b.updated_at || 0) - new Date(a.updated_at || 0));
   // Deleted/SPAM clientseitig ausschließen — Freshdesk-Search-API hat deleted/spam
@@ -1179,7 +1191,10 @@ async function fetchTicketsForAccount(accountId, opts = {}) {
   }
 
   const acc = APP_STATE.accounts.find(a => a.id === accountId);
-  return list.map(t => ({ ...t, _accountId: accountId, _accountName: acc?.name || '?', _accountColor: acc?.color || '#64748b' }));
+  const annotated = list.map(t => ({ ...t, _accountId: accountId, _accountName: acc?.name || '?', _accountColor: acc?.color || '#64748b' }));
+  // _rawCount = Anzahl direkt vom Server (vor Clientside-Filtern), für hasMore-Check bei Pagination
+  Object.defineProperty(annotated, '_rawCount', { value: rawCount, enumerable: false });
+  return annotated;
 }
 
 async function fetchTicketDetail(accountId, ticketId) {
@@ -1272,16 +1287,23 @@ async function ensureTypesLoaded(accountId) {
 async function fetchTicketsAllAccounts(opts = {}) {
   const all = APP_STATE.accounts;
   if (!all.length) return [];
-  // Bei Multi-Account: account-spezifische Filter (Gruppe/Assignee) ignorieren —
-  // IDs sind nicht zwischen Accounts vergleichbar.
+  // Bei Multi-Account: account-spezifische Filter (Gruppe/Assignee) ignorieren
   const accOpts = { ...opts, skipAccountSpecific: true };
   const results = await Promise.allSettled(all.map(a => fetchTicketsForAccount(a.id, accOpts)));
   const merged = [];
+  const perAccount = {}; // { accountId: rawCount }
   results.forEach((r, i) => {
-    if (r.status === 'fulfilled') merged.push(...r.value);
-    else console.warn('Ticket-Fetch fehlgeschlagen für', all[i].name, r.reason);
+    const acc = all[i];
+    if (r.status === 'fulfilled') {
+      merged.push(...r.value);
+      perAccount[acc.id] = r.value._rawCount || 0;
+    } else {
+      console.warn('Ticket-Fetch fehlgeschlagen für', acc.name, r.reason);
+      perAccount[acc.id] = 0;
+    }
   });
   merged.sort((a, b) => new Date(b.updated_at || 0) - new Date(a.updated_at || 0));
+  Object.defineProperty(merged, '_perAccount', { value: perAccount, enumerable: false });
   return merged;
 }
 
@@ -1436,9 +1458,10 @@ async function renderTicketsPage() {
     </div>`;
   if (window.lucide) lucide.createIcons();
 
-  // Load tickets (parallel mit Agent-Cache)
+  // Load tickets (parallel mit Agent-Cache) — Pagination-State zurücksetzen
+  APP_STATE.pageState = { page: 1, hasMore: false, exhausted: new Set(), tickets: [] };
   try {
-    const opts = { perPage: 50, filters: APP_STATE.filters };
+    const opts = { perPage: TICKETS_PER_PAGE, filters: APP_STATE.filters, page: 1 };
     const ticketsPromise = (acc === 'all')
       ? fetchTicketsAllAccounts(opts)
       : fetchTicketsForAccount(acc, opts);
@@ -1446,6 +1469,15 @@ async function renderTicketsPage() {
       ? Promise.allSettled(APP_STATE.accounts.flatMap(a => [ensureAgentsLoaded(a.id), ensureGroupsLoaded(a.id), ensureTypesLoaded(a.id)]))
       : Promise.all([ensureAgentsLoaded(acc), ensureGroupsLoaded(acc), ensureTypesLoaded(acc)]);
     const [tickets] = await Promise.all([ticketsPromise, cachesPromise]);
+    // Pagination-State erfassen
+    const accsRelevant = acc === 'all' ? APP_STATE.accounts.map(a => a.id) : [acc];
+    if (acc === 'all' && tickets._perAccount) {
+      accsRelevant.forEach(aid => { if ((tickets._perAccount[aid] || 0) < TICKETS_PER_PAGE) APP_STATE.pageState.exhausted.add(aid); });
+    } else if (acc !== 'all') {
+      if ((tickets._rawCount || 0) < TICKETS_PER_PAGE) APP_STATE.pageState.exhausted.add(acc);
+    }
+    APP_STATE.pageState.tickets = tickets;
+    APP_STATE.pageState.hasMore = APP_STATE.pageState.exhausted.size < accsRelevant.length;
     renderTicketList(tickets);
   } catch (e) {
     $('ticketList').innerHTML = `
@@ -1455,6 +1487,49 @@ async function renderTicketsPage() {
         ${e.status === 401 ? '<p class="mt-2 text-[11px]">Tipp: Erneut einloggen.</p>' : ''}
       </div>`;
   }
+}
+
+async function loadMoreTickets(btnEl) {
+  const acc = APP_STATE.currentAccount;
+  const accountsAll = acc === 'all' ? APP_STATE.accounts : APP_STATE.accounts.filter(a => a.id === acc);
+  const accountsToFetch = accountsAll.filter(a => !APP_STATE.pageState.exhausted.has(a.id));
+  if (!accountsToFetch.length) { APP_STATE.pageState.hasMore = false; renderTicketList(APP_STATE.pageState.tickets); return; }
+  if (btnEl) setBusy(btnEl, true, 'Lade weitere…');
+  const nextPage = APP_STATE.pageState.page + 1;
+  // Search-API erlaubt max page=10
+  if (nextPage > 10) {
+    if (btnEl) setBusy(btnEl, false);
+    toast('Maximale Seitenzahl der Suche erreicht (300 Tickets). Filter enger ziehen, um mehr zu sehen.', 'warn', 6000);
+    APP_STATE.pageState.hasMore = false;
+    renderTicketList(APP_STATE.pageState.tickets);
+    return;
+  }
+  const opts = { perPage: TICKETS_PER_PAGE, filters: APP_STATE.filters, page: nextPage, skipAccountSpecific: (acc === 'all') };
+  const results = await Promise.allSettled(accountsToFetch.map(a => fetchTicketsForAccount(a.id, opts)));
+  const newTickets = [];
+  results.forEach((r, i) => {
+    const aid = accountsToFetch[i].id;
+    if (r.status === 'fulfilled') {
+      newTickets.push(...r.value);
+      if ((r.value._rawCount || 0) < TICKETS_PER_PAGE) APP_STATE.pageState.exhausted.add(aid);
+    } else {
+      console.warn('LoadMore fehlgeschlagen für', aid, r.reason);
+      APP_STATE.pageState.exhausted.add(aid);
+    }
+  });
+  // Dedupe gegen bisherige Tickets, dann mergen + sortieren
+  const existingKeys = new Set(APP_STATE.pageState.tickets.map(t => t._accountId + '|' + t.id));
+  for (const t of newTickets) {
+    const k = t._accountId + '|' + t.id;
+    if (!existingKeys.has(k)) {
+      APP_STATE.pageState.tickets.push(t);
+      existingKeys.add(k);
+    }
+  }
+  APP_STATE.pageState.tickets.sort((a, b) => new Date(b.updated_at || 0) - new Date(a.updated_at || 0));
+  APP_STATE.pageState.page = nextPage;
+  APP_STATE.pageState.hasMore = APP_STATE.pageState.exhausted.size < accountsAll.length && nextPage < 10;
+  renderTicketList(APP_STATE.pageState.tickets);
 }
 
 function setCurrentAccount(id) {
@@ -1661,7 +1736,12 @@ function renderTicketList(tickets) {
           </div>`;
       }).join('')}
     </div>
-    <p class="text-[10px] text-center text-ink-400 mt-3">${tickets.length} Ticket${tickets.length===1?'':'s'} · rechts wischen: Schließen/SPAM · weiter rechts: Wiedervorlage · links: KI-Assistent</p>`;
+    ${APP_STATE.pageState?.hasMore
+      ? `<button onclick="loadMoreTickets(this)" class="w-full bg-white border border-ink-200 rounded-2xl py-3 text-sm font-semibold text-brand-600 hover:bg-ink-50 mt-2 inline-flex items-center justify-center gap-2 active:opacity-70">
+          <i data-lucide="chevron-down" class="w-4 h-4"></i> Weitere ${TICKETS_PER_PAGE} laden
+         </button>`
+      : (tickets.length ? '<p class="text-[10px] text-center text-ink-400 mt-3">— alle geladen —</p>' : '')}
+    <p class="text-[10px] text-center text-ink-400 mt-3">${tickets.length} Ticket${tickets.length===1?'':'s'} · rechts wischen: Schließen/SPAM · weiter rechts: Wiedervorlage · links: KI-Assistent · lang drücken: Mehrfach-Auswahl</p>`;
   if (window.lucide) lucide.createIcons();
   attachSwipeToCards();
   renderMultiSelectBar();
