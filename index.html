@@ -205,7 +205,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v1.2.4';
+const APP_VERSION = 'v1.3.0';
 // Read-Token absichtlich gesplittet, damit GitHub Secret-Scanning beim Push nicht blockt.
 // Der Token ist read-only und Base-scoped → bewusst eingebettet (Architektur-Entscheidung).
 const _RK = 'patu8KWM8aWB' + 'yxCGL.69fae5d9fa4b94c2' + '66b426dadd71a51f574945d840b33569058ab5e9d89ebef3';
@@ -910,27 +910,39 @@ const FD_PRIORITY = {
 };
 
 async function fetchTicketsForAccount(accountId, opts = {}) {
-  const params = new URLSearchParams();
-  params.set('per_page', String(opts.perPage || 30));
-  params.set('order_by', opts.orderBy || 'updated_at');
-  params.set('order_type', opts.orderType || 'desc');
-  if (opts.includeStats) params.set('include', 'stats,requester');
   // Status-Filter: 2 offen, 3 wartet, 4 gelöst, 5 geschlossen
   const filterMap = { open: 2, pending: 3, resolved: 4, closed: 5 };
-  if (opts.status && filterMap[opts.status] !== undefined) {
-    // Use the canned "open_or_pending" approach via filter param
-    // Actually simpler: use ?filter=new_and_my_open is account-bound, so just query and filter client-side OR use the search API.
-    // We'll just request and filter client-side for simplicity.
+  const statusVal = opts.status && filterMap[opts.status];
+
+  let path;
+  if (statusVal) {
+    // Server-seitige Suche — der reguläre /tickets-Endpoint kann NICHT nach Status
+    // filtern und liefert nur die letzten 30 Tage; clientseitiges Filtern verfehlt
+    // Tickets, die in der Stichprobe der letzten N nicht enthalten sind.
+    const q = '"status:' + statusVal + '"';
+    path = '/freshdesk/' + encodeURIComponent(accountId) +
+      '/api/v2/search/tickets?query=' + encodeURIComponent(q);
+  } else {
+    const params = new URLSearchParams();
+    params.set('per_page', String(opts.perPage || 30));
+    params.set('order_by', opts.orderBy || 'updated_at');
+    params.set('order_type', opts.orderType || 'desc');
+    path = '/freshdesk/' + encodeURIComponent(accountId) + '/api/v2/tickets?' + params.toString();
   }
-  const path = '/freshdesk/' + encodeURIComponent(accountId) + '/api/v2/tickets?' + params.toString();
+
   const data = await proxyJson(path);
   let list = Array.isArray(data) ? data : (data.results || []);
-  if (opts.status && filterMap[opts.status] !== undefined) {
-    list = list.filter(t => t.status === filterMap[opts.status]);
-  }
-  // Annotate with account info
+  // Search-API gibt nicht nach updated_at sortiert zurück → manuell sortieren
+  if (statusVal) list.sort((a, b) => new Date(b.updated_at || 0) - new Date(a.updated_at || 0));
+
   const acc = APP_STATE.accounts.find(a => a.id === accountId);
   return list.map(t => ({ ...t, _accountId: accountId, _accountName: acc?.name || '?', _accountColor: acc?.color || '#64748b' }));
+}
+
+async function fetchTicketDetail(accountId, ticketId) {
+  const path = '/freshdesk/' + encodeURIComponent(accountId) +
+    '/api/v2/tickets/' + ticketId + '?include=conversations,requester';
+  return await proxyJson(path);
 }
 
 async function fetchTicketsAllAccounts(opts = {}) {
@@ -1127,7 +1139,7 @@ function renderTicketList(tickets) {
         const subj = t.subject || '(ohne Betreff)';
         const desc = (t.description_text || '').slice(0, 140);
         return `
-          <div class="bg-white rounded-2xl border border-ink-200 p-3 active:bg-ink-50 cursor-pointer" onclick="openTicket('${t._accountId}', ${t.id})">
+          <div class="bg-white rounded-2xl border border-ink-200 p-3 active:bg-ink-50 cursor-pointer" onclick="openTicketDetail('${t._accountId}', ${t.id})">
             <div class="flex items-start gap-2">
               ${showAccount ? `<span class="shrink-0 mt-1 w-2.5 h-2.5 rounded-full" style="background:${escapeAttr(t._accountColor)}" title="${escapeAttr(t._accountName)}"></span>` : ''}
               <div class="flex-1 min-w-0">
@@ -1151,11 +1163,185 @@ function renderTicketList(tickets) {
   if (window.lucide) lucide.createIcons();
 }
 
-function openTicket(accountId, ticketId) {
+function openInFreshdesk(accountId, ticketId) {
   const acc = APP_STATE.accounts.find(a => a.id === accountId);
   if (!acc) return toast('Account nicht gefunden', 'error');
-  const url = 'https://' + acc.domain + '.freshdesk.com/a/tickets/' + ticketId;
-  window.open(url, '_blank');
+  window.open('https://' + acc.domain + '.freshdesk.com/a/tickets/' + ticketId, '_blank');
+}
+
+let CURRENT_TICKET = null;
+
+async function openTicketDetail(accountId, ticketId) {
+  CURRENT_TICKET = null;
+  const acc = APP_STATE.accounts.find(a => a.id === accountId);
+  $('modalHost').innerHTML = `
+    <div class="fixed inset-0 z-50 bg-white flex flex-col">
+      <header class="sticky top-0 z-10 bg-white/95 backdrop-blur border-b border-ink-200 safe-top">
+        <div class="px-2 py-2.5 flex items-center gap-1.5">
+          <button onclick="closeModal()" class="w-9 h-9 rounded-lg hover:bg-ink-100 flex items-center justify-center" aria-label="Zurück">
+            <i data-lucide="arrow-left" class="w-5 h-5 text-ink-700"></i>
+          </button>
+          <div class="flex-1 min-w-0">
+            <h1 class="font-bold text-ink-900 leading-tight truncate">Ticket #${ticketId}</h1>
+            ${acc ? `<p class="text-[11px] text-ink-500 flex items-center gap-1.5 truncate"><span class="w-2 h-2 rounded-full inline-block" style="background:${escapeAttr(acc.color)}"></span>${escapeHtml(acc.name)}</p>` : ''}
+          </div>
+          <button onclick="openInFreshdesk('${accountId}', ${ticketId})" class="w-9 h-9 rounded-lg hover:bg-ink-100 flex items-center justify-center" aria-label="In Freshdesk öffnen">
+            <i data-lucide="external-link" class="w-4.5 h-4.5 text-ink-700"></i>
+          </button>
+        </div>
+      </header>
+      <div id="ticketDetailBody" class="flex-1 overflow-y-auto px-4 py-4 pb-20">
+        <div class="text-center py-16">
+          <div class="spinner inline-block w-7 h-7 border-[3px] text-brand-500"></div>
+          <p class="text-sm text-ink-500 mt-2">Lade Ticket…</p>
+        </div>
+      </div>
+    </div>`;
+  if (window.lucide) lucide.createIcons();
+
+  try {
+    const ticket = await fetchTicketDetail(accountId, ticketId);
+    ticket._accountId = accountId;
+    CURRENT_TICKET = ticket;
+    renderTicketDetailBody(ticket);
+  } catch (e) {
+    $('ticketDetailBody').innerHTML = `
+      <div class="bg-red-50 border border-red-200 rounded-2xl p-4 text-sm text-red-800">
+        <p class="font-semibold">Ticket konnte nicht geladen werden</p>
+        <p class="mt-1">${escapeHtml(e.message)}</p>
+      </div>`;
+  }
+}
+
+function renderTicketDetailBody(ticket) {
+  const status = FD_STATUS[ticket.status] || { label: 'Status ' + ticket.status, cls: 'bg-ink-100 text-ink-600 border-ink-200' };
+  const pri    = FD_PRIORITY[ticket.priority] || { label: '–', cls: 'bg-ink-100 text-ink-600' };
+  const req    = ticket.requester || {};
+  const conversations = (ticket.conversations || []).slice().sort((a, b) => new Date(a.created_at || 0) - new Date(b.created_at || 0));
+
+  $('ticketDetailBody').innerHTML = `
+    <div class="space-y-3 max-w-2xl mx-auto">
+
+      <!-- Header-Karte -->
+      <div class="bg-white rounded-2xl border border-ink-200 p-4">
+        <h2 class="font-bold text-ink-900 text-base leading-snug">${escapeHtml(ticket.subject || '(ohne Betreff)')}</h2>
+        <div class="flex flex-wrap gap-1.5 mt-2 items-center">
+          <span class="text-[10px] uppercase tracking-wider px-1.5 py-0.5 rounded font-semibold border ${status.cls}">${escapeHtml(status.label)}</span>
+          <span class="text-[10px] uppercase tracking-wider px-1.5 py-0.5 rounded font-semibold ${pri.cls}">${escapeHtml(pri.label)}</span>
+          <span class="text-[10px] text-ink-400">·</span>
+          <span class="text-[11px] text-ink-500">${escapeHtml(fmtDate(ticket.updated_at))}</span>
+        </div>
+        <div class="mt-3 pt-3 border-t border-ink-100 grid grid-cols-2 gap-3 text-xs">
+          <div class="min-w-0">
+            <p class="text-ink-500 text-[10px] uppercase tracking-wider">Anfragender</p>
+            <p class="font-semibold text-ink-900 truncate mt-0.5">${escapeHtml(req.name || '–')}</p>
+            ${req.email ? `<p class="text-ink-500 truncate text-[11px]">${escapeHtml(req.email)}</p>` : ''}
+          </div>
+          <div class="min-w-0">
+            <p class="text-ink-500 text-[10px] uppercase tracking-wider">Erstellt</p>
+            <p class="font-medium text-ink-900 mt-0.5">${escapeHtml(fmtDate(ticket.created_at))}</p>
+          </div>
+        </div>
+      </div>
+
+      <!-- KI-Zusammenfassung -->
+      <div class="bg-gradient-to-br from-brand-50 to-emerald-50 border border-brand-200 rounded-2xl p-4">
+        <div class="flex items-center gap-2 mb-2">
+          <i data-lucide="sparkles" class="w-4 h-4 text-brand-600"></i>
+          <h3 class="font-semibold text-ink-900 text-sm">KI-Zusammenfassung</h3>
+        </div>
+        <div id="aiSummaryContent">
+          <button onclick="summarizeTicket(this)" class="bg-brand-500 hover:bg-brand-600 text-white rounded-lg px-3 py-2 text-xs font-semibold flex items-center gap-2">
+            <i data-lucide="sparkles" class="w-3.5 h-3.5"></i> Zusammenfassen
+          </button>
+          <p class="text-[10px] text-ink-500 mt-1.5">Analyse via Claude — Anliegen, Status, nächster Schritt.</p>
+        </div>
+      </div>
+
+      <!-- Erste Anfrage -->
+      <div class="bg-white rounded-2xl border border-ink-200 p-4">
+        <p class="text-[10px] font-semibold text-ink-500 uppercase tracking-wider mb-2">Erste Anfrage</p>
+        <div class="text-sm text-ink-800 whitespace-pre-line break-words">${escapeHtml((ticket.description_text || '').trim() || '(kein Text)')}</div>
+      </div>
+
+      <!-- Verlauf -->
+      ${conversations.length ? `
+      <div class="bg-white rounded-2xl border border-ink-200 p-4">
+        <div class="flex items-center justify-between mb-3">
+          <p class="text-[10px] font-semibold text-ink-500 uppercase tracking-wider">Verlauf</p>
+          <span class="text-[10px] text-ink-400">${conversations.length} Nachricht${conversations.length === 1 ? '' : 'en'}</span>
+        </div>
+        <div class="space-y-3">
+          ${conversations.map(c => {
+            const isIncoming = c.incoming === true;
+            const isPrivate  = c.private === true;
+            const who = isPrivate ? 'Interne Notiz' : (isIncoming ? (c.from_email || 'Kunde') : 'Agent');
+            const align = isIncoming ? 'border-brand-300 bg-brand-50/50' : (isPrivate ? 'border-amber-300 bg-amber-50/50' : 'border-ink-200 bg-ink-50/50');
+            const arrow = isPrivate ? '⊙' : (isIncoming ? '←' : '→');
+            const body = (c.body_text || '').trim();
+            const truncated = body.length > 1500;
+            return `
+              <div class="border-l-2 ${align} pl-3 py-2 rounded-r">
+                <div class="flex items-baseline justify-between gap-2 text-[11px] mb-1">
+                  <span class="font-semibold text-ink-700 truncate">${escapeHtml(arrow + ' ' + who)}</span>
+                  <span class="text-ink-400 shrink-0">${escapeHtml(fmtDate(c.created_at))}</span>
+                </div>
+                <div class="text-sm text-ink-700 whitespace-pre-line break-words">${escapeHtml(body.slice(0, 1500))}${truncated ? '…' : ''}</div>
+              </div>`;
+          }).join('')}
+        </div>
+      </div>` : ''}
+    </div>`;
+  if (window.lucide) lucide.createIcons();
+}
+
+async function summarizeTicket(btnEl) {
+  if (!CURRENT_TICKET) return;
+  if (!APP_KEYS.apiProxyUrl) return toast('Proxy nicht eingerichtet', 'warn');
+  const ticket = CURRENT_TICKET;
+  const container = $('aiSummaryContent');
+  container.innerHTML = '<div class="flex items-center gap-2 text-ink-700 text-xs"><span class="spinner w-4 h-4 border-[2px] text-brand-500"></span> Analyse läuft…</div>';
+
+  const conv = (ticket.conversations || [])
+    .slice().sort((a, b) => new Date(a.created_at || 0) - new Date(b.created_at || 0))
+    .map(c => (c.private ? '[Notiz] ' : '') + (c.incoming ? 'Kunde' : 'Agent') + ': ' + (c.body_text || '').trim().slice(0, 600))
+    .join('\n\n');
+
+  const prompt =
+    'Fasse das folgende Support-Ticket in 2-4 deutschen Sätzen zusammen. Format:\n' +
+    '• **Anliegen:** Was will der Kunde?\n' +
+    '• **Status:** Wie weit sind wir?\n' +
+    '• **Nächster Schritt:** Was ist offen / wer muss reagieren?\n\n' +
+    'Antworte kompakt und nüchtern, ohne Floskeln.\n\n' +
+    '— TICKET —\n' +
+    'Betreff: ' + (ticket.subject || '') + '\n' +
+    'Kunde: ' + (ticket.requester?.name || '?') + ' <' + (ticket.requester?.email || '?') + '>\n' +
+    'Erste Anfrage: ' + (ticket.description_text || '').trim().slice(0, 1500) + '\n\n' +
+    (conv ? 'Verlauf:\n' + conv.slice(0, 5000) : '');
+
+  try {
+    const data = await proxyJson('/anthropic/v1/messages', {
+      method: 'POST',
+      body: JSON.stringify({
+        model: 'claude-haiku-4-5-20251001',
+        max_tokens: 500,
+        messages: [{ role: 'user', content: prompt }]
+      })
+    });
+    const text = (data.content && data.content[0] && data.content[0].text) || '(keine Antwort)';
+    container.innerHTML = `
+      <div class="text-sm text-ink-800 whitespace-pre-line leading-relaxed">${escapeHtml(text)}</div>
+      <button onclick="summarizeTicket(this)" class="mt-2 text-[11px] text-brand-600 hover:text-brand-700 font-medium flex items-center gap-1">
+        <i data-lucide="refresh-cw" class="w-3 h-3"></i> Neu erstellen
+      </button>`;
+    if (window.lucide) lucide.createIcons();
+  } catch (e) {
+    container.innerHTML = `<div class="text-xs text-red-700 bg-red-50 border border-red-200 rounded p-2">Fehler: ${escapeHtml(e.message)}</div>
+      <button onclick="summarizeTicket(this)" class="mt-2 text-[11px] text-brand-600 font-medium flex items-center gap-1">
+        <i data-lucide="refresh-cw" class="w-3 h-3"></i> Erneut versuchen
+      </button>`;
+    if (window.lucide) lucide.createIcons();
+  }
 }
 
 /* ===================== ACCOUNTS PAGE ===================== */
