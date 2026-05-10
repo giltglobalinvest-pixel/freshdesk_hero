@@ -5,6 +5,16 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="theme-color" content="#0ea5e9">
 <title>Freshdesk Hero</title>
+
+<!-- App-Icon (Home-Screen, Browser-Tab) -->
+<link rel="icon" type="image/svg+xml" href="data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAxMDI0IDEwMjQiPjxkZWZzPjxsaW5lYXJHcmFkaWVudCBpZD0iYmciIHgxPSIwIiB5MT0iMCIgeDI9IjEiIHkyPSIxIj48c3RvcCBvZmZzZXQ9IjAiIHN0b3AtY29sb3I9IiMzOGJkZjgiLz48c3RvcCBvZmZzZXQ9IjEiIHN0b3AtY29sb3I9IiMwMzY5YTEiLz48L2xpbmVhckdyYWRpZW50PjxsaW5lYXJHcmFkaWVudCBpZD0iYm9sdCIgeDE9IjAiIHkxPSIwIiB4Mj0iMCIgeTI9IjEiPjxzdG9wIG9mZnNldD0iMCIgc3RvcC1jb2xvcj0iIzBlYTVlOSIvPjxzdG9wIG9mZnNldD0iMSIgc3RvcC1jb2xvcj0iIzBjNGE2ZSIvPjwvbGluZWFyR3JhZGllbnQ+PGZpbHRlciBpZD0ic2hhZG93IiB4PSItMTAlIiB5PSItMTAlIiB3aWR0aD0iMTIwJSIgaGVpZ2h0PSIxMzAlIj48ZmVEcm9wU2hhZG93IGR4PSIwIiBkeT0iMTQiIHN0ZERldmlhdGlvbj0iMTgiIGZsb29kLWNvbG9yPSIjMGM0YTZlIiBmbG9vZC1vcGFjaXR5PSIuMzUiLz48L2ZpbHRlcj48L2RlZnM+PHJlY3Qgd2lkdGg9IjEwMjQiIGhlaWdodD0iMTAyNCIgcng9IjIzMCIgZmlsbD0idXJsKCNiZykiLz48Y2lyY2xlIGN4PSI1MTIiIGN5PSI0MDAiIHI9IjM2MCIgZmlsbD0iI2ZmZiIgZmlsbC1vcGFjaXR5PSIuMTIiLz48Y2lyY2xlIGN4PSI1MTIiIGN5PSI0MDAiIHI9IjIyMCIgZmlsbD0iI2ZmZiIgZmlsbC1vcGFjaXR5PSIuMDgiLz48ZyBmaWx0ZXI9InVybCgjc2hhZG93KSI+PHBhdGggZD0iTSAyMDAgMzYwIEggODI0IFEgODY0IDM2MCA4NjQgNDAwIFYgNTEwIEEgNTAgNTAgMCAwIDAgODY0IDYxMCBWIDcyMCBRIDg2NCA3NjAgODI0IDc2MCBIIDIwMCBRIDE2MCA3NjAgMTYwIDcyMCBWIDYxMCBBIDUwIDUwIDAgMCAwIDE2MCA1MTAgViA0MDAgUSAxNjAgMzYwIDIwMCAzNjAgWiIgZmlsbD0iI2ZmZiIvPjwvZz48bGluZSB4MT0iMzgwIiB5MT0iNDQ1IiB4Mj0iMzgwIiB5Mj0iNjc1IiBzdHJva2U9IiNiYWU2ZmQiIHN0cm9rZS13aWR0aD0iNiIgc3Ryb2tlLWRhc2hhcnJheT0iMTQgMTAiIHN0cm9rZS1saW5lY2FwPSJyb3VuZCIvPjxwYXRoIGQ9Ik0gNjEyIDQwMCBMIDQ3MCA1OTUgTCA1NjIgNTk1IEwgNTIyIDcyMCBMIDY3MiA1NDAgTCA1ODAgNTQwIFoiIGZpbGw9InVybCgjYm9sdCkiLz48L3N2Zz4=">
+<link rel="apple-touch-icon" href="data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAxMDI0IDEwMjQiPjxkZWZzPjxsaW5lYXJHcmFkaWVudCBpZD0iYmciIHgxPSIwIiB5MT0iMCIgeDI9IjEiIHkyPSIxIj48c3RvcCBvZmZzZXQ9IjAiIHN0b3AtY29sb3I9IiMzOGJkZjgiLz48c3RvcCBvZmZzZXQ9IjEiIHN0b3AtY29sb3I9IiMwMzY5YTEiLz48L2xpbmVhckdyYWRpZW50PjxsaW5lYXJHcmFkaWVudCBpZD0iYm9sdCIgeDE9IjAiIHkxPSIwIiB4Mj0iMCIgeTI9IjEiPjxzdG9wIG9mZnNldD0iMCIgc3RvcC1jb2xvcj0iIzBlYTVlOSIvPjxzdG9wIG9mZnNldD0iMSIgc3RvcC1jb2xvcj0iIzBjNGE2ZSIvPjwvbGluZWFyR3JhZGllbnQ+PGZpbHRlciBpZD0ic2hhZG93IiB4PSItMTAlIiB5PSItMTAlIiB3aWR0aD0iMTIwJSIgaGVpZ2h0PSIxMzAlIj48ZmVEcm9wU2hhZG93IGR4PSIwIiBkeT0iMTQiIHN0ZERldmlhdGlvbj0iMTgiIGZsb29kLWNvbG9yPSIjMGM0YTZlIiBmbG9vZC1vcGFjaXR5PSIuMzUiLz48L2ZpbHRlcj48L2RlZnM+PHJlY3Qgd2lkdGg9IjEwMjQiIGhlaWdodD0iMTAyNCIgcng9IjIzMCIgZmlsbD0idXJsKCNiZykiLz48Y2lyY2xlIGN4PSI1MTIiIGN5PSI0MDAiIHI9IjM2MCIgZmlsbD0iI2ZmZiIgZmlsbC1vcGFjaXR5PSIuMTIiLz48Y2lyY2xlIGN4PSI1MTIiIGN5PSI0MDAiIHI9IjIyMCIgZmlsbD0iI2ZmZiIgZmlsbC1vcGFjaXR5PSIuMDgiLz48ZyBmaWx0ZXI9InVybCgjc2hhZG93KSI+PHBhdGggZD0iTSAyMDAgMzYwIEggODI0IFEgODY0IDM2MCA4NjQgNDAwIFYgNTEwIEEgNTAgNTAgMCAwIDAgODY0IDYxMCBWIDcyMCBRIDg2NCA3NjAgODI0IDc2MCBIIDIwMCBRIDE2MCA3NjAgMTYwIDcyMCBWIDYxMCBBIDUwIDUwIDAgMCAwIDE2MCA1MTAgViA0MDAgUSAxNjAgMzYwIDIwMCAzNjAgWiIgZmlsbD0iI2ZmZiIvPjwvZz48bGluZSB4MT0iMzgwIiB5MT0iNDQ1IiB4Mj0iMzgwIiB5Mj0iNjc1IiBzdHJva2U9IiNiYWU2ZmQiIHN0cm9rZS13aWR0aD0iNiIgc3Ryb2tlLWRhc2hhcnJheT0iMTQgMTAiIHN0cm9rZS1saW5lY2FwPSJyb3VuZCIvPjxwYXRoIGQ9Ik0gNjEyIDQwMCBMIDQ3MCA1OTUgTCA1NjIgNTk1IEwgNTIyIDcyMCBMIDY3MiA1NDAgTCA1ODAgNTQwIFoiIGZpbGw9InVybCgjYm9sdCkiLz48L3N2Zz4=">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="Freshdesk Hero">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="application-name" content="Freshdesk Hero">
+<link rel="manifest" href='data:application/manifest+json;utf8,{"name":"Freshdesk Hero","short_name":"FD Hero","theme_color":"%230ea5e9","background_color":"%230ea5e9","display":"standalone","start_url":"./","icons":[{"src":"data:image/svg%2Bxml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAxMDI0IDEwMjQiPjxkZWZzPjxsaW5lYXJHcmFkaWVudCBpZD0iYmciIHgxPSIwIiB5MT0iMCIgeDI9IjEiIHkyPSIxIj48c3RvcCBvZmZzZXQ9IjAiIHN0b3AtY29sb3I9IiMzOGJkZjgiLz48c3RvcCBvZmZzZXQ9IjEiIHN0b3AtY29sb3I9IiMwMzY5YTEiLz48L2xpbmVhckdyYWRpZW50PjxsaW5lYXJHcmFkaWVudCBpZD0iYm9sdCIgeDE9IjAiIHkxPSIwIiB4Mj0iMCIgeTI9IjEiPjxzdG9wIG9mZnNldD0iMCIgc3RvcC1jb2xvcj0iIzBlYTVlOSIvPjxzdG9wIG9mZnNldD0iMSIgc3RvcC1jb2xvcj0iIzBjNGE2ZSIvPjwvbGluZWFyR3JhZGllbnQ+PC9kZWZzPjxyZWN0IHdpZHRoPSIxMDI0IiBoZWlnaHQ9IjEwMjQiIHJ4PSIyMzAiIGZpbGw9InVybCgjYmcpIi8+PGNpcmNsZSBjeD0iNTEyIiBjeT0iNDAwIiByPSIzNjAiIGZpbGw9IiNmZmYiIGZpbGwtb3BhY2l0eT0iLjEyIi8+PHBhdGggZD0iTSAyMDAgMzYwIEggODI0IFEgODY0IDM2MCA4NjQgNDAwIFYgNTEwIEEgNTAgNTAgMCAwIDAgODY0IDYxMCBWIDcyMCBRIDg2NCA3NjAgODI0IDc2MCBIIDIwMCBRIDE2MCA3NjAgMTYwIDcyMCBWIDYxMCBBIDUwIDUwIDAgMCAwIDE2MCA1MTAgViA0MDAgUSAxNjAgMzYwIDIwMCAzNjAgWiIgZmlsbD0iI2ZmZiIvPjxwYXRoIGQ9Ik0gNjEyIDQwMCBMIDQ3MCA1OTUgTCA1NjIgNTk1IEwgNTIyIDcyMCBMIDY3MiA1NDAgTCA1ODAgNTQwIFoiIGZpbGw9InVybCgjYm9sdCkiLz48L3N2Zz4=","sizes":"any","type":"image/svg+xml"}]}'>
 <script src="https://cdn.tailwindcss.com"></script>
 <script>
   tailwind.config = {
@@ -42,9 +52,18 @@
   <div class="flex-1 flex items-center justify-center px-5 py-10">
     <div class="w-full max-w-sm">
       <div class="text-center mb-8">
-        <div class="w-16 h-16 mx-auto rounded-2xl bg-gradient-to-br from-brand-500 to-brand-700 flex items-center justify-center shadow-lg shadow-brand-500/25 mb-4">
-          <i data-lucide="ticket" class="w-8 h-8 text-white"></i>
-        </div>
+        <svg viewBox="0 0 1024 1024" class="w-20 h-20 mx-auto shadow-lg shadow-brand-500/25 rounded-[28%] mb-4" aria-label="Freshdesk Hero">
+          <defs>
+            <linearGradient id="lg-bg" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#38bdf8"/><stop offset="1" stop-color="#0369a1"/></linearGradient>
+            <linearGradient id="lg-bolt" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#0ea5e9"/><stop offset="1" stop-color="#0c4a6e"/></linearGradient>
+          </defs>
+          <rect width="1024" height="1024" rx="230" fill="url(#lg-bg)"/>
+          <circle cx="512" cy="400" r="360" fill="#fff" fill-opacity=".12"/>
+          <circle cx="512" cy="400" r="220" fill="#fff" fill-opacity=".08"/>
+          <path d="M 200 360 H 824 Q 864 360 864 400 V 510 A 50 50 0 0 0 864 610 V 720 Q 864 760 824 760 H 200 Q 160 760 160 720 V 610 A 50 50 0 0 0 160 510 V 400 Q 160 360 200 360 Z" fill="#fff"/>
+          <line x1="380" y1="445" x2="380" y2="675" stroke="#bae6fd" stroke-width="6" stroke-dasharray="14 10" stroke-linecap="round"/>
+          <path d="M 612 400 L 470 595 L 562 595 L 522 720 L 672 540 L 580 540 Z" fill="url(#lg-bolt)"/>
+        </svg>
         <h1 class="text-2xl font-bold text-ink-900">Freshdesk Hero</h1>
         <p class="text-sm text-ink-500 mt-1">Multi-Account Helpdesk · <span id="loginVersion"></span></p>
       </div>
@@ -81,9 +100,15 @@
 <div id="appShell" hidden class="min-h-screen flex flex-col">
   <header class="sticky top-0 z-30 bg-white/85 backdrop-blur border-b border-ink-200 safe-top">
     <div class="px-4 py-3 flex items-center gap-3">
-      <div class="w-9 h-9 rounded-xl bg-gradient-to-br from-brand-500 to-brand-700 flex items-center justify-center shrink-0">
-        <i data-lucide="ticket" class="w-5 h-5 text-white"></i>
-      </div>
+      <svg viewBox="0 0 1024 1024" class="w-9 h-9 rounded-xl shrink-0" aria-label="Freshdesk Hero">
+        <defs>
+          <linearGradient id="hd-bg" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#38bdf8"/><stop offset="1" stop-color="#0369a1"/></linearGradient>
+          <linearGradient id="hd-bolt" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#0ea5e9"/><stop offset="1" stop-color="#0c4a6e"/></linearGradient>
+        </defs>
+        <rect width="1024" height="1024" rx="230" fill="url(#hd-bg)"/>
+        <path d="M 200 360 H 824 Q 864 360 864 400 V 510 A 50 50 0 0 0 864 610 V 720 Q 864 760 824 760 H 200 Q 160 760 160 720 V 610 A 50 50 0 0 0 160 510 V 400 Q 160 360 200 360 Z" fill="#fff"/>
+        <path d="M 612 400 L 470 595 L 562 595 L 522 720 L 672 540 L 580 540 Z" fill="url(#hd-bolt)"/>
+      </svg>
       <div class="flex-1 min-w-0">
         <h1 id="pageTitle" class="font-bold text-ink-900 leading-tight truncate">Tickets</h1>
         <p id="pageSubtitle" class="text-[11px] text-ink-500 truncate"></p>
@@ -143,7 +168,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v1.0';
+const APP_VERSION = 'v1.0.1';
 // Read-Token absichtlich gesplittet, damit GitHub Secret-Scanning beim Push nicht blockt.
 // Der Token ist read-only und Base-scoped → bewusst eingebettet (Architektur-Entscheidung).
 const _RK = 'patu8KWM8aWB' + 'yxCGL.69fae5d9fa4b94c2' + '66b426dadd71a51f574945d840b33569058ab5e9d89ebef3';
