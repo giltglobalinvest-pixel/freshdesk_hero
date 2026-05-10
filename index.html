@@ -51,6 +51,10 @@
   }
   /* Eigenes Update-Banner (sauber kodiert, ersetzt Loader-Banner) */
   .update-banner { background: linear-gradient(90deg, #10b981, #059669); }
+  /* Swipe-Cards (Tickets) */
+  [data-swipe-card] { position: relative; overflow: hidden; border-radius: 1rem; }
+  [data-swipe-content] { position: relative; transition: transform .22s ease; will-change: transform; touch-action: pan-y; }
+  [data-swipe-content].is-dragging { transition: none; }
   *:focus { outline: none; }
   .safe-bottom { padding-bottom: max(env(safe-area-inset-bottom), 0.5rem); }
   .safe-top    { padding-top:    max(env(safe-area-inset-top), 0.5rem); }
@@ -205,7 +209,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v1.3.0';
+const APP_VERSION = 'v1.4.0';
 // Read-Token absichtlich gesplittet, damit GitHub Secret-Scanning beim Push nicht blockt.
 // Der Token ist read-only und Base-scoped → bewusst eingebettet (Architektur-Entscheidung).
 const _RK = 'patu8KWM8aWB' + 'yxCGL.69fae5d9fa4b94c2' + '66b426dadd71a51f574945d840b33569058ab5e9d89ebef3';
@@ -1139,28 +1143,172 @@ function renderTicketList(tickets) {
         const subj = t.subject || '(ohne Betreff)';
         const desc = (t.description_text || '').slice(0, 140);
         return `
-          <div class="bg-white rounded-2xl border border-ink-200 p-3 active:bg-ink-50 cursor-pointer" onclick="openTicketDetail('${t._accountId}', ${t.id})">
-            <div class="flex items-start gap-2">
-              ${showAccount ? `<span class="shrink-0 mt-1 w-2.5 h-2.5 rounded-full" style="background:${escapeAttr(t._accountColor)}" title="${escapeAttr(t._accountName)}"></span>` : ''}
-              <div class="flex-1 min-w-0">
-                <div class="flex items-baseline gap-2">
-                  <p class="font-semibold text-ink-900 text-sm leading-snug truncate flex-1">${escapeHtml(subj)}</p>
-                  <span class="text-[10px] text-ink-400 shrink-0">${escapeHtml(relTime(t.updated_at))}</span>
-                </div>
-                ${desc ? `<p class="text-[12px] text-ink-500 mt-0.5 line-clamp-2">${escapeHtml(desc)}</p>` : ''}
-                <div class="flex items-center gap-1.5 mt-1.5 flex-wrap">
-                  <span class="text-[10px] uppercase tracking-wider px-1.5 py-0.5 rounded font-semibold border ${st.cls}">${escapeHtml(st.label)}</span>
-                  ${pr ? `<span class="text-[10px] uppercase tracking-wider px-1.5 py-0.5 rounded font-semibold ${pr.cls}">${escapeHtml(pr.label)}</span>` : ''}
-                  <span class="text-[10px] text-ink-400">#${t.id}</span>
-                  ${showAccount ? `<span class="text-[10px] text-ink-500 ml-auto">${escapeHtml(t._accountName)}</span>` : ''}
+          <div data-swipe-card class="shadow-sm">
+            <div class="absolute inset-y-0 left-0 flex items-stretch">
+              <button data-action="close" data-account-id="${escapeAttr(t._accountId)}" data-ticket-id="${t.id}"
+                      class="bg-emerald-500 active:bg-emerald-600 text-white text-[10px] font-bold flex flex-col items-center justify-center w-20 gap-0.5">
+                <i data-lucide="check-circle-2" class="w-5 h-5"></i> Schließen
+              </button>
+              <button data-action="spam" data-account-id="${escapeAttr(t._accountId)}" data-ticket-id="${t.id}"
+                      class="bg-red-500 active:bg-red-600 text-white text-[10px] font-bold flex flex-col items-center justify-center w-20 gap-0.5">
+                <i data-lucide="ban" class="w-5 h-5"></i> SPAM
+              </button>
+            </div>
+            <div data-swipe-content data-account-id="${escapeAttr(t._accountId)}" data-ticket-id="${t.id}"
+                 class="bg-white border border-ink-200 rounded-2xl p-3 active:bg-ink-50 cursor-pointer">
+              <div class="flex items-start gap-2">
+                ${showAccount ? `<span class="shrink-0 mt-1 w-2.5 h-2.5 rounded-full" style="background:${escapeAttr(t._accountColor)}" title="${escapeAttr(t._accountName)}"></span>` : ''}
+                <div class="flex-1 min-w-0">
+                  <div class="flex items-baseline gap-2">
+                    <p class="font-semibold text-ink-900 text-sm leading-snug truncate flex-1">${escapeHtml(subj)}</p>
+                    <span class="text-[10px] text-ink-400 shrink-0">${escapeHtml(relTime(t.updated_at))}</span>
+                  </div>
+                  ${desc ? `<p class="text-[12px] text-ink-500 mt-0.5 line-clamp-2">${escapeHtml(desc)}</p>` : ''}
+                  <div class="flex items-center gap-1.5 mt-1.5 flex-wrap">
+                    <span class="text-[10px] uppercase tracking-wider px-1.5 py-0.5 rounded font-semibold border ${st.cls}">${escapeHtml(st.label)}</span>
+                    ${pr ? `<span class="text-[10px] uppercase tracking-wider px-1.5 py-0.5 rounded font-semibold ${pr.cls}">${escapeHtml(pr.label)}</span>` : ''}
+                    <span class="text-[10px] text-ink-400">#${t.id}</span>
+                    ${showAccount ? `<span class="text-[10px] text-ink-500 ml-auto">${escapeHtml(t._accountName)}</span>` : ''}
+                  </div>
                 </div>
               </div>
             </div>
           </div>`;
       }).join('')}
     </div>
-    <p class="text-[10px] text-center text-ink-400 mt-3">${tickets.length} Ticket${tickets.length===1?'':'s'} geladen</p>`;
+    <p class="text-[10px] text-center text-ink-400 mt-3">${tickets.length} Ticket${tickets.length===1?'':'s'} geladen · Wischen für Aktionen</p>`;
   if (window.lucide) lucide.createIcons();
+  attachSwipeToCards();
+}
+
+/* === Swipe-Actions auf Ticket-Cards === */
+let _openSwipedContent = null;
+const SWIPE_OPEN_PX = 160;     // Endposition wenn offen (deckt zwei 80px-Buttons ab)
+const SWIPE_THRESHOLD_PX = 60; // ab da snappt es auf
+
+function _resetSwipe() {
+  if (!_openSwipedContent) return;
+  _openSwipedContent.classList.remove('is-dragging');
+  _openSwipedContent.style.transform = 'translateX(0)';
+  _openSwipedContent = null;
+}
+
+function attachSwipeToCards() {
+  document.querySelectorAll('[data-swipe-card]').forEach(card => {
+    if (card._swipeAttached) return;
+    card._swipeAttached = true;
+    const content = card.querySelector('[data-swipe-content]');
+    if (!content) return;
+    const accountId = content.dataset.accountId;
+    const ticketId  = content.dataset.ticketId;
+
+    let startX = 0, startY = 0, currentDx = 0, isHorizontal = null, dragActive = false, suppressClickUntil = 0;
+
+    content.addEventListener('touchstart', (e) => {
+      if (_openSwipedContent && _openSwipedContent !== content) _resetSwipe();
+      startX = e.touches[0].clientX;
+      startY = e.touches[0].clientY;
+      currentDx = 0;
+      isHorizontal = null;
+      dragActive = true;
+      content.classList.add('is-dragging');
+    }, { passive: true });
+
+    content.addEventListener('touchmove', (e) => {
+      if (!dragActive) return;
+      const dx = e.touches[0].clientX - startX;
+      const dy = Math.abs(e.touches[0].clientY - startY);
+      if (isHorizontal === null) {
+        if (Math.abs(dx) < 8 && dy < 8) return;
+        isHorizontal = Math.abs(dx) > dy;
+        if (!isHorizontal) { dragActive = false; content.classList.remove('is-dragging'); content.style.transform = ''; return; }
+      }
+      // Nur Right-Swipe; bei offener Karte auch Left-Swipe um zu schließen
+      const baseOffset = (_openSwipedContent === content) ? SWIPE_OPEN_PX : 0;
+      const newX = Math.max(0, Math.min(SWIPE_OPEN_PX * 1.3, baseOffset + dx));
+      currentDx = newX;
+      content.style.transform = `translateX(${newX}px)`;
+    }, { passive: true });
+
+    content.addEventListener('touchend', () => {
+      if (!dragActive) return;
+      dragActive = false;
+      content.classList.remove('is-dragging');
+      if (isHorizontal) suppressClickUntil = Date.now() + 350;
+      if (currentDx > SWIPE_THRESHOLD_PX) {
+        content.style.transform = `translateX(${SWIPE_OPEN_PX}px)`;
+        _openSwipedContent = content;
+      } else {
+        content.style.transform = 'translateX(0)';
+        if (_openSwipedContent === content) _openSwipedContent = null;
+      }
+    });
+
+    content.addEventListener('touchcancel', () => {
+      dragActive = false;
+      content.classList.remove('is-dragging');
+      content.style.transform = _openSwipedContent === content ? `translateX(${SWIPE_OPEN_PX}px)` : 'translateX(0)';
+    });
+
+    content.addEventListener('click', (e) => {
+      if (Date.now() < suppressClickUntil) { e.preventDefault(); e.stopPropagation(); return; }
+      if (_openSwipedContent === content) { _resetSwipe(); e.preventDefault(); e.stopPropagation(); return; }
+      if (_openSwipedContent) { _resetSwipe(); e.preventDefault(); e.stopPropagation(); return; }
+      openTicketDetail(accountId, parseInt(ticketId, 10));
+    });
+
+    // Action-Buttons binden
+    card.querySelectorAll('button[data-action]').forEach(btn => {
+      btn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        e.preventDefault();
+        const action = btn.dataset.action;
+        const accId  = btn.dataset.accountId;
+        const tId    = parseInt(btn.dataset.ticketId, 10);
+        if (action === 'close') ticketActionClose(accId, tId, btn);
+        else if (action === 'spam') ticketActionSpam(accId, tId, btn);
+      });
+    });
+  });
+}
+
+// Außerhalb des Swipe-Cards getippt → Swipe schließen
+document.addEventListener('touchstart', (e) => {
+  if (_openSwipedContent && !e.target.closest('[data-swipe-card]')) _resetSwipe();
+}, { passive: true });
+
+async function ticketActionClose(accountId, ticketId, btn) {
+  if (btn) setBusy(btn, true, '…');
+  try {
+    await proxyJson('/freshdesk/' + encodeURIComponent(accountId) + '/api/v2/tickets/' + ticketId, {
+      method: 'PUT',
+      body: JSON.stringify({ status: 5 })
+    });
+    _resetSwipe();
+    toast('Ticket #' + ticketId + ' geschlossen', 'success');
+    renderTicketsPage();
+  } catch (e) {
+    if (btn) setBusy(btn, false);
+    toast('Schließen fehlgeschlagen: ' + e.message, 'error', 6000);
+  }
+}
+
+async function ticketActionSpam(accountId, ticketId, btn) {
+  const ok = await confirmDialog('Als SPAM markieren', 'Ticket #' + ticketId + ' wird als Spam markiert und ist danach nicht mehr in der normalen Liste.', { danger: true, okText: 'Als SPAM markieren' });
+  if (!ok) return;
+  if (btn) setBusy(btn, true, '…');
+  try {
+    await proxyJson('/freshdesk/' + encodeURIComponent(accountId) + '/api/v2/tickets/' + ticketId, {
+      method: 'PUT',
+      body: JSON.stringify({ spam: true })
+    });
+    _resetSwipe();
+    toast('Ticket #' + ticketId + ' als SPAM markiert', 'success');
+    renderTicketsPage();
+  } catch (e) {
+    if (btn) setBusy(btn, false);
+    toast('SPAM-Markierung fehlgeschlagen: ' + e.message, 'error', 6000);
+  }
 }
 
 function openInFreshdesk(accountId, ticketId) {
