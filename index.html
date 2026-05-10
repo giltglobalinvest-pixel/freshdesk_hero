@@ -31,12 +31,26 @@
 <script src="https://unpkg.com/lucide@latest/dist/umd/lucide.min.js"></script>
 <style>
   html,body { height: 100%; max-width: 100vw; overflow-x: clip; }
-  /* Fallback für Browser ohne overflow:clip-Support */
   @supports not (overflow: clip) { html,body { overflow-x: hidden; } }
   body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, system-ui, sans-serif; -webkit-tap-highlight-color: transparent; background: #f8fafc; width: 100%; position: relative; }
-  /* Defense gegen breite Inline-Inhalte (lange URLs, Code-Snippets) */
   pre, code { max-width: 100%; }
   img, svg { max-width: 100%; }
+  /* GitDeploy-Loader Update-Banner ausblenden — hat Encoding-Bug (Hieroglyphen). Ersatz unten. */
+  #__upd_banner { display: none !important; }
+  /* Pull-to-Refresh Indikator */
+  #p2rIndicator {
+    position: fixed; top: 0; left: 50%;
+    transform: translate(-50%, -120%);
+    background: white; padding: 10px 16px; border-radius: 9999px;
+    box-shadow: 0 4px 16px rgba(15,23,42,0.18);
+    display: flex; align-items: center; gap: 8px;
+    font-size: 12px; color: #334155; font-weight: 500;
+    transition: transform .2s, opacity .2s;
+    z-index: 60; opacity: 0; pointer-events: none;
+    margin-top: env(safe-area-inset-top, 0px);
+  }
+  /* Eigenes Update-Banner (sauber kodiert, ersetzt Loader-Banner) */
+  .update-banner { background: linear-gradient(90deg, #10b981, #059669); }
   *:focus { outline: none; }
   .safe-bottom { padding-bottom: max(env(safe-area-inset-bottom), 0.5rem); }
   .safe-top    { padding-top:    max(env(safe-area-inset-top), 0.5rem); }
@@ -54,6 +68,12 @@
 
 <!-- ===================== LOGIN SCREEN ===================== -->
 <div id="loginScreen" class="min-h-screen flex flex-col">
+  <div class="bg-ink-100 border-b border-ink-200 px-4 py-1.5 flex items-center justify-between text-[11px] safe-top sticky top-0 z-20">
+    <span class="text-ink-600 font-medium">Freshdesk Hero · <span id="versionLabelLogin">v?.?</span></span>
+    <button onclick="forceUpdate(this)" class="text-brand-600 font-semibold flex items-center gap-1 active:opacity-60 px-2 py-1 -mx-2 -my-1 rounded">
+      <i data-lucide="refresh-cw" class="w-3 h-3"></i> Update prüfen
+    </button>
+  </div>
   <div class="flex-1 flex items-center justify-center px-5 py-10">
     <div class="w-full max-w-sm">
       <div class="text-center mb-8">
@@ -70,7 +90,7 @@
           <path d="M 612 400 L 470 595 L 562 595 L 522 720 L 672 540 L 580 540 Z" fill="url(#lg-bolt)"/>
         </svg>
         <h1 class="text-2xl font-bold text-ink-900">Freshdesk Hero</h1>
-        <p class="text-sm text-ink-500 mt-1">Multi-Account Helpdesk · <span id="loginVersion"></span></p>
+        <p class="text-sm text-ink-500 mt-1">Multi-Account Helpdesk</p>
       </div>
 
       <form id="loginForm" class="bg-white border border-ink-200 rounded-2xl p-5 shadow-sm space-y-4">
@@ -104,6 +124,12 @@
 <!-- ===================== APP SHELL ===================== -->
 <div id="appShell" hidden class="min-h-screen flex flex-col">
   <header class="sticky top-0 z-30 bg-white/85 backdrop-blur border-b border-ink-200 safe-top">
+    <div id="versionBar" class="bg-ink-100 border-b border-ink-100 px-4 py-1 flex items-center justify-between text-[11px]">
+      <span class="text-ink-500"><span id="versionLabel" class="font-medium">v?.?</span></span>
+      <button onclick="forceUpdate(this)" class="text-brand-600 font-semibold flex items-center gap-1 active:opacity-60 px-2 py-0.5 -mx-2 -my-0.5 rounded">
+        <i data-lucide="refresh-cw" class="w-3 h-3"></i> Update prüfen
+      </button>
+    </div>
     <div class="px-4 py-3 flex items-center gap-3">
       <svg viewBox="0 0 1024 1024" class="w-9 h-9 rounded-xl shrink-0" aria-label="Freshdesk Hero">
         <defs>
@@ -163,6 +189,12 @@
   </nav>
 </div>
 
+<!-- ===================== PULL-TO-REFRESH INDIKATOR ===================== -->
+<div id="p2rIndicator">
+  <span id="p2rSpin" class="spinner" style="width:14px;height:14px;border-color:#0ea5e9;border-right-color:transparent"></span>
+  <span id="p2rText">Ziehen zum Aktualisieren</span>
+</div>
+
 <!-- ===================== TOAST ===================== -->
 <div id="toastContainer" class="fixed bottom-20 inset-x-0 z-50 flex flex-col items-center gap-2 px-4 pointer-events-none safe-bottom"></div>
 
@@ -173,7 +205,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v1.0.2';
+const APP_VERSION = 'v1.1.0';
 // Read-Token absichtlich gesplittet, damit GitHub Secret-Scanning beim Push nicht blockt.
 // Der Token ist read-only und Base-scoped → bewusst eingebettet (Architektur-Entscheidung).
 const _RK = 'patu8KWM8aWB' + 'yxCGL.69fae5d9fa4b94c2' + '66b426dadd71a51f574945d840b33569058ab5e9d89ebef3';
@@ -1548,19 +1580,126 @@ function noProxyNotice() {
 }
 
 /* ============================================================
-   UPDATE CHECK
+   UPDATE CHECK + FORCE-UPDATE + PULL-TO-REFRESH
    ============================================================ */
 async function checkForUpdate(showToastIfUpToDate = false) {
+  return forceUpdate(null, showToastIfUpToDate ? 'menu' : 'silent');
+}
+
+// mode: 'silent' (Boot), 'menu' (Menü-Klick), 'pull' (Pull-to-Refresh), 'button' (Top-Bar-Button)
+async function forceUpdate(btnEl, mode = 'button') {
+  const showResultToast = mode === 'button' || mode === 'menu' || mode === 'pull';
+  if (btnEl) setBusy(btnEl, true, 'Prüfe…');
   try {
-    const r = await fetch('https://api.github.com/repos/' + APP_CONFIG.GITHUB_REPO + '/releases/latest');
-    if (!r.ok) { if (showToastIfUpToDate) toast('Update-Check fehlgeschlagen (' + r.status + ')', 'warn'); return; }
-    const d = await r.json();
-    if (d.tag_name && d.tag_name !== APP_VERSION) {
-      toast('Neue Version verfügbar: ' + d.tag_name + ' (Seite neu laden!)', 'info', 8000);
-    } else if (showToastIfUpToDate) {
-      toast('Du nutzt die neueste Version (' + APP_VERSION + ')', 'success');
+    const r = await fetch('https://api.github.com/repos/' + APP_CONFIG.GITHUB_REPO + '/releases/latest', { cache: 'no-store' });
+    if (!r.ok) {
+      if (showResultToast) toast('Update-Check fehlgeschlagen (' + r.status + ')', 'warn');
+      return;
     }
-  } catch (e) { if (showToastIfUpToDate) toast('Update-Check fehlgeschlagen', 'warn'); }
+    const d = await r.json();
+    const newVersion = d.tag_name;
+    if (newVersion && newVersion !== APP_VERSION) {
+      showNewVersionBanner(newVersion);
+      if (mode !== 'silent') {
+        // Sofort neu laden (cache-busted)
+        toast('Neue Version ' + newVersion + ' — lade neu…', 'success', 1500);
+        setTimeout(() => doHardReload(), 1500);
+      }
+    } else {
+      if (showResultToast) toast('Bereits aktuell · ' + APP_VERSION, 'success', 2000);
+      if (mode === 'pull' && APP_KEYS.user) {
+        // Bei Pull-Refresh: auch aktuelle Daten neu laden
+        await loadAccounts();
+        if (APP_STATE.page === 'tickets') renderTicketsPage();
+      }
+    }
+  } catch (e) {
+    if (showResultToast) toast('Update-Check fehlgeschlagen', 'warn');
+  } finally {
+    if (btnEl) setBusy(btnEl, false);
+    hideP2rIndicator();
+  }
+}
+
+function doHardReload() {
+  try { if ('caches' in window) caches.keys().then(ks => Promise.all(ks.map(k => caches.delete(k)))); } catch (_) {}
+  try {
+    const u = new URL(location.href);
+    u.searchParams.set('_v', Date.now());
+    location.replace(u.toString());
+  } catch (_) {
+    location.reload();
+  }
+}
+
+function showNewVersionBanner(newVersion) {
+  const bar = $('versionBar');
+  if (!bar) return;
+  bar.className = 'update-banner text-white px-4 py-2 flex items-center justify-between text-xs gap-2';
+  bar.innerHTML = `
+    <span class="font-semibold truncate">Neue Version ${escapeHtml(newVersion)} verfügbar</span>
+    <button onclick="doHardReload()" class="bg-white/25 hover:bg-white/35 px-2.5 py-1 rounded font-semibold flex items-center gap-1 shrink-0">
+      <i data-lucide="download" class="w-3.5 h-3.5"></i> Jetzt aktualisieren
+    </button>`;
+  if (window.lucide) lucide.createIcons();
+}
+
+/* --- Pull-to-Refresh --- */
+const P2R = { startY: 0, currentY: 0, isPulling: false, triggered: false, THRESHOLD: 75 };
+
+function hideP2rIndicator() {
+  const ind = $('p2rIndicator');
+  if (!ind) return;
+  ind.style.transform = 'translate(-50%, -120%)';
+  ind.style.opacity = '0';
+}
+
+function attachPullToRefresh() {
+  document.addEventListener('touchstart', (e) => {
+    // Nur im AppShell, nicht im Login, und nur am Seitenanfang
+    if ($('appShell').hidden) return;
+    if (window.scrollY > 0) return;
+    if (e.touches.length !== 1) return;
+    // Im Modal nicht aktiv
+    if ($('modalHost').children.length) return;
+    P2R.startY = e.touches[0].clientY;
+    P2R.currentY = P2R.startY;
+    P2R.isPulling = true;
+    P2R.triggered = false;
+  }, { passive: true });
+
+  document.addEventListener('touchmove', (e) => {
+    if (!P2R.isPulling) return;
+    P2R.currentY = e.touches[0].clientY;
+    const pull = P2R.currentY - P2R.startY;
+    const ind = $('p2rIndicator');
+    if (pull <= 0) { hideP2rIndicator(); return; }
+    const dist = Math.min(pull * 0.5, 60);
+    ind.style.transform = `translate(-50%, calc(${dist}px + env(safe-area-inset-top, 0px)))`;
+    ind.style.opacity = String(Math.min(pull / P2R.THRESHOLD, 1));
+    $('p2rText').textContent = pull > P2R.THRESHOLD ? 'Loslassen zum Aktualisieren' : 'Weiter ziehen…';
+  }, { passive: true });
+
+  document.addEventListener('touchend', () => {
+    if (!P2R.isPulling) return;
+    const pull = P2R.currentY - P2R.startY;
+    if (pull > P2R.THRESHOLD && !P2R.triggered) {
+      P2R.triggered = true;
+      $('p2rText').textContent = 'Prüfe Update…';
+      const ind = $('p2rIndicator');
+      ind.style.transform = 'translate(-50%, calc(20px + env(safe-area-inset-top, 0px)))';
+      ind.style.opacity = '1';
+      forceUpdate(null, 'pull');
+    } else {
+      hideP2rIndicator();
+    }
+    P2R.isPulling = false;
+  });
+
+  document.addEventListener('touchcancel', () => {
+    P2R.isPulling = false;
+    hideP2rIndicator();
+  });
 }
 
 /* ============================================================
@@ -1870,7 +2009,12 @@ function showLogin(initial = false) {
 }
 
 async function init() {
-  $('loginVersion').textContent = APP_VERSION;
+  // Versionsnummern in alle Slots setzen
+  ['loginVersion','versionLabel','versionLabelLogin'].forEach(id => {
+    const el = $(id); if (el) el.textContent = APP_VERSION;
+  });
+  // Pull-to-Refresh aktivieren
+  attachPullToRefresh();
   await loadProjectKeys();
   const ok = await tryAutoLogin();
   if (ok) await showApp();
