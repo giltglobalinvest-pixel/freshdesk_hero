@@ -205,7 +205,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v1.1.0';
+const APP_VERSION = 'v1.2.0';
 // Read-Token absichtlich gesplittet, damit GitHub Secret-Scanning beim Push nicht blockt.
 // Der Token ist read-only und Base-scoped → bewusst eingebettet (Architektur-Entscheidung).
 const _RK = 'patu8KWM8aWB' + 'yxCGL.69fae5d9fa4b94c2' + '66b426dadd71a51f574945d840b33569058ab5e9d89ebef3';
@@ -223,9 +223,15 @@ let APP_KEYS = {
   appBaseId:        null,
   apiProxyUrl:      null,
   anthropicKey:     null,    // optional fallback
+  valtownKey:       null,    // für Auto-Setup + Re-Deploy
+  valtownValId:     null,    // ID des angelegten Vals (für Updates)
   sessionToken:     null,
   user:             null,    // { _id, api_key?, name, role, is_admin, ... }
 };
+
+const VALTOWN_API_BASE  = 'https://api.val.town';
+const VALTOWN_VAL_NAME  = 'freshdeskHeroProxy';
+const VALTOWN_FILE_PATH = 'main.tsx';
 
 let APP_STATE = {
   page:           'tickets',
@@ -422,6 +428,8 @@ async function loadProjectKeys() {
         if (f.key_name === 'airtableWriteKey') APP_KEYS.airtableWriteKey = f.key_value;
         if (f.key_name === 'airtableBaseId')   APP_KEYS.appBaseId        = f.key_value;
         if (f.key_name === 'apiProxyUrl')      APP_KEYS.apiProxyUrl      = (f.key_value || '').replace(/\/+$/, '');
+        if (f.key_name === 'valtownKey')       APP_KEYS.valtownKey       = f.key_value;
+        if (f.key_name === 'valtownValId')     APP_KEYS.valtownValId     = f.key_value;
       });
     }
   } catch (_) {}
@@ -468,6 +476,161 @@ async function writeMasterBaseKey(keyName, value, existingRecordId) {
     throw new Error('Speichern fehlgeschlagen: ' + txt.slice(0, 200));
   }
   return res.json();
+}
+
+/* ============================================================
+   VAL.TOWN API — Auto-Setup + Re-Deploy
+   ============================================================ */
+async function valtownApi(token, method, path, body) {
+  if (!token) throw new Error('Val.town API-Key fehlt');
+  const init = {
+    method,
+    headers: { 'Authorization': 'Bearer ' + token, 'Accept': 'application/json' }
+  };
+  if (body !== undefined) {
+    init.headers['Content-Type'] = 'application/json';
+    init.body = JSON.stringify(body);
+  }
+  const res = await fetch(VALTOWN_API_BASE + path, init);
+  const text = await res.text();
+  let data; try { data = text ? JSON.parse(text) : {}; } catch (_) { data = { _raw: text }; }
+  if (!res.ok) {
+    const msg = (data && (data.message || data.error)) || ('Val.town HTTP ' + res.status);
+    const err = new Error(String(msg));
+    err.status = res.status; err.data = data;
+    throw err;
+  }
+  return data;
+}
+
+async function valtownMe(token)             { return valtownApi(token, 'GET', '/v1/me'); }
+async function valtownGetVal(token, valId)  { return valtownApi(token, 'GET', '/v2/vals/' + valId); }
+async function valtownCreateVal(token, name, description = '') {
+  return valtownApi(token, 'POST', '/v2/vals', { name, description, privacy: 'unlisted' });
+}
+async function valtownAddHttpFile(token, valId, code) {
+  return valtownApi(token, 'POST', `/v2/vals/${valId}/files?path=${encodeURIComponent(VALTOWN_FILE_PATH)}`, {
+    type: 'http', content: code
+  });
+}
+async function valtownUpdateFile(token, valId, code) {
+  return valtownApi(token, 'PUT', `/v2/vals/${valId}/files?path=${encodeURIComponent(VALTOWN_FILE_PATH)}`, {
+    content: code
+  });
+}
+async function valtownGetFile(token, valId) {
+  return valtownApi(token, 'GET', `/v2/vals/${valId}/files?path=${encodeURIComponent(VALTOWN_FILE_PATH)}`);
+}
+async function valtownSetEnvVar(token, valId, key, value, description = '') {
+  // POST = create; bei 409/Conflict → PUT (update existing)
+  try {
+    return await valtownApi(token, 'POST', `/v2/vals/${valId}/environment_variables`, { key, value, description });
+  } catch (e) {
+    if (e.status === 409 || e.status === 400 || /exist|duplicate|already/i.test(e.message)) {
+      return valtownApi(token, 'PUT', `/v2/vals/${valId}/environment_variables/${encodeURIComponent(key)}`, { value, description });
+    }
+    throw e;
+  }
+}
+
+// Orchestrator — alle Steps mit Live-Progress
+async function valtownAutoSetup({ token, onProgress }) {
+  const log = (msg, kind = 'info') => onProgress?.(msg, kind);
+  log('Validiere API-Key…');
+  const me = await valtownMe(token);
+  if (!me.username) throw new Error('Val.town /me lieferte keinen Username');
+  log('Eingeloggt als ' + me.username, 'ok');
+
+  // 1) Existierenden Val updaten oder neuen erstellen
+  let valId = APP_KEYS.valtownValId;
+  let endpointUrl = null;
+  let isUpdate = false;
+  if (valId) {
+    try {
+      log('Bestehender Val gefunden → aktualisiere Code…');
+      const fileRes = await valtownUpdateFile(token, valId, VALTOWN_PROXY_CODE);
+      endpointUrl = fileRes.links?.endpoint;
+      isUpdate = true;
+      log('Code aktualisiert', 'ok');
+    } catch (e) {
+      log('Bestehender Val nicht erreichbar (' + e.message + ') → neuer Val', 'warn');
+      valId = null;
+    }
+  }
+  if (!valId) {
+    log('Erstelle Val "' + VALTOWN_VAL_NAME + '"…');
+    let val;
+    try {
+      val = await valtownCreateVal(token, VALTOWN_VAL_NAME, 'Auto-erstellt von Freshdesk Hero App');
+    } catch (e) {
+      // Bei Name-Konflikt: Suffix hinzufügen
+      if (/name|exist|duplicate/i.test(e.message)) {
+        log('Name belegt → versuche mit Suffix…', 'warn');
+        val = await valtownCreateVal(token, VALTOWN_VAL_NAME + Date.now().toString(36).slice(-4), 'Auto-erstellt von Freshdesk Hero App');
+      } else throw e;
+    }
+    valId = val.id;
+    log('Val angelegt (' + valId.slice(0, 8) + '…)', 'ok');
+
+    log('Lade Proxy-Code in main.tsx…');
+    const fileRes = await valtownAddHttpFile(token, valId, VALTOWN_PROXY_CODE);
+    endpointUrl = fileRes.links?.endpoint;
+    log('Code geladen', 'ok');
+  }
+  if (!endpointUrl) throw new Error('Val.town hat keine Endpoint-URL geliefert');
+  const cleanUrl = endpointUrl.replace(/\/+$/, '');
+
+  // 2) Environment-Vars setzen
+  const envs = [
+    { k: 'AIRTABLE_READ_KEY', v: APP_CONFIG.AIRTABLE_READ_KEY, d: 'Read-Token für App-Base' },
+    { k: 'AIRTABLE_BASE_ID',  v: APP_CONFIG.APP_BASE_ID,       d: 'App-Base-ID' },
+  ];
+  if (APP_KEYS.anthropicKey) envs.push({ k: 'ANTHROPIC_API_KEY', v: APP_KEYS.anthropicKey, d: 'Anthropic-Key für KI' });
+  for (const env of envs) {
+    log('Setze ENV ' + env.k + '…');
+    await valtownSetEnvVar(token, valId, env.k, env.v, env.d);
+    log('OK: ' + env.k, 'ok');
+  }
+
+  // 3) Master-Base persistieren
+  log('Speichere Konfiguration in Master-Base…');
+  const keys = await fetchMasterBaseKeys();
+  const find = (k) => keys.find(r => r.fields.key_name === k);
+  await writeMasterBaseKey('apiProxyUrl',  cleanUrl, find('apiProxyUrl')?.id);
+  await writeMasterBaseKey('valtownKey',   token,    find('valtownKey')?.id);
+  await writeMasterBaseKey('valtownValId', valId,    find('valtownValId')?.id);
+  APP_KEYS.apiProxyUrl  = cleanUrl;
+  APP_KEYS.valtownKey   = token;
+  APP_KEYS.valtownValId = valId;
+  log('Master-Base aktualisiert', 'ok');
+
+  // 4) Session migrieren (Bootstrap → Session-Token via neuer Proxy)
+  const legacyKey = localStorage.getItem(LEGACY_USER_KEY);
+  if (legacyKey) {
+    try {
+      log('Migriere Session via neuen Proxy…');
+      await loginWithUserKey(legacyKey, true);
+      log('Session migriert', 'ok');
+    } catch (e) {
+      log('Session-Migration fehlgeschlagen — bitte gleich neu einloggen', 'warn');
+    }
+  }
+
+  // 5) Health-Check (mit Retry, da neue Vals 1-2s zum Deploy brauchen)
+  log('Teste Verbindung (Val deployt)…');
+  for (let i = 1; i <= 5; i++) {
+    await new Promise(r => setTimeout(r, i === 1 ? 1500 : 1500));
+    try {
+      const health = await proxyJson('/health');
+      log('Proxy live · ' + (health.user?.name || 'OK'), 'ok');
+      break;
+    } catch (e) {
+      if (i === 5) { log('Health-Check noch nicht erfolgreich (' + e.message + ') — gleich „Verbindung testen"', 'warn'); break; }
+      log('Versuch ' + i + '/5 …');
+    }
+  }
+
+  return { valId, endpointUrl: cleanUrl, username: me.username, isUpdate };
 }
 
 /* ============================================================
@@ -1364,41 +1527,67 @@ async function renderSettingsPage() {
 
   $('pageContent').innerHTML = `
     <div class="space-y-4">
-      <div class="bg-gradient-to-br from-brand-50 to-emerald-50 border border-brand-200 rounded-2xl p-4">
-        <p class="text-xs font-semibold text-brand-700 uppercase tracking-wider mb-2">Architektur</p>
-        <pre class="text-[11px] text-ink-700 font-mono leading-relaxed whitespace-pre-wrap">Login (1×):  Browser ──[user_key]──▶ Val.town ──▶ Airtable User
-             Browser ◀──[session_token]── Val.town
 
-Calls:       Browser ──[Bearer session]──▶ Val.town ──┬─▶ Anthropic   (env var)
-                                                       │
-                                                       └─▶ Freshdesk  (Account aus
-                                                                       Airtable lookup)
+      <!-- ============ SCHNELL-SETUP (Auto via Val.town API) ============ -->
+      <div class="bg-gradient-to-br from-emerald-50 via-brand-50 to-brand-100 border-2 border-brand-300 rounded-2xl p-4 shadow-sm">
+        <div class="flex items-center gap-3 mb-3 flex-wrap">
+          <div class="w-10 h-10 rounded-xl bg-gradient-to-br from-brand-500 to-brand-700 flex items-center justify-center shrink-0 shadow shadow-brand-500/30">
+            <i data-lucide="zap" class="w-5 h-5 text-white"></i>
+          </div>
+          <div class="flex-1 min-w-0">
+            <h3 class="font-bold text-ink-900 text-base leading-tight">Schnell-Setup</h3>
+            <p class="text-[11px] text-ink-600">Val.town in einem Klick — kein Copy-Paste nötig</p>
+          </div>
+          ${isProxySet && APP_KEYS.valtownKey ? '<span class="bg-emerald-100 text-emerald-700 px-2 py-1 rounded text-[10px] font-bold uppercase tracking-wider"><i data-lucide="check" class="inline w-3 h-3"></i> Eingerichtet</span>' : ''}
+        </div>
 
-Browser hält:  session_token (8h Tab / 30d Gerät)
-Val.town hält: Sessions (blob) · ANTHROPIC_API_KEY · AIRTABLE_READ_KEY
-Airtable hält: User-Records · Accounts mit freshdesk_domain + freshdesk_api_key</pre>
-        <div class="text-[11px] text-emerald-800 mt-2 space-y-1">
-          <p><i data-lucide="check-circle-2" class="inline w-3.5 h-3.5"></i> Persönliche Freshdesk-Keys liegen serverseitig in Airtable, der Proxy nutzt sie nur für ausgehende Calls.</p>
-          <p><i data-lucide="check-circle-2" class="inline w-3.5 h-3.5"></i> User-Login-Keys werden nach erfolgreichem Login im Browser verworfen (Session-Token statt User-Key).</p>
+        <div class="space-y-2.5">
+          <div>
+            <label class="text-xs font-semibold text-ink-700">Val.town API-Key</label>
+            <p class="text-[11px] text-ink-500 mb-1.5">In val.town: oben rechts Avatar → <a href="https://www.val.town/settings/api" target="_blank" class="text-brand-600 underline">Settings → API Tokens</a> → „New token" mit Scopes <code class="bg-white border border-ink-200 px-1 rounded text-[10px]">vals:read</code>, <code class="bg-white border border-ink-200 px-1 rounded text-[10px]">vals:write</code>, <code class="bg-white border border-ink-200 px-1 rounded text-[10px]">environment_variables:write</code>.</p>
+            <input id="valtownKeyInput" type="password" value="${escapeAttr(APP_KEYS.valtownKey || '')}" placeholder="vt_pat_..." autocomplete="off" class="w-full px-3 py-2 border border-ink-200 rounded-lg text-sm font-mono bg-white focus:ring-2 focus:ring-brand-500/30 focus:border-brand-500">
+          </div>
+          <div class="flex gap-2 flex-wrap">
+            <button id="valtownSetupBtn" type="button" onclick="valtownStartSetup(this)" class="flex-1 min-w-[140px] bg-brand-500 hover:bg-brand-600 text-white px-4 py-2.5 rounded-lg text-sm font-semibold flex items-center justify-center gap-2 shadow shadow-brand-500/30">
+              <i data-lucide="zap" class="w-4 h-4"></i> ${isProxySet && APP_KEYS.valtownKey ? 'Proxy-Code aktualisieren' : 'Setup starten'}
+            </button>
+            ${isProxySet ? `
+              <button type="button" onclick="testProxyConnection()" class="px-3 py-2.5 border border-ink-200 bg-white rounded-lg text-sm font-medium hover:bg-ink-50 flex items-center gap-2">
+                <i data-lucide="activity" class="w-4 h-4"></i> Test
+              </button>` : ''}
+          </div>
+          <div id="valtownProgress" class="hidden">
+            <div id="valtownProgressBox" class="bg-ink-900 rounded-lg p-3 max-h-72 overflow-y-auto border border-ink-700">
+              <ul id="valtownProgressList" class="text-[11px] space-y-0.5 font-mono"></ul>
+            </div>
+          </div>
+          ${APP_KEYS.valtownValId ? `<p class="text-[10px] text-ink-500 text-center pt-1">Val-ID: <code class="bg-white border border-ink-200 px-1 py-0.5 rounded">${escapeHtml(APP_KEYS.valtownValId.slice(0, 8))}…</code></p>` : ''}
         </div>
       </div>
 
+      <!-- Status -->
       <div class="bg-white rounded-2xl border border-ink-200 p-4">
         <p class="text-xs font-semibold text-ink-500 uppercase tracking-wider mb-3">Status</p>
         <div class="grid sm:grid-cols-2 gap-2 text-sm">
           <div class="flex items-center justify-between bg-ink-50 rounded-lg px-3 py-2">
-            <span class="text-ink-700">Proxy-URL gesetzt</span>
+            <span class="text-ink-700">Proxy-URL</span>
             ${statusBadge(isProxySet, isProxySet?'OK':'fehlt')}
           </div>
           <div class="flex items-center justify-between bg-ink-50 rounded-lg px-3 py-2">
-            <span class="text-ink-700">Verbindung</span>
-            <button id="testProxyBtn" type="button" onclick="testProxyConnection()" class="text-xs text-brand-600 hover:text-brand-700 font-medium flex items-center gap-1" ${!isProxySet?'disabled':''}>
-              <i data-lucide="zap" class="w-3.5 h-3.5"></i> Test
-            </button>
+            <span class="text-ink-700">Val.town-Key</span>
+            ${statusBadge(!!APP_KEYS.valtownKey, APP_KEYS.valtownKey?'OK':'fehlt')}
           </div>
         </div>
         <div id="proxyTestResult" class="mt-3"></div>
       </div>
+
+      <!-- ============ FALLBACK: MANUELLES SETUP ============ -->
+      <details class="bg-white border border-ink-200 rounded-2xl group">
+        <summary class="cursor-pointer p-4 text-sm font-medium text-ink-700 flex items-center gap-2 select-none">
+          <i data-lucide="chevron-right" class="w-4 h-4 group-open:rotate-90 transition shrink-0"></i>
+          <span class="flex-1">Manuelles Setup <span class="text-ink-400 text-[11px]">(Fallback, falls Schnell-Setup nicht klappt)</span></span>
+        </summary>
+        <div class="px-4 pb-4 space-y-3 border-t border-ink-100 pt-3">
 
       <!-- STEP 1 -->
       <div class="bg-white rounded-2xl border border-ink-200 p-4">
@@ -1470,6 +1659,34 @@ Airtable hält: User-Records · Accounts mit freshdesk_domain + freshdesk_api_ke
           <p class="text-[11px] text-ink-500 mt-1">Master-Base/Keys → <code>apiProxyUrl</code> für project_id <code>${escapeHtml(APP_CONFIG.PROJECT_ID)}</code>.</p>
         </div>
       </div>
+
+        </div>
+      </details>
+
+      <!-- Architektur (collapsed, informativ) -->
+      <details class="bg-gradient-to-br from-brand-50 to-emerald-50 border border-brand-200 rounded-2xl group">
+        <summary class="cursor-pointer p-4 text-sm font-medium text-ink-700 flex items-center gap-2 select-none">
+          <i data-lucide="chevron-right" class="w-4 h-4 group-open:rotate-90 transition shrink-0"></i>
+          <span class="flex-1">Architektur erklärt</span>
+        </summary>
+        <div class="px-4 pb-4">
+          <pre class="text-[11px] text-ink-700 font-mono leading-relaxed whitespace-pre-wrap">Login (1×):  Browser ──[user_key]──▶ Val.town ──▶ Airtable User
+             Browser ◀──[session_token]── Val.town
+
+Calls:       Browser ──[Bearer session]──▶ Val.town ──┬─▶ Anthropic   (env var)
+                                                       │
+                                                       └─▶ Freshdesk  (Account aus
+                                                                       Airtable lookup)
+
+Browser hält:  session_token (8h Tab / 30d Gerät)
+Val.town hält: Sessions (blob) · ANTHROPIC_API_KEY · AIRTABLE_READ_KEY
+Airtable hält: User-Records · Accounts mit freshdesk_domain + freshdesk_api_key</pre>
+          <div class="text-[11px] text-emerald-800 mt-2 space-y-1">
+            <p><i data-lucide="check-circle-2" class="inline w-3.5 h-3.5"></i> Persönliche Freshdesk-Keys liegen serverseitig in Airtable.</p>
+            <p><i data-lucide="check-circle-2" class="inline w-3.5 h-3.5"></i> User-Login-Keys werden nach Login im Browser verworfen.</p>
+          </div>
+        </div>
+      </details>
 
       <!-- STEP 5: Tabellen prüfen -->
       <div class="bg-white rounded-2xl border border-ink-200 p-4">
@@ -1545,6 +1762,37 @@ async function testProxyConnection() {
     </div>`;
   } catch (e) {
     out.innerHTML = `<div class="text-xs bg-red-50 border border-red-200 rounded-lg p-2 text-red-800"><strong>Fehler:</strong> ${escapeHtml(e.message)}</div>`;
+  }
+}
+
+async function valtownStartSetup(btnEl) {
+  const inp = $('valtownKeyInput');
+  const token = (inp?.value || '').trim();
+  if (!token) { toast('Val.town-API-Key fehlt', 'warn'); inp?.focus(); return; }
+  const progressBox = $('valtownProgress');
+  const progressList = $('valtownProgressList');
+  const scrollBox = $('valtownProgressBox');
+  progressBox.classList.remove('hidden');
+  progressList.innerHTML = '';
+  setBusy(btnEl, true, 'Läuft…');
+  const onProgress = (msg, kind = 'info') => {
+    const li = document.createElement('li');
+    const icon = kind === 'ok' ? '✓' : kind === 'warn' ? '!' : '›';
+    const cls  = kind === 'ok' ? 'text-emerald-300' : kind === 'warn' ? 'text-amber-300' : 'text-ink-300';
+    li.innerHTML = `<span class="${cls} inline-block w-3">${icon}</span> <span class="${cls === 'text-ink-300' ? 'text-ink-200' : cls}">${escapeHtml(msg)}</span>`;
+    progressList.appendChild(li);
+    if (scrollBox) scrollBox.scrollTop = 999999;
+  };
+  try {
+    const result = await valtownAutoSetup({ token, onProgress });
+    onProgress(result.isUpdate ? 'Fertig — Proxy aktualisiert' : 'Fertig — Proxy live unter ' + result.endpointUrl, 'ok');
+    toast(result.isUpdate ? 'Proxy aktualisiert' : 'Proxy eingerichtet', 'success', 5000);
+    setBusy(btnEl, false);
+    setTimeout(() => renderSettingsPage(), 1800);
+  } catch (e) {
+    onProgress('Fehler: ' + e.message, 'warn');
+    toast('Setup fehlgeschlagen: ' + e.message, 'error', 8000);
+    setBusy(btnEl, false);
   }
 }
 
