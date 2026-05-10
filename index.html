@@ -221,7 +221,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.1.2';
+const APP_VERSION = 'v2.1.3';
 // Read-Token absichtlich gesplittet, damit GitHub Secret-Scanning beim Push nicht blockt.
 // Der Token ist read-only und Base-scoped → bewusst eingebettet (Architektur-Entscheidung).
 const _RK = 'patu8KWM8aWB' + 'yxCGL.69fae5d9fa4b94c2' + '66b426dadd71a51f574945d840b33569058ab5e9d89ebef3';
@@ -1144,6 +1144,27 @@ async function fetchTicketsForAccount(accountId, opts = {}) {
   // Deleted/SPAM clientseitig ausschließen — Freshdesk-Search-API hat deleted/spam
   // nicht als gültige Query-Felder, also kommen sie im Status-Filter mit rein.
   list = list.filter(t => !t.deleted && !t.spam);
+
+  // Server-Filter clientseitig nachvollziehen — der Freshdesk-Search-Index hängt
+  // ein paar Sekunden hinterher, gerade geänderte Tickets erscheinen daher mit
+  // aktuellem Feld-Wert aber unter ihrer alten Indexierung.
+  const statusMap = { open: 2, pending: 3, resolved: 4, closed: 5 };
+  if (filters && filters.status && filters.status !== 'all' && statusMap[filters.status]) {
+    list = list.filter(t => t.status === statusMap[filters.status]);
+  }
+  if (filters && filters.type) {
+    list = list.filter(t => t.type === filters.type);
+  }
+  if (!opts.skipAccountSpecific) {
+    if (filters && filters.groupId) {
+      list = list.filter(t => t.group_id === filters.groupId);
+    }
+    if (filters && filters.responderId === 'unassigned') {
+      list = list.filter(t => !t.responder_id);
+    } else if (filters && filters.responderId) {
+      list = list.filter(t => t.responder_id === filters.responderId);
+    }
+  }
 
   // Wiedervorlage-Sichtbarkeit clientseitig anwenden
   const visMode = (filters && filters.visibility) || 'active';
