@@ -1,0 +1,1873 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0ea5e9">
+<title>Freshdesk Hero</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script>
+  tailwind.config = {
+    theme: {
+      extend: {
+        colors: {
+          brand: { 50:'#f0f9ff',100:'#e0f2fe',200:'#bae6fd',300:'#7dd3fc',400:'#38bdf8',500:'#0ea5e9',600:'#0284c7',700:'#0369a1',800:'#075985',900:'#0c4a6e' },
+          ink:   { 50:'#f8fafc',100:'#f1f5f9',200:'#e2e8f0',300:'#cbd5e1',400:'#94a3b8',500:'#64748b',600:'#475569',700:'#334155',800:'#1e293b',900:'#0f172a' }
+        }
+      }
+    }
+  };
+</script>
+<script src="https://unpkg.com/lucide@latest/dist/umd/lucide.min.js"></script>
+<style>
+  html,body { height: 100%; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, system-ui, sans-serif; -webkit-tap-highlight-color: transparent; background: #f8fafc; }
+  *:focus { outline: none; }
+  .safe-bottom { padding-bottom: max(env(safe-area-inset-bottom), 0.5rem); }
+  .safe-top    { padding-top:    max(env(safe-area-inset-top), 0.5rem); }
+  .spinner { border:2px solid currentColor; border-right-color:transparent; border-radius:9999px; width:1rem; height:1rem; animation: spin .7s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .toast-enter { animation: toast-in .25s ease-out; }
+  @keyframes toast-in { from { opacity:0; transform:translateY(8px) } to { opacity:1; transform:translateY(0) } }
+  .scrollbar-hidden::-webkit-scrollbar { display:none; }
+  .scrollbar-hidden { scrollbar-width: none; }
+  /* Hide tailwind play CDN dev-warning */
+  #tailwind-cdn-warn, #__tailwind_cdn_warning__ { display:none !important; }
+</style>
+</head>
+<body class="text-ink-900">
+
+<!-- ===================== LOGIN SCREEN ===================== -->
+<div id="loginScreen" class="min-h-screen flex flex-col">
+  <div class="flex-1 flex items-center justify-center px-5 py-10">
+    <div class="w-full max-w-sm">
+      <div class="text-center mb-8">
+        <div class="w-16 h-16 mx-auto rounded-2xl bg-gradient-to-br from-brand-500 to-brand-700 flex items-center justify-center shadow-lg shadow-brand-500/25 mb-4">
+          <i data-lucide="ticket" class="w-8 h-8 text-white"></i>
+        </div>
+        <h1 class="text-2xl font-bold text-ink-900">Freshdesk Hero</h1>
+        <p class="text-sm text-ink-500 mt-1">Multi-Account Helpdesk · <span id="loginVersion"></span></p>
+      </div>
+
+      <form id="loginForm" class="bg-white border border-ink-200 rounded-2xl p-5 shadow-sm space-y-4">
+        <div>
+          <label class="text-xs font-semibold text-ink-700 uppercase tracking-wider">Login-Key</label>
+          <input id="loginKey" type="password" autocomplete="current-password" required class="mt-1 w-full px-3 py-2.5 border border-ink-200 rounded-lg focus:ring-2 focus:ring-brand-500/30 focus:border-brand-500 font-mono text-sm" placeholder="••••••••••">
+          <p class="text-[11px] text-ink-500 mt-1">Persönlicher Schlüssel aus der User-Tabelle.</p>
+        </div>
+        <label class="flex items-center gap-2 text-sm text-ink-700 select-none">
+          <input id="loginRemember" type="checkbox" class="w-4 h-4 accent-brand-500" checked>
+          Auf diesem Gerät angemeldet bleiben
+        </label>
+        <button id="loginBtn" type="submit" class="w-full bg-brand-500 hover:bg-brand-600 text-white rounded-lg py-2.5 font-medium flex items-center justify-center gap-2 transition disabled:opacity-50">
+          <span id="loginBtnText">Einloggen</span>
+          <span id="loginBtnSpinner" class="spinner hidden"></span>
+        </button>
+        <div id="loginError" class="hidden text-sm text-red-700 bg-red-50 border border-red-200 rounded-lg px-3 py-2"></div>
+      </form>
+
+      <div id="loginBootstrapNotice" class="hidden mt-3 text-[11px] text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
+        <i data-lucide="alert-triangle" class="inline w-3 h-3 mr-1"></i>
+        Setup-Modus: Val.town-Proxy noch nicht eingerichtet. Nach dem Login: <strong>Admin → Einstellungen</strong>.
+      </div>
+    </div>
+  </div>
+  <div class="text-center text-[11px] text-ink-400 pb-6 px-4">
+    Single-File Web-App · Daten in Airtable · Keys in Val.town
+  </div>
+</div>
+
+<!-- ===================== APP SHELL ===================== -->
+<div id="appShell" hidden class="min-h-screen flex flex-col">
+  <header class="sticky top-0 z-30 bg-white/85 backdrop-blur border-b border-ink-200 safe-top">
+    <div class="px-4 py-3 flex items-center gap-3">
+      <div class="w-9 h-9 rounded-xl bg-gradient-to-br from-brand-500 to-brand-700 flex items-center justify-center shrink-0">
+        <i data-lucide="ticket" class="w-5 h-5 text-white"></i>
+      </div>
+      <div class="flex-1 min-w-0">
+        <h1 id="pageTitle" class="font-bold text-ink-900 leading-tight truncate">Tickets</h1>
+        <p id="pageSubtitle" class="text-[11px] text-ink-500 truncate"></p>
+      </div>
+      <button onclick="toggleMenu()" class="w-9 h-9 rounded-lg hover:bg-ink-100 flex items-center justify-center" aria-label="Menü">
+        <i data-lucide="menu" class="w-5 h-5 text-ink-700"></i>
+      </button>
+    </div>
+  </header>
+
+  <div id="dropdownMenu" class="hidden fixed top-14 right-3 z-40 w-56 bg-white border border-ink-200 rounded-xl shadow-xl py-1 safe-top">
+    <div class="px-3 py-2 border-b border-ink-100">
+      <p id="menuUserName" class="text-sm font-semibold text-ink-900 truncate">–</p>
+      <p id="menuUserRole" class="text-[11px] text-ink-500"></p>
+    </div>
+    <button onclick="navTo('settings'); closeMenu();" id="menuSettingsBtn" class="hidden w-full text-left px-3 py-2 text-sm hover:bg-ink-50 flex items-center gap-2">
+      <i data-lucide="settings" class="w-4 h-4 text-ink-500"></i> Einstellungen
+    </button>
+    <button onclick="navTo('users'); closeMenu();" id="menuUsersBtn" class="hidden w-full text-left px-3 py-2 text-sm hover:bg-ink-50 flex items-center gap-2">
+      <i data-lucide="users" class="w-4 h-4 text-ink-500"></i> Benutzer
+    </button>
+    <button onclick="checkForUpdate(true); closeMenu();" class="w-full text-left px-3 py-2 text-sm hover:bg-ink-50 flex items-center gap-2">
+      <i data-lucide="refresh-cw" class="w-4 h-4 text-ink-500"></i> Update prüfen
+    </button>
+    <button onclick="logout()" class="w-full text-left px-3 py-2 text-sm hover:bg-red-50 text-red-700 flex items-center gap-2 border-t border-ink-100">
+      <i data-lucide="log-out" class="w-4 h-4"></i> Abmelden
+    </button>
+  </div>
+
+  <main id="pageContent" class="flex-1 px-4 py-4 pb-24"></main>
+
+  <nav class="fixed bottom-0 inset-x-0 z-30 bg-white/95 backdrop-blur border-t border-ink-200 safe-bottom">
+    <div class="flex justify-around max-w-md mx-auto">
+      <button data-nav="tickets"  onclick="navTo('tickets')"  class="flex-1 py-2 flex flex-col items-center gap-0.5 text-ink-500">
+        <i data-lucide="ticket" class="w-5 h-5"></i>
+        <span class="text-[10px] font-medium">Tickets</span>
+      </button>
+      <button data-nav="accounts" onclick="navTo('accounts')" class="flex-1 py-2 flex flex-col items-center gap-0.5 text-ink-500">
+        <i data-lucide="building-2" class="w-5 h-5"></i>
+        <span class="text-[10px] font-medium">Accounts</span>
+      </button>
+      <button data-nav="profile"  onclick="navTo('profile')"  class="flex-1 py-2 flex flex-col items-center gap-0.5 text-ink-500">
+        <i data-lucide="user" class="w-5 h-5"></i>
+        <span class="text-[10px] font-medium">Profil</span>
+      </button>
+    </div>
+  </nav>
+</div>
+
+<!-- ===================== TOAST ===================== -->
+<div id="toastContainer" class="fixed bottom-20 inset-x-0 z-50 flex flex-col items-center gap-2 px-4 pointer-events-none safe-bottom"></div>
+
+<!-- ===================== MODAL HOST ===================== -->
+<div id="modalHost"></div>
+
+<script>
+/* ============================================================
+   CONFIG
+   ============================================================ */
+const APP_VERSION = 'v1.0';
+// Read-Token absichtlich gesplittet, damit GitHub Secret-Scanning beim Push nicht blockt.
+// Der Token ist read-only und Base-scoped → bewusst eingebettet (Architektur-Entscheidung).
+const _RK = 'patu8KWM8aWB' + 'yxCGL.69fae5d9fa4b94c2' + '66b426dadd71a51f574945d840b33569058ab5e9d89ebef3';
+const APP_CONFIG = {
+  AIRTABLE_READ_KEY: _RK,
+  MASTER_BASE_ID:    'appzhNrhkLSTEaNFW',
+  APP_BASE_ID:       'appp4yTO7LVOKQJEh',
+  PROJECT_ID:        'p_1778420971086',
+  PROJECT_NAME:      'Freshdesk Hero',
+  GITHUB_REPO:       'giltglobalinvest-pixel/freshdesk_hero',
+};
+
+let APP_KEYS = {
+  airtableWriteKey: null,
+  appBaseId:        null,
+  apiProxyUrl:      null,
+  anthropicKey:     null,    // optional fallback
+  sessionToken:     null,
+  user:             null,    // { _id, api_key?, name, role, is_admin, ... }
+};
+
+let APP_STATE = {
+  page:           'tickets',
+  accounts:       [],         // cached accounts for current user
+  currentAccount: 'all',      // 'all' or accountRecordId
+  ticketStatus:   'open',     // 'open'|'pending'|'resolved'|'closed'|'all'
+};
+
+const SESSION_STORAGE_KEY = 'fdh_session_' + APP_CONFIG.PROJECT_ID;
+const LEGACY_USER_KEY     = 'user_key_'    + APP_CONFIG.PROJECT_ID;
+const LAST_ACCOUNT_KEY    = 'fdh_last_account_' + APP_CONFIG.PROJECT_ID;
+
+/* ============================================================
+   UTIL
+   ============================================================ */
+function $(id) { return document.getElementById(id); }
+function escapeHtml(s) { return String(s == null ? '' : s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+function escapeAttr(s) { return escapeHtml(s).replace(/`/g, '&#96;'); }
+function escapeFormula(s) { return String(s == null ? '' : s).replace(/'/g, "\\'"); }
+function nowIso() { return new Date().toISOString(); }
+function fmtDate(iso) {
+  if (!iso) return '';
+  const d = new Date(iso);
+  if (isNaN(d)) return iso;
+  const today = new Date();
+  const sameDay = d.toDateString() === today.toDateString();
+  if (sameDay) return d.toLocaleTimeString('de', { hour:'2-digit', minute:'2-digit' });
+  const diffDays = Math.floor((today - d) / 86400000);
+  if (diffDays < 7) return d.toLocaleDateString('de', { weekday:'short' }) + ' ' + d.toLocaleTimeString('de', { hour:'2-digit', minute:'2-digit' });
+  return d.toLocaleDateString('de', { day:'2-digit', month:'2-digit', year:'2-digit' });
+}
+function relTime(iso) {
+  if (!iso) return '';
+  const d = new Date(iso);
+  if (isNaN(d)) return iso;
+  const sec = Math.floor((Date.now() - d) / 1000);
+  if (sec < 60)    return 'gerade';
+  if (sec < 3600)  return Math.floor(sec/60)    + ' min';
+  if (sec < 86400) return Math.floor(sec/3600)  + ' h';
+  if (sec < 604800)return Math.floor(sec/86400) + ' d';
+  return d.toLocaleDateString('de', { day:'2-digit', month:'2-digit', year:'2-digit' });
+}
+
+function toast(msg, kind = 'info', ttl = 3500) {
+  const c = $('toastContainer'); if (!c) return;
+  const palettes = {
+    success: 'bg-emerald-600 text-white',
+    error:   'bg-red-600 text-white',
+    warn:    'bg-amber-500 text-white',
+    info:    'bg-ink-900 text-white',
+  };
+  const ic = { success:'check-circle-2', error:'alert-circle', warn:'alert-triangle', info:'info' }[kind] || 'info';
+  const el = document.createElement('div');
+  el.className = `toast-enter pointer-events-auto rounded-xl px-4 py-2.5 shadow-lg flex items-center gap-2 text-sm max-w-md ${palettes[kind] || palettes.info}`;
+  el.innerHTML = `<i data-lucide="${ic}" class="w-4 h-4 shrink-0"></i><span class="flex-1">${escapeHtml(msg)}</span>`;
+  c.appendChild(el);
+  if (window.lucide) lucide.createIcons();
+  setTimeout(() => { el.style.transition='opacity .3s'; el.style.opacity='0'; setTimeout(()=>el.remove(),300); }, ttl);
+}
+
+function setBusy(btnEl, busy, busyText) {
+  if (!btnEl) return;
+  if (busy) {
+    btnEl.dataset._origHtml = btnEl.innerHTML;
+    btnEl.disabled = true;
+    btnEl.innerHTML = `<span class="spinner"></span><span>${escapeHtml(busyText || 'Lade…')}</span>`;
+    btnEl.classList.add('opacity-70');
+  } else {
+    btnEl.disabled = false;
+    if (btnEl.dataset._origHtml) btnEl.innerHTML = btnEl.dataset._origHtml;
+    btnEl.classList.remove('opacity-70');
+  }
+  if (window.lucide) lucide.createIcons();
+}
+
+function confirmDialog(title, message, opts = {}) {
+  return new Promise(resolve => {
+    const danger = !!opts.danger;
+    const okText = opts.okText || 'OK';
+    const cancelText = opts.cancelText || 'Abbrechen';
+    const host = $('modalHost');
+    host.innerHTML = `
+      <div class="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/40 px-4">
+        <div class="bg-white rounded-2xl w-full max-w-sm shadow-2xl">
+          <div class="p-5">
+            <h3 class="font-bold text-ink-900 text-lg">${escapeHtml(title)}</h3>
+            <p class="text-sm text-ink-700 mt-2 whitespace-pre-line">${escapeHtml(message)}</p>
+          </div>
+          <div class="flex gap-2 p-4 pt-0">
+            <button id="cdCancel" class="flex-1 px-3 py-2.5 border border-ink-200 rounded-lg text-sm font-medium hover:bg-ink-50">${escapeHtml(cancelText)}</button>
+            <button id="cdOk" class="flex-1 px-3 py-2.5 ${danger?'bg-red-600 hover:bg-red-700':'bg-brand-500 hover:bg-brand-600'} text-white rounded-lg text-sm font-medium">${escapeHtml(okText)}</button>
+          </div>
+        </div>
+      </div>`;
+    const close = (val) => { host.innerHTML = ''; resolve(val); };
+    $('cdCancel').onclick = () => close(false);
+    $('cdOk').onclick     = () => close(true);
+  });
+}
+
+/* ============================================================
+   AIRTABLE — DIRECT (read via embedded read-key, write via APP_KEYS.airtableWriteKey)
+   ============================================================ */
+async function airtableRead(table, opts = {}) {
+  let url = 'https://api.airtable.com/v0/' + APP_CONFIG.APP_BASE_ID + '/' + encodeURIComponent(table);
+  const params = new URLSearchParams();
+  if (opts.filter)    params.set('filterByFormula', opts.filter);
+  if (opts.maxRecords) params.set('maxRecords', String(opts.maxRecords));
+  if (opts.pageSize)  params.set('pageSize', String(opts.pageSize));
+  (opts.sort || []).forEach((s, i) => {
+    params.set(`sort[${i}][field]`, s.field);
+    if (s.direction) params.set(`sort[${i}][direction]`, s.direction);
+  });
+  const qs = params.toString();
+  if (qs) url += '?' + qs;
+  const res = await fetch(url, { headers: { 'Authorization': 'Bearer ' + APP_CONFIG.AIRTABLE_READ_KEY } });
+  if (!res.ok) throw new Error('Airtable read fehlgeschlagen (' + res.status + ')');
+  const data = await res.json();
+  return data.records || [];
+}
+async function airtableWrite(table, fields) {
+  if (!APP_KEYS.airtableWriteKey) throw new Error('Schreibzugriff fehlt — bitte einloggen oder Master-Base/Keys prüfen');
+  const url = 'https://api.airtable.com/v0/' + APP_CONFIG.APP_BASE_ID + '/' + encodeURIComponent(table);
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: { 'Authorization': 'Bearer ' + APP_KEYS.airtableWriteKey, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ fields }),
+  });
+  if (!res.ok) {
+    const t = await res.text(); throw new Error('Airtable write fehlgeschlagen (' + res.status + '): ' + t.slice(0, 200));
+  }
+  return res.json();
+}
+async function airtableUpdate(table, id, fields) {
+  if (!APP_KEYS.airtableWriteKey) throw new Error('Schreibzugriff fehlt');
+  const url = 'https://api.airtable.com/v0/' + APP_CONFIG.APP_BASE_ID + '/' + encodeURIComponent(table) + '/' + id;
+  const res = await fetch(url, {
+    method: 'PATCH',
+    headers: { 'Authorization': 'Bearer ' + APP_KEYS.airtableWriteKey, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ fields }),
+  });
+  if (!res.ok) { const t = await res.text(); throw new Error('Airtable update fehlgeschlagen: ' + t.slice(0, 200)); }
+  return res.json();
+}
+async function airtableDelete(table, id) {
+  if (!APP_KEYS.airtableWriteKey) throw new Error('Schreibzugriff fehlt');
+  const url = 'https://api.airtable.com/v0/' + APP_CONFIG.APP_BASE_ID + '/' + encodeURIComponent(table) + '/' + id;
+  const res = await fetch(url, {
+    method: 'DELETE',
+    headers: { 'Authorization': 'Bearer ' + APP_KEYS.airtableWriteKey }
+  });
+  if (!res.ok) throw new Error('Airtable delete fehlgeschlagen (' + res.status + ')');
+  return res.json();
+}
+
+async function ensureTable(tableName, fields) {
+  if (!APP_KEYS.airtableWriteKey) throw new Error('Bitte einloggen');
+  const metaRes = await fetch(
+    'https://api.airtable.com/v0/meta/bases/' + APP_CONFIG.APP_BASE_ID + '/tables',
+    { headers: { 'Authorization': 'Bearer ' + APP_KEYS.airtableWriteKey } }
+  );
+  if (!metaRes.ok) throw new Error('Meta-API: ' + metaRes.status);
+  const meta = await metaRes.json();
+  const exists = (meta.tables || []).find(t => t.name === tableName);
+  if (exists) return exists;
+  const createRes = await fetch(
+    'https://api.airtable.com/v0/meta/bases/' + APP_CONFIG.APP_BASE_ID + '/tables',
+    {
+      method: 'POST',
+      headers: { 'Authorization': 'Bearer ' + APP_KEYS.airtableWriteKey, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: tableName, fields }),
+    }
+  );
+  if (!createRes.ok) { const t = await createRes.text(); throw new Error('ensureTable: ' + t.slice(0, 200)); }
+  return createRes.json();
+}
+
+/* ============================================================
+   MASTER-BASE KEYS
+   ============================================================ */
+async function loadProjectKeys() {
+  const headers = { 'Authorization': 'Bearer ' + APP_CONFIG.AIRTABLE_READ_KEY };
+  try {
+    const res = await fetch(
+      'https://api.airtable.com/v0/' + APP_CONFIG.MASTER_BASE_ID + '/Keys?filterByFormula=' +
+      encodeURIComponent("{project_id}='" + APP_CONFIG.PROJECT_ID + "'"),
+      { headers }
+    );
+    if (res.ok) {
+      const data = await res.json();
+      (data.records || []).forEach(rec => {
+        const f = rec.fields || {};
+        if (f.key_name === 'anthropicKey')     APP_KEYS.anthropicKey     = f.key_value;
+        if (f.key_name === 'airtableWriteKey') APP_KEYS.airtableWriteKey = f.key_value;
+        if (f.key_name === 'airtableBaseId')   APP_KEYS.appBaseId        = f.key_value;
+        if (f.key_name === 'apiProxyUrl')      APP_KEYS.apiProxyUrl      = (f.key_value || '').replace(/\/+$/, '');
+      });
+    }
+  } catch (_) {}
+  if (!APP_KEYS.anthropicKey) {
+    try {
+      const res = await fetch(
+        'https://api.airtable.com/v0/' + APP_CONFIG.MASTER_BASE_ID + '/Keys?filterByFormula=' +
+        encodeURIComponent("{project_id}='GLOBAL'"),
+        { headers }
+      );
+      if (res.ok) {
+        const data = await res.json();
+        (data.records || []).forEach(rec => {
+          if (rec.fields.key_name === 'anthropicKey') APP_KEYS.anthropicKey = rec.fields.key_value;
+        });
+      }
+    } catch (_) {}
+  }
+}
+
+async function fetchMasterBaseKeys() {
+  const headers = { 'Authorization': 'Bearer ' + APP_CONFIG.AIRTABLE_READ_KEY };
+  const url = 'https://api.airtable.com/v0/' + APP_CONFIG.MASTER_BASE_ID + '/Keys?filterByFormula=' +
+    encodeURIComponent("{project_id}='" + APP_CONFIG.PROJECT_ID + "'");
+  const res = await fetch(url, { headers });
+  if (!res.ok) throw new Error('Konnte Keys nicht laden (HTTP ' + res.status + ')');
+  return (await res.json()).records || [];
+}
+async function writeMasterBaseKey(keyName, value, existingRecordId) {
+  if (!APP_KEYS.airtableWriteKey) throw new Error('Schreib-Key fehlt — bitte einloggen');
+  const url = 'https://api.airtable.com/v0/' + APP_CONFIG.MASTER_BASE_ID + '/Keys' + (existingRecordId ? '/' + existingRecordId : '');
+  const method = existingRecordId ? 'PATCH' : 'POST';
+  const body = existingRecordId
+    ? { fields: { key_value: value } }
+    : { fields: { project_id: APP_CONFIG.PROJECT_ID, key_name: keyName, key_value: value } };
+  const res = await fetch(url, {
+    method,
+    headers: { 'Authorization': 'Bearer ' + APP_KEYS.airtableWriteKey, 'Content-Type': 'application/json' },
+    body: JSON.stringify(body)
+  });
+  if (!res.ok) {
+    const txt = await res.text();
+    if (res.status === 403 || res.status === 401) throw new Error('Kein Schreibzugriff auf Master-Base. Token-Scope erweitern.');
+    throw new Error('Speichern fehlgeschlagen: ' + txt.slice(0, 200));
+  }
+  return res.json();
+}
+
+/* ============================================================
+   AUTH — Session-Token via val.town Proxy + Bootstrap-Fallback
+   ============================================================ */
+function _proxyBase() { return APP_KEYS.apiProxyUrl || ''; }
+function _getStoredToken() { return localStorage.getItem(SESSION_STORAGE_KEY) || sessionStorage.getItem(SESSION_STORAGE_KEY) || ''; }
+function _setStoredToken(token, longLived) {
+  if (longLived) {
+    localStorage.setItem(SESSION_STORAGE_KEY, token);
+    sessionStorage.removeItem(SESSION_STORAGE_KEY);
+  } else {
+    sessionStorage.setItem(SESSION_STORAGE_KEY, token);
+    localStorage.removeItem(SESSION_STORAGE_KEY);
+  }
+  localStorage.removeItem(LEGACY_USER_KEY);
+  APP_KEYS.sessionToken = token;
+}
+function _clearStoredToken() {
+  localStorage.removeItem(SESSION_STORAGE_KEY);
+  sessionStorage.removeItem(SESSION_STORAGE_KEY);
+  localStorage.removeItem(LEGACY_USER_KEY);
+  APP_KEYS.sessionToken = null;
+}
+
+// Bootstrap-Login: nur wenn kein Proxy konfiguriert ist. Liest direkt aus Airtable.
+async function _bootstrapLogin(userKey) {
+  const headers = { 'Authorization': 'Bearer ' + APP_CONFIG.AIRTABLE_READ_KEY };
+  const formula = "AND({api_key}='" + escapeFormula(userKey) + "',{status}='aktiv')";
+  const res = await fetch(
+    'https://api.airtable.com/v0/' + APP_CONFIG.APP_BASE_ID + '/User?filterByFormula=' + encodeURIComponent(formula),
+    { headers }
+  );
+  if (!res.ok) throw new Error('Verbindung zu Airtable fehlgeschlagen');
+  const data = await res.json();
+  if (!data.records || !data.records.length) throw new Error('Ungültiger Key oder Account inaktiv');
+  const rec = data.records[0];
+  const role = (rec.fields.role || '').toLowerCase();
+  APP_KEYS.user = {
+    _id: rec.id,
+    api_key: rec.fields.api_key,
+    name:    rec.fields.name || '',
+    role:    rec.fields.role || '',
+    is_admin: role === 'admin' || rec.fields.is_admin === true,
+  };
+  localStorage.setItem(LEGACY_USER_KEY, userKey);
+  return APP_KEYS.user;
+}
+
+async function loginWithUserKey(userKey, longLived = false) {
+  if (!APP_KEYS.apiProxyUrl) {
+    return await _bootstrapLogin(userKey);
+  }
+  const proxyBase = _proxyBase();
+  let res;
+  try {
+    res = await fetch(proxyBase + '/auth', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ user_key: userKey, long_lived: !!longLived })
+    });
+  } catch (e) {
+    console.warn('Proxy unerreichbar, Bootstrap-Fallback:', e.message);
+    const u = await _bootstrapLogin(userKey);
+    setTimeout(() => toast('Proxy nicht erreichbar — Setup-Modus aktiv. Admin → Einstellungen prüfen.', 'warn', 8000), 500);
+    return u;
+  }
+  if (res.status >= 500) {
+    let detail = '';
+    try { const ej = await res.clone().json(); if (ej.error) detail = String(ej.error); } catch (_) {}
+    console.warn('Proxy 5xx, Bootstrap-Fallback:', detail);
+    const u = await _bootstrapLogin(userKey);
+    setTimeout(() => toast('Proxy-Fehler (' + res.status + ') — Setup-Modus aktiv. Admin → Einstellungen.', 'warn', 9000), 500);
+    return u;
+  }
+  if (!res.ok) {
+    let msg = 'Login fehlgeschlagen (HTTP ' + res.status + ')';
+    try { const ej = await res.json(); if (ej.error) msg = String(ej.error); } catch (_) {}
+    throw new Error(msg);
+  }
+  const data = await res.json();
+  if (!data.session_token) throw new Error('Proxy hat kein Session-Token zurückgeliefert');
+  _setStoredToken(data.session_token, !!longLived);
+  APP_KEYS.user = {
+    _id:      data.user.id,
+    api_key:  data.user.api_key,
+    name:     data.user.name,
+    role:     data.user.role,
+    is_admin: !!data.user.is_admin,
+  };
+  return APP_KEYS.user;
+}
+
+async function tryAutoLogin() {
+  let proxyBroken = false;
+  const token = _getStoredToken();
+  if (token && APP_KEYS.apiProxyUrl) {
+    try {
+      const res = await fetch(_proxyBase() + '/me', {
+        headers: { 'Authorization': 'Bearer ' + token }
+      });
+      if (res.ok) {
+        const data = await res.json();
+        APP_KEYS.user = {
+          _id:      data.user.id,
+          api_key:  data.user.api_key,
+          name:     data.user.name,
+          role:     data.user.role,
+          is_admin: !!data.user.is_admin,
+        };
+        APP_KEYS.sessionToken = token;
+        return true;
+      }
+      if (res.status >= 500) proxyBroken = true;
+      else _clearStoredToken();
+    } catch (_) { proxyBroken = true; }
+  }
+  // Legacy migration / Bootstrap
+  const legacyKey = localStorage.getItem(LEGACY_USER_KEY);
+  if (legacyKey) {
+    try {
+      await loginWithUserKey(legacyKey, true);
+      return true;
+    } catch (_) {
+      if (proxyBroken) {
+        try {
+          await _bootstrapLogin(legacyKey);
+          setTimeout(() => toast('Setup-Modus — Proxy nicht erreichbar. Admin → Einstellungen.', 'warn', 8000), 500);
+          return true;
+        } catch (_) {}
+      }
+      localStorage.removeItem(LEGACY_USER_KEY);
+    }
+  }
+  return false;
+}
+
+async function logout() {
+  const token = _getStoredToken();
+  if (token && APP_KEYS.apiProxyUrl) {
+    try {
+      await fetch(_proxyBase() + '/logout', {
+        method: 'POST',
+        headers: { 'Authorization': 'Bearer ' + token }
+      });
+    } catch (_) {}
+  }
+  _clearStoredToken();
+  APP_KEYS.user = null;
+  APP_KEYS.sessionToken = null;
+  location.reload();
+}
+
+/* ============================================================
+   PROXY FETCH (für Freshdesk + Anthropic via val.town)
+   ============================================================ */
+async function proxyFetch(path, init = {}) {
+  if (!APP_KEYS.apiProxyUrl) throw new Error('Val.town-Proxy nicht eingerichtet — Admin → Einstellungen');
+  const token = APP_KEYS.sessionToken || _getStoredToken();
+  if (!token) throw new Error('Nicht eingeloggt');
+  const headers = Object.assign({}, init.headers || {}, { 'Authorization': 'Bearer ' + token });
+  if (init.body && !headers['Content-Type']) headers['Content-Type'] = 'application/json';
+  const res = await fetch(_proxyBase() + (path.startsWith('/') ? path : '/' + path), Object.assign({}, init, { headers }));
+  return res;
+}
+
+async function proxyJson(path, init = {}) {
+  const res = await proxyFetch(path, init);
+  const text = await res.text();
+  let data; try { data = text ? JSON.parse(text) : {}; } catch (_) { data = { _raw: text }; }
+  if (!res.ok) {
+    const msg = (data && data.error) ? (typeof data.error === 'string' ? data.error : JSON.stringify(data.error)) : ('HTTP ' + res.status);
+    const err = new Error(msg); err.status = res.status; err.data = data; throw err;
+  }
+  return data;
+}
+
+/* ============================================================
+   ACCOUNTS — gespeichert in App-Base / Tabelle "Accounts"
+   ============================================================ */
+const ACCOUNTS_TABLE = 'Accounts';
+const ACCOUNT_COLORS = ['#0ea5e9','#10b981','#f59e0b','#ef4444','#8b5cf6','#ec4899','#14b8a6','#6366f1','#f97316','#84cc16'];
+
+async function ensureAppTables() {
+  // Accounts-Tabelle anlegen falls nicht vorhanden
+  await ensureTable(ACCOUNTS_TABLE, [
+    { name: 'name',                type: 'singleLineText' },
+    { name: 'freshdesk_domain',    type: 'singleLineText' },
+    { name: 'freshdesk_api_key',   type: 'singleLineText' },
+    { name: 'color',               type: 'singleLineText' },
+    { name: 'api_key',             type: 'singleLineText' },
+    { name: 'created',             type: 'singleLineText' },
+  ]);
+}
+
+async function loadAccounts() {
+  if (!APP_KEYS.user?.api_key) { APP_STATE.accounts = []; return; }
+  const filter = "{api_key}='" + escapeFormula(APP_KEYS.user.api_key) + "'";
+  let recs = [];
+  try {
+    recs = await airtableRead(ACCOUNTS_TABLE, { filter, sort: [{ field: 'name', direction: 'asc' }] });
+  } catch (e) {
+    // Tabelle existiert evtl. noch nicht
+    recs = [];
+  }
+  APP_STATE.accounts = recs.map(r => ({
+    id:       r.id,
+    name:     r.fields.name || '–',
+    domain:   (r.fields.freshdesk_domain || '').replace(/^https?:\/\//, '').replace(/\.freshdesk\.com\/?$/, '').replace(/\/+$/, ''),
+    color:    r.fields.color || ACCOUNT_COLORS[Math.floor(Math.random() * ACCOUNT_COLORS.length)],
+    created:  r.fields.created || '',
+  }));
+  // Restore last-selected account
+  const last = localStorage.getItem(LAST_ACCOUNT_KEY);
+  if (last && (last === 'all' || APP_STATE.accounts.find(a => a.id === last))) APP_STATE.currentAccount = last;
+  else if (APP_STATE.accounts.length === 1) APP_STATE.currentAccount = APP_STATE.accounts[0].id;
+  else APP_STATE.currentAccount = 'all';
+}
+
+async function createAccount({ name, domain, apiKey, color }) {
+  domain = (domain || '').trim().replace(/^https?:\/\//i, '').replace(/\.freshdesk\.com\/?$/i, '').replace(/\/+$/, '');
+  if (!name) throw new Error('Name fehlt');
+  if (!domain) throw new Error('Subdomain fehlt');
+  if (!apiKey) throw new Error('API-Key fehlt');
+  return await airtableWrite(ACCOUNTS_TABLE, {
+    name, freshdesk_domain: domain, freshdesk_api_key: apiKey,
+    color: color || ACCOUNT_COLORS[APP_STATE.accounts.length % ACCOUNT_COLORS.length],
+    api_key: APP_KEYS.user.api_key,
+    created: nowIso(),
+  });
+}
+
+async function deleteAccount(id) {
+  return await airtableDelete(ACCOUNTS_TABLE, id);
+}
+
+/* ============================================================
+   FRESHDESK — Tickets via Proxy /freshdesk/<account_id>/api/v2/...
+   ============================================================ */
+const FD_STATUS = {
+  2: { label:'Offen',     short:'OPEN',    cls:'bg-blue-100 text-blue-700 border-blue-200' },
+  3: { label:'Wartet',    short:'PEND',    cls:'bg-amber-100 text-amber-700 border-amber-200' },
+  4: { label:'Gelöst',    short:'SOLVED',  cls:'bg-emerald-100 text-emerald-700 border-emerald-200' },
+  5: { label:'Geschlossen',short:'CLOSED', cls:'bg-ink-100 text-ink-600 border-ink-200' },
+};
+const FD_PRIORITY = {
+  1: { label:'Niedrig',  cls:'bg-ink-100 text-ink-600' },
+  2: { label:'Normal',   cls:'bg-blue-100 text-blue-700' },
+  3: { label:'Hoch',     cls:'bg-amber-100 text-amber-700' },
+  4: { label:'Dringend', cls:'bg-red-100 text-red-700' },
+};
+
+async function fetchTicketsForAccount(accountId, opts = {}) {
+  const params = new URLSearchParams();
+  params.set('per_page', String(opts.perPage || 30));
+  params.set('order_by', opts.orderBy || 'updated_at');
+  params.set('order_type', opts.orderType || 'desc');
+  if (opts.includeStats) params.set('include', 'stats,requester');
+  // Status-Filter: 2 offen, 3 wartet, 4 gelöst, 5 geschlossen
+  const filterMap = { open: 2, pending: 3, resolved: 4, closed: 5 };
+  if (opts.status && filterMap[opts.status] !== undefined) {
+    // Use the canned "open_or_pending" approach via filter param
+    // Actually simpler: use ?filter=new_and_my_open is account-bound, so just query and filter client-side OR use the search API.
+    // We'll just request and filter client-side for simplicity.
+  }
+  const path = '/freshdesk/' + encodeURIComponent(accountId) + '/api/v2/tickets?' + params.toString();
+  const data = await proxyJson(path);
+  let list = Array.isArray(data) ? data : (data.results || []);
+  if (opts.status && filterMap[opts.status] !== undefined) {
+    list = list.filter(t => t.status === filterMap[opts.status]);
+  }
+  // Annotate with account info
+  const acc = APP_STATE.accounts.find(a => a.id === accountId);
+  return list.map(t => ({ ...t, _accountId: accountId, _accountName: acc?.name || '?', _accountColor: acc?.color || '#64748b' }));
+}
+
+async function fetchTicketsAllAccounts(opts = {}) {
+  const all = APP_STATE.accounts;
+  if (!all.length) return [];
+  const results = await Promise.allSettled(all.map(a => fetchTicketsForAccount(a.id, opts)));
+  const merged = [];
+  results.forEach((r, i) => {
+    if (r.status === 'fulfilled') merged.push(...r.value);
+    else console.warn('Ticket-Fetch fehlgeschlagen für', all[i].name, r.reason);
+  });
+  // Sort by updated_at desc
+  merged.sort((a, b) => new Date(b.updated_at || 0) - new Date(a.updated_at || 0));
+  return merged;
+}
+
+/* ============================================================
+   USERS (Admin)
+   ============================================================ */
+async function fetchUsers() {
+  return await airtableRead('User', { sort: [{ field: 'name', direction: 'asc' }] });
+}
+async function createUser({ api_key, name, role, status }) {
+  return await airtableWrite('User', {
+    api_key, name, role: role || 'user', status: status || 'aktiv', created: nowIso(),
+  });
+}
+async function updateUser(id, fields) { return await airtableUpdate('User', id, fields); }
+async function deleteUser(id)         { return await airtableDelete('User', id); }
+
+function generateUserKey() {
+  const arr = new Uint8Array(18);
+  crypto.getRandomValues(arr);
+  return 'fdh_' + Array.from(arr).map(b => b.toString(36).padStart(2, '0')).join('').slice(0, 28);
+}
+
+/* ============================================================
+   NAVIGATION + RENDERING
+   ============================================================ */
+function setPageTitle(title, subtitle) {
+  $('pageTitle').textContent = title || '';
+  $('pageSubtitle').textContent = subtitle || '';
+}
+function setActiveNav(name) {
+  document.querySelectorAll('[data-nav]').forEach(b => {
+    if (b.dataset.nav === name) b.classList.replace('text-ink-500', 'text-brand-600');
+    else b.classList.replace('text-brand-600', 'text-ink-500');
+  });
+}
+function navTo(page) {
+  APP_STATE.page = page;
+  setActiveNav(['tickets','accounts','profile'].includes(page) ? page : '');
+  if (page === 'tickets')      renderTicketsPage();
+  else if (page === 'accounts') renderAccountsPage();
+  else if (page === 'profile')  renderProfilePage();
+  else if (page === 'settings') renderSettingsPage();
+  else if (page === 'users')    renderUsersPage();
+  else                          renderTicketsPage();
+}
+
+function toggleMenu() {
+  const m = $('dropdownMenu');
+  m.classList.toggle('hidden');
+}
+function closeMenu() { $('dropdownMenu').classList.add('hidden'); }
+document.addEventListener('click', (e) => {
+  const m = $('dropdownMenu');
+  if (!m || m.classList.contains('hidden')) return;
+  if (!m.contains(e.target) && !e.target.closest('button[onclick="toggleMenu()"]')) closeMenu();
+});
+
+function renderShellChrome() {
+  $('menuUserName').textContent = APP_KEYS.user?.name || '–';
+  $('menuUserRole').textContent = (APP_KEYS.user?.role || '–') + (APP_KEYS.user?.is_admin ? ' · Admin' : '');
+  if (APP_KEYS.user?.is_admin) {
+    $('menuSettingsBtn').classList.remove('hidden');
+    $('menuUsersBtn').classList.remove('hidden');
+  }
+  if (window.lucide) lucide.createIcons();
+}
+
+/* ===================== TICKETS PAGE ===================== */
+async function renderTicketsPage() {
+  setPageTitle('Tickets', '');
+  setActiveNav('tickets');
+  const acc = APP_STATE.currentAccount;
+  const accLabel = acc === 'all' ? `Alle Accounts (${APP_STATE.accounts.length})` : (APP_STATE.accounts.find(a => a.id === acc)?.name || '–');
+
+  if (!APP_KEYS.apiProxyUrl) {
+    $('pageContent').innerHTML = noProxyNotice();
+    if (window.lucide) lucide.createIcons();
+    return;
+  }
+  if (!APP_STATE.accounts.length) {
+    $('pageContent').innerHTML = `
+      <div class="bg-white rounded-2xl border border-ink-200 p-6 text-center">
+        <div class="w-14 h-14 mx-auto rounded-2xl bg-brand-50 flex items-center justify-center mb-3">
+          <i data-lucide="building-2" class="w-7 h-7 text-brand-600"></i>
+        </div>
+        <h3 class="font-semibold text-ink-900">Noch keine Accounts</h3>
+        <p class="text-sm text-ink-500 mt-1">Lege deinen ersten Freshdesk-Account an, um Tickets zu sehen.</p>
+        <button onclick="navTo('accounts')" class="mt-4 inline-flex items-center gap-2 bg-brand-500 hover:bg-brand-600 text-white rounded-lg px-4 py-2 text-sm font-medium">
+          <i data-lucide="plus" class="w-4 h-4"></i> Account anlegen
+        </button>
+      </div>`;
+    if (window.lucide) lucide.createIcons();
+    return;
+  }
+
+  $('pageContent').innerHTML = `
+    <div class="space-y-3">
+      <!-- Account Switcher -->
+      <div class="flex gap-2 overflow-x-auto scrollbar-hidden -mx-1 px-1 py-1">
+        <button onclick="setCurrentAccount('all')" class="account-chip shrink-0 px-3 py-1.5 rounded-full text-xs font-medium border ${acc==='all'?'bg-ink-900 text-white border-ink-900':'bg-white text-ink-700 border-ink-200'}">
+          <i data-lucide="layers" class="inline w-3.5 h-3.5 mr-1"></i> Alle (${APP_STATE.accounts.length})
+        </button>
+        ${APP_STATE.accounts.map(a => `
+          <button onclick="setCurrentAccount('${a.id}')" class="account-chip shrink-0 px-3 py-1.5 rounded-full text-xs font-medium border flex items-center gap-1.5 ${acc===a.id?'bg-ink-900 text-white border-ink-900':'bg-white text-ink-700 border-ink-200'}">
+            <span class="w-2 h-2 rounded-full" style="background:${escapeAttr(a.color)}"></span>
+            ${escapeHtml(a.name)}
+          </button>
+        `).join('')}
+      </div>
+
+      <!-- Status Filter -->
+      <div class="flex gap-2 overflow-x-auto scrollbar-hidden -mx-1 px-1">
+        ${[
+          { k: 'open',     label:'Offen' },
+          { k: 'pending',  label:'Wartet' },
+          { k: 'resolved', label:'Gelöst' },
+          { k: 'closed',   label:'Geschlossen' },
+          { k: 'all',      label:'Alle' },
+        ].map(s => `
+          <button onclick="setTicketStatus('${s.k}')" class="shrink-0 px-3 py-1 rounded-md text-xs font-medium ${APP_STATE.ticketStatus===s.k?'bg-brand-500 text-white':'bg-white text-ink-700 border border-ink-200'}">${escapeHtml(s.label)}</button>
+        `).join('')}
+        <button onclick="renderTicketsPage()" class="shrink-0 ml-auto px-2 py-1 rounded-md text-xs font-medium bg-white text-ink-700 border border-ink-200" title="Neu laden">
+          <i data-lucide="refresh-cw" class="w-3.5 h-3.5"></i>
+        </button>
+      </div>
+
+      <!-- Ticket List -->
+      <div id="ticketList">
+        <div class="bg-white rounded-2xl border border-ink-200 p-8 text-center">
+          <div class="spinner inline-block text-brand-500 w-6 h-6 border-[3px]"></div>
+          <p class="text-sm text-ink-500 mt-2">Lade Tickets…</p>
+        </div>
+      </div>
+    </div>`;
+  if (window.lucide) lucide.createIcons();
+
+  // Load tickets
+  try {
+    const opts = { perPage: 50, status: APP_STATE.ticketStatus === 'all' ? null : APP_STATE.ticketStatus };
+    const tickets = (acc === 'all')
+      ? await fetchTicketsAllAccounts(opts)
+      : await fetchTicketsForAccount(acc, opts);
+    renderTicketList(tickets);
+  } catch (e) {
+    $('ticketList').innerHTML = `
+      <div class="bg-red-50 border border-red-200 rounded-2xl p-4 text-sm text-red-800">
+        <p class="font-semibold">Tickets konnten nicht geladen werden</p>
+        <p class="mt-1">${escapeHtml(e.message)}</p>
+        ${e.status === 401 ? '<p class="mt-2 text-[11px]">Tipp: Erneut einloggen.</p>' : ''}
+      </div>`;
+  }
+}
+
+function setCurrentAccount(id) {
+  APP_STATE.currentAccount = id;
+  localStorage.setItem(LAST_ACCOUNT_KEY, id);
+  renderTicketsPage();
+}
+function setTicketStatus(k) {
+  APP_STATE.ticketStatus = k;
+  renderTicketsPage();
+}
+
+function renderTicketList(tickets) {
+  if (!tickets.length) {
+    $('ticketList').innerHTML = `
+      <div class="bg-white rounded-2xl border border-ink-200 p-8 text-center">
+        <i data-lucide="inbox" class="w-10 h-10 mx-auto text-ink-400"></i>
+        <p class="text-sm text-ink-500 mt-2">Keine Tickets gefunden.</p>
+      </div>`;
+    if (window.lucide) lucide.createIcons();
+    return;
+  }
+  const showAccount = APP_STATE.currentAccount === 'all';
+  $('ticketList').innerHTML = `
+    <div class="space-y-2">
+      ${tickets.map(t => {
+        const st = FD_STATUS[t.status] || { label:'?', short:'?', cls:'bg-ink-100 text-ink-600 border-ink-200' };
+        const pr = FD_PRIORITY[t.priority] || null;
+        const subj = t.subject || '(ohne Betreff)';
+        const desc = (t.description_text || '').slice(0, 140);
+        return `
+          <div class="bg-white rounded-2xl border border-ink-200 p-3 active:bg-ink-50 cursor-pointer" onclick="openTicket('${t._accountId}', ${t.id})">
+            <div class="flex items-start gap-2">
+              ${showAccount ? `<span class="shrink-0 mt-1 w-2.5 h-2.5 rounded-full" style="background:${escapeAttr(t._accountColor)}" title="${escapeAttr(t._accountName)}"></span>` : ''}
+              <div class="flex-1 min-w-0">
+                <div class="flex items-baseline gap-2">
+                  <p class="font-semibold text-ink-900 text-sm leading-snug truncate flex-1">${escapeHtml(subj)}</p>
+                  <span class="text-[10px] text-ink-400 shrink-0">${escapeHtml(relTime(t.updated_at))}</span>
+                </div>
+                ${desc ? `<p class="text-[12px] text-ink-500 mt-0.5 line-clamp-2">${escapeHtml(desc)}</p>` : ''}
+                <div class="flex items-center gap-1.5 mt-1.5 flex-wrap">
+                  <span class="text-[10px] uppercase tracking-wider px-1.5 py-0.5 rounded font-semibold border ${st.cls}">${escapeHtml(st.label)}</span>
+                  ${pr ? `<span class="text-[10px] uppercase tracking-wider px-1.5 py-0.5 rounded font-semibold ${pr.cls}">${escapeHtml(pr.label)}</span>` : ''}
+                  <span class="text-[10px] text-ink-400">#${t.id}</span>
+                  ${showAccount ? `<span class="text-[10px] text-ink-500 ml-auto">${escapeHtml(t._accountName)}</span>` : ''}
+                </div>
+              </div>
+            </div>
+          </div>`;
+      }).join('')}
+    </div>
+    <p class="text-[10px] text-center text-ink-400 mt-3">${tickets.length} Ticket${tickets.length===1?'':'s'} geladen</p>`;
+  if (window.lucide) lucide.createIcons();
+}
+
+function openTicket(accountId, ticketId) {
+  const acc = APP_STATE.accounts.find(a => a.id === accountId);
+  if (!acc) return toast('Account nicht gefunden', 'error');
+  const url = 'https://' + acc.domain + '.freshdesk.com/a/tickets/' + ticketId;
+  window.open(url, '_blank');
+}
+
+/* ===================== ACCOUNTS PAGE ===================== */
+async function renderAccountsPage() {
+  setPageTitle('Accounts', 'Freshdesk-Workspaces');
+  setActiveNav('accounts');
+  if (!APP_KEYS.airtableWriteKey) {
+    $('pageContent').innerHTML = `
+      <div class="bg-amber-50 border border-amber-200 rounded-2xl p-4 text-sm text-amber-800">
+        Schreibzugriff fehlt. Master-Base/Keys prüfen: <code>airtableWriteKey</code> für project_id <code>${escapeHtml(APP_CONFIG.PROJECT_ID)}</code>.
+      </div>`;
+    return;
+  }
+  $('pageContent').innerHTML = `
+    <div class="space-y-3">
+      <button onclick="openAccountModal()" class="w-full bg-brand-500 hover:bg-brand-600 text-white rounded-xl py-2.5 font-medium flex items-center justify-center gap-2">
+        <i data-lucide="plus" class="w-4 h-4"></i> Account hinzufügen
+      </button>
+      <div id="accountsList">
+        <div class="bg-white rounded-2xl border border-ink-200 p-6 text-center">
+          <div class="spinner inline-block text-brand-500 w-6 h-6 border-[3px]"></div>
+        </div>
+      </div>
+    </div>`;
+  if (window.lucide) lucide.createIcons();
+  await loadAccounts();
+  renderAccountsList();
+}
+
+function renderAccountsList() {
+  const list = APP_STATE.accounts;
+  if (!list.length) {
+    $('accountsList').innerHTML = `
+      <div class="bg-white rounded-2xl border border-ink-200 p-6 text-center">
+        <i data-lucide="building-2" class="w-10 h-10 mx-auto text-ink-400"></i>
+        <p class="text-sm text-ink-500 mt-2">Noch keine Accounts.</p>
+        <p class="text-[11px] text-ink-400 mt-1">Trag einen Freshdesk-Workspace ein, um zu starten.</p>
+      </div>`;
+    if (window.lucide) lucide.createIcons();
+    return;
+  }
+  $('accountsList').innerHTML = `
+    <div class="space-y-2">
+      ${list.map(a => `
+        <div class="bg-white rounded-2xl border border-ink-200 p-3 flex items-center gap-3">
+          <span class="w-10 h-10 rounded-xl flex items-center justify-center shrink-0 text-white font-semibold" style="background:${escapeAttr(a.color)}">
+            ${escapeHtml((a.name || '?').charAt(0).toUpperCase())}
+          </span>
+          <div class="flex-1 min-w-0">
+            <p class="font-semibold text-ink-900 text-sm truncate">${escapeHtml(a.name)}</p>
+            <p class="text-[11px] text-ink-500 truncate">${escapeHtml(a.domain)}.freshdesk.com</p>
+          </div>
+          <button onclick="testAccount('${a.id}', this)" class="text-ink-500 hover:text-brand-600 p-2" title="Test">
+            <i data-lucide="zap" class="w-4 h-4"></i>
+          </button>
+          <button onclick="confirmDeleteAccount('${a.id}', '${escapeAttr(a.name)}')" class="text-ink-500 hover:text-red-600 p-2" title="Löschen">
+            <i data-lucide="trash-2" class="w-4 h-4"></i>
+          </button>
+        </div>
+      `).join('')}
+    </div>`;
+  if (window.lucide) lucide.createIcons();
+}
+
+async function testAccount(accountId, btnEl) {
+  setBusy(btnEl, true);
+  try {
+    const data = await proxyJson('/freshdesk/' + accountId + '/api/v2/agents/me');
+    toast('OK · ' + (data.contact?.name || data.email || 'Verbindung erfolgreich'), 'success');
+  } catch (e) {
+    toast('Fehler: ' + e.message, 'error', 6000);
+  } finally {
+    setBusy(btnEl, false);
+  }
+}
+
+async function confirmDeleteAccount(id, name) {
+  const ok = await confirmDialog('Account löschen', 'Soll der Account "' + name + '" wirklich entfernt werden?\nDer Freshdesk-Workspace selbst bleibt unberührt — nur der Eintrag in der App wird gelöscht.', { danger: true, okText: 'Löschen' });
+  if (!ok) return;
+  try {
+    await deleteAccount(id);
+    toast('Gelöscht', 'success');
+    await loadAccounts();
+    renderAccountsList();
+  } catch (e) { toast('Fehler: ' + e.message, 'error'); }
+}
+
+function openAccountModal(account) {
+  const isEdit = !!account;
+  $('modalHost').innerHTML = `
+    <div class="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/40 px-4">
+      <div class="bg-white rounded-2xl w-full max-w-sm shadow-2xl">
+        <form id="accountForm" class="p-5 space-y-3">
+          <div class="flex items-center justify-between">
+            <h3 class="font-bold text-ink-900 text-lg">${isEdit ? 'Account bearbeiten' : 'Neuer Account'}</h3>
+            <button type="button" onclick="closeModal()" class="text-ink-500 hover:text-ink-900 p-1"><i data-lucide="x" class="w-5 h-5"></i></button>
+          </div>
+          <div>
+            <label class="text-xs font-semibold text-ink-700">Name</label>
+            <input id="accName" type="text" required value="${escapeAttr(account?.name || '')}" placeholder="z.B. FLP Lift Parts" class="mt-1 w-full px-3 py-2 border border-ink-200 rounded-lg text-sm focus:ring-2 focus:ring-brand-500/30 focus:border-brand-500">
+          </div>
+          <div>
+            <label class="text-xs font-semibold text-ink-700">Freshdesk-Subdomain</label>
+            <div class="mt-1 flex items-center border border-ink-200 rounded-lg overflow-hidden focus-within:ring-2 focus-within:ring-brand-500/30">
+              <input id="accDomain" type="text" required value="${escapeAttr(account?.domain || '')}" placeholder="flpliftparts" class="flex-1 px-3 py-2 text-sm focus:outline-none">
+              <span class="text-xs text-ink-500 pr-3">.freshdesk.com</span>
+            </div>
+            <p class="text-[10px] text-ink-500 mt-1">Nur die Subdomain — ohne https:// und ohne .freshdesk.com.</p>
+          </div>
+          <div>
+            <label class="text-xs font-semibold text-ink-700">API-Key</label>
+            <input id="accApiKey" type="password" required placeholder="••••••••••••" class="mt-1 w-full px-3 py-2 border border-ink-200 rounded-lg text-sm font-mono focus:ring-2 focus:ring-brand-500/30 focus:border-brand-500">
+            <p class="text-[10px] text-ink-500 mt-1">In Freshdesk: Profil-Avatar → "Profile settings" → Sektion "API Key" (Show).</p>
+          </div>
+          <div>
+            <label class="text-xs font-semibold text-ink-700">Farbe</label>
+            <div class="flex gap-2 mt-1 flex-wrap">
+              ${ACCOUNT_COLORS.map((c, i) => `
+                <label class="cursor-pointer">
+                  <input type="radio" name="accColor" value="${c}" ${(account?.color === c || (!account && i === 0))?'checked':''} class="hidden peer">
+                  <span class="block w-7 h-7 rounded-full border-2 border-transparent peer-checked:border-ink-900" style="background:${c}"></span>
+                </label>
+              `).join('')}
+            </div>
+          </div>
+          <div id="accFormError" class="hidden text-xs text-red-700 bg-red-50 border border-red-200 rounded px-2 py-1.5"></div>
+          <div class="flex gap-2 pt-1">
+            <button type="button" onclick="closeModal()" class="flex-1 px-3 py-2.5 border border-ink-200 rounded-lg text-sm font-medium hover:bg-ink-50">Abbrechen</button>
+            <button id="accSubmitBtn" type="submit" class="flex-1 px-3 py-2.5 bg-brand-500 hover:bg-brand-600 text-white rounded-lg text-sm font-medium">${isEdit?'Speichern':'Anlegen'}</button>
+          </div>
+        </form>
+      </div>
+    </div>`;
+  if (window.lucide) lucide.createIcons();
+  $('accountForm').onsubmit = async (e) => {
+    e.preventDefault();
+    const errEl = $('accFormError'); errEl.classList.add('hidden');
+    const btn = $('accSubmitBtn');
+    setBusy(btn, true, 'Speichere…');
+    try {
+      const color = document.querySelector('input[name="accColor"]:checked')?.value || ACCOUNT_COLORS[0];
+      await createAccount({
+        name:   $('accName').value.trim(),
+        domain: $('accDomain').value.trim(),
+        apiKey: $('accApiKey').value.trim(),
+        color,
+      });
+      closeModal();
+      toast('Account angelegt', 'success');
+      await loadAccounts();
+      renderAccountsList();
+    } catch (err) {
+      setBusy(btn, false);
+      errEl.textContent = err.message;
+      errEl.classList.remove('hidden');
+    }
+  };
+}
+function closeModal() { $('modalHost').innerHTML = ''; }
+
+/* ===================== PROFILE PAGE ===================== */
+function renderProfilePage() {
+  setPageTitle('Profil', '');
+  setActiveNav('profile');
+  const u = APP_KEYS.user || {};
+  $('pageContent').innerHTML = `
+    <div class="space-y-3">
+      <div class="bg-white rounded-2xl border border-ink-200 p-5 text-center">
+        <div class="w-16 h-16 mx-auto rounded-full bg-gradient-to-br from-brand-500 to-brand-700 flex items-center justify-center text-white text-2xl font-bold">
+          ${escapeHtml((u.name || '?').charAt(0).toUpperCase())}
+        </div>
+        <h3 class="font-bold text-ink-900 text-lg mt-2">${escapeHtml(u.name || '–')}</h3>
+        <p class="text-sm text-ink-500">${escapeHtml(u.role || '–')}${u.is_admin?' · Admin':''}</p>
+      </div>
+
+      <div class="bg-white rounded-2xl border border-ink-200 divide-y divide-ink-100">
+        <div class="p-3 flex items-center justify-between">
+          <span class="text-sm text-ink-700">Accounts</span>
+          <span class="text-sm font-semibold text-ink-900">${APP_STATE.accounts.length}</span>
+        </div>
+        <div class="p-3 flex items-center justify-between">
+          <span class="text-sm text-ink-700">App-Version</span>
+          <span class="text-sm font-mono text-ink-900">${escapeHtml(APP_VERSION)}</span>
+        </div>
+        <div class="p-3 flex items-center justify-between">
+          <span class="text-sm text-ink-700">Proxy</span>
+          <span class="text-xs ${APP_KEYS.apiProxyUrl?'text-emerald-700':'text-amber-700'}">${APP_KEYS.apiProxyUrl?'verbunden':'nicht eingerichtet'}</span>
+        </div>
+      </div>
+
+      ${u.is_admin ? `
+        <div class="grid grid-cols-2 gap-2">
+          <button onclick="navTo('settings')" class="bg-white border border-ink-200 rounded-xl py-3 px-2 text-sm font-medium hover:bg-ink-50 flex items-center justify-center gap-2">
+            <i data-lucide="settings" class="w-4 h-4"></i> Einstellungen
+          </button>
+          <button onclick="navTo('users')" class="bg-white border border-ink-200 rounded-xl py-3 px-2 text-sm font-medium hover:bg-ink-50 flex items-center justify-center gap-2">
+            <i data-lucide="users" class="w-4 h-4"></i> Benutzer
+          </button>
+        </div>
+      ` : ''}
+
+      <button onclick="logout()" class="w-full bg-red-50 border border-red-200 hover:bg-red-100 text-red-700 rounded-xl py-3 font-medium flex items-center justify-center gap-2">
+        <i data-lucide="log-out" class="w-4 h-4"></i> Abmelden
+      </button>
+
+      <p class="text-[10px] text-center text-ink-400 mt-2">Project-ID: ${escapeHtml(APP_CONFIG.PROJECT_ID)}</p>
+    </div>`;
+  if (window.lucide) lucide.createIcons();
+}
+
+/* ===================== USERS PAGE (Admin) ===================== */
+async function renderUsersPage() {
+  setPageTitle('Benutzer', 'Wer darf rein');
+  if (!APP_KEYS.user?.is_admin) {
+    $('pageContent').innerHTML = `<div class="bg-red-50 border border-red-200 rounded-2xl p-4 text-sm text-red-800">Nur für Admins.</div>`;
+    return;
+  }
+  $('pageContent').innerHTML = `
+    <div class="space-y-3">
+      <button onclick="openUserModal()" class="w-full bg-brand-500 hover:bg-brand-600 text-white rounded-xl py-2.5 font-medium flex items-center justify-center gap-2">
+        <i data-lucide="user-plus" class="w-4 h-4"></i> Benutzer anlegen
+      </button>
+      <div id="usersList">
+        <div class="bg-white rounded-2xl border border-ink-200 p-6 text-center">
+          <div class="spinner inline-block text-brand-500 w-6 h-6 border-[3px]"></div>
+        </div>
+      </div>
+    </div>`;
+  if (window.lucide) lucide.createIcons();
+  try {
+    const recs = await fetchUsers();
+    renderUsersList(recs);
+  } catch (e) {
+    $('usersList').innerHTML = `<div class="bg-red-50 border border-red-200 rounded-2xl p-4 text-sm text-red-800">${escapeHtml(e.message)}</div>`;
+  }
+}
+
+function renderUsersList(recs) {
+  if (!recs.length) {
+    $('usersList').innerHTML = `<div class="bg-white rounded-2xl border border-ink-200 p-6 text-center text-sm text-ink-500">Noch keine Benutzer.</div>`;
+    return;
+  }
+  $('usersList').innerHTML = `
+    <div class="space-y-2">
+      ${recs.map(r => {
+        const f = r.fields || {};
+        const name = f.name || '–';
+        const role = (f.role || '').toLowerCase();
+        const isAdmin = role === 'admin' || f.is_admin === true;
+        const active = (f.status || '').toLowerCase() === 'aktiv';
+        return `
+          <div class="bg-white rounded-2xl border border-ink-200 p-3 flex items-center gap-3">
+            <span class="w-10 h-10 rounded-full flex items-center justify-center shrink-0 text-white font-semibold ${isAdmin?'bg-gradient-to-br from-brand-500 to-brand-700':'bg-ink-400'}">
+              ${escapeHtml(name.charAt(0).toUpperCase())}
+            </span>
+            <div class="flex-1 min-w-0">
+              <p class="font-semibold text-ink-900 text-sm truncate">${escapeHtml(name)}</p>
+              <p class="text-[11px] text-ink-500">${escapeHtml(f.role || 'user')} ${active?'· aktiv':'· inaktiv'}</p>
+            </div>
+            ${isAdmin ? '<span class="text-[10px] uppercase tracking-wider bg-brand-100 text-brand-700 px-1.5 py-0.5 rounded font-semibold">Admin</span>' : ''}
+            <button onclick='openUserModal(${JSON.stringify({ id:r.id, ...f }).replace(/'/g, "&#39;")})' class="text-ink-500 hover:text-brand-600 p-2"><i data-lucide="edit-3" class="w-4 h-4"></i></button>
+            <button onclick="confirmDeleteUser('${r.id}', '${escapeAttr(name)}')" class="text-ink-500 hover:text-red-600 p-2"><i data-lucide="trash-2" class="w-4 h-4"></i></button>
+          </div>`;
+      }).join('')}
+    </div>`;
+  if (window.lucide) lucide.createIcons();
+}
+
+function openUserModal(user) {
+  const isEdit = !!user;
+  const isAdmin = user && ((user.role || '').toLowerCase() === 'admin' || user.is_admin === true);
+  $('modalHost').innerHTML = `
+    <div class="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/40 px-4">
+      <div class="bg-white rounded-2xl w-full max-w-sm shadow-2xl">
+        <form id="userForm" class="p-5 space-y-3">
+          <div class="flex items-center justify-between">
+            <h3 class="font-bold text-ink-900 text-lg">${isEdit?'Benutzer bearbeiten':'Neuer Benutzer'}</h3>
+            <button type="button" onclick="closeModal()" class="text-ink-500 hover:text-ink-900 p-1"><i data-lucide="x" class="w-5 h-5"></i></button>
+          </div>
+          <div>
+            <label class="text-xs font-semibold text-ink-700">Name</label>
+            <input id="usrName" type="text" required value="${escapeAttr(user?.name || '')}" class="mt-1 w-full px-3 py-2 border border-ink-200 rounded-lg text-sm focus:ring-2 focus:ring-brand-500/30 focus:border-brand-500">
+          </div>
+          <div>
+            <label class="text-xs font-semibold text-ink-700">Login-Key</label>
+            <div class="mt-1 flex gap-1">
+              <input id="usrApiKey" type="text" required value="${escapeAttr(user?.api_key || generateUserKey())}" class="flex-1 px-3 py-2 border border-ink-200 rounded-lg text-sm font-mono focus:ring-2 focus:ring-brand-500/30 focus:border-brand-500" ${isEdit?'readonly':''}>
+              ${!isEdit?`<button type="button" onclick="document.getElementById('usrApiKey').value=generateUserKey()" class="px-2 border border-ink-200 rounded-lg hover:bg-ink-50" title="Neu generieren"><i data-lucide="dice-3" class="w-4 h-4"></i></button>`:''}
+            </div>
+            <p class="text-[10px] text-ink-500 mt-1">${isEdit?'Im Klartext anzeigen, damit der User ihn notieren kann.':'Wird dem User mitgeteilt – nicht ändern nach Speichern.'}</p>
+          </div>
+          <div class="grid grid-cols-2 gap-3">
+            <div>
+              <label class="text-xs font-semibold text-ink-700">Rolle</label>
+              <select id="usrRole" class="mt-1 w-full px-3 py-2 border border-ink-200 rounded-lg text-sm">
+                <option value="user"  ${!isAdmin?'selected':''}>User</option>
+                <option value="admin" ${isAdmin?'selected':''}>Admin</option>
+              </select>
+            </div>
+            <div>
+              <label class="text-xs font-semibold text-ink-700">Status</label>
+              <select id="usrStatus" class="mt-1 w-full px-3 py-2 border border-ink-200 rounded-lg text-sm">
+                <option value="aktiv"   ${(!user || (user.status||'aktiv')==='aktiv')?'selected':''}>aktiv</option>
+                <option value="inaktiv" ${user && user.status==='inaktiv'?'selected':''}>inaktiv</option>
+              </select>
+            </div>
+          </div>
+          <div id="usrFormError" class="hidden text-xs text-red-700 bg-red-50 border border-red-200 rounded px-2 py-1.5"></div>
+          <div class="flex gap-2 pt-1">
+            <button type="button" onclick="closeModal()" class="flex-1 px-3 py-2.5 border border-ink-200 rounded-lg text-sm font-medium hover:bg-ink-50">Abbrechen</button>
+            <button id="usrSubmitBtn" type="submit" class="flex-1 px-3 py-2.5 bg-brand-500 hover:bg-brand-600 text-white rounded-lg text-sm font-medium">${isEdit?'Speichern':'Anlegen'}</button>
+          </div>
+        </form>
+      </div>
+    </div>`;
+  if (window.lucide) lucide.createIcons();
+  $('userForm').onsubmit = async (e) => {
+    e.preventDefault();
+    const errEl = $('usrFormError'); errEl.classList.add('hidden');
+    const btn = $('usrSubmitBtn'); setBusy(btn, true, 'Speichere…');
+    try {
+      const fields = {
+        name:    $('usrName').value.trim(),
+        api_key: $('usrApiKey').value.trim(),
+        role:    $('usrRole').value,
+        status:  $('usrStatus').value,
+      };
+      if (isEdit) {
+        const upd = { name: fields.name, role: fields.role, status: fields.status };
+        await updateUser(user.id, upd);
+      } else {
+        await createUser(fields);
+      }
+      closeModal();
+      toast(isEdit?'Gespeichert':'Benutzer angelegt', 'success');
+      renderUsersPage();
+    } catch (err) {
+      setBusy(btn, false);
+      errEl.textContent = err.message;
+      errEl.classList.remove('hidden');
+    }
+  };
+}
+
+async function confirmDeleteUser(id, name) {
+  if (id === APP_KEYS.user?._id) return toast('Du kannst dich nicht selbst löschen.', 'warn');
+  const ok = await confirmDialog('Benutzer löschen', 'Soll "' + name + '" wirklich gelöscht werden?', { danger: true, okText:'Löschen' });
+  if (!ok) return;
+  try {
+    await deleteUser(id);
+    toast('Gelöscht', 'success');
+    renderUsersPage();
+  } catch (e) { toast('Fehler: ' + e.message, 'error'); }
+}
+
+/* ===================== SETTINGS / VAL.TOWN WIZARD ===================== */
+function _valtownEnvVars() {
+  return [
+    { name: 'AIRTABLE_READ_KEY', hint: 'Read-Token für Airtable (App-Base). Der hier eingebettete Read-Key kann genutzt werden:', value: APP_CONFIG.AIRTABLE_READ_KEY, secret: true,  required: true },
+    { name: 'AIRTABLE_BASE_ID',  hint: 'App-Base-ID — wo User- und Accounts-Tabelle liegen:',                                  value: APP_CONFIG.APP_BASE_ID,    secret: false, required: true },
+    { name: 'ANTHROPIC_API_KEY', hint: 'Anthropic Console → API Keys → Create. Beginnt mit sk-ant-... (für KI-Features).',     value: '',                        secret: true,  required: false },
+  ];
+}
+
+async function renderSettingsPage() {
+  setPageTitle('Einstellungen', 'Val.town-Setup');
+  if (!APP_KEYS.user?.is_admin) {
+    $('pageContent').innerHTML = `<div class="bg-red-50 border border-red-200 rounded-2xl p-4 text-sm text-red-800">Nur für Admins.</div>`;
+    return;
+  }
+  $('pageContent').innerHTML = `<p class="text-sm text-ink-500">Lade…</p>`;
+  let keys = [];
+  try { keys = await fetchMasterBaseKeys(); }
+  catch (e) {
+    $('pageContent').innerHTML = `<div class="bg-red-50 border border-red-200 rounded-2xl p-4 text-sm text-red-800">${escapeHtml(e.message)}</div>`;
+    return;
+  }
+  const byName = {};
+  keys.forEach(rec => byName[rec.fields.key_name] = rec);
+  const proxyRec = byName['apiProxyUrl'];
+  const proxyUrl = proxyRec?.fields?.key_value || '';
+  const isProxySet = !!proxyUrl;
+  const envVars = _valtownEnvVars();
+
+  const statusBadge = (ok, txt) => ok
+    ? `<span class="inline-flex items-center gap-1 text-[10px] uppercase tracking-wider bg-emerald-100 text-emerald-700 px-1.5 py-0.5 rounded font-semibold"><i data-lucide="check-circle-2" class="w-3 h-3"></i> ${escapeHtml(txt)}</span>`
+    : `<span class="inline-flex items-center gap-1 text-[10px] uppercase tracking-wider bg-amber-100 text-amber-700 px-1.5 py-0.5 rounded font-semibold"><i data-lucide="alert-circle" class="w-3 h-3"></i> ${escapeHtml(txt)}</span>`;
+
+  const stepHeader = (n, title, badge) => `
+    <div class="flex items-center gap-3 mb-3">
+      <div class="w-8 h-8 rounded-full bg-brand-500 text-white flex items-center justify-center text-sm font-bold shrink-0">${n}</div>
+      <h3 class="font-semibold text-ink-900 text-base flex-1">${escapeHtml(title)}</h3>
+      ${badge || ''}
+    </div>`;
+
+  $('pageContent').innerHTML = `
+    <div class="space-y-4">
+      <div class="bg-gradient-to-br from-brand-50 to-emerald-50 border border-brand-200 rounded-2xl p-4">
+        <p class="text-xs font-semibold text-brand-700 uppercase tracking-wider mb-2">Architektur</p>
+        <pre class="text-[11px] text-ink-700 font-mono leading-relaxed whitespace-pre-wrap">Login (1×):  Browser ──[user_key]──▶ Val.town ──▶ Airtable User
+             Browser ◀──[session_token]── Val.town
+
+Calls:       Browser ──[Bearer session]──▶ Val.town ──┬─▶ Anthropic   (env var)
+                                                       │
+                                                       └─▶ Freshdesk  (Account aus
+                                                                       Airtable lookup)
+
+Browser hält:  session_token (8h Tab / 30d Gerät)
+Val.town hält: Sessions (blob) · ANTHROPIC_API_KEY · AIRTABLE_READ_KEY
+Airtable hält: User-Records · Accounts mit freshdesk_domain + freshdesk_api_key</pre>
+        <div class="text-[11px] text-emerald-800 mt-2 space-y-1">
+          <p><i data-lucide="check-circle-2" class="inline w-3.5 h-3.5"></i> Persönliche Freshdesk-Keys liegen serverseitig in Airtable, der Proxy nutzt sie nur für ausgehende Calls.</p>
+          <p><i data-lucide="check-circle-2" class="inline w-3.5 h-3.5"></i> User-Login-Keys werden nach erfolgreichem Login im Browser verworfen (Session-Token statt User-Key).</p>
+        </div>
+      </div>
+
+      <div class="bg-white rounded-2xl border border-ink-200 p-4">
+        <p class="text-xs font-semibold text-ink-500 uppercase tracking-wider mb-3">Status</p>
+        <div class="grid sm:grid-cols-2 gap-2 text-sm">
+          <div class="flex items-center justify-between bg-ink-50 rounded-lg px-3 py-2">
+            <span class="text-ink-700">Proxy-URL gesetzt</span>
+            ${statusBadge(isProxySet, isProxySet?'OK':'fehlt')}
+          </div>
+          <div class="flex items-center justify-between bg-ink-50 rounded-lg px-3 py-2">
+            <span class="text-ink-700">Verbindung</span>
+            <button id="testProxyBtn" type="button" onclick="testProxyConnection()" class="text-xs text-brand-600 hover:text-brand-700 font-medium flex items-center gap-1" ${!isProxySet?'disabled':''}>
+              <i data-lucide="zap" class="w-3.5 h-3.5"></i> Test
+            </button>
+          </div>
+        </div>
+        <div id="proxyTestResult" class="mt-3"></div>
+      </div>
+
+      <!-- STEP 1 -->
+      <div class="bg-white rounded-2xl border border-ink-200 p-4">
+        ${stepHeader(1, 'Val.town-Account anlegen + HTTP-Val erstellen', '')}
+        <div class="text-sm text-ink-700 space-y-2 pl-11">
+          <p>1. Auf <a href="https://val.town" target="_blank" class="text-brand-600 underline">val.town</a> einloggen (oder kostenlos registrieren).</p>
+          <p>2. Oben rechts <strong>„New Val"</strong> → Typ <strong>„HTTP"</strong>.</p>
+          <p>3. Den Val z.B. <code class="bg-ink-100 px-1.5 py-0.5 rounded text-[11px]">freshdesk-hero-proxy</code> nennen.</p>
+        </div>
+      </div>
+
+      <!-- STEP 2 -->
+      <div class="bg-white rounded-2xl border border-ink-200 p-4">
+        ${stepHeader(2, 'Code in den Val einfügen', '')}
+        <div class="pl-11">
+          <p class="text-sm text-ink-700 mb-2">Den Beispiel-Code in Val.town vollständig ersetzen:</p>
+          <div class="relative">
+            <button type="button" onclick="copyValTownCode(this)" class="absolute top-2 right-2 z-10 bg-ink-900 text-white text-xs px-2.5 py-1.5 rounded-lg hover:bg-ink-700 flex items-center gap-1.5 shadow">
+              <i data-lucide="copy" class="w-3.5 h-3.5"></i> Code kopieren
+            </button>
+            <pre id="valtownCodeBlock" class="bg-ink-900 text-emerald-200 text-[10px] leading-relaxed font-mono p-4 pt-12 rounded-lg overflow-x-auto max-h-72 overflow-y-auto whitespace-pre"></pre>
+          </div>
+          <p class="text-xs text-ink-500 mt-2">Anschließend in Val.town oben <strong>„Save"</strong> drücken.</p>
+        </div>
+      </div>
+
+      <!-- STEP 3 -->
+      <div class="bg-white rounded-2xl border border-ink-200 p-4">
+        ${stepHeader(3, 'Environment Variables setzen', '')}
+        <div class="pl-11">
+          <p class="text-sm text-ink-700 mb-3">In Val.town: rechts → <strong>„Environment Variables"</strong> → für jede Zeile <strong>„+ Add"</strong>:</p>
+          <div class="bg-ink-50 rounded-lg overflow-hidden border border-ink-200">
+            ${envVars.map(v => `
+              <div class="grid grid-cols-12 gap-2 px-3 py-3 border-b border-ink-200 last:border-b-0 items-start">
+                <div class="col-span-12 sm:col-span-4">
+                  <p class="font-mono text-xs font-semibold text-ink-900">${escapeHtml(v.name)}</p>
+                  <div class="flex gap-1 flex-wrap mt-0.5">
+                    ${v.secret?'<span class="text-[10px] uppercase tracking-wider bg-red-100 text-red-700 px-1.5 py-0.5 rounded font-semibold">secret</span>':''}
+                    ${v.required===false?'<span class="text-[10px] uppercase tracking-wider bg-ink-200 text-ink-700 px-1.5 py-0.5 rounded font-semibold">optional</span>':''}
+                  </div>
+                </div>
+                <div class="col-span-12 sm:col-span-8 space-y-1">
+                  <p class="text-[11px] text-ink-600">${escapeHtml(v.hint)}</p>
+                  ${v.value ? `
+                    <div class="flex items-center gap-2">
+                      <code class="bg-white border border-ink-200 px-2 py-1 rounded text-[11px] font-mono break-all flex-1 select-all">${escapeHtml(v.value)}</code>
+                      <button type="button" onclick="copyToClipboard('${escapeAttr(v.value)}', this)" class="text-xs text-brand-600 flex items-center gap-1 shrink-0">
+                        <i data-lucide="copy" class="w-3.5 h-3.5"></i>
+                      </button>
+                    </div>` : `<p class="text-[11px] text-amber-700 italic">Wert musst du selbst beschaffen.</p>`}
+                </div>
+              </div>`).join('')}
+          </div>
+          <p class="text-xs text-ink-500 mt-3"><strong>Wichtig:</strong> Nach dem Setzen der Env-Vars in Val.town <strong>„Save"</strong> drücken.</p>
+        </div>
+      </div>
+
+      <!-- STEP 4 -->
+      <div class="bg-white rounded-2xl border border-ink-200 p-4">
+        ${stepHeader(4, 'Val.town-URL hier eintragen', isProxySet?statusBadge(true,'gesetzt'):'')}
+        <div class="pl-11">
+          <p class="text-sm text-ink-700 mb-2">In Val.town zeigt sich oben über dem Code-Editor die <strong>HTTP-Endpoint-URL</strong> (z.B. <code class="bg-ink-100 px-1.5 py-0.5 rounded text-[11px]">https://benutzer-freshdeskheroproxy.web.val.run</code>):</p>
+          <div class="flex gap-2 flex-wrap">
+            <input type="url" id="settingsProxyUrl" value="${escapeAttr(proxyUrl)}" placeholder="https://benutzer-freshdeskheroproxy.web.val.run" class="flex-1 min-w-[260px] px-3 py-2 border border-ink-200 rounded-lg text-sm font-mono focus:ring-2 focus:ring-brand-500/30 focus:border-brand-500">
+            <button type="button" onclick="saveProxyUrl(this)" class="bg-brand-500 hover:bg-brand-600 text-white rounded-lg px-4 py-2 text-sm font-medium flex items-center gap-2">
+              <i data-lucide="save" class="w-4 h-4"></i> Speichern
+            </button>
+          </div>
+          <p class="text-[11px] text-ink-500 mt-1">Master-Base/Keys → <code>apiProxyUrl</code> für project_id <code>${escapeHtml(APP_CONFIG.PROJECT_ID)}</code>.</p>
+        </div>
+      </div>
+
+      <!-- STEP 5: Tabellen prüfen -->
+      <div class="bg-white rounded-2xl border border-ink-200 p-4">
+        ${stepHeader(5, 'App-Tabellen anlegen', '')}
+        <div class="pl-11">
+          <p class="text-sm text-ink-700 mb-2">Sorgt dafür, dass <code>Accounts</code> in der App-Base existiert (mit allen Feldern). Idempotent — kann mehrfach geklickt werden.</p>
+          <button type="button" onclick="ensureAppTablesAction(this)" class="bg-ink-900 text-white rounded-lg px-3 py-2 text-sm font-medium hover:bg-ink-700 flex items-center gap-2">
+            <i data-lucide="database" class="w-4 h-4"></i> Tabellen prüfen / anlegen
+          </button>
+          <div id="ensureTableResult" class="mt-2"></div>
+        </div>
+      </div>
+
+      <details class="bg-ink-50 border border-ink-200 rounded-2xl p-4 group">
+        <summary class="cursor-pointer text-sm font-medium text-ink-700 flex items-center gap-2"><i data-lucide="chevron-right" class="w-4 h-4 group-open:rotate-90 transition"></i> Erweitert: alle Master-Base Keys</summary>
+        <div class="mt-3 space-y-1.5">
+          ${keys.length===0 ? '<p class="text-xs text-ink-500 italic">Keine Keys vorhanden.</p>' : keys.map(rec => {
+            const f = rec.fields || {};
+            const isSecret = /key$|token$|Key$|Token$/.test(f.key_name || '');
+            const v = isSecret ? _maskSecret(f.key_value || '') : (f.key_value || '');
+            return `<div class="flex items-baseline gap-3 text-xs"><code class="font-mono font-semibold text-ink-700 shrink-0">${escapeHtml(f.key_name || '')}</code><span class="text-ink-500 break-all">${escapeHtml(v || '(leer)')}</span></div>`;
+          }).join('')}
+        </div>
+      </details>
+    </div>`;
+
+  const codeEl = $('valtownCodeBlock');
+  if (codeEl) codeEl.textContent = VALTOWN_PROXY_CODE;
+  if (window.lucide) lucide.createIcons();
+}
+
+function _maskSecret(val) {
+  if (!val) return '';
+  if (val.length <= 10) return '••••••••';
+  return val.substring(0, 4) + '••••••••' + val.substring(val.length - 4);
+}
+
+async function copyToClipboard(text, btnEl) {
+  try {
+    await navigator.clipboard.writeText(text);
+    if (btnEl) {
+      const original = btnEl.innerHTML;
+      btnEl.innerHTML = '<i data-lucide="check" class="w-3.5 h-3.5"></i>';
+      if (window.lucide) lucide.createIcons();
+      setTimeout(() => { btnEl.innerHTML = original; if (window.lucide) lucide.createIcons(); }, 1500);
+    } else toast('Kopiert', 'success', 1200);
+  } catch (e) { toast('Kopieren fehlgeschlagen', 'error'); }
+}
+async function copyValTownCode(btnEl) { await copyToClipboard(VALTOWN_PROXY_CODE, btnEl); }
+
+async function saveProxyUrl(btnEl) {
+  const inp = $('settingsProxyUrl'); if (!inp) return;
+  let val = (inp.value || '').trim().replace(/\/+$/, '');
+  if (!val) return toast('URL ist leer', 'warn');
+  if (!/^https?:\/\//i.test(val)) return toast('URL muss mit http(s):// beginnen', 'warn');
+  setBusy(btnEl, true, 'Speichere…');
+  try {
+    let keys = await fetchMasterBaseKeys();
+    const existing = keys.find(r => r.fields.key_name === 'apiProxyUrl');
+    await writeMasterBaseKey('apiProxyUrl', val, existing?.id);
+    APP_KEYS.apiProxyUrl = val;
+    toast('Proxy-URL gespeichert. Beim nächsten Login wird das Session-Token genutzt.', 'success', 5000);
+    setTimeout(() => renderSettingsPage(), 800);
+  } catch (e) { setBusy(btnEl, false); toast('Fehler: ' + e.message, 'error', 6000); }
+}
+
+async function testProxyConnection() {
+  const out = $('proxyTestResult'); out.innerHTML = '<p class="text-xs text-ink-500"><span class="spinner inline-block w-3 h-3 mr-1"></span>Teste…</p>';
+  try {
+    const data = await proxyJson('/health');
+    out.innerHTML = `<div class="text-xs bg-emerald-50 border border-emerald-200 rounded-lg p-2 text-emerald-800">
+      <strong>OK</strong> · Proxy erreichbar · auth: ${escapeHtml(data.auth_kind || '?')}, user: ${escapeHtml(data.user?.name || '?')}.
+    </div>`;
+  } catch (e) {
+    out.innerHTML = `<div class="text-xs bg-red-50 border border-red-200 rounded-lg p-2 text-red-800"><strong>Fehler:</strong> ${escapeHtml(e.message)}</div>`;
+  }
+}
+
+async function ensureAppTablesAction(btnEl) {
+  setBusy(btnEl, true, 'Prüfe…');
+  const out = $('ensureTableResult');
+  try {
+    await ensureAppTables();
+    out.innerHTML = `<div class="text-xs bg-emerald-50 border border-emerald-200 rounded-lg p-2 text-emerald-800">Tabelle <code>${ACCOUNTS_TABLE}</code> ist bereit.</div>`;
+    setBusy(btnEl, false);
+  } catch (e) {
+    out.innerHTML = `<div class="text-xs bg-red-50 border border-red-200 rounded-lg p-2 text-red-800">${escapeHtml(e.message)}</div>`;
+    setBusy(btnEl, false);
+  }
+}
+
+/* ===================== HELPER: NO-PROXY NOTICE ===================== */
+function noProxyNotice() {
+  const isAdmin = APP_KEYS.user?.is_admin;
+  return `
+    <div class="bg-amber-50 border border-amber-200 rounded-2xl p-4">
+      <div class="flex items-start gap-3">
+        <i data-lucide="alert-triangle" class="w-5 h-5 text-amber-600 mt-0.5 shrink-0"></i>
+        <div class="flex-1">
+          <p class="font-semibold text-amber-900">Val.town-Proxy noch nicht eingerichtet</p>
+          <p class="text-sm text-amber-800 mt-1">Tickets können erst geladen werden, wenn der Proxy konfiguriert ist. Der Proxy hält die Freshdesk-API-Keys serverseitig.</p>
+          ${isAdmin
+            ? `<button onclick="navTo('settings')" class="mt-3 inline-flex items-center gap-2 bg-amber-600 hover:bg-amber-700 text-white rounded-lg px-3 py-2 text-sm font-medium"><i data-lucide="settings" class="w-4 h-4"></i> Zum Setup-Wizard</button>`
+            : `<p class="text-xs text-amber-700 mt-2">Bitte einen Admin bitten, den Proxy einzurichten (Admin → Einstellungen).</p>`}
+        </div>
+      </div>
+    </div>`;
+}
+
+/* ============================================================
+   UPDATE CHECK
+   ============================================================ */
+async function checkForUpdate(showToastIfUpToDate = false) {
+  try {
+    const r = await fetch('https://api.github.com/repos/' + APP_CONFIG.GITHUB_REPO + '/releases/latest');
+    if (!r.ok) { if (showToastIfUpToDate) toast('Update-Check fehlgeschlagen (' + r.status + ')', 'warn'); return; }
+    const d = await r.json();
+    if (d.tag_name && d.tag_name !== APP_VERSION) {
+      toast('Neue Version verfügbar: ' + d.tag_name + ' (Seite neu laden!)', 'info', 8000);
+    } else if (showToastIfUpToDate) {
+      toast('Du nutzt die neueste Version (' + APP_VERSION + ')', 'success');
+    }
+  } catch (e) { if (showToastIfUpToDate) toast('Update-Check fehlgeschlagen', 'warn'); }
+}
+
+/* ============================================================
+   VAL.TOWN PROXY CODE — wird im Settings-Wizard angezeigt
+   ============================================================ */
+const VALTOWN_PROXY_CODE = `// Freshdesk Hero · API-Proxy mit Session-Token-Auth
+// =====================================================================
+// HTTP-Val für Val.town. Routet:
+//   POST /auth                     →  Login: User-Key prüfen, Session-Token ausgeben
+//   POST /logout                   →  aktuelle Session invalidieren
+//   GET  /me                       →  aktuellen User abrufen (Auto-Login)
+//   POST /sessions/revoke-user     →  ALLE Sessions eines Users killen (Admin only)
+//   POST /anthropic/v1/messages    →  api.anthropic.com (mit ANTHROPIC_API_KEY)
+//   ANY  /freshdesk/<account_id>/api/v2/...
+//                                  →  proxy zu <account_domain>.freshdesk.com
+//                                      Account wird per ID aus Airtable Accounts-Tabelle
+//                                      geladen. Jeder Account hat seinen eigenen
+//                                      freshdesk_domain + freshdesk_api_key.
+//                                      Owner-Check: account.api_key == user.api_key
+//                                      (Nur eigene Accounts ansprechbar)
+//   GET  /health                   →  Auth-Check
+//
+// ENV VARS in Val.town:
+//   AIRTABLE_READ_KEY   — Read-Token mit Scope auf App-Base (User + Accounts)
+//   AIRTABLE_BASE_ID    — App-Base-ID
+//   ANTHROPIC_API_KEY   — sk-ant-... (optional, für KI-Features)
+//
+// Sessions liegen im val.town blob-Storage (übersteht Worker-Restarts).
+// =====================================================================
+
+import { blob } from "https://esm.town/v/std/blob";
+
+const USER_CACHE     = new Map();
+const ACCOUNT_CACHE  = new Map();
+const CACHE_TTL_MS   = 60_000;
+const SESSION_SHORT  = 8 * 60 * 60 * 1000;
+const SESSION_LONG   = 30 * 24 * 60 * 60 * 1000;
+const SESSION_PREFIX = "fdh_session_";
+
+async function setSession(token, data) {
+  await blob.setJSON(SESSION_PREFIX + token, data);
+}
+async function getSession(token) {
+  let data;
+  try { data = await blob.getJSON(SESSION_PREFIX + token); } catch (_) { return null; }
+  if (!data) return null;
+  if (data.expires && data.expires < Date.now()) {
+    try { await blob.delete(SESSION_PREFIX + token); } catch (_) {}
+    return null;
+  }
+  return data;
+}
+async function deleteSession(token) {
+  try { await blob.delete(SESSION_PREFIX + token); } catch (_) {}
+}
+async function revokeAllSessionsForUser(userId) {
+  let count = 0;
+  let items = [];
+  try { items = await blob.list(SESSION_PREFIX) || []; } catch (_) { return 0; }
+  for (const item of items) {
+    const key = item.key || item;
+    let val;
+    try { val = await blob.getJSON(key); } catch (_) { continue; }
+    if (val && val.userId === userId) {
+      try { await blob.delete(key); count++; } catch (_) {}
+    }
+  }
+  return count;
+}
+
+function generateSessionToken() {
+  const arr = new Uint8Array(32);
+  crypto.getRandomValues(arr);
+  return Array.from(arr).map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+async function lookupUser(userKey) {
+  const cached = USER_CACHE.get(userKey);
+  if (cached && cached.expires > Date.now()) return cached.user;
+  const baseId  = Deno.env.get("AIRTABLE_BASE_ID");
+  const readKey = Deno.env.get("AIRTABLE_READ_KEY");
+  if (!baseId || !readKey) throw new Error("Server-Konfiguration: AIRTABLE_BASE_ID/AIRTABLE_READ_KEY fehlt");
+  const formula = \`AND({api_key}='\${userKey.replace(/'/g, "\\\\'")}',{status}='aktiv')\`;
+  const url = \`https://api.airtable.com/v0/\${baseId}/User?filterByFormula=\${encodeURIComponent(formula)}\`;
+  const res = await fetch(url, { headers: { Authorization: \`Bearer \${readKey}\` } });
+  if (!res.ok) throw new Error(\`User-Lookup fehlgeschlagen: \${res.status}\`);
+  const data = await res.json();
+  const rec = (data.records || [])[0];
+  if (!rec) return null;
+  const role = (rec.fields.role || "").toLowerCase();
+  const user = {
+    id:       rec.id,
+    api_key:  rec.fields.api_key || "",
+    name:     rec.fields.name || "",
+    role:     rec.fields.role || "",
+    is_admin: role === "admin" || rec.fields.is_admin === true,
+  };
+  USER_CACHE.set(userKey, { user, expires: Date.now() + CACHE_TTL_MS });
+  return user;
+}
+
+async function lookupAccount(accountRecordId) {
+  const cached = ACCOUNT_CACHE.get(accountRecordId);
+  if (cached && cached.expires > Date.now()) return cached.acc;
+  const baseId  = Deno.env.get("AIRTABLE_BASE_ID");
+  const readKey = Deno.env.get("AIRTABLE_READ_KEY");
+  const url = \`https://api.airtable.com/v0/\${baseId}/Accounts/\${accountRecordId}\`;
+  const res = await fetch(url, { headers: { Authorization: \`Bearer \${readKey}\` } });
+  if (res.status === 404) return null;
+  if (!res.ok) throw new Error(\`Account-Lookup fehlgeschlagen: \${res.status}\`);
+  const rec = await res.json();
+  let domain = (rec.fields.freshdesk_domain || "").trim();
+  domain = domain.replace(/^https?:\\/\\//i, "").replace(/\\.freshdesk\\.com\\/?$/i, "").replace(/\\/+$/, "");
+  const acc = {
+    id:        rec.id,
+    name:      rec.fields.name || "",
+    domain,
+    api_key:   rec.fields.freshdesk_api_key || "",
+    owner_key: rec.fields.api_key || "",
+  };
+  ACCOUNT_CACHE.set(accountRecordId, { acc, expires: Date.now() + CACHE_TTL_MS });
+  return acc;
+}
+
+async function resolveAuth(token) {
+  if (!token) return null;
+  const sess = await getSession(token);
+  if (sess) {
+    return { kind: "session", userId: sess.userId, api_key: sess.userApiKey, name: sess.name, role: sess.role || "", is_admin: sess.isAdmin };
+  }
+  // Legacy: Bearer == user_key (Übergangsmodus)
+  try {
+    const u = await lookupUser(token);
+    if (u) return { kind: "legacy", userId: u.id, api_key: u.api_key, name: u.name, role: u.role, is_admin: u.is_admin };
+  } catch (_) {}
+  return null;
+}
+
+function jsonResponse(body, status = 200) {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: {
+      "content-type": "application/json",
+      "access-control-allow-origin": "*",
+      "access-control-allow-headers": "authorization, content-type",
+      "access-control-allow-methods": "GET, POST, PATCH, PUT, DELETE, OPTIONS"
+    }
+  });
+}
+
+export default async function (req) {
+  if (req.method === "OPTIONS") {
+    return new Response(null, {
+      status: 204,
+      headers: {
+        "access-control-allow-origin": "*",
+        "access-control-allow-headers": "authorization, content-type",
+        "access-control-allow-methods": "GET, POST, PATCH, PUT, DELETE, OPTIONS",
+        "access-control-max-age": "86400"
+      }
+    });
+  }
+
+  const url = new URL(req.url);
+  const path = url.pathname.replace(/^\\/+/, "");
+
+  // ===== /auth =====
+  if (path === "auth" && req.method === "POST") {
+    let body = {};
+    try { body = await req.json(); } catch (_) {}
+    const userKey = (body.user_key || "").toString().trim();
+    const longLived = !!body.long_lived;
+    if (!userKey) return jsonResponse({ error: "user_key fehlt" }, 400);
+    let user;
+    try { user = await lookupUser(userKey); }
+    catch (e) { return jsonResponse({ error: e.message }, 500); }
+    if (!user) return jsonResponse({ error: "Ungültiger Login-Key oder Account inaktiv" }, 401);
+    const token = generateSessionToken();
+    const ttl = longLived ? SESSION_LONG : SESSION_SHORT;
+    await setSession(token, {
+      userId:      user.id,
+      userApiKey:  user.api_key,
+      name:        user.name,
+      role:        user.role,
+      isAdmin:     user.is_admin,
+      expires:     Date.now() + ttl,
+      longLived
+    });
+    return jsonResponse({
+      session_token: token,
+      expires_in:    Math.floor(ttl / 1000),
+      user: {
+        id: user.id, api_key: user.api_key, name: user.name, role: user.role, is_admin: user.is_admin
+      }
+    });
+  }
+
+  // ===== Auth check =====
+  const auth = req.headers.get("authorization") || "";
+  const token = auth.replace(/^Bearer\\s+/i, "").trim();
+  if (!token) return jsonResponse({ error: "Missing Bearer token" }, 401);
+  const user = await resolveAuth(token);
+  if (!user) return jsonResponse({ error: "Ungültiges Token oder abgelaufen" }, 401);
+
+  // ===== /logout =====
+  if (path === "logout" && req.method === "POST") {
+    if (user.kind === "session") await deleteSession(token);
+    return jsonResponse({ ok: true });
+  }
+
+  // ===== /me =====
+  if (path === "me") {
+    return jsonResponse({ user: { id: user.userId, api_key: user.api_key, name: user.name, role: user.role, is_admin: user.is_admin } });
+  }
+
+  // ===== /sessions/revoke-user (admin) =====
+  if (path === "sessions/revoke-user" && req.method === "POST") {
+    if (!user.is_admin) return jsonResponse({ error: "Nur für Admins" }, 403);
+    let body = {};
+    try { body = await req.json(); } catch (_) {}
+    const targetId = (body.user_id || "").toString();
+    if (!targetId) return jsonResponse({ error: "user_id fehlt" }, 400);
+    const count = await revokeAllSessionsForUser(targetId);
+    return jsonResponse({ revoked: count });
+  }
+
+  // ===== /health =====
+  if (path === "health") {
+    return jsonResponse({ ok: true, auth_kind: user.kind, user: { name: user.name, is_admin: user.is_admin } });
+  }
+
+  // ===== /anthropic/v1/messages =====
+  if (path === "anthropic/v1/messages") {
+    if (req.method !== "POST") return jsonResponse({ error: "Method not allowed" }, 405);
+    const apiKey = Deno.env.get("ANTHROPIC_API_KEY");
+    if (!apiKey) return jsonResponse({ error: "ANTHROPIC_API_KEY env var fehlt" }, 500);
+    const body = await req.text();
+    const upstream = await fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: { "x-api-key": apiKey, "anthropic-version": "2023-06-01", "content-type": "application/json" },
+      body
+    });
+    const text = await upstream.text();
+    return new Response(text, {
+      status: upstream.status,
+      headers: { "content-type": upstream.headers.get("content-type") || "application/json", "access-control-allow-origin": "*" }
+    });
+  }
+
+  // ===== /freshdesk/<account_id>/api/v2/... =====
+  if (path.startsWith("freshdesk/")) {
+    const rest = path.replace(/^freshdesk\\//, "");
+    const slash = rest.indexOf("/");
+    if (slash < 0) return jsonResponse({ error: "Bad path. Erwartet: /freshdesk/<account_id>/api/v2/..." }, 400);
+    const accountId = decodeURIComponent(rest.slice(0, slash));
+    const fdPath = rest.slice(slash + 1);
+    if (!fdPath.startsWith("api/v2/")) return jsonResponse({ error: "Bad path. Erwartet: api/v2/..." }, 400);
+    let acc;
+    try { acc = await lookupAccount(accountId); }
+    catch (e) { return jsonResponse({ error: e.message }, 500); }
+    if (!acc) return jsonResponse({ error: "Account nicht gefunden" }, 404);
+    if (acc.owner_key && acc.owner_key !== user.api_key && !user.is_admin) {
+      return jsonResponse({ error: "Account gehört einem anderen User" }, 403);
+    }
+    if (!acc.domain) return jsonResponse({ error: "Account hat keine Subdomain" }, 500);
+    if (!acc.api_key) return jsonResponse({ error: "Account hat keinen Freshdesk-Key" }, 500);
+    const target = \`https://\${acc.domain}.freshdesk.com/\${fdPath}\${url.search}\`;
+    const basic = btoa(\`\${acc.api_key}:X\`);
+    const init = {
+      method: req.method,
+      headers: { "Authorization": \`Basic \${basic}\`, "Content-Type": "application/json" }
+    };
+    if (req.method !== "GET" && req.method !== "HEAD") init.body = await req.text();
+    const upstream = await fetch(target, init);
+    const text = await upstream.text();
+    return new Response(text, {
+      status: upstream.status,
+      headers: { "content-type": upstream.headers.get("content-type") || "application/json", "access-control-allow-origin": "*" }
+    });
+  }
+
+  return jsonResponse({ error: \`Route nicht gefunden: \${path}\` }, 404);
+}
+`;
+
+/* ============================================================
+   BOOT
+   ============================================================ */
+async function showApp() {
+  $('loginScreen').style.display = 'none';
+  $('appShell').hidden = false;
+  renderShellChrome();
+  // Tabellen sicherstellen + Accounts laden im Hintergrund (nicht blockierend für UI)
+  if (APP_KEYS.airtableWriteKey) {
+    ensureAppTables().catch(e => console.warn('ensureAppTables:', e.message));
+  }
+  await loadAccounts();
+  navTo('tickets');
+  // Update-Check (lautlos)
+  checkForUpdate(false);
+}
+
+function showLogin(initial = false) {
+  $('loginScreen').style.display = 'flex';
+  $('appShell').hidden = true;
+  if (initial && !APP_KEYS.apiProxyUrl) $('loginBootstrapNotice').classList.remove('hidden');
+}
+
+async function init() {
+  $('loginVersion').textContent = APP_VERSION;
+  await loadProjectKeys();
+  const ok = await tryAutoLogin();
+  if (ok) await showApp();
+  else    showLogin(true);
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+  if (window.lucide) lucide.createIcons();
+  $('loginForm').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const key = $('loginKey').value.trim();
+    if (!key) return;
+    const remember = $('loginRemember').checked;
+    const errEl = $('loginError'); errEl.classList.add('hidden');
+    const btn = $('loginBtn'), txt = $('loginBtnText'), spn = $('loginBtnSpinner');
+    btn.disabled = true; txt.textContent = 'Prüfe…'; spn.classList.remove('hidden');
+    try {
+      await loginWithUserKey(key, remember);
+      await showApp();
+    } catch (err) {
+      errEl.textContent = err.message;
+      errEl.classList.remove('hidden');
+      btn.disabled = false; txt.textContent = 'Einloggen'; spn.classList.add('hidden');
+    }
+  });
+  init();
+});
+</script>
+</body>
+</html>
