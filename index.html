@@ -209,7 +209,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v1.4.2';
+const APP_VERSION = 'v1.4.3';
 // Read-Token absichtlich gesplittet, damit GitHub Secret-Scanning beim Push nicht blockt.
 // Der Token ist read-only und Base-scoped → bewusst eingebettet (Architektur-Entscheidung).
 const _RK = 'patu8KWM8aWB' + 'yxCGL.69fae5d9fa4b94c2' + '66b426dadd71a51f574945d840b33569058ab5e9d89ebef3';
@@ -267,6 +267,33 @@ function fmtDate(iso) {
   if (diffDays < 7) return d.toLocaleDateString('de', { weekday:'short' }) + ' ' + d.toLocaleTimeString('de', { hour:'2-digit', minute:'2-digit' });
   return d.toLocaleDateString('de', { day:'2-digit', month:'2-digit', year:'2-digit' });
 }
+// HTML → reiner Text. Für Freshdesk-Felder wie description_text / body_text,
+// die je nach Plan / Quelle HTML-Tags enthalten können (bes. Newsletter-Mails).
+function htmlToText(s) {
+  if (!s) return '';
+  let t = String(s);
+  // Block-Elemente in Newlines
+  t = t.replace(/<br\s*\/?>/gi, '\n');
+  t = t.replace(/<\/(p|div|li|h[1-6]|tr|table|blockquote)>/gi, '\n');
+  t = t.replace(/<li[^>]*>/gi, '• ');
+  // Restliche Tags entfernen
+  t = t.replace(/<[^>]+>/g, '');
+  // Häufige HTML-Entities decoden (genug für Lesbarkeit)
+  t = t.replace(/&nbsp;/g, ' ')
+       .replace(/&amp;/g, '&')
+       .replace(/&lt;/g, '<')
+       .replace(/&gt;/g, '>')
+       .replace(/&quot;/g, '"')
+       .replace(/&#39;/g, "'")
+       .replace(/&hellip;/g, '…')
+       .replace(/&mdash;/g, '—')
+       .replace(/&ndash;/g, '–')
+       .replace(/&zwnj;/g, '');
+  // Mehrfach-Leerzeilen kollabieren
+  t = t.replace(/\n[ \t]+/g, '\n').replace(/\n{3,}/g, '\n\n');
+  return t.trim();
+}
+
 function relTime(iso) {
   if (!iso) return '';
   const d = new Date(iso);
@@ -1141,7 +1168,7 @@ function renderTicketList(tickets) {
         const st = FD_STATUS[t.status] || { label:'?', short:'?', cls:'bg-ink-100 text-ink-600 border-ink-200' };
         const pr = FD_PRIORITY[t.priority] || null;
         const subj = t.subject || '(ohne Betreff)';
-        const desc = (t.description_text || '').slice(0, 140);
+        const desc = htmlToText(t.description_text || t.description || '').slice(0, 140);
         return `
           <div data-swipe-card class="shadow-sm">
             <div class="absolute inset-y-0 left-0 flex items-stretch">
@@ -1420,7 +1447,7 @@ function renderTicketDetailBody(ticket) {
       <!-- Erste Anfrage -->
       <div class="bg-white rounded-2xl border border-ink-200 p-4">
         <p class="text-[10px] font-semibold text-ink-500 uppercase tracking-wider mb-2">Erste Anfrage</p>
-        <div class="text-sm text-ink-800 whitespace-pre-line break-words">${escapeHtml((ticket.description_text || '').trim() || '(kein Text)')}</div>
+        <div class="text-sm text-ink-800 whitespace-pre-line break-words">${escapeHtml(htmlToText(ticket.description_text || ticket.description || '') || '(kein Text)')}</div>
       </div>
 
       <!-- Verlauf -->
@@ -1437,7 +1464,7 @@ function renderTicketDetailBody(ticket) {
             const who = isPrivate ? 'Interne Notiz' : (isIncoming ? (c.from_email || 'Kunde') : 'Agent');
             const align = isIncoming ? 'border-brand-300 bg-brand-50/50' : (isPrivate ? 'border-amber-300 bg-amber-50/50' : 'border-ink-200 bg-ink-50/50');
             const arrow = isPrivate ? '⊙' : (isIncoming ? '←' : '→');
-            const body = (c.body_text || '').trim();
+            const body = htmlToText(c.body_text || c.body || '');
             const truncated = body.length > 1500;
             return `
               <div class="border-l-2 ${align} pl-3 py-2 rounded-r">
@@ -1463,7 +1490,7 @@ async function summarizeTicket(btnEl) {
 
   const conv = (ticket.conversations || [])
     .slice().sort((a, b) => new Date(a.created_at || 0) - new Date(b.created_at || 0))
-    .map(c => (c.private ? '[Notiz] ' : '') + (c.incoming ? 'Kunde' : 'Agent') + ': ' + (c.body_text || '').trim().slice(0, 600))
+    .map(c => (c.private ? '[Notiz] ' : '') + (c.incoming ? 'Kunde' : 'Agent') + ': ' + htmlToText(c.body_text || c.body || '').slice(0, 600))
     .join('\n\n');
 
   const prompt =
@@ -1475,7 +1502,7 @@ async function summarizeTicket(btnEl) {
     '— TICKET —\n' +
     'Betreff: ' + (ticket.subject || '') + '\n' +
     'Kunde: ' + (ticket.requester?.name || '?') + ' <' + (ticket.requester?.email || '?') + '>\n' +
-    'Erste Anfrage: ' + (ticket.description_text || '').trim().slice(0, 1500) + '\n\n' +
+    'Erste Anfrage: ' + htmlToText(ticket.description_text || ticket.description || '').slice(0, 1500) + '\n\n' +
     (conv ? 'Verlauf:\n' + conv.slice(0, 5000) : '');
 
   try {
