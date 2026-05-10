@@ -53,8 +53,10 @@
   .update-banner { background: linear-gradient(90deg, #10b981, #059669); }
   /* Swipe-Cards (Tickets) */
   [data-swipe-card] { position: relative; overflow: hidden; border-radius: 1rem; }
-  [data-swipe-content] { position: relative; transition: transform .22s ease; will-change: transform; touch-action: pan-y; }
+  [data-swipe-content] { position: relative; transition: transform .22s ease; will-change: transform; touch-action: pan-y; -webkit-touch-callout: none; -webkit-user-select: none; user-select: none; }
   [data-swipe-content].is-dragging { transition: none; }
+  body.multi-select [data-swipe-content] { padding-left: 2.75rem !important; }
+  body.multi-select [data-swipe-card] [data-ai-indicator], body.multi-select [data-swipe-card] [data-snooze-indicator] { display: none; }
   *:focus { outline: none; }
   .safe-bottom { padding-bottom: max(env(safe-area-inset-bottom), 0.5rem); }
   .safe-top    { padding-top:    max(env(safe-area-inset-top), 0.5rem); }
@@ -175,6 +177,16 @@
 
   <main id="pageContent" class="flex-1 px-4 py-4 pb-24"></main>
 
+  <!-- Multi-Select Action-Bar (verdrängt die normale Nav) -->
+  <div id="multiSelectBar" hidden class="fixed bottom-0 inset-x-0 z-40 bg-white border-t border-ink-200 shadow-2xl safe-bottom">
+    <div class="px-3 py-2 flex items-center gap-2 border-b border-ink-100">
+      <span id="msCount" class="font-bold text-ink-900 text-sm">0 ausgewählt</span>
+      <span class="text-[11px] text-ink-500 hidden sm:inline">tippe Tickets zum Auswählen</span>
+      <button onclick="msExit()" class="ml-auto text-ink-700 px-3 py-1.5 text-xs font-semibold border border-ink-200 rounded-lg active:bg-ink-100">Abbrechen</button>
+    </div>
+    <div id="msActions" class="flex gap-2 overflow-x-auto scrollbar-hidden px-3 py-2"></div>
+  </div>
+
   <nav class="fixed bottom-0 inset-x-0 z-30 bg-white/95 backdrop-blur border-t border-ink-200 safe-bottom">
     <div class="flex justify-around max-w-md mx-auto">
       <button data-nav="tickets"  onclick="navTo('tickets')"  class="flex-1 py-2 flex flex-col items-center gap-0.5 text-ink-500">
@@ -209,7 +221,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.0.1';
+const APP_VERSION = 'v2.1.0';
 // Read-Token absichtlich gesplittet, damit GitHub Secret-Scanning beim Push nicht blockt.
 // Der Token ist read-only und Base-scoped → bewusst eingebettet (Architektur-Entscheidung).
 const _RK = 'patu8KWM8aWB' + 'yxCGL.69fae5d9fa4b94c2' + '66b426dadd71a51f574945d840b33569058ab5e9d89ebef3';
@@ -249,6 +261,10 @@ let APP_STATE = {
     visibility:  'active',    // 'active' (verbirgt Wiedervorlage) | 'wiedervorlage' | 'all'
   },
   wiedervorlageMap: new Map(),
+  multiSelect: {
+    active:   false,
+    selected: new Set(),  // 'accountId|ticketId'
+  },
 };
 
 const SESSION_STORAGE_KEY = 'fdh_session_' + APP_CONFIG.PROJECT_ID;
@@ -1486,13 +1502,7 @@ function closeFilterPicker() {
   FILTER_PICKER_KEY = null;
 }
 
-function applyFilterByIndex(idx) {
-  const opt = FILTER_OPTIONS_TMP[idx];
-  if (!opt || !FILTER_PICKER_KEY) return;
-  APP_STATE.filters[FILTER_PICKER_KEY] = opt.value;
-  closeFilterPicker();
-  renderTicketsPage();
-}
+// (applyFilterByIndex weiter unten — handhabt auch Bulk-Operations via __bulk*__-Keys)
 
 function openFilterStatus() {
   openFilterPicker('Status filtern', 'status', [
@@ -1598,7 +1608,8 @@ function renderTicketList(tickets) {
               </div>
             </div>
             <div data-swipe-content data-account-id="${escapeAttr(t._accountId)}" data-ticket-id="${t.id}"
-                 class="bg-white border border-ink-200 rounded-2xl p-3 active:bg-ink-50 cursor-pointer">
+                 class="bg-white border border-ink-200 rounded-2xl p-3 active:bg-ink-50 cursor-pointer ${msIsActive() && msIsSelected(t._accountId, t.id) ? 'ring-2 ring-brand-500' : ''}">
+              ${msIsActive() ? `<div data-ms-dot class="absolute left-3 top-1/2 -translate-y-1/2 z-10">${msIsSelected(t._accountId, t.id) ? '<div class="w-6 h-6 rounded-full bg-brand-500 flex items-center justify-center text-white"><i data-lucide="check" class="w-4 h-4"></i></div>' : '<div class="w-6 h-6 rounded-full border-2 border-ink-300 bg-white"></div>'}</div>` : ''}
               <div class="flex items-start gap-2">
                 ${showAccount ? `<span class="shrink-0 mt-1 w-2.5 h-2.5 rounded-full" style="background:${escapeAttr(t._accountColor)}" title="${escapeAttr(t._accountName)}"></span>` : ''}
                 <div class="flex-1 min-w-0">
@@ -1632,6 +1643,236 @@ function renderTicketList(tickets) {
     <p class="text-[10px] text-center text-ink-400 mt-3">${tickets.length} Ticket${tickets.length===1?'':'s'} · rechts wischen: Schließen/SPAM · weiter rechts: Wiedervorlage · links: KI-Assistent</p>`;
   if (window.lucide) lucide.createIcons();
   attachSwipeToCards();
+  renderMultiSelectBar();
+}
+
+/* === Multi-Select Action-Bar + Bulk-Operations === */
+function renderMultiSelectBar() {
+  const bar = $('multiSelectBar');
+  if (!bar) return;
+  if (!msIsActive()) {
+    bar.hidden = true;
+    document.body.classList.remove('multi-select');
+    return;
+  }
+  bar.hidden = false;
+  document.body.classList.add('multi-select');
+  const sel = msSelectedList();
+  $('msCount').textContent = sel.length + ' ausgewählt';
+  const sameAcc = msSameAccount();
+  const btn = (icon, label, onclick, cls = 'bg-white border-ink-200 text-ink-800', disabled = false) =>
+    `<button onclick="${onclick}" ${disabled?'disabled':''} class="shrink-0 px-3 py-2 rounded-lg text-xs font-semibold border ${cls} active:opacity-80 inline-flex items-center gap-1.5 ${disabled?'opacity-40':''}">
+      <i data-lucide="${icon}" class="w-3.5 h-3.5"></i> ${escapeHtml(label)}
+    </button>`;
+  $('msActions').innerHTML = (sel.length === 0) ? '<p class="text-xs text-ink-400 px-1">Tickets antippen…</p>' : [
+    btn('check-circle-2', 'Schließen', 'bulkClose()',           'bg-emerald-500 border-emerald-500 text-white'),
+    btn('clock',          'Wiedervorlage', 'bulkWiedervorlage()','bg-indigo-500 border-indigo-500 text-white'),
+    btn('user',           'Bearbeiter',   'bulkAssign()',        'bg-white border-ink-200 text-ink-800',  !sameAcc),
+    btn('users',          'Gruppe',       'bulkGroup()',         'bg-white border-ink-200 text-ink-800',  !sameAcc),
+    btn('tag',            'Typ',          'bulkType()'),
+    btn('flag',           'Status',       'bulkStatus()'),
+    btn('ban',            'SPAM',         'bulkSpam()',          'bg-red-500 border-red-500 text-white'),
+  ].join('');
+  if (window.lucide) lucide.createIcons();
+}
+
+// Generisches Bulk-Execute mit Live-Progress-Toast
+async function bulkExecute(items, perItemFn, labelDone, labelOne) {
+  if (!items.length) return;
+  const total = items.length;
+  let done = 0, failed = 0;
+  // Permanente Progress-Toast
+  const c = $('toastContainer');
+  const el = document.createElement('div');
+  el.className = 'toast-enter pointer-events-auto rounded-xl px-4 py-2.5 shadow-lg flex items-center gap-2 text-sm bg-ink-900 text-white';
+  el.innerHTML = `<span class="spinner w-4 h-4 border-[2px]"></span><span class="flex-1">0 / ${total} ${escapeHtml(labelOne)}…</span>`;
+  c.appendChild(el);
+  for (const it of items) {
+    try { await perItemFn(it); done++; }
+    catch (e) { failed++; console.warn('Bulk-Item fehlgeschlagen', it, e); }
+    el.querySelector('span.flex-1').textContent = (done + failed) + ' / ' + total + ' ' + labelOne + '…';
+  }
+  el.remove();
+  toast(done + ' ' + labelDone + (failed ? ' · ' + failed + ' fehlgeschlagen' : ''), failed ? 'warn' : 'success', 4000);
+  msExit();
+}
+
+async function bulkClose() {
+  const items = msSelectedList();
+  await bulkExecute(items, async ({ accountId, ticketId }) => {
+    await proxyJson('/freshdesk/' + encodeURIComponent(accountId) + '/api/v2/tickets/' + ticketId, {
+      method: 'PUT', body: JSON.stringify({ status: 5 })
+    });
+  }, 'geschlossen', 'schließe');
+}
+
+async function bulkSpam() {
+  const items = msSelectedList();
+  await bulkExecute(items, async ({ accountId, ticketId }) => {
+    await proxyJson('/freshdesk/' + encodeURIComponent(accountId) + '/api/v2/tickets/' + ticketId, { method: 'DELETE' });
+  }, 'in Papierkorb verschoben', 'verschiebe');
+}
+
+function bulkWiedervorlage() {
+  const items = msSelectedList();
+  if (!items.length) return;
+  // Picker mit Speziallogik: keine einzelne Ticket-ID, sondern alle ausgewählten
+  WV_CTX = { bulk: true, items, fromList: true };
+  let host = document.getElementById('subModalHost');
+  if (!host) { host = document.createElement('div'); host.id = 'subModalHost'; document.body.appendChild(host); }
+  host.innerHTML = `
+    <div class="fixed inset-0 z-[60] flex items-end justify-center bg-black/40" onclick="if(event.target===this)closeWiedervorlagePicker()">
+      <div class="bg-white w-full max-w-md rounded-t-2xl shadow-2xl flex flex-col safe-bottom" style="max-height:80vh">
+        <div class="px-4 py-3 border-b border-ink-200 flex items-center justify-between">
+          <div><h3 class="font-bold text-ink-900">${items.length} Tickets auf Wiedervorlage</h3><p class="text-[11px] text-ink-500">Frist auswählen</p></div>
+          <button onclick="closeWiedervorlagePicker()" class="w-9 h-9 rounded-lg hover:bg-ink-100 flex items-center justify-center"><i data-lucide="x" class="w-5 h-5 text-ink-700"></i></button>
+        </div>
+        <div class="flex-1 overflow-y-auto py-1">
+          ${[{days:1,label:'Morgen früh'},{days:3,label:'In 3 Tagen'},{days:7,label:'In 1 Woche'},{days:14,label:'In 2 Wochen'}].map(o => `
+            <button onclick="bulkWiedervorlageApply(${o.days})" class="w-full text-left px-4 py-3 active:bg-ink-50 border-b border-ink-100 flex items-center gap-3">
+              <span class="w-9 h-9 rounded-full bg-gradient-to-br from-indigo-400 to-indigo-600 flex items-center justify-center shrink-0 text-white"><i data-lucide="clock" class="w-4 h-4"></i></span>
+              <p class="font-medium text-ink-900 text-sm flex-1">${escapeHtml(o.label)}</p>
+              <i data-lucide="chevron-right" class="w-4 h-4 text-ink-400"></i>
+            </button>`).join('')}
+        </div>
+      </div>
+    </div>`;
+  if (window.lucide) lucide.createIcons();
+}
+
+async function bulkWiedervorlageApply(days) {
+  const items = WV_CTX?.items || [];
+  closeWiedervorlagePicker();
+  const frist = _daysToFrist(days, { morning: true });
+  await bulkExecute(items, async ({ accountId, ticketId }) => {
+    await addWiedervorlage(accountId, parseInt(ticketId, 10), frist, 'manuell');
+  }, 'auf Wiedervorlage', 'setze');
+}
+
+function bulkAssign() {
+  const accountId = msSameAccount();
+  if (!accountId) return toast('Bearbeiter-Bulk nur innerhalb eines Accounts', 'warn');
+  const cache = APP_STATE.agentsCache?.[accountId] || { agents: [] };
+  openFilterPicker('Bearbeiter zuweisen (' + msSelectedList().length + ')', '__bulkAssign__', [
+    { value: null, label: 'Niemand (Zuweisung entfernen)', icon: 'user-x' },
+    ...cache.agents.slice().sort((a, b) => a.name.localeCompare(b.name, 'de')).map(a => ({ value: a.id, label: a.name, icon: 'user', sub: a.email || '' })),
+  ]);
+}
+
+function bulkGroup() {
+  const accountId = msSameAccount();
+  if (!accountId) return toast('Gruppen-Bulk nur innerhalb eines Accounts', 'warn');
+  const cache = APP_STATE.groupsCache?.[accountId] || { groups: [] };
+  openFilterPicker('Gruppe zuweisen (' + msSelectedList().length + ')', '__bulkGroup__', [
+    { value: null, label: 'Keine Gruppe', icon: 'folder-x' },
+    ...cache.groups.slice().sort((a, b) => a.name.localeCompare(b.name, 'de')).map(g => ({ value: g.id, label: g.name, icon: 'users', sub: g.description || '' })),
+  ]);
+}
+
+function bulkType() {
+  const set = new Set();
+  msSelectedList().forEach(({ accountId }) => (APP_STATE.typesCache?.[accountId]?.types || []).forEach(t => set.add(t)));
+  // Wenn nichts im Cache: aus allen Accounts ziehen
+  if (!set.size) APP_STATE.accounts.forEach(a => (APP_STATE.typesCache?.[a.id]?.types || []).forEach(t => set.add(t)));
+  openFilterPicker('Typ setzen (' + msSelectedList().length + ')', '__bulkType__', [
+    { value: null, label: 'Kein Typ', icon: 'tag' },
+    ...Array.from(set).sort((a, b) => a.localeCompare(b, 'de')).map(t => ({ value: t, label: t, icon: 'tag' })),
+  ]);
+}
+
+function bulkStatus() {
+  openFilterPicker('Status setzen (' + msSelectedList().length + ')', '__bulkStatus__', [
+    { value: 2, label: 'Offen',       icon: 'circle' },
+    { value: 3, label: 'Wartet',      icon: 'clock' },
+    { value: 4, label: 'Gelöst',      icon: 'check-circle-2' },
+    { value: 5, label: 'Geschlossen', icon: 'lock' },
+  ]);
+}
+
+// applyFilterByIndex: bei __bulk*__-Keys → Bulk-PUT, sonst normaler Filter-Set
+async function applyFilterByIndex(idx) {
+  const opt = FILTER_OPTIONS_TMP[idx];
+  if (!opt || !FILTER_PICKER_KEY) return;
+  const key = FILTER_PICKER_KEY;
+  closeFilterPicker();
+  if (key === '__bulkAssign__') {
+    const items = msSelectedList();
+    await bulkExecute(items, async ({ accountId, ticketId }) => {
+      await proxyJson('/freshdesk/' + encodeURIComponent(accountId) + '/api/v2/tickets/' + ticketId, { method: 'PUT', body: JSON.stringify({ responder_id: opt.value }) });
+    }, 'zugewiesen', 'weise zu');
+    return;
+  }
+  if (key === '__bulkGroup__') {
+    const items = msSelectedList();
+    await bulkExecute(items, async ({ accountId, ticketId }) => {
+      await proxyJson('/freshdesk/' + encodeURIComponent(accountId) + '/api/v2/tickets/' + ticketId, { method: 'PUT', body: JSON.stringify({ group_id: opt.value }) });
+    }, 'Gruppen-Zuordnung gesetzt', 'setze Gruppe');
+    return;
+  }
+  if (key === '__bulkType__') {
+    const items = msSelectedList();
+    await bulkExecute(items, async ({ accountId, ticketId }) => {
+      await proxyJson('/freshdesk/' + encodeURIComponent(accountId) + '/api/v2/tickets/' + ticketId, { method: 'PUT', body: JSON.stringify({ type: opt.value }) });
+    }, 'Typ gesetzt', 'setze Typ');
+    return;
+  }
+  if (key === '__bulkStatus__') {
+    const items = msSelectedList();
+    await bulkExecute(items, async ({ accountId, ticketId }) => {
+      await proxyJson('/freshdesk/' + encodeURIComponent(accountId) + '/api/v2/tickets/' + ticketId, { method: 'PUT', body: JSON.stringify({ status: opt.value }) });
+    }, 'Status gesetzt', 'setze Status');
+    return;
+  }
+  // Normaler Filter
+  APP_STATE.filters[key] = opt.value;
+  renderTicketsPage();
+}
+
+/* === Multi-Select === */
+function msKey(accountId, ticketId) { return accountId + '|' + ticketId; }
+function msIsActive() { return !!APP_STATE.multiSelect?.active; }
+function msIsSelected(accountId, ticketId) { return APP_STATE.multiSelect.selected.has(msKey(accountId, ticketId)); }
+function msToggle(accountId, ticketId) {
+  const k = msKey(accountId, ticketId);
+  if (APP_STATE.multiSelect.selected.has(k)) APP_STATE.multiSelect.selected.delete(k);
+  else APP_STATE.multiSelect.selected.add(k);
+  renderMultiSelectBar();
+  // Card-Visual lokal toggeln (statt voller Re-Render)
+  const card = document.querySelector(`[data-swipe-content][data-account-id="${CSS.escape(accountId)}"][data-ticket-id="${ticketId}"]`);
+  if (card) {
+    const sel = msIsSelected(accountId, ticketId);
+    card.classList.toggle('ring-2', sel);
+    card.classList.toggle('ring-brand-500', sel);
+    const dot = card.querySelector('[data-ms-dot]');
+    if (dot) dot.innerHTML = sel
+      ? '<div class="w-6 h-6 rounded-full bg-brand-500 flex items-center justify-center text-white"><i data-lucide="check" class="w-4 h-4"></i></div>'
+      : '<div class="w-6 h-6 rounded-full border-2 border-ink-300 bg-white"></div>';
+    if (window.lucide) lucide.createIcons();
+  }
+}
+function msEnter(accountId, ticketId) {
+  APP_STATE.multiSelect.active = true;
+  APP_STATE.multiSelect.selected = new Set();
+  APP_STATE.multiSelect.selected.add(msKey(accountId, ticketId));
+  document.body.classList.add('multi-select');
+  try { if (navigator.vibrate) navigator.vibrate(40); } catch (_) {}
+  renderTicketsPage();
+}
+function msExit() {
+  APP_STATE.multiSelect.active = false;
+  APP_STATE.multiSelect.selected.clear();
+  document.body.classList.remove('multi-select');
+  renderTicketsPage();
+}
+function msSelectedList() {
+  return Array.from(APP_STATE.multiSelect.selected).map(k => {
+    const [accountId, ticketId] = k.split('|');
+    return { accountId, ticketId };
+  });
+}
+function msSameAccount() {
+  const ids = new Set(msSelectedList().map(s => s.accountId));
+  return ids.size === 1 ? [...ids][0] : null;
 }
 
 /* === Swipe-Actions auf Ticket-Cards === */
@@ -1658,6 +1899,7 @@ function attachSwipeToCards() {
     const ticketId  = content.dataset.ticketId;
 
     let startX = 0, startY = 0, currentDx = 0, isHorizontal = null, dragActive = false, suppressClickUntil = 0;
+    let longPressTimer = null;
 
     content.addEventListener('touchstart', (e) => {
       if (_openSwipedContent && _openSwipedContent !== content) _resetSwipe();
@@ -1667,6 +1909,18 @@ function attachSwipeToCards() {
       isHorizontal = null;
       dragActive = true;
       content.classList.add('is-dragging');
+      // Long-Press startet Multi-Select-Mode (nur wenn nicht schon aktiv)
+      if (!msIsActive()) {
+        longPressTimer = setTimeout(() => {
+          longPressTimer = null;
+          if (!dragActive || isHorizontal) return; // schon ein Swipe → kein Long-Press
+          dragActive = false;
+          content.classList.remove('is-dragging');
+          content.style.transform = 'translateX(0)';
+          suppressClickUntil = Date.now() + 500;
+          msEnter(accountId, parseInt(ticketId, 10));
+        }, 500);
+      }
     }, { passive: true });
 
     content.addEventListener('touchmove', (e) => {
@@ -1675,8 +1929,17 @@ function attachSwipeToCards() {
       const dy = Math.abs(e.touches[0].clientY - startY);
       if (isHorizontal === null) {
         if (Math.abs(dx) < 8 && dy < 8) return;
+        // Bewegung erkannt → Long-Press canceln
+        if (longPressTimer) { clearTimeout(longPressTimer); longPressTimer = null; }
         isHorizontal = Math.abs(dx) > dy;
         if (!isHorizontal) { dragActive = false; content.classList.remove('is-dragging'); content.style.transform = ''; return; }
+      }
+      // Multi-Select-Mode: keine Swipe-Gesten erlauben
+      if (msIsActive()) {
+        dragActive = false;
+        content.classList.remove('is-dragging');
+        content.style.transform = '';
+        return;
       }
       // Rechts: reveal-Panel + Far-Trigger Wiedervorlage, Links: AI-Assistent
       const baseOffset = (_openSwipedContent === content) ? SWIPE_OPEN_PX : 0;
@@ -1700,6 +1963,7 @@ function attachSwipeToCards() {
     }, { passive: true });
 
     content.addEventListener('touchend', () => {
+      if (longPressTimer) { clearTimeout(longPressTimer); longPressTimer = null; }
       if (!dragActive) return;
       dragActive = false;
       content.classList.remove('is-dragging');
@@ -1730,6 +1994,7 @@ function attachSwipeToCards() {
     });
 
     content.addEventListener('touchcancel', () => {
+      if (longPressTimer) { clearTimeout(longPressTimer); longPressTimer = null; }
       dragActive = false;
       content.classList.remove('is-dragging');
       content.style.transform = _openSwipedContent === content ? `translateX(${SWIPE_OPEN_PX}px)` : 'translateX(0)';
@@ -1737,6 +2002,8 @@ function attachSwipeToCards() {
 
     content.addEventListener('click', (e) => {
       if (Date.now() < suppressClickUntil) { e.preventDefault(); e.stopPropagation(); return; }
+      // Multi-Select-Mode: Tap toggelt Auswahl statt Detail zu öffnen
+      if (msIsActive()) { e.preventDefault(); e.stopPropagation(); msToggle(accountId, parseInt(ticketId, 10)); return; }
       if (_openSwipedContent === content) { _resetSwipe(); e.preventDefault(); e.stopPropagation(); return; }
       if (_openSwipedContent) { _resetSwipe(); e.preventDefault(); e.stopPropagation(); return; }
       openTicketDetail(accountId, parseInt(ticketId, 10));
