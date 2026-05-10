@@ -205,7 +205,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v1.2.3';
+const APP_VERSION = 'v1.2.4';
 // Read-Token absichtlich gesplittet, damit GitHub Secret-Scanning beim Push nicht blockt.
 // Der Token ist read-only und Base-scoped → bewusst eingebettet (Architektur-Entscheidung).
 const _RK = 'patu8KWM8aWB' + 'yxCGL.69fae5d9fa4b94c2' + '66b426dadd71a51f574945d840b33569058ab5e9d89ebef3';
@@ -491,11 +491,21 @@ async function valtownApi(token, method, path, body) {
     init.headers['Content-Type'] = 'application/json';
     init.body = JSON.stringify(body);
   }
-  const res = await fetch(VALTOWN_API_BASE + path, init);
+  let res;
+  try { res = await fetch(VALTOWN_API_BASE + path, init); }
+  catch (netErr) { throw new Error('Val.town nicht erreichbar: ' + netErr.message); }
   const text = await res.text();
   let data; try { data = text ? JSON.parse(text) : {}; } catch (_) { data = { _raw: text }; }
+  console.log('valtownApi', method, path, '→', res.status, data, '(body sent:', body, ')');
   if (!res.ok) {
-    const msg = (data && (data.message || data.error)) || ('Val.town HTTP ' + res.status);
+    let msg = '';
+    if (data && data.message)      msg = data.message;
+    else if (data && data.error)   msg = typeof data.error === 'string' ? data.error : JSON.stringify(data.error);
+    else if (data && data.errors)  msg = JSON.stringify(data.errors);
+    else if (data && data.issues)  msg = JSON.stringify(data.issues);   // Zod-Style
+    else if (data && data._raw)    msg = data._raw.slice(0, 200);
+    else                            msg = 'HTTP ' + res.status;
+    if (!String(msg).match(/HTTP/)) msg = msg + ' (HTTP ' + res.status + ')';
     const err = new Error(String(msg));
     err.status = res.status; err.data = data;
     throw err;
@@ -508,7 +518,11 @@ async function valtownGetVal(token, valId)  { return valtownApi(token, 'GET', '/
 async function valtownCreateVal(token, name, description = '', privacy = 'public') {
   // 'public' default: zählt nicht zum Free-Tier-Privatlimit, Code-Sichtbarkeit ist
   // egal weil keine Secrets im Code liegen (Env-Vars sind immer privat).
-  return valtownApi(token, 'POST', '/v2/vals', { name, description, privacy });
+  // Body nur mit definierten Feldern — leere description weglassen, val.town
+  // ist mit leeren Optional-Strings strict.
+  const body = { name, privacy };
+  if (description && description.length > 0) body.description = description.slice(0, 64);
+  return valtownApi(token, 'POST', '/v2/vals', body);
 }
 async function valtownAddHttpFile(token, valId, code) {
   return valtownApi(token, 'POST', `/v2/vals/${valId}/files?path=${encodeURIComponent(VALTOWN_FILE_PATH)}`, {
