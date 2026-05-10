@@ -209,7 +209,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v1.5.2';
+const APP_VERSION = 'v1.6.0';
 // Read-Token absichtlich gesplittet, damit GitHub Secret-Scanning beim Push nicht blockt.
 // Der Token ist read-only und Base-scoped → bewusst eingebettet (Architektur-Entscheidung).
 const _RK = 'patu8KWM8aWB' + 'yxCGL.69fae5d9fa4b94c2' + '66b426dadd71a51f574945d840b33569058ab5e9d89ebef3';
@@ -1016,6 +1016,31 @@ function getAgentFirstName(accountId, agentId) {
   return n.split(/\s+/)[0];
 }
 
+/* === Gruppen-Cache (group_id → name) === */
+async function ensureGroupsLoaded(accountId) {
+  if (!APP_STATE.groupsCache) APP_STATE.groupsCache = {};
+  if (APP_STATE.groupsCache[accountId]) return APP_STATE.groupsCache[accountId];
+  try {
+    const data = await proxyJson('/freshdesk/' + encodeURIComponent(accountId) + '/api/v2/groups?per_page=100');
+    const groups = (Array.isArray(data) ? data : []).map(g => ({
+      id: g.id, name: g.name || ('Gruppe ' + g.id), description: g.description || ''
+    }));
+    const byId = {};
+    groups.forEach(g => byId[g.id] = g);
+    APP_STATE.groupsCache[accountId] = { groups, byId };
+    return APP_STATE.groupsCache[accountId];
+  } catch (e) {
+    console.warn('Group-Load fehlgeschlagen für ' + accountId + ':', e.message);
+    APP_STATE.groupsCache[accountId] = { groups: [], byId: {} };
+    return APP_STATE.groupsCache[accountId];
+  }
+}
+function getGroupName(accountId, groupId) {
+  if (!groupId) return null;
+  const c = APP_STATE.groupsCache?.[accountId];
+  return c?.byId?.[groupId]?.name || ('#' + groupId);
+}
+
 async function fetchTicketsAllAccounts(opts = {}) {
   const all = APP_STATE.accounts;
   if (!all.length) return [];
@@ -1170,10 +1195,10 @@ async function renderTicketsPage() {
     const ticketsPromise = (acc === 'all')
       ? fetchTicketsAllAccounts(opts)
       : fetchTicketsForAccount(acc, opts);
-    const agentsPromise = (acc === 'all')
-      ? Promise.allSettled(APP_STATE.accounts.map(a => ensureAgentsLoaded(a.id)))
-      : ensureAgentsLoaded(acc);
-    const [tickets] = await Promise.all([ticketsPromise, agentsPromise]);
+    const cachesPromise = (acc === 'all')
+      ? Promise.allSettled(APP_STATE.accounts.flatMap(a => [ensureAgentsLoaded(a.id), ensureGroupsLoaded(a.id)]))
+      : Promise.all([ensureAgentsLoaded(acc), ensureGroupsLoaded(acc)]);
+    const [tickets] = await Promise.all([ticketsPromise, cachesPromise]);
     renderTicketList(tickets);
   } catch (e) {
     $('ticketList').innerHTML = `
@@ -1213,6 +1238,7 @@ function renderTicketList(tickets) {
         const subj = t.subject || '(ohne Betreff)';
         const desc = htmlToText(t.description_text || t.description || '').slice(0, 140);
         const assigneeFirst = getAgentFirstName(t._accountId, t.responder_id);
+        const groupName = getGroupName(t._accountId, t.group_id);
         return `
           <div data-swipe-card class="shadow-sm">
             <div class="absolute inset-y-0 left-0 flex items-stretch">
@@ -1240,6 +1266,9 @@ function renderTicketList(tickets) {
                     ${assigneeFirst
                       ? `<button data-action="assign" data-account-id="${escapeAttr(t._accountId)}" data-ticket-id="${t.id}" data-responder-id="${t.responder_id || ''}" class="text-[10px] uppercase tracking-wider px-1.5 py-0.5 rounded font-semibold bg-ink-100 text-ink-700 active:bg-ink-200 inline-flex items-center gap-1"><i data-lucide="user" class="w-2.5 h-2.5"></i>${escapeHtml(assigneeFirst)} <i data-lucide="chevron-down" class="w-2.5 h-2.5"></i></button>`
                       : `<button data-action="assign" data-account-id="${escapeAttr(t._accountId)}" data-ticket-id="${t.id}" data-responder-id="" class="text-[10px] uppercase tracking-wider px-1.5 py-0.5 rounded font-semibold bg-amber-50 text-amber-700 border border-amber-200 active:bg-amber-100 inline-flex items-center gap-1">unzugewiesen <i data-lucide="chevron-down" class="w-2.5 h-2.5"></i></button>`}
+                    ${groupName
+                      ? `<button data-action="group" data-account-id="${escapeAttr(t._accountId)}" data-ticket-id="${t.id}" data-group-id="${t.group_id || ''}" class="text-[10px] uppercase tracking-wider px-1.5 py-0.5 rounded font-semibold bg-brand-50 text-brand-700 border border-brand-200 active:bg-brand-100 inline-flex items-center gap-1"><i data-lucide="users" class="w-2.5 h-2.5"></i>${escapeHtml(groupName)} <i data-lucide="chevron-down" class="w-2.5 h-2.5"></i></button>`
+                      : `<button data-action="group" data-account-id="${escapeAttr(t._accountId)}" data-ticket-id="${t.id}" data-group-id="" class="text-[10px] uppercase tracking-wider px-1.5 py-0.5 rounded font-semibold bg-ink-50 text-ink-500 border border-ink-200 active:bg-ink-100 inline-flex items-center gap-1">keine Gruppe <i data-lucide="chevron-down" class="w-2.5 h-2.5"></i></button>`}
                     <span class="text-[10px] text-ink-400">#${t.id}</span>
                     ${showAccount ? `<span class="text-[10px] text-ink-500 ml-auto">${escapeHtml(t._accountName)}</span>` : ''}
                   </div>
@@ -1346,6 +1375,12 @@ function attachSwipeToCards() {
           if (_openSwipedContent) _resetSwipe();
           openAssigneeModal(accId, tId, respId, true);
         }
+        else if (action === 'group') {
+          const gRaw = btn.dataset.groupId;
+          const gId  = gRaw ? parseInt(gRaw, 10) : null;
+          if (_openSwipedContent) _resetSwipe();
+          openGroupModal(accId, tId, gId, true);
+        }
       });
     });
   });
@@ -1428,6 +1463,7 @@ async function openTicketDetail(accountId, ticketId) {
     const [ticket] = await Promise.all([
       fetchTicketDetail(accountId, ticketId),
       ensureAgentsLoaded(accountId),
+      ensureGroupsLoaded(accountId),
     ]);
     ticket._accountId = accountId;
     CURRENT_TICKET = ticket;
@@ -1446,6 +1482,7 @@ function renderTicketDetailBody(ticket) {
   const req    = ticket.requester || {};
   const conversations = (ticket.conversations || []).slice().sort((a, b) => new Date(a.created_at || 0) - new Date(b.created_at || 0));
   const assigneeName = getAgentName(ticket._accountId, ticket.responder_id);
+  const groupName    = getGroupName(ticket._accountId, ticket.group_id);
 
   $('ticketDetailBody').innerHTML = `
     <div class="space-y-3 max-w-2xl mx-auto">
@@ -1459,19 +1496,26 @@ function renderTicketDetailBody(ticket) {
           <span class="text-[11px] text-ink-500">${escapeHtml(fmtDate(ticket.updated_at))}</span>
           <span class="text-[10px] text-ink-400 ml-auto">erstellt ${escapeHtml(fmtDate(ticket.created_at))}</span>
         </div>
-        <div class="mt-3 pt-3 border-t border-ink-100 grid grid-cols-2 gap-3 text-xs">
+        <div class="mt-3 pt-3 border-t border-ink-100 space-y-3 text-xs">
           <div class="min-w-0">
             <p class="text-ink-500 text-[10px] uppercase tracking-wider">Anfragender</p>
             <p class="font-semibold text-ink-900 truncate mt-0.5">${escapeHtml(req.name || '–')}</p>
             ${req.email ? `<p class="text-ink-500 truncate text-[11px]">${escapeHtml(req.email)}</p>` : ''}
           </div>
-          <button onclick="openAssigneeModal()" class="min-w-0 text-left -m-1 p-1 rounded-lg active:bg-ink-50 hover:bg-ink-50 transition">
-            <p class="text-ink-500 text-[10px] uppercase tracking-wider flex items-center gap-1">
-              Zugewiesen <i data-lucide="chevron-down" class="w-3 h-3"></i>
-            </p>
-            <p class="font-semibold ${assigneeName ? 'text-ink-900' : 'text-amber-700'} truncate mt-0.5">${escapeHtml(assigneeName || 'niemand')}</p>
-            <p class="text-ink-500 text-[10px] truncate">tippen zum Ändern</p>
-          </button>
+          <div class="grid grid-cols-2 gap-3">
+            <button onclick="openAssigneeModal()" class="min-w-0 text-left -m-1 p-1 rounded-lg active:bg-ink-50 hover:bg-ink-50 transition">
+              <p class="text-ink-500 text-[10px] uppercase tracking-wider flex items-center gap-1">
+                Zugewiesen <i data-lucide="chevron-down" class="w-3 h-3"></i>
+              </p>
+              <p class="font-semibold ${assigneeName ? 'text-ink-900' : 'text-amber-700'} truncate mt-0.5">${escapeHtml(assigneeName || 'niemand')}</p>
+            </button>
+            <button onclick="openGroupModal()" class="min-w-0 text-left -m-1 p-1 rounded-lg active:bg-ink-50 hover:bg-ink-50 transition">
+              <p class="text-ink-500 text-[10px] uppercase tracking-wider flex items-center gap-1">
+                Gruppe <i data-lucide="chevron-down" class="w-3 h-3"></i>
+              </p>
+              <p class="font-semibold ${groupName ? 'text-ink-900' : 'text-ink-500'} truncate mt-0.5">${escapeHtml(groupName || 'keine')}</p>
+            </button>
+          </div>
         </div>
       </div>
 
@@ -1638,6 +1682,119 @@ async function assignAndClose(agentId) {
   } catch (e) {
     closeAssigneeModal();
     toast('Zuweisung fehlgeschlagen: ' + e.message, 'error', 6000);
+  }
+}
+
+/* === Gruppen-Modal (Bottom-Sheet) === */
+let GROUP_CTX = null;
+
+async function openGroupModal(accountId, ticketId, currentGroupId, fromList = false) {
+  if (accountId === undefined) {
+    if (!CURRENT_TICKET) return;
+    accountId = CURRENT_TICKET._accountId;
+    ticketId = CURRENT_TICKET.id;
+    currentGroupId = CURRENT_TICKET.group_id || null;
+    fromList = false;
+  }
+  if (!accountId || !ticketId) return;
+  GROUP_CTX = { accountId, ticketId, currentGroupId: currentGroupId || null, fromList };
+
+  let host = document.getElementById('subModalHost');
+  if (!host) {
+    host = document.createElement('div');
+    host.id = 'subModalHost';
+    document.body.appendChild(host);
+  }
+  host.innerHTML = `
+    <div class="fixed inset-0 z-[60] flex items-end justify-center bg-black/40" onclick="if(event.target===this)closeGroupModal()">
+      <div class="bg-white w-full max-w-md rounded-t-2xl shadow-2xl flex flex-col safe-bottom" style="max-height:80vh">
+        <div class="px-4 py-3 border-b border-ink-200 flex items-center justify-between">
+          <div>
+            <h3 class="font-bold text-ink-900">Ticket #${ticketId} → Gruppe</h3>
+            <p class="text-[11px] text-ink-500">${escapeHtml(getGroupName(accountId, currentGroupId) || 'keine Gruppe')}</p>
+          </div>
+          <button onclick="closeGroupModal()" class="w-9 h-9 rounded-lg hover:bg-ink-100 flex items-center justify-center">
+            <i data-lucide="x" class="w-5 h-5 text-ink-700"></i>
+          </button>
+        </div>
+        <div class="px-3 py-2 border-b border-ink-100">
+          <input id="groupFilter" type="search" placeholder="Suchen…" autocomplete="off"
+                 class="w-full px-3 py-2 border border-ink-200 rounded-lg text-sm focus:ring-2 focus:ring-brand-500/30 focus:border-brand-500">
+        </div>
+        <div id="groupList" class="flex-1 overflow-y-auto"></div>
+      </div>
+    </div>`;
+  if (window.lucide) lucide.createIcons();
+
+  if (!APP_STATE.groupsCache?.[accountId]) {
+    $('groupList').innerHTML = `<div class="text-center py-8 text-sm text-ink-500"><span class="spinner inline-block w-4 h-4 border-[2px] text-brand-500"></span> Lade Gruppen…</div>`;
+    await ensureGroupsLoaded(accountId);
+  }
+  renderGroupList('');
+  $('groupFilter').addEventListener('input', e => renderGroupList(e.target.value));
+}
+
+function renderGroupList(filter) {
+  if (!GROUP_CTX) return;
+  const cache = APP_STATE.groupsCache?.[GROUP_CTX.accountId] || { groups: [] };
+  const currentId = GROUP_CTX.currentGroupId || null;
+  const f = (filter || '').trim().toLowerCase();
+  const filtered = cache.groups
+    .filter(g => !f || g.name.toLowerCase().includes(f) || (g.description||'').toLowerCase().includes(f))
+    .sort((a, b) => a.name.localeCompare(b.name, 'de'));
+
+  $('groupList').innerHTML = `
+    <button onclick="assignGroupAndClose(null)" class="w-full text-left px-4 py-3 active:bg-ink-50 border-b border-ink-100 flex items-center gap-3 ${!currentId ? 'bg-brand-50' : ''}">
+      <span class="w-9 h-9 rounded-full bg-ink-100 flex items-center justify-center shrink-0">
+        <i data-lucide="folder-x" class="w-4 h-4 text-ink-500"></i>
+      </span>
+      <div class="flex-1 min-w-0">
+        <p class="font-medium text-ink-900 text-sm">Keine Gruppe</p>
+        <p class="text-[11px] text-ink-500">Zuordnung entfernen</p>
+      </div>
+      ${!currentId ? '<i data-lucide="check" class="w-4 h-4 text-brand-600 shrink-0"></i>' : ''}
+    </button>
+    ${filtered.length ? filtered.map(g => `
+      <button onclick="assignGroupAndClose(${g.id})" class="w-full text-left px-4 py-3 active:bg-ink-50 border-b border-ink-100 flex items-center gap-3 ${currentId === g.id ? 'bg-brand-50' : ''}">
+        <span class="w-9 h-9 rounded-full bg-gradient-to-br from-brand-400 to-brand-600 flex items-center justify-center shrink-0 text-white">
+          <i data-lucide="users" class="w-4 h-4"></i>
+        </span>
+        <div class="flex-1 min-w-0">
+          <p class="font-medium text-ink-900 text-sm truncate">${escapeHtml(g.name)}</p>
+          ${g.description ? `<p class="text-[11px] text-ink-500 truncate">${escapeHtml(g.description)}</p>` : ''}
+        </div>
+        ${currentId === g.id ? '<i data-lucide="check" class="w-4 h-4 text-brand-600 shrink-0"></i>' : ''}
+      </button>
+    `).join('') : `<p class="text-center text-sm text-ink-500 py-8">${cache.groups.length ? 'Keine Treffer' : 'Keine Gruppen geladen'}</p>`}`;
+  if (window.lucide) lucide.createIcons();
+}
+
+function closeGroupModal() {
+  const host = document.getElementById('subModalHost');
+  if (host) host.innerHTML = '';
+  GROUP_CTX = null;
+}
+
+async function assignGroupAndClose(groupId) {
+  if (!GROUP_CTX) return;
+  const { accountId, ticketId, fromList } = GROUP_CTX;
+  const list = $('groupList');
+  if (list) list.innerHTML = `<div class="text-center py-8 text-sm text-ink-500"><span class="spinner inline-block w-4 h-4 border-[2px] text-brand-500"></span> Speichere…</div>`;
+  try {
+    await proxyJson('/freshdesk/' + encodeURIComponent(accountId) + '/api/v2/tickets/' + ticketId, {
+      method: 'PUT',
+      body: JSON.stringify({ group_id: groupId })
+    });
+    closeGroupModal();
+    toast(groupId ? 'Gruppe: ' + getGroupName(accountId, groupId) : 'Gruppen-Zuordnung entfernt', 'success');
+    if (CURRENT_TICKET && CURRENT_TICKET.id === ticketId) {
+      CURRENT_TICKET.group_id = groupId;
+      renderTicketDetailBody(CURRENT_TICKET);
+    }
+    if (fromList) renderTicketsPage();
+  } catch (e) {
+    closeGroupModal();
+    toast('Gruppen-Zuordnung fehlgeschlagen: ' + e.message, 'error', 6000);
   }
 }
 
