@@ -191,6 +191,9 @@
     <button onclick="navTo('rules'); closeMenu();" class="w-full text-left px-3 py-2 text-sm hover:bg-ink-50 flex items-center gap-2">
       <i data-lucide="sparkles" class="w-4 h-4 text-purple-500"></i> KI-Regeln
     </button>
+    <button onclick="navTo('automated'); closeMenu();" class="w-full text-left px-3 py-2 text-sm hover:bg-ink-50 flex items-center gap-2">
+      <i data-lucide="bot" class="w-4 h-4 text-purple-500"></i> Automatisierte Tickets
+    </button>
     <button onclick="checkForUpdate(true); closeMenu();" class="w-full text-left px-3 py-2 text-sm hover:bg-ink-50 flex items-center gap-2">
       <i data-lucide="refresh-cw" class="w-4 h-4 text-ink-500"></i> Update prüfen
     </button>
@@ -245,7 +248,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.7.2';
+const APP_VERSION = 'v2.8.0';
 // Read-Token absichtlich gesplittet, damit GitHub Secret-Scanning beim Push nicht blockt.
 // Der Token ist read-only und Base-scoped → bewusst eingebettet (Architektur-Entscheidung).
 const _RK = 'patu8KWM8aWB' + 'yxCGL.69fae5d9fa4b94c2' + '66b426dadd71a51f574945d840b33569058ab5e9d89ebef3';
@@ -1489,6 +1492,7 @@ function navTo(page) {
   else if (page === 'settings') renderSettingsPage();
   else if (page === 'users')    renderUsersPage();
   else if (page === 'rules')    renderRulesPage();
+  else if (page === 'automated') renderAutomatedPage();
   else                          renderTicketsPage();
 }
 
@@ -1879,7 +1883,12 @@ function renderTicketList(tickets) {
                     ${(() => {
                       const my = getMyNotesForTicket(t._accountId, t.id);
                       if (!my.length) return '';
-                      return `<button data-action="myNotes" data-account-id="${escapeAttr(t._accountId)}" data-ticket-id="${t.id}" class="text-amber-600 active:text-amber-800 hover:bg-amber-50 -m-1 p-1 rounded shrink-0 relative" title="${my.length} eigene Notiz${my.length===1?'':'en'}"><i data-lucide="sticky-note" class="w-4 h-4"></i>${my.length > 1 ? `<span class="absolute -top-0.5 -right-0.5 bg-amber-500 text-white text-[8px] font-bold leading-none w-3.5 h-3.5 rounded-full flex items-center justify-center">${my.length}</span>` : ''}</button>`;
+                      const hasRule = my.some(n => n.typ === 'regel');
+                      const iconColor = hasRule ? 'text-purple-600 active:text-purple-800 hover:bg-purple-50' : 'text-amber-600 active:text-amber-800 hover:bg-amber-50';
+                      const badgeColor = hasRule ? 'bg-purple-500' : 'bg-amber-500';
+                      const iconName = hasRule ? 'bot' : 'sticky-note';
+                      const tooltip = hasRule ? 'Automatisiert per KI-Regel' : (my.length + ' eigene Notiz' + (my.length === 1 ? '' : 'en'));
+                      return `<button data-action="myNotes" data-account-id="${escapeAttr(t._accountId)}" data-ticket-id="${t.id}" class="${iconColor} -m-1 p-1 rounded shrink-0 relative" title="${tooltip}"><i data-lucide="${iconName}" class="w-4 h-4"></i>${my.length > 1 ? `<span class="absolute -top-0.5 -right-0.5 ${badgeColor} text-white text-[8px] font-bold leading-none w-3.5 h-3.5 rounded-full flex items-center justify-center">${my.length}</span>` : ''}</button>`;
                     })()}
                     <button data-action="summarize" data-account-id="${escapeAttr(t._accountId)}" data-ticket-id="${t.id}" class="text-purple-500 active:text-purple-700 hover:bg-purple-50 -m-1 p-1 rounded shrink-0" title="KI-Zusammenfassung">
                       <i data-lucide="sparkles" class="w-4 h-4"></i>
@@ -4216,9 +4225,14 @@ function renderProfilePage() {
           </button>
         </div>
       ` : ''}
-      <button onclick="navTo('rules')" class="w-full bg-gradient-to-r from-purple-50 to-brand-50 border border-purple-200 rounded-xl py-3 px-3 text-sm font-medium hover:opacity-90 flex items-center justify-center gap-2">
-        <i data-lucide="sparkles" class="w-4 h-4 text-purple-600"></i> KI-Regeln verwalten
-      </button>
+      <div class="grid grid-cols-2 gap-2">
+        <button onclick="navTo('rules')" class="bg-gradient-to-r from-purple-50 to-brand-50 border border-purple-200 rounded-xl py-3 px-2 text-sm font-medium hover:opacity-90 flex items-center justify-center gap-2">
+          <i data-lucide="sparkles" class="w-4 h-4 text-purple-600"></i> KI-Regeln
+        </button>
+        <button onclick="navTo('automated')" class="bg-gradient-to-r from-purple-50 to-brand-50 border border-purple-200 rounded-xl py-3 px-2 text-sm font-medium hover:opacity-90 flex items-center justify-center gap-2">
+          <i data-lucide="bot" class="w-4 h-4 text-purple-600"></i> Automatisiert
+        </button>
+      </div>
 
       <button onclick="logout()" class="w-full bg-red-50 border border-red-200 hover:bg-red-100 text-red-700 rounded-xl py-3 font-medium flex items-center justify-center gap-2">
         <i data-lucide="log-out" class="w-4 h-4"></i> Abmelden
@@ -4506,6 +4520,73 @@ function renderRulesList() {
             </div>
           </div>`;
       }).join('')}
+    </div>`;
+  if (window.lucide) lucide.createIcons();
+}
+
+/* === Automatisierte Tickets — Übersicht aller Tickets bei denen KI-Regeln gegriffen haben === */
+function renderAutomatedPage() {
+  setPageTitle('Automatisiert', 'KI-Regel-Historie pro Ticket');
+  // Aus MeineNotizen-Index aggregieren
+  const items = [];
+  if (APP_STATE.myNotesMap) {
+    for (const [key, notes] of APP_STATE.myNotesMap.entries()) {
+      const ruleNotes = notes.filter(n => n.typ === 'regel');
+      if (!ruleNotes.length) continue;
+      const [accountId, ticketId] = key.split('|');
+      items.push({
+        accountId,
+        ticketId,
+        latest:    ruleNotes[0],
+        count:     ruleNotes.length,
+        all:       ruleNotes,
+      });
+    }
+  }
+  items.sort((a, b) => new Date(b.latest.created || 0) - new Date(a.latest.created || 0));
+
+  $('pageContent').innerHTML = `
+    <div class="space-y-3">
+      <div class="bg-gradient-to-br from-purple-50 to-brand-50 border border-purple-200 rounded-2xl p-4 flex items-center gap-3">
+        <div class="w-10 h-10 rounded-xl bg-gradient-to-br from-purple-500 to-brand-600 flex items-center justify-center text-white shrink-0">
+          <i data-lucide="bot" class="w-5 h-5"></i>
+        </div>
+        <div class="flex-1 min-w-0">
+          <p class="font-bold text-ink-900">${items.length} Ticket${items.length === 1 ? '' : 's'} automatisiert</p>
+          <p class="text-[11px] text-ink-600">Sortiert nach letzter Regel-Anwendung</p>
+        </div>
+      </div>
+      ${items.length ? `
+        <div class="space-y-2">
+          ${items.map(it => {
+            const acc = APP_STATE.accounts.find(a => a.id === it.accountId);
+            const rel = _relTimeFull(it.latest.created);
+            return `
+              <div onclick="openTicketDetail('${escapeAttr(it.accountId)}', ${it.ticketId})" class="bg-white border border-ink-200 rounded-2xl p-3 active:bg-ink-50 cursor-pointer">
+                <div class="flex items-start gap-2 mb-1">
+                  <i data-lucide="bot" class="w-4 h-4 text-purple-600 shrink-0 mt-0.5"></i>
+                  <div class="flex-1 min-w-0">
+                    <p class="font-semibold text-ink-900 text-sm leading-snug">Ticket #${it.ticketId}</p>
+                    ${acc ? `<p class="text-[11px] text-ink-500 mt-0.5 inline-flex items-center gap-1 truncate"><span class="w-2 h-2 rounded-full" style="background:${escapeAttr(acc.color || '#64748b')}"></span> ${escapeHtml(acc.name)}</p>` : ''}
+                  </div>
+                  <span class="text-[10px] text-ink-400 shrink-0">${escapeHtml(rel)}</span>
+                </div>
+                <div class="bg-purple-50 border border-purple-200 rounded-lg p-2 mt-1.5">
+                  <p class="text-xs text-ink-700 whitespace-pre-line break-words line-clamp-3">${escapeHtml(it.latest.body)}</p>
+                </div>
+                ${it.count > 1 ? `<p class="text-[10px] text-purple-700 font-semibold mt-1.5">+ ${it.count - 1} weitere Anwendung${it.count === 2 ? '' : 'en'}</p>` : ''}
+              </div>`;
+          }).join('')}
+        </div>
+      ` : `
+        <div class="bg-white rounded-2xl border border-ink-200 p-8 text-center">
+          <i data-lucide="bot" class="w-12 h-12 mx-auto text-ink-400"></i>
+          <p class="font-semibold text-ink-700 mt-3">Noch keine automatisierten Tickets</p>
+          <p class="text-[11px] text-ink-500 mt-1">Sobald eine deiner KI-Regeln auf ein Ticket greift, erscheint es hier.</p>
+          <button onclick="navTo('rules')" class="mt-4 bg-purple-600 hover:bg-purple-700 text-white px-4 py-2 rounded-lg text-sm font-semibold inline-flex items-center gap-2">
+            <i data-lucide="sparkles" class="w-4 h-4"></i> Zu den KI-Regeln
+          </button>
+        </div>`}
     </div>`;
   if (window.lucide) lucide.createIcons();
 }
@@ -4851,6 +4932,7 @@ async function applyRuleActions(rule, ticket) {
   const base = '/freshdesk/' + encodeURIComponent(accountId) + '/api/v2/tickets/' + ticketId;
   const actions = rule.action?.actions || [];
   const performed = [];
+  let wroteNote = false;
   for (const a of actions) {
     try {
       if (a.type === 'note' && a.body) {
@@ -4860,6 +4942,7 @@ async function applyRuleActions(rule, ticket) {
         });
         recordMyNote(accountId, ticketId, a.body, 'regel').catch(() => {});
         performed.push('Notiz');
+        wroteNote = true;
       } else if (a.type === 'reply' && a.body) {
         await proxyJson(base + '/reply', {
           method: 'POST',
@@ -4905,6 +4988,21 @@ async function applyRuleActions(rule, ticket) {
     } catch (e) {
       console.warn('Rule action failed:', a, e);
     }
+  }
+  // Wenn Aktionen gelaufen sind und keine eigene Note-Action dabei war: kurze Bestätigungs-Notiz in Freshdesk
+  if (performed.length > 0 && !wroteNote) {
+    const summaryBody = '🤖 KI-Regel „' + rule.titel + '" automatisch angewandt\n\nAktionen: ' + performed.join(' · ');
+    try {
+      await proxyJson(base + '/notes', {
+        method: 'POST',
+        body: JSON.stringify({ body: textToHtmlForFreshdesk(summaryBody), private: true })
+      });
+    } catch (e) { console.warn('Summary-Note fehlgeschlagen:', e.message); }
+  }
+  // Immer in MeineNotizen indexieren — egal welche Aktionen gelaufen sind, damit UI „automatisiert" erkennt
+  if (performed.length > 0) {
+    const trackingBody = 'Regel „' + rule.titel + '" angewandt: ' + performed.join(' · ');
+    recordMyNote(accountId, ticketId, trackingBody, 'regel').catch(() => {});
   }
   return performed;
 }
