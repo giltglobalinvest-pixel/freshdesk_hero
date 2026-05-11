@@ -248,7 +248,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.14.1';
+const APP_VERSION = 'v2.15.0';
 // Read-Token absichtlich gesplittet, damit GitHub Secret-Scanning beim Push nicht blockt.
 // Der Token ist read-only und Base-scoped → bewusst eingebettet (Architektur-Entscheidung).
 const _RK = 'patu8KWM8aWB' + 'yxCGL.69fae5d9fa4b94c2' + '66b426dadd71a51f574945d840b33569058ab5e9d89ebef3';
@@ -4386,8 +4386,10 @@ async function processAssistantCommand(btn) {
   ctx.command = cmd;
   setBusy(btn, true, 'Claude analysiert…');
   try {
-    const action = await aiInterpretCommand(ctx.ticket, cmd, ctx.accountId);
-    ctx.action = action;
+    const plan = await aiInterpretCommand(ctx.ticket, cmd, ctx.accountId);
+    ctx.plan = plan;
+    // Backward-Compat für Stellen die noch ctx.action lesen
+    ctx.action = plan.actions[0] || null;
     renderAssistantPreview();
   } catch (e) {
     setBusy(btn, false);
@@ -4408,21 +4410,27 @@ async function aiInterpretCommand(ticket, command, accountId) {
     .map(a => '- ID ' + a.id + ': ' + a.name + (a.email ? ' (' + a.email + ')' : ''))
     .join('\n');
 
-  const sysPrompt = 'Du bist ein präziser AI-Assistent für eine deutschsprachige Freshdesk-Helpdesk-App auf dem Handy. Der User gibt dir einen kurzen Befehl (oft per Sprache). Du erkennst die Intention und gibst eine strukturierte JSON-Antwort zurück.\n\n' +
-    'AKTIONEN:\n' +
+  const sysPrompt = 'Du bist ein präziser AI-Assistent für eine deutschsprachige Freshdesk-Helpdesk-App auf dem Handy. Der User gibt dir einen kurzen Befehl (oft per Sprache). Du erkennst alle erforderlichen Schritte und gibst sie als JSON-Liste zurück.\n\n' +
+    'AKTIONSTYPEN (Feld "type"):\n' +
     '- "reply": öffentliche Antwort an Kunde\n' +
     '- "note": interne Notiz (nur Agents sehen sie)\n' +
     '- "forward": E-Mail weiterleiten an externe Adresse\n' +
     '- "assign": Bearbeiter ändern (responder_id setzen)\n' +
     '- "status": Status setzen (2=offen, 3=wartet, 4=gelöst, 5=geschlossen)\n' +
     '- "unknown": Befehl ist unklar oder mehrdeutig\n\n' +
-    'REGELN:\n' +
+    'WICHTIG — MEHRERE SCHRITTE:\n' +
+    'Ein User-Befehl kann mehrere Aktionen umfassen (z.B. „antworte… und weise Sandra zu und auf Gelöst setzen" = drei Aktionen). Liste sie in der logischen Reihenfolge auf (typisch: reply/note vor assign vor status, weil Status zuletzt geändert werden soll).\n' +
+    'Jede Aktion bekommt einen eigenen Eintrag in der "actions"-Liste. Wenn der User nur EINE Aktion verlangt, ist die Liste eben einelementig — das ist OK.\n\n' +
+    'REGELN PRO AKTION:\n' +
     '- Bei reply/note/forward: Verfasse einen fertigen, professionellen body-Text in der Sprache des Tickets (meist Deutsch). Mit Anrede (Name aus Ticket), klarer Aussage, freundlichem Abschluss. Verwende Zeilenumbrüche \\n für Absätze.\n' +
-    '- Bei assign: nur EINE eindeutige agent_id verwenden. Bei mehrdeutigen Vornamen (z.B. mehrere "Sandra") → action="unknown" mit Rückfrage in summary.\n' +
+    '- Bei assign: nur EINE eindeutige agent_id verwenden. Bei mehrdeutigen Vornamen (z.B. mehrere "Sandra") → type="unknown" mit Rückfrage in summary.\n' +
     '- Bei forward: forward_to als Array von E-Mail-Adressen.\n' +
+    '- Pro Aktion ein kurzes "summary"-Feld auf Deutsch, das knapp beschreibt was die Aktion bewirkt — der User sieht das als Kachel-Untertitel.\n' +
     '- Antworte AUSSCHLIESSLICH mit dem JSON-Objekt, kein Markdown, keine Erklärung drumherum.\n\n' +
     'JSON-FORMAT:\n' +
-    '{"action":"reply|note|forward|assign|status|unknown","body":"...","forward_to":["..."],"agent_id":12345,"status":4,"summary":"Kurze deutsche Zusammenfassung der Aktion"}';
+    '{"overall_summary":"Kurz auf Deutsch was insgesamt passieren soll","actions":[\n' +
+    '  {"type":"reply|note|forward|assign|status|unknown","body":"...","forward_to":["..."],"agent_id":12345,"status":4,"summary":"Kurze deutsche Beschreibung dieses Schritts"}\n' +
+    ']}';
 
   const userPrompt = 'TICKET:\n' +
     'Betreff: ' + (ticket.subject || '') + '\n' +
@@ -4442,63 +4450,312 @@ async function aiInterpretCommand(ticket, command, accountId) {
     })
   });
   const text = (data.content && data.content[0] && data.content[0].text) || '';
-  return parseAIJson(text);
+  const parsed = parseAIJson(text);
+  return normalizeAssistantPlan(parsed);
 }
 
+/* Normalisiert die Claude-Antwort auf das Format {overall_summary, actions:[...]}.
+   Akzeptiert auch das alte Single-Action-Schema und wickelt es in actions[] ein.
+   Jede Aktion bekommt zusätzlich einen Status-State für die Kachel-Bestätigung. */
+function normalizeAssistantPlan(raw) {
+  if (!raw || typeof raw !== 'object') {
+    return { overall_summary: '', actions: [{ type: 'unknown', summary: 'Antwort konnte nicht interpretiert werden', _state: 'pending' }] };
+  }
+  let actions = [];
+  if (Array.isArray(raw.actions) && raw.actions.length) {
+    actions = raw.actions.slice();
+  } else if (raw.action || raw.type) {
+    // Altes Schema: einzelne Aktion auf Top-Level
+    const single = Object.assign({}, raw);
+    single.type = single.type || single.action;
+    delete single.action;
+    actions = [single];
+  } else {
+    actions = [{ type: 'unknown', summary: 'Keine Aktion erkannt' }];
+  }
+  // Normalisieren und State-Felder anhängen
+  actions = actions.map((a, i) => {
+    const norm = Object.assign({}, a);
+    norm.type = norm.type || norm.action || 'unknown';
+    delete norm.action;
+    norm._state = 'pending';   // pending | running | done | failed | skipped
+    norm._error = null;
+    norm._idx = i;
+    return norm;
+  });
+  return {
+    overall_summary: raw.overall_summary || raw.summary || '',
+    actions,
+  };
+}
+
+/* === Kachel-basierter Mehr-Schritt-Plan ====================================
+   Statt einer einzigen „Ausführen"-Aktion liefert die KI eine Liste von Schritten.
+   Jede Kachel hat eigenen Status (pending/running/done/failed/skipped). Schritte
+   werden der Reihe nach freigeschaltet — Schritt N+1 ist sichtbar aber disabled,
+   bis Schritt N bestätigt oder übersprungen wurde.
+   ========================================================================== */
 function renderAssistantPreview() {
   const ctx = ASSISTANT_CTX;
-  if (!ctx || !ctx.action) return;
-  const a = ctx.action;
-  let card = '';
-  let canExecute = a.action !== 'unknown';
+  if (!ctx || !ctx.plan) return;
+  const plan = ctx.plan;
+  const actions = plan.actions || [];
 
-  if (a.action === 'reply') {
-    card = '<div class="bg-emerald-50 border border-emerald-200 rounded-xl p-3">' +
-      '<div class="flex items-center gap-2 mb-2"><i data-lucide="reply" class="w-4 h-4 text-emerald-700"></i><p class="font-semibold text-emerald-900 text-sm">Antwort an Kunde (öffentlich)</p></div>' +
-      '<textarea id="assistantBodyEdit" class="w-full text-sm px-3 py-2 border border-emerald-300 bg-white rounded-lg whitespace-pre-line" rows="10">' + escapeHtml(a.body || '') + '</textarea>' +
-      '<p class="text-[10px] text-emerald-800 mt-1 italic">Du kannst den Text vor dem Senden anpassen.</p></div>';
-  } else if (a.action === 'note') {
-    card = '<div class="bg-amber-50 border border-amber-200 rounded-xl p-3">' +
-      '<div class="flex items-center gap-2 mb-2"><i data-lucide="sticky-note" class="w-4 h-4 text-amber-700"></i><p class="font-semibold text-amber-900 text-sm">Interne Notiz</p></div>' +
-      '<textarea id="assistantBodyEdit" class="w-full text-sm px-3 py-2 border border-amber-300 bg-white rounded-lg whitespace-pre-line" rows="8">' + escapeHtml(a.body || '') + '</textarea></div>';
-  } else if (a.action === 'forward') {
-    card = '<div class="bg-blue-50 border border-blue-200 rounded-xl p-3">' +
-      '<div class="flex items-center gap-2 mb-2"><i data-lucide="forward" class="w-4 h-4 text-blue-700"></i><p class="font-semibold text-blue-900 text-sm">Weiterleiten</p></div>' +
-      '<label class="text-[10px] uppercase font-semibold text-blue-800">Empfänger (mehrere mit Komma)</label>' +
-      '<input id="assistantForwardTo" class="w-full text-sm px-3 py-2 border border-blue-300 bg-white rounded-lg mb-2 mt-0.5 font-mono" value="' + escapeAttr((a.forward_to || []).join(', ')) + '" placeholder="empfaenger@beispiel.de">' +
-      '<label class="text-[10px] uppercase font-semibold text-blue-800">Nachricht</label>' +
-      '<textarea id="assistantBodyEdit" class="w-full text-sm px-3 py-2 border border-blue-300 bg-white rounded-lg whitespace-pre-line mt-0.5" rows="8">' + escapeHtml(a.body || '') + '</textarea></div>';
-  } else if (a.action === 'assign') {
-    const name = getAgentName(ctx.accountId, a.agent_id) || ('Agent #' + a.agent_id);
-    card = '<div class="bg-brand-50 border border-brand-200 rounded-xl p-4">' +
-      '<div class="flex items-center gap-3"><i data-lucide="user" class="w-5 h-5 text-brand-700"></i>' +
-      '<div><p class="text-[10px] uppercase font-semibold text-brand-800 tracking-wider">Zuweisen an</p>' +
-      '<p class="font-bold text-ink-900 text-base">' + escapeHtml(name) + '</p></div></div></div>';
-  } else if (a.action === 'status') {
-    const statusMap = { 2: 'Offen', 3: 'Wartet', 4: 'Gelöst', 5: 'Geschlossen' };
-    card = '<div class="bg-brand-50 border border-brand-200 rounded-xl p-4">' +
-      '<div class="flex items-center gap-3"><i data-lucide="flag" class="w-5 h-5 text-brand-700"></i>' +
-      '<div><p class="text-[10px] uppercase font-semibold text-brand-800 tracking-wider">Neuer Status</p>' +
-      '<p class="font-bold text-ink-900 text-base">' + escapeHtml(statusMap[a.status] || ('Status ' + a.status)) + '</p></div></div></div>';
+  // Welcher Schritt ist als nächstes dran? Der erste pending nach allen done/skipped/failed
+  let activeIdx = -1;
+  for (let i = 0; i < actions.length; i++) {
+    if (actions[i]._state === 'pending' || actions[i]._state === 'running') { activeIdx = i; break; }
+  }
+  const allDone = actions.every(a => a._state === 'done' || a._state === 'skipped' || a._state === 'failed');
+
+  const statusMap = { 2: 'Offen', 3: 'Wartet', 4: 'Gelöst', 5: 'Geschlossen' };
+  const typeMeta = {
+    reply:   { icon: 'reply',         color: 'emerald', label: 'Antwort an Kunde' },
+    note:    { icon: 'sticky-note',   color: 'amber',   label: 'Interne Notiz' },
+    forward: { icon: 'forward',       color: 'blue',    label: 'Weiterleiten' },
+    assign:  { icon: 'user',          color: 'brand',   label: 'Zuweisen' },
+    status:  { icon: 'flag',          color: 'purple',  label: 'Status setzen' },
+    unknown: { icon: 'help-circle',   color: 'amber',   label: 'Befehl unklar' },
+  };
+  const stateMeta = {
+    pending: { label: 'ausstehend', cls: 'bg-ink-100 text-ink-600 border-ink-200',           icon: 'circle' },
+    running: { label: 'läuft…',      cls: 'bg-blue-100 text-blue-700 border-blue-200',       icon: 'loader' },
+    done:    { label: 'erledigt',    cls: 'bg-emerald-100 text-emerald-700 border-emerald-200', icon: 'check-circle-2' },
+    failed:  { label: 'fehler',      cls: 'bg-red-100 text-red-700 border-red-200',          icon: 'alert-triangle' },
+    skipped: { label: 'übersprungen', cls: 'bg-ink-100 text-ink-500 border-ink-200',         icon: 'skip-forward' },
+  };
+
+  const cards = actions.map((a, i) => {
+    const meta = typeMeta[a.type] || typeMeta.unknown;
+    const isActive   = (i === activeIdx);
+    const isPending  = a._state === 'pending';
+    const isRunning  = a._state === 'running';
+    const isDone     = a._state === 'done';
+    const isFailed   = a._state === 'failed';
+    const isSkipped  = a._state === 'skipped';
+    const locked     = !isActive && isPending; // späterer Schritt, noch nicht dran
+
+    const stMeta = stateMeta[a._state] || stateMeta.pending;
+    const headerColorCls = `text-${meta.color}-700`;
+    const wrapCls = isDone     ? 'bg-emerald-50/40 border-emerald-200 opacity-90'
+                  : isFailed   ? 'bg-red-50/40 border-red-200'
+                  : isSkipped  ? 'bg-ink-50 border-ink-200 opacity-70'
+                  : isActive   ? `bg-${meta.color}-50 border-${meta.color}-300 shadow-sm`
+                  :              'bg-white border-ink-200 opacity-60';
+
+    // Body / Edit-Fields nur in der aktiven Karte editierbar, vorher/nachher readonly Anzeige
+    let body = '';
+    if (a.type === 'reply' || a.type === 'note') {
+      if (isActive && isPending) {
+        body = `<label class="text-[10px] uppercase font-semibold text-${meta.color}-800 block">Text — kannst du anpassen</label>
+                <textarea id="stepBody_${i}" class="w-full text-sm px-3 py-2 border border-${meta.color}-300 bg-white rounded-lg whitespace-pre-line mt-1" rows="${a.type==='reply'?8:6}">${escapeHtml(a.body || '')}</textarea>`;
+      } else {
+        body = `<div class="text-[11px] text-ink-700 whitespace-pre-line bg-white/60 rounded p-2 max-h-32 overflow-y-auto border border-${meta.color}-200">${escapeHtml(a.body || '')}</div>`;
+      }
+    } else if (a.type === 'forward') {
+      if (isActive && isPending) {
+        body = `<label class="text-[10px] uppercase font-semibold text-${meta.color}-800 block">Empfänger (kommagetrennt)</label>
+                <input id="stepForwardTo_${i}" class="w-full text-sm px-3 py-2 border border-${meta.color}-300 bg-white rounded-lg mt-1 mb-2 font-mono" value="${escapeAttr((a.forward_to || []).join(', '))}" placeholder="empfaenger@beispiel.de">
+                <label class="text-[10px] uppercase font-semibold text-${meta.color}-800 block">Nachricht</label>
+                <textarea id="stepBody_${i}" class="w-full text-sm px-3 py-2 border border-${meta.color}-300 bg-white rounded-lg whitespace-pre-line mt-1" rows="6">${escapeHtml(a.body || '')}</textarea>`;
+      } else {
+        body = `<p class="text-[11px] text-ink-600">an <span class="font-mono">${escapeHtml((a.forward_to||[]).join(', '))}</span></p>
+                <div class="text-[11px] text-ink-700 whitespace-pre-line bg-white/60 rounded p-2 max-h-24 overflow-y-auto border border-${meta.color}-200 mt-1">${escapeHtml(a.body || '')}</div>`;
+      }
+    } else if (a.type === 'assign') {
+      const name = getAgentName(ctx.accountId, a.agent_id) || ('Agent #' + a.agent_id);
+      body = `<p class="text-sm"><span class="text-ink-500">→</span> <span class="font-semibold text-ink-900">${escapeHtml(name)}</span></p>`;
+    } else if (a.type === 'status') {
+      body = `<p class="text-sm"><span class="text-ink-500">→</span> <span class="font-semibold text-ink-900">${escapeHtml(statusMap[a.status] || ('Status ' + a.status))}</span></p>`;
+    } else {
+      body = `<p class="text-sm text-ink-800">${escapeHtml(a.summary || 'Bitte präziser formulieren.')}</p>`;
+    }
+
+    const stateBadge = `<span class="inline-flex items-center gap-1 text-[10px] uppercase tracking-wider px-1.5 py-0.5 rounded font-bold border ${stMeta.cls}"><i data-lucide="${stMeta.icon}" class="w-3 h-3 ${isRunning?'animate-spin':''}"></i>${stMeta.label}</span>`;
+
+    // Buttons: nur am aktiven Schritt sichtbar UND nur wenn pending (nicht running/done/failed)
+    let buttons = '';
+    if (isActive && isPending && a.type !== 'unknown') {
+      buttons = `
+        <div class="flex gap-2 pt-2">
+          <button onclick="skipAssistantStep(${i})" class="flex-1 bg-white border border-ink-200 px-3 py-2 rounded-lg text-xs font-medium hover:bg-ink-50 active:bg-ink-100 inline-flex items-center justify-center gap-1.5">
+            <i data-lucide="skip-forward" class="w-3.5 h-3.5"></i> Überspringen
+          </button>
+          <button onclick="confirmAssistantStep(${i}, this)" class="flex-[2] bg-${meta.color}-600 hover:bg-${meta.color}-700 text-white px-4 py-2 rounded-lg text-sm font-semibold inline-flex items-center justify-center gap-1.5">
+            <i data-lucide="check" class="w-4 h-4"></i> Bestätigen
+          </button>
+        </div>`;
+    } else if (isActive && isPending && a.type === 'unknown') {
+      buttons = `
+        <div class="flex gap-2 pt-2">
+          <button onclick="skipAssistantStep(${i})" class="flex-1 bg-white border border-ink-200 px-3 py-2 rounded-lg text-xs font-medium hover:bg-ink-50 inline-flex items-center justify-center gap-1.5">
+            <i data-lucide="x" class="w-3.5 h-3.5"></i> Überspringen
+          </button>
+        </div>`;
+    } else if (isFailed) {
+      buttons = `
+        <div class="text-[11px] text-red-700 mt-1">${escapeHtml(a._error || 'Fehler')}</div>
+        <div class="flex gap-2 pt-2">
+          <button onclick="retryAssistantStep(${i}, this)" class="flex-1 bg-white border border-red-200 text-red-700 px-3 py-2 rounded-lg text-xs font-medium hover:bg-red-50 inline-flex items-center justify-center gap-1.5">
+            <i data-lucide="refresh-cw" class="w-3.5 h-3.5"></i> Nochmal versuchen
+          </button>
+        </div>`;
+    }
+
+    return `
+      <div class="rounded-xl border-2 p-3 transition-all ${wrapCls}">
+        <div class="flex items-center gap-2 mb-2">
+          <div class="w-7 h-7 rounded-full bg-${meta.color}-100 border border-${meta.color}-300 flex items-center justify-center text-${meta.color}-700 shrink-0 text-xs font-bold">${i+1}</div>
+          <i data-lucide="${meta.icon}" class="w-4 h-4 ${headerColorCls}"></i>
+          <p class="font-semibold text-ink-900 text-sm flex-1 truncate">${escapeHtml(meta.label)}</p>
+          ${stateBadge}
+        </div>
+        ${a.summary && a.type !== 'unknown' ? `<p class="text-[11px] text-ink-600 italic mb-2">${escapeHtml(a.summary)}</p>` : ''}
+        ${body}
+        ${locked ? `<p class="text-[10px] text-ink-400 italic mt-2 inline-flex items-center gap-1"><i data-lucide="lock" class="w-3 h-3"></i> Vorheriger Schritt zuerst bestätigen</p>` : ''}
+        ${buttons}
+      </div>`;
+  }).join('');
+
+  // Footer-Button
+  let footer = '';
+  if (allDone) {
+    const okCount = actions.filter(a => a._state === 'done').length;
+    const failCount = actions.filter(a => a._state === 'failed').length;
+    const skipCount = actions.filter(a => a._state === 'skipped').length;
+    footer = `
+      <div class="bg-emerald-50 border-2 border-emerald-200 rounded-xl p-3 text-center">
+        <p class="font-bold text-emerald-900 text-sm inline-flex items-center gap-1.5"><i data-lucide="check-check" class="w-4 h-4"></i> Plan abgeschlossen</p>
+        <p class="text-[11px] text-emerald-700 mt-0.5">${okCount} erledigt · ${skipCount} übersprungen${failCount?` · ${failCount} fehlgeschlagen`:''}</p>
+      </div>
+      <div class="flex gap-2 pt-1">
+        <button onclick="renderAssistantInput()" class="flex-1 bg-white border border-ink-200 px-3 py-2.5 rounded-lg text-sm font-medium hover:bg-ink-50">Neuer Befehl</button>
+        <button onclick="finalizeAssistantRun()" class="flex-[2] bg-brand-500 hover:bg-brand-600 text-white px-4 py-2.5 rounded-lg text-sm font-semibold inline-flex items-center justify-center gap-2"><i data-lucide="x" class="w-4 h-4"></i> Fertig</button>
+      </div>`;
   } else {
-    card = '<div class="bg-amber-50 border border-amber-200 rounded-xl p-4">' +
-      '<div class="flex items-center gap-2 mb-2"><i data-lucide="help-circle" class="w-4 h-4 text-amber-700"></i><p class="font-semibold text-amber-900 text-sm">Befehl unklar</p></div>' +
-      '<p class="text-sm text-ink-800">' + escapeHtml(a.summary || 'Bitte präziser formulieren.') + '</p></div>';
+    footer = `
+      <div class="flex gap-2 pt-1">
+        <button onclick="renderAssistantInput()" class="flex-1 bg-white border border-ink-200 px-3 py-2.5 rounded-lg text-sm font-medium hover:bg-ink-50">← Zurück (Eingabe ändern)</button>
+      </div>`;
   }
 
   $('assistantContent').innerHTML =
     '<div class="space-y-3 max-w-2xl mx-auto">' +
       '<div class="bg-ink-50 rounded-xl p-3 text-xs">' +
         '<p class="text-ink-500 text-[10px] uppercase tracking-wider">Dein Befehl</p>' +
-        '<p class="text-ink-900 italic mt-1">„' + escapeHtml(ctx.command) + '"</p></div>' +
-      card +
-      (a.summary && a.action !== 'unknown' ? '<p class="text-[11px] text-ink-500 text-center italic">' + escapeHtml(a.summary) + '</p>' : '') +
-      '<div class="flex gap-2 pt-1">' +
-        '<button onclick="renderAssistantInput()" class="flex-1 bg-white border border-ink-200 px-3 py-2.5 rounded-lg text-sm font-medium hover:bg-ink-50">← Zurück</button>' +
-        (canExecute ? '<button onclick="executeAssistantAction(this)" class="flex-[2] bg-brand-500 hover:bg-brand-600 text-white px-4 py-2.5 rounded-lg text-sm font-semibold inline-flex items-center justify-center gap-2"><i data-lucide="check" class="w-4 h-4"></i> Ausführen</button>' : '') +
+        '<p class="text-ink-900 italic mt-1">„' + escapeHtml(ctx.command) + '"</p>' +
+        (plan.overall_summary ? '<p class="text-[11px] text-ink-600 mt-1.5"><span class="font-semibold">Plan:</span> ' + escapeHtml(plan.overall_summary) + '</p>' : '') +
+        '<p class="text-[10px] text-ink-500 mt-1.5"><i data-lucide="info" class="w-3 h-3 inline mr-0.5"></i>Jeder Schritt wird einzeln bestätigt. Nichts läuft automatisch.</p>' +
       '</div>' +
+      '<div class="space-y-2">' + cards + '</div>' +
+      footer +
     '</div>';
   if (window.lucide) lucide.createIcons();
+}
+
+/* === Step-Aktionen ======================================================== */
+async function confirmAssistantStep(idx, btnEl) {
+  const ctx = ASSISTANT_CTX;
+  if (!ctx?.plan) return;
+  const a = ctx.plan.actions[idx];
+  if (!a || a._state !== 'pending') return;
+
+  // Edits aus den Eingabefeldern lesen
+  if (a.type === 'reply' || a.type === 'note' || a.type === 'forward') {
+    const edited = $('stepBody_' + idx)?.value;
+    if (edited !== undefined) a.body = edited;
+  }
+  if (a.type === 'forward') {
+    const raw = $('stepForwardTo_' + idx)?.value || '';
+    a.forward_to = raw.split(',').map(s => s.trim()).filter(Boolean);
+    if (!a.forward_to.length) return toast('Empfänger fehlt', 'warn');
+  }
+
+  a._state = 'running';
+  renderAssistantPreview();
+
+  try {
+    await executeSingleAssistantAction(ctx, a);
+    a._state = 'done';
+    a._error = null;
+  } catch (e) {
+    a._state = 'failed';
+    a._error = e?.message || String(e);
+    toast('Schritt ' + (idx + 1) + ' fehlgeschlagen: ' + a._error, 'error', 6000);
+  }
+  renderAssistantPreview();
+}
+
+function skipAssistantStep(idx) {
+  const ctx = ASSISTANT_CTX;
+  if (!ctx?.plan) return;
+  const a = ctx.plan.actions[idx];
+  if (!a || a._state !== 'pending') return;
+  a._state = 'skipped';
+  renderAssistantPreview();
+}
+
+async function retryAssistantStep(idx, btnEl) {
+  const ctx = ASSISTANT_CTX;
+  if (!ctx?.plan) return;
+  const a = ctx.plan.actions[idx];
+  if (!a) return;
+  a._state = 'pending';
+  a._error = null;
+  renderAssistantPreview();
+}
+
+/* Führt eine einzelne Schritt-Aktion gegen die Freshdesk-API aus.
+   Keine Toast/UI-Updates hier — die Schleife steuert das. */
+async function executeSingleAssistantAction(ctx, a) {
+  const base = '/freshdesk/' + encodeURIComponent(ctx.accountId) + '/api/v2/tickets/' + ctx.ticketId;
+  if (a.type === 'reply') {
+    await proxyJson(base + '/reply', { method: 'POST', body: JSON.stringify({ body: textToHtmlForFreshdesk(a.body) }) });
+  } else if (a.type === 'note') {
+    await proxyJson(base + '/notes', { method: 'POST', body: JSON.stringify({ body: textToHtmlForFreshdesk(a.body), private: true }) });
+    recordMyNote(ctx.accountId, ctx.ticketId, a.body, 'assistant').catch(() => {});
+  } else if (a.type === 'forward') {
+    await proxyJson(base + '/forward', { method: 'POST', body: JSON.stringify({ to_emails: a.forward_to, body: textToHtmlForFreshdesk(a.body) }) });
+  } else if (a.type === 'assign') {
+    await proxyJson(base, { method: 'PUT', body: JSON.stringify({ responder_id: a.agent_id }) });
+  } else if (a.type === 'status') {
+    await proxyJson(base, { method: 'PUT', body: JSON.stringify({ status: a.status }) });
+  } else {
+    throw new Error('Unbekannter Aktionstyp: ' + a.type);
+  }
+}
+
+/* Wird gerufen wenn der User „Fertig" tippt nachdem alle Schritte durch sind.
+   Setzt eine sinnvolle Auto-Wiedervorlage (höchste Prio: reply > assign > note). */
+async function finalizeAssistantRun() {
+  const ctx = ASSISTANT_CTX;
+  if (!ctx?.plan) { closeAssistantModal(); return; }
+  const done = ctx.plan.actions.filter(a => a._state === 'done');
+  if (done.length) {
+    // Auto-Wiedervorlage: nimm die längste anwendbare Dauer der erfolgreichen Aktionen
+    const wvDays = { reply: 3, assign: 7, note: 1 };
+    let bestDays = 0, bestGrund = null;
+    for (const a of done) {
+      const d = wvDays[a.type];
+      if (d && d > bestDays) {
+        bestDays = d;
+        bestGrund = a.type === 'reply' ? 'antwort' : a.type === 'assign' ? 'zuweisung' : 'notiz';
+      }
+    }
+    if (bestDays > 0 && bestGrund) {
+      try {
+        const frist = _daysToFrist(bestDays, { morning: true });
+        await addWiedervorlage(ctx.accountId, ctx.ticketId, frist, bestGrund);
+        toast(done.length + ' Aktion' + (done.length===1?'':'en') + ' ausgeführt · ' + bestDays + ' Tag' + (bestDays===1?'':'e') + ' auf Wiedervorlage', 'success', 5000);
+      } catch (_) {
+        toast(done.length + ' Aktion' + (done.length===1?'':'en') + ' ausgeführt', 'success', 4000);
+      }
+    } else {
+      toast(done.length + ' Aktion' + (done.length===1?'':'en') + ' ausgeführt', 'success', 4000);
+    }
+  }
+  closeAssistantModal();
+  renderTicketsPage();
 }
 
 function textToHtmlForFreshdesk(text) {
@@ -4506,72 +4763,13 @@ function textToHtmlForFreshdesk(text) {
   return text.split(/\n\n+/).map(p => '<p>' + escapeHtml(p).replace(/\n/g, '<br>') + '</p>').join('');
 }
 
+// Legacy-Wrapper: alte Single-Action-Funktion delegiert jetzt auf den
+// Schritt-für-Schritt-Flow. Wird intern nicht mehr gerufen, bleibt nur
+// als Sicherung falls noch ein Bookmarklet/Debug-Aufruf existiert.
 async function executeAssistantAction(btn) {
   const ctx = ASSISTANT_CTX;
-  if (!ctx || !ctx.action) return;
-  const a = ctx.action;
-  const edited = $('assistantBodyEdit')?.value;
-  if (edited !== undefined && (a.action === 'reply' || a.action === 'note' || a.action === 'forward')) {
-    a.body = edited;
-  }
-  if (a.action === 'forward') {
-    const raw = $('assistantForwardTo')?.value || '';
-    a.forward_to = raw.split(',').map(s => s.trim()).filter(Boolean);
-    if (!a.forward_to.length) return toast('Empfänger fehlt', 'warn');
-  }
-
-  setBusy(btn, true, 'Sende…');
-  const base = '/freshdesk/' + encodeURIComponent(ctx.accountId) + '/api/v2/tickets/' + ctx.ticketId;
-  // Auto-Wiedervorlage: Default-Dauer pro Aktionstyp (nur Sicht-Hide, kein Status-Change)
-  const autoWvDays = { reply: 3, note: 1, assign: 7 };
-  try {
-    let successMsg = '';
-    let wvDays = 0;
-    let wvGrund = null;
-    if (a.action === 'reply') {
-      await proxyJson(base + '/reply', { method: 'POST', body: JSON.stringify({ body: textToHtmlForFreshdesk(a.body) }) });
-      successMsg = 'Antwort gesendet';
-      wvDays = autoWvDays.reply; wvGrund = 'antwort';
-    } else if (a.action === 'note') {
-      await proxyJson(base + '/notes', { method: 'POST', body: JSON.stringify({ body: textToHtmlForFreshdesk(a.body), private: true }) });
-      recordMyNote(ctx.accountId, ctx.ticketId, a.body, 'assistant').catch(() => {});
-      successMsg = 'Notiz hinzugefügt';
-      wvDays = autoWvDays.note; wvGrund = 'notiz';
-    } else if (a.action === 'forward') {
-      await proxyJson(base + '/forward', { method: 'POST', body: JSON.stringify({ to_emails: a.forward_to, body: textToHtmlForFreshdesk(a.body) }) });
-      successMsg = 'Weitergeleitet an ' + a.forward_to.join(', ');
-    } else if (a.action === 'assign') {
-      await proxyJson(base, { method: 'PUT', body: JSON.stringify({ responder_id: a.agent_id }) });
-      successMsg = 'Zugewiesen an ' + (getAgentName(ctx.accountId, a.agent_id) || ('#' + a.agent_id));
-      wvDays = autoWvDays.assign; wvGrund = 'zuweisung';
-    } else if (a.action === 'status') {
-      // Status-Änderung: keine Auto-Wiedervorlage (Status-Filter handhabt das)
-      await proxyJson(base, { method: 'PUT', body: JSON.stringify({ status: a.status }) });
-      successMsg = 'Status geändert';
-    }
-    closeAssistantModal();
-    // Auto-Wiedervorlage anhängen (nur bei reply/note/assign)
-    if (wvDays > 0 && wvGrund) {
-      try {
-        const frist = _daysToFrist(wvDays, { morning: true });
-        await addWiedervorlage(ctx.accountId, ctx.ticketId, frist, wvGrund);
-        toast(successMsg + ' · ' + wvDays + ' Tag' + (wvDays === 1 ? '' : 'e') + ' auf Wiedervorlage', 'success', 6000, {
-          label: 'Doch zeigen',
-          onClick: async () => {
-            try { await removeWiedervorlage(ctx.accountId, ctx.ticketId); renderTicketsPage(); toast('Wiedervorlage aufgehoben', 'info', 2000); } catch (_) {}
-          }
-        });
-      } catch (wvErr) {
-        toast(successMsg + ' (Wiedervorlage fehlgeschlagen: ' + wvErr.message + ')', 'warn', 5000);
-      }
-    } else {
-      toast(successMsg, 'success');
-    }
-    renderTicketsPage();
-  } catch (e) {
-    setBusy(btn, false);
-    toast('Fehler: ' + e.message, 'error', 8000);
-  }
+  if (!ctx?.plan?.actions?.length) return;
+  return confirmAssistantStep(0, btn);
 }
 
 async function summarizeTicket(btnEl) {
