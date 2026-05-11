@@ -221,7 +221,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.3.0';
+const APP_VERSION = 'v2.4.0';
 // Read-Token absichtlich gesplittet, damit GitHub Secret-Scanning beim Push nicht blockt.
 // Der Token ist read-only und Base-scoped → bewusst eingebettet (Architektur-Entscheidung).
 const _RK = 'patu8KWM8aWB' + 'yxCGL.69fae5d9fa4b94c2' + '66b426dadd71a51f574945d840b33569058ab5e9d89ebef3';
@@ -2937,6 +2937,7 @@ async function openTicketSummaryModal(accountId, ticketId) {
 }
 
 function closeSummaryModal() {
+  if (NOTE_REC) { try { NOTE_REC.stop(); } catch (_) {} NOTE_REC = null; }
   const host = document.getElementById('subModalHost');
   if (host) host.innerHTML = '';
   SUMMARY_CTX = null;
@@ -3018,6 +3019,36 @@ function renderMarkdownLite(md) {
   return html;
 }
 
+function collectTicketAttachments(ticket) {
+  const list = [];
+  (ticket.attachments || []).forEach(a => list.push({ ...a, _source: 'Erste Anfrage', _createdAt: ticket.created_at }));
+  (ticket.conversations || []).forEach((c, idx) => {
+    (c.attachments || []).forEach(a => {
+      list.push({ ...a, _source: (c.incoming ? 'Kunde' : 'Agent') + (c.private ? ' (intern)' : '') + ' #' + (idx + 1), _createdAt: c.created_at });
+    });
+  });
+  return list;
+}
+
+function attachmentIcon(contentType) {
+  const ct = (contentType || '').toLowerCase();
+  if (ct.startsWith('image/')) return 'image';
+  if (ct.includes('pdf')) return 'file-text';
+  if (ct.includes('word') || ct.includes('document')) return 'file-text';
+  if (ct.includes('sheet') || ct.includes('excel')) return 'sheet';
+  if (ct.includes('zip') || ct.includes('archive')) return 'archive';
+  if (ct.includes('audio')) return 'music';
+  if (ct.includes('video')) return 'video';
+  return 'file';
+}
+
+function fmtFileSize(bytes) {
+  if (!bytes || isNaN(bytes)) return '';
+  if (bytes < 1024) return bytes + ' B';
+  if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(0) + ' KB';
+  return (bytes / 1024 / 1024).toFixed(1) + ' MB';
+}
+
 function renderSummaryBody(ticket, summary) {
   const req = ticket.requester || {};
   // Phones aus requester
@@ -3041,6 +3072,10 @@ function renderSummaryBody(ticket, summary) {
     summary,
   ].join('\n');
   extractPhoneNumbers(fullText).forEach(n => addPhone('gefunden', n));
+
+  // Anhänge sammeln
+  const attachments = collectTicketAttachments(ticket);
+  const speechAvailable = !!(window.SpeechRecognition || window.webkitSpeechRecognition);
 
   $('summaryContent').innerHTML = `
     <div class="space-y-3 max-w-2xl mx-auto">
@@ -3093,9 +3128,116 @@ function renderSummaryBody(ticket, summary) {
           </div>
         </div>` : ''}
 
-      <p class="text-[10px] text-center text-ink-400 italic mt-2">Zusammenfassung wird automatisch als private Notiz im Ticket gespeichert.</p>
+      <!-- Anhänge -->
+      ${attachments.length ? `
+        <div class="bg-white border border-ink-200 rounded-2xl p-4">
+          <div class="flex items-center gap-2 mb-3">
+            <i data-lucide="paperclip" class="w-4 h-4 text-ink-700"></i>
+            <h3 class="font-semibold text-ink-900 text-sm">Anhänge (${attachments.length})</h3>
+            <span class="ml-auto text-[10px] text-ink-400">tippen zum Öffnen</span>
+          </div>
+          <div class="space-y-1.5">
+            ${attachments.map(a => `
+              <a href="${escapeAttr(a.attachment_url)}" target="_blank" rel="noopener" class="flex items-center gap-3 px-3 py-2.5 bg-ink-50 active:bg-ink-100 border border-ink-200 rounded-lg">
+                <div class="w-9 h-9 rounded-lg bg-white border border-ink-200 flex items-center justify-center text-ink-600 shrink-0"><i data-lucide="${attachmentIcon(a.content_type)}" class="w-4 h-4"></i></div>
+                <div class="flex-1 min-w-0">
+                  <p class="text-sm text-ink-900 truncate">${escapeHtml(a.name || 'Datei')}</p>
+                  <p class="text-[10px] text-ink-500 truncate">${escapeHtml(fmtFileSize(a.size))}${a.content_type ? ' · ' + escapeHtml(a.content_type) : ''} · ${escapeHtml(a._source || '')}</p>
+                </div>
+                <i data-lucide="download" class="w-4 h-4 text-ink-500 shrink-0"></i>
+              </a>`).join('')}
+          </div>
+        </div>` : ''}
+
+      <!-- Eigene Notiz hinzufügen (Sprach- oder Texteingabe) -->
+      <div class="bg-amber-50 border border-amber-200 rounded-2xl p-4">
+        <div class="flex items-center gap-2 mb-3">
+          <i data-lucide="sticky-note" class="w-4 h-4 text-amber-700"></i>
+          <h3 class="font-semibold text-amber-900 text-sm">Eigene Notiz hinzufügen</h3>
+        </div>
+        <textarea id="noteInput" placeholder="Eigene Anmerkung — tippen oder diktieren…" rows="3" class="w-full px-3 py-2 border border-amber-300 bg-white rounded-lg text-sm focus:ring-2 focus:ring-amber-500/30 focus:border-amber-500 resize-none"></textarea>
+        <div class="flex gap-2 mt-2">
+          ${speechAvailable ? `
+            <button id="noteMicBtn" type="button" onclick="toggleNoteVoice()" class="px-3 py-2.5 bg-gradient-to-br from-purple-500 to-brand-600 text-white rounded-lg text-sm font-semibold inline-flex items-center gap-1.5 active:opacity-80 shrink-0">
+              <i data-lucide="mic" class="w-4 h-4"></i><span id="noteMicLabel">Sprechen</span>
+            </button>` : ''}
+          <button type="button" onclick="saveCustomNote(this)" class="flex-1 bg-amber-600 hover:bg-amber-700 text-white rounded-lg px-3 py-2.5 text-sm font-semibold inline-flex items-center justify-center gap-1.5">
+            <i data-lucide="save" class="w-4 h-4"></i> Als private Notiz speichern
+          </button>
+        </div>
+        <p class="text-[10px] text-amber-700 mt-2 italic">Nur intern sichtbar — der Kunde bekommt das nicht.</p>
+      </div>
+
+      <p class="text-[10px] text-center text-ink-400 italic mt-2">Die KI-Zusammenfassung oben wurde automatisch als private Notiz im Ticket gespeichert.</p>
     </div>`;
   if (window.lucide) lucide.createIcons();
+}
+
+/* === Voice + Save für eigene Notiz im Summary-Modal === */
+let NOTE_REC = null;
+
+function toggleNoteVoice() {
+  if (NOTE_REC) { try { NOTE_REC.stop(); } catch (_) {} NOTE_REC = null; updateNoteMicUI(false); return; }
+  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if (!SR) return toast('Sprach-Eingabe nicht verfügbar', 'warn');
+  const rec = new SR();
+  rec.lang = 'de-DE';
+  rec.continuous = true;
+  rec.interimResults = true;
+  const ta = $('noteInput');
+  let base = (ta?.value || '');
+  if (base && !/\s$/.test(base)) base += ' ';
+  rec.onresult = (event) => {
+    let final = '', interim = '';
+    for (let i = event.resultIndex; i < event.results.length; i++) {
+      const tr = event.results[i][0].transcript;
+      if (event.results[i].isFinal) final += tr;
+      else interim += tr;
+    }
+    if (final) base += final;
+    if (ta) ta.value = base + interim;
+  };
+  rec.onerror = (e) => {
+    console.warn('Voice error', e);
+    if (e.error !== 'aborted' && e.error !== 'no-speech') toast('Sprach-Fehler: ' + (e.error || ''), 'warn');
+    NOTE_REC = null; updateNoteMicUI(false);
+  };
+  rec.onend = () => { NOTE_REC = null; updateNoteMicUI(false); };
+  try { rec.start(); NOTE_REC = rec; updateNoteMicUI(true); }
+  catch (_) { toast('Mikrofon nicht zugänglich', 'warn'); }
+}
+
+function updateNoteMicUI(active) {
+  const btn = $('noteMicBtn');
+  const label = $('noteMicLabel');
+  if (!btn) return;
+  if (active) {
+    btn.classList.add('animate-pulse');
+    if (label) label.textContent = 'Stopp';
+  } else {
+    btn.classList.remove('animate-pulse');
+    if (label) label.textContent = 'Sprechen';
+  }
+}
+
+async function saveCustomNote(btn) {
+  if (!SUMMARY_CTX) return;
+  if (NOTE_REC) { try { NOTE_REC.stop(); } catch (_) {} NOTE_REC = null; }
+  const text = ($('noteInput')?.value || '').trim();
+  if (!text) return toast('Bitte etwas eingeben oder sprechen', 'warn');
+  setBusy(btn, true, 'Speichere…');
+  try {
+    await proxyJson('/freshdesk/' + encodeURIComponent(SUMMARY_CTX.accountId) + '/api/v2/tickets/' + SUMMARY_CTX.ticketId + '/notes', {
+      method: 'POST',
+      body: JSON.stringify({ body: textToHtmlForFreshdesk(text), private: true })
+    });
+    setBusy(btn, false);
+    if ($('noteInput')) $('noteInput').value = '';
+    toast('Notiz gespeichert', 'success');
+  } catch (e) {
+    setBusy(btn, false);
+    toast('Speichern fehlgeschlagen: ' + e.message, 'error', 6000);
+  }
 }
 
 /* ============================================================
