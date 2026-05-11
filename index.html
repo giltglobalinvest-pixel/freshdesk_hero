@@ -167,6 +167,9 @@
     <button onclick="navTo('users'); closeMenu();" id="menuUsersBtn" class="hidden w-full text-left px-3 py-2 text-sm hover:bg-ink-50 flex items-center gap-2">
       <i data-lucide="users" class="w-4 h-4 text-ink-500"></i> Benutzer
     </button>
+    <button onclick="navTo('rules'); closeMenu();" class="w-full text-left px-3 py-2 text-sm hover:bg-ink-50 flex items-center gap-2">
+      <i data-lucide="sparkles" class="w-4 h-4 text-purple-500"></i> KI-Regeln
+    </button>
     <button onclick="checkForUpdate(true); closeMenu();" class="w-full text-left px-3 py-2 text-sm hover:bg-ink-50 flex items-center gap-2">
       <i data-lucide="refresh-cw" class="w-4 h-4 text-ink-500"></i> Update prüfen
     </button>
@@ -221,7 +224,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.4.2';
+const APP_VERSION = 'v2.5.0';
 // Read-Token absichtlich gesplittet, damit GitHub Secret-Scanning beim Push nicht blockt.
 // Der Token ist read-only und Base-scoped → bewusst eingebettet (Architektur-Entscheidung).
 const _RK = 'patu8KWM8aWB' + 'yxCGL.69fae5d9fa4b94c2' + '66b426dadd71a51f574945d840b33569058ab5e9d89ebef3';
@@ -927,6 +930,7 @@ const ACCOUNTS_TABLE = 'Accounts';
 const ACCOUNT_COLORS = ['#0ea5e9','#10b981','#f59e0b','#ef4444','#8b5cf6','#ec4899','#14b8a6','#6366f1','#f97316','#84cc16'];
 
 const WIEDERVORLAGE_TABLE = 'Wiedervorlage';
+const REGELN_TABLE = 'Regeln';
 
 async function ensureAppTables() {
   // Accounts-Tabelle anlegen falls nicht vorhanden
@@ -939,12 +943,20 @@ async function ensureAppTables() {
     { name: 'created',             type: 'singleLineText' },
   ]);
   await ensureTable(WIEDERVORLAGE_TABLE, [
-    { name: 'api_key',     type: 'singleLineText' },  // User-Owner
-    { name: 'account_id',  type: 'singleLineText' },  // Airtable record ID des FD-Accounts
-    { name: 'ticket_id',   type: 'singleLineText' },  // Freshdesk-Ticket-ID
-    { name: 'frist_am',    type: 'singleLineText' },  // ISO-Datum, wann Ticket wieder sichtbar wird
-    { name: 'grund',       type: 'singleLineText' },  // manuell | antwort | notiz | zuweisung | sonstiges
-    { name: 'angelegt_am', type: 'singleLineText' },  // ISO-Datum der Anlage
+    { name: 'api_key',     type: 'singleLineText' },
+    { name: 'account_id',  type: 'singleLineText' },
+    { name: 'ticket_id',   type: 'singleLineText' },
+    { name: 'frist_am',    type: 'singleLineText' },
+    { name: 'grund',       type: 'singleLineText' },
+    { name: 'angelegt_am', type: 'singleLineText' },
+  ]);
+  await ensureTable(REGELN_TABLE, [
+    { name: 'api_key',       type: 'singleLineText' },  // User-Owner
+    { name: 'titel',         type: 'singleLineText' },  // KI-generierter Titel
+    { name: 'beschreibung',  type: 'multilineText'  },  // Originaler Sprach-/Text-Input
+    { name: 'aktion_json',   type: 'multilineText'  },  // {matchCriteria, actions:[...]}
+    { name: 'aktiv',         type: 'singleLineText' },  // 'ja' | 'nein'
+    { name: 'created',       type: 'singleLineText' },
   ]);
 }
 
@@ -1207,6 +1219,23 @@ async function fetchTicketDetail(accountId, ticketId) {
   return await proxyJson(path);
 }
 
+async function fetchContact(accountId, contactId) {
+  if (!accountId || !contactId) return null;
+  try {
+    return await proxyJson('/freshdesk/' + encodeURIComponent(accountId) + '/api/v2/contacts/' + contactId);
+  } catch (e) {
+    console.warn('Contact-Fetch fehlgeschlagen für #' + contactId + ':', e.message);
+    return null;
+  }
+}
+
+async function updateContact(accountId, contactId, fields) {
+  return await proxyJson('/freshdesk/' + encodeURIComponent(accountId) + '/api/v2/contacts/' + contactId, {
+    method: 'PUT',
+    body: JSON.stringify(fields)
+  });
+}
+
 /* === Agent-Cache (responder_id → name) === */
 async function ensureAgentsLoaded(accountId) {
   if (!APP_STATE.agentsCache) APP_STATE.agentsCache = {};
@@ -1352,6 +1381,7 @@ function navTo(page) {
   else if (page === 'profile')  renderProfilePage();
   else if (page === 'settings') renderSettingsPage();
   else if (page === 'users')    renderUsersPage();
+  else if (page === 'rules')    renderRulesPage();
   else                          renderTicketsPage();
 }
 
@@ -2943,13 +2973,17 @@ async function openTicketSummaryModal(accountId, ticketId) {
   try {
     const ticket = await fetchTicketDetail(accountId, ticketId);
     SUMMARY_CTX.ticket = ticket;
-    // Update Status: Claude analysiert
+    // Update Status: Claude analysiert + Contact wird parallel geladen
     $('summaryContent').innerHTML = `
       <div class="text-center py-12">
         <div class="spinner inline-block w-7 h-7 border-[3px] text-brand-500"></div>
         <p class="text-sm text-ink-500 mt-3">Claude liest den Verlauf und fasst zusammen…</p>
       </div>`;
-    const summary = await aiSummarizeTicket(ticket);
+    const [contact, summary] = await Promise.all([
+      ticket.requester_id ? fetchContact(accountId, ticket.requester_id).catch(() => null) : Promise.resolve(null),
+      aiSummarizeTicket(ticket),
+    ]);
+    SUMMARY_CTX.contact = contact;
     SUMMARY_CTX.summary = summary;
     renderSummaryBody(ticket, summary);
     // Auto-Save als private Notiz im Hintergrund
@@ -3079,19 +3113,25 @@ function fmtFileSize(bytes) {
 
 function renderSummaryBody(ticket, summary) {
   const req = ticket.requester || {};
-  // Phones aus requester
+  const contact = SUMMARY_CTX?.contact || null;
+  // Phones aus requester UND aus contact (falls geladen)
   const phones = [];
   const seenDigits = new Set();
-  const addPhone = (label, number) => {
+  const addPhone = (label, number, fromContact) => {
     if (!number) return;
     const digits = String(number).replace(/\D/g, '');
     if (digits.length < 6) return;
     if (seenDigits.has(digits)) return;
     seenDigits.add(digits);
-    phones.push({ label, number: String(number).trim() });
+    phones.push({ label, number: String(number).trim(), fromContact: !!fromContact });
   };
-  addPhone('Festnetz', req.phone);
-  addPhone('Mobil',    req.mobile);
+  if (contact) {
+    addPhone('Festnetz', contact.phone, true);
+    addPhone('Mobil',    contact.mobile, true);
+  } else {
+    addPhone('Festnetz', req.phone);
+    addPhone('Mobil',    req.mobile);
+  }
 
   // Phones aus dem Ticket-Verlauf + Zusammenfassung extrahieren
   const fullText = [
@@ -3104,6 +3144,14 @@ function renderSummaryBody(ticket, summary) {
   // Anhänge sammeln
   const attachments = collectTicketAttachments(ticket);
   const speechAvailable = !!(window.SpeechRecognition || window.webkitSpeechRecognition);
+
+  // Welche Phones sind schon im Contact?
+  const contactDigits = new Set();
+  if (contact?.phone)  contactDigits.add(String(contact.phone).replace(/\D/g, ''));
+  if (contact?.mobile) contactDigits.add(String(contact.mobile).replace(/\D/g, ''));
+  phones.forEach(p => { p.inContact = contactDigits.has(p.number.replace(/\D/g, '')); });
+  const contactCanAddPhone  = contact && !contact.phone;
+  const contactCanAddMobile = contact && !contact.mobile;
 
   $('summaryContent').innerHTML = `
     <div class="space-y-3 max-w-2xl mx-auto">
@@ -3123,20 +3171,26 @@ function renderSummaryBody(ticket, summary) {
         <div class="text-sm text-ink-800 leading-relaxed break-words">${renderMarkdownLite(summary)}</div>
       </div>
 
-      <!-- Kontakt -->
+      <!-- Kontakt (mit Freshdesk-Contact-Details) -->
       <div class="bg-white border border-ink-200 rounded-2xl p-4">
         <div class="flex items-center gap-2 mb-3">
           <i data-lucide="user" class="w-4 h-4 text-ink-700"></i>
           <h3 class="font-semibold text-ink-900 text-sm">Anfragender</h3>
+          ${contact ? '<span class="ml-auto text-[10px] text-emerald-700 bg-emerald-100 px-1.5 py-0.5 rounded font-semibold uppercase tracking-wider">Contact #' + contact.id + '</span>' : '<span class="ml-auto text-[10px] text-ink-400 italic">nur Ticket-Daten</span>'}
         </div>
         <div class="space-y-1.5 text-sm">
-          ${req.name ? `<div class="flex items-center gap-2"><i data-lucide="user" class="w-4 h-4 text-ink-400 shrink-0"></i><span class="text-ink-900 font-medium truncate">${escapeHtml(req.name)}</span></div>` : ''}
-          ${req.email ? `<a href="mailto:${escapeAttr(req.email)}" class="flex items-center gap-2 text-brand-600 active:underline"><i data-lucide="mail" class="w-4 h-4 shrink-0"></i><span class="truncate">${escapeHtml(req.email)}</span></a>` : ''}
-          ${req.company_id ? `<div class="flex items-center gap-2"><i data-lucide="building" class="w-4 h-4 text-ink-400 shrink-0"></i><span class="text-ink-700">Firmen-ID: ${escapeHtml(String(req.company_id))}</span></div>` : ''}
+          ${(contact?.name || req.name) ? `<div class="flex items-center gap-2"><i data-lucide="user" class="w-4 h-4 text-ink-400 shrink-0"></i><span class="text-ink-900 font-medium truncate">${escapeHtml(contact?.name || req.name)}</span></div>` : ''}
+          ${(contact?.email || req.email) ? `<a href="mailto:${escapeAttr(contact?.email || req.email)}" class="flex items-center gap-2 text-brand-600 active:underline"><i data-lucide="mail" class="w-4 h-4 shrink-0"></i><span class="truncate">${escapeHtml(contact?.email || req.email)}</span></a>` : ''}
+          ${contact?.job_title ? `<div class="flex items-center gap-2"><i data-lucide="briefcase" class="w-4 h-4 text-ink-400 shrink-0"></i><span class="text-ink-700 truncate">${escapeHtml(contact.job_title)}</span></div>` : ''}
+          ${(contact?.company_id || req.company_id) ? `<div class="flex items-center gap-2"><i data-lucide="building" class="w-4 h-4 text-ink-400 shrink-0"></i><span class="text-ink-700">Firmen-ID: ${escapeHtml(String(contact?.company_id || req.company_id))}</span></div>` : ''}
+          ${contact?.address ? `<div class="flex items-start gap-2"><i data-lucide="map-pin" class="w-4 h-4 text-ink-400 shrink-0 mt-0.5"></i><span class="text-ink-700 whitespace-pre-line break-words">${escapeHtml(contact.address)}</span></div>` : ''}
+          ${contact?.twitter_id ? `<div class="flex items-center gap-2"><i data-lucide="at-sign" class="w-4 h-4 text-ink-400 shrink-0"></i><span class="text-ink-700 truncate">${escapeHtml(contact.twitter_id)}</span></div>` : ''}
+          ${(contact?.other_emails && contact.other_emails.length) ? `<div class="flex items-start gap-2"><i data-lucide="mail-plus" class="w-4 h-4 text-ink-400 shrink-0 mt-0.5"></i><div class="flex-1 min-w-0 space-y-0.5">${contact.other_emails.map(em => `<a href="mailto:${escapeAttr(em)}" class="block text-brand-600 active:underline truncate">${escapeHtml(em)}</a>`).join('')}</div></div>` : ''}
+          ${contact?.description ? `<div class="text-[11px] text-ink-600 italic mt-1 whitespace-pre-line break-words">${escapeHtml(String(contact.description).slice(0, 200))}</div>` : ''}
         </div>
       </div>
 
-      <!-- Telefonnummern (klickbar zum Anrufen) -->
+      <!-- Telefonnummern (klickbar zum Anrufen + Contact-Sync) -->
       ${phones.length ? `
         <div class="bg-white border border-ink-200 rounded-2xl p-4">
           <div class="flex items-center gap-2 mb-3">
@@ -3144,15 +3198,27 @@ function renderSummaryBody(ticket, summary) {
             <h3 class="font-semibold text-ink-900 text-sm">Telefon</h3>
             <span class="ml-auto text-[10px] text-ink-400">tippen zum Anrufen</span>
           </div>
-          <div class="space-y-1.5">
-            ${phones.map(p => `
-              <a href="tel:${escapeAttr(_cleanPhoneForTel(p.number))}" class="flex items-center gap-3 px-3 py-2.5 bg-emerald-50 active:bg-emerald-200 border border-emerald-200 rounded-lg">
-                <div class="w-9 h-9 rounded-full bg-emerald-500 flex items-center justify-center text-white shrink-0"><i data-lucide="phone-call" class="w-4 h-4"></i></div>
-                <div class="flex-1 min-w-0">
-                  <p class="font-mono text-sm text-ink-900 truncate">${escapeHtml(p.number)}</p>
-                  <p class="text-[10px] text-ink-500 uppercase tracking-wider">${escapeHtml(p.label)}</p>
-                </div>
-              </a>`).join('')}
+          <div class="space-y-2">
+            ${phones.map(p => {
+              const cleanTel = _cleanPhoneForTel(p.number);
+              const showSyncButtons = contact && !p.inContact && (contactCanAddPhone || contactCanAddMobile);
+              return `
+                <div>
+                  <a href="tel:${escapeAttr(cleanTel)}" class="flex items-center gap-3 px-3 py-2.5 bg-emerald-50 active:bg-emerald-200 border border-emerald-200 rounded-lg">
+                    <div class="w-9 h-9 rounded-full bg-emerald-500 flex items-center justify-center text-white shrink-0"><i data-lucide="phone-call" class="w-4 h-4"></i></div>
+                    <div class="flex-1 min-w-0">
+                      <p class="font-mono text-sm text-ink-900 truncate">${escapeHtml(p.number)}</p>
+                      <p class="text-[10px] text-ink-500 uppercase tracking-wider">${escapeHtml(p.label)}${p.inContact ? ' · im Contact' : p.fromContact ? '' : ' · gefunden'}</p>
+                    </div>
+                  </a>
+                  ${showSyncButtons ? `
+                    <div class="flex gap-2 mt-1 ml-3 flex-wrap">
+                      <span class="text-[10px] text-ink-500">Im Contact ergänzen:</span>
+                      ${contactCanAddPhone ? `<button onclick="applyPhoneToContact('phone', '${escapeAttr(p.number)}', this)" class="text-[11px] text-brand-600 hover:underline font-medium inline-flex items-center gap-1 active:opacity-70"><i data-lucide="plus" class="w-3 h-3"></i>Festnetz</button>` : ''}
+                      ${contactCanAddMobile ? `<button onclick="applyPhoneToContact('mobile', '${escapeAttr(p.number)}', this)" class="text-[11px] text-brand-600 hover:underline font-medium inline-flex items-center gap-1 active:opacity-70"><i data-lucide="plus" class="w-3 h-3"></i>Mobil</button>` : ''}
+                    </div>` : ''}
+                </div>`;
+            }).join('')}
           </div>
         </div>` : ''}
 
@@ -3245,6 +3311,23 @@ function updateNoteMicUI(active) {
   } else {
     btn.classList.remove('animate-pulse');
     if (label) label.textContent = 'Sprechen';
+  }
+}
+
+async function applyPhoneToContact(field, phoneNumber, btnEl) {
+  if (!SUMMARY_CTX?.contact?.id) return toast('Kein Contact geladen', 'warn');
+  const accountId = SUMMARY_CTX.accountId;
+  const contactId = SUMMARY_CTX.contact.id;
+  if (btnEl) setBusy(btnEl, true, '…');
+  try {
+    await updateContact(accountId, contactId, { [field]: phoneNumber });
+    SUMMARY_CTX.contact[field] = phoneNumber;
+    const label = field === 'phone' ? 'Festnetz' : 'Mobil';
+    toast(label + ' im Contact gespeichert: ' + phoneNumber, 'success', 4000);
+    renderSummaryBody(SUMMARY_CTX.ticket, SUMMARY_CTX.summary);
+  } catch (e) {
+    if (btnEl) setBusy(btnEl, false);
+    toast('Contact-Update fehlgeschlagen: ' + e.message, 'error', 6000);
   }
 }
 
@@ -3876,6 +3959,9 @@ function renderProfilePage() {
           </button>
         </div>
       ` : ''}
+      <button onclick="navTo('rules')" class="w-full bg-gradient-to-r from-purple-50 to-brand-50 border border-purple-200 rounded-xl py-3 px-3 text-sm font-medium hover:opacity-90 flex items-center justify-center gap-2">
+        <i data-lucide="sparkles" class="w-4 h-4 text-purple-600"></i> KI-Regeln verwalten
+      </button>
 
       <button onclick="logout()" class="w-full bg-red-50 border border-red-200 hover:bg-red-100 text-red-700 rounded-xl py-3 font-medium flex items-center justify-center gap-2">
         <i data-lucide="log-out" class="w-4 h-4"></i> Abmelden
@@ -4029,6 +4115,381 @@ async function confirmDeleteUser(id, name) {
     toast('Gelöscht', 'success');
     renderUsersPage();
   } catch (e) { toast('Fehler: ' + e.message, 'error'); }
+}
+
+/* ============================================================
+   KI-REGELN: CRUD + Voice→Rule Parse
+   ============================================================ */
+let RULES_CACHE = [];  // alle aktiven + inaktiven Regeln für den User
+
+async function loadRules() {
+  if (!APP_KEYS.user?.api_key) { RULES_CACHE = []; return []; }
+  const filter = "{api_key}='" + escapeFormula(APP_KEYS.user.api_key) + "'";
+  try {
+    const recs = await airtableRead(REGELN_TABLE, { filter, sort: [{ field: 'created', direction: 'desc' }] });
+    RULES_CACHE = recs.map(r => {
+      let action = {};
+      try { action = JSON.parse(r.fields.aktion_json || '{}'); } catch (_) {}
+      return {
+        id:           r.id,
+        titel:        r.fields.titel || '(ohne Titel)',
+        beschreibung: r.fields.beschreibung || '',
+        action,
+        aktiv:        (r.fields.aktiv || 'ja').toLowerCase() !== 'nein',
+        created:      r.fields.created || '',
+      };
+    });
+    return RULES_CACHE;
+  } catch (e) {
+    console.warn('Rules-Load fehlgeschlagen:', e.message);
+    RULES_CACHE = [];
+    return [];
+  }
+}
+
+function getActiveRules() { return RULES_CACHE.filter(r => r.aktiv); }
+
+async function saveRule({ id, titel, beschreibung, action, aktiv }) {
+  const fields = {
+    api_key:      APP_KEYS.user.api_key,
+    titel:        String(titel).slice(0, 100),
+    beschreibung: String(beschreibung).slice(0, 4000),
+    aktion_json:  JSON.stringify(action || {}).slice(0, 8000),
+    aktiv:        aktiv === false ? 'nein' : 'ja',
+    created:      nowIso(),
+  };
+  if (id) {
+    await airtableUpdate(REGELN_TABLE, id, fields);
+  } else {
+    await airtableWrite(REGELN_TABLE, fields);
+  }
+}
+
+async function toggleRule(id, active) {
+  await airtableUpdate(REGELN_TABLE, id, { aktiv: active ? 'ja' : 'nein' });
+  const r = RULES_CACHE.find(x => x.id === id);
+  if (r) r.aktiv = active;
+}
+
+async function deleteRule(id) {
+  await airtableDelete(REGELN_TABLE, id);
+  RULES_CACHE = RULES_CACHE.filter(r => r.id !== id);
+}
+
+async function renderRulesPage() {
+  setPageTitle('KI-Regeln', 'Automatische Bearbeitung neuer Tickets');
+  $('pageContent').innerHTML = `
+    <div class="space-y-3">
+      <div class="bg-gradient-to-br from-purple-50 to-brand-50 border border-purple-200 rounded-2xl p-4">
+        <p class="text-sm text-ink-700 leading-snug">Definiere Regeln in natürlicher Sprache. Claude analysiert, was zu tun ist, und kannst die Regel mit einem Klick auf ein Ticket anwenden (Phase C: automatisch beim ersten Öffnen).</p>
+      </div>
+      <button onclick="openRuleEditor()" class="w-full bg-gradient-to-br from-purple-500 to-brand-600 text-white rounded-xl py-3 font-semibold flex items-center justify-center gap-2 active:opacity-80">
+        <i data-lucide="plus" class="w-4 h-4"></i> Neue Regel anlegen
+      </button>
+      <div id="rulesList">
+        <div class="bg-white rounded-2xl border border-ink-200 p-6 text-center">
+          <div class="spinner inline-block text-brand-500 w-6 h-6 border-[3px]"></div>
+        </div>
+      </div>
+    </div>`;
+  if (window.lucide) lucide.createIcons();
+  // Tabellen sicherstellen (Regeln-Tabelle wird beim ersten Aufruf angelegt)
+  if (APP_KEYS.airtableWriteKey) {
+    try { await ensureAppTables(); } catch (e) { console.warn('ensureAppTables:', e.message); }
+  }
+  await loadRules();
+  renderRulesList();
+}
+
+function renderRulesList() {
+  if (!RULES_CACHE.length) {
+    $('rulesList').innerHTML = `
+      <div class="bg-white rounded-2xl border border-ink-200 p-6 text-center">
+        <i data-lucide="sparkles" class="w-10 h-10 mx-auto text-purple-400"></i>
+        <p class="text-sm text-ink-500 mt-2">Noch keine Regeln</p>
+        <p class="text-[11px] text-ink-400 mt-1">Erstelle deine erste KI-Regel — z.B. per Sprache.</p>
+      </div>`;
+    if (window.lucide) lucide.createIcons();
+    return;
+  }
+  $('rulesList').innerHTML = `
+    <div class="space-y-2">
+      ${RULES_CACHE.map(r => {
+        const actCount = (r.action?.actions || []).length;
+        return `
+          <div class="bg-white rounded-2xl border ${r.aktiv ? 'border-purple-200' : 'border-ink-200'} p-3">
+            <div class="flex items-start gap-2">
+              <div class="w-9 h-9 rounded-full ${r.aktiv ? 'bg-gradient-to-br from-purple-500 to-brand-600 text-white' : 'bg-ink-100 text-ink-400'} flex items-center justify-center shrink-0">
+                <i data-lucide="sparkles" class="w-4 h-4"></i>
+              </div>
+              <div class="flex-1 min-w-0">
+                <p class="font-semibold text-ink-900 text-sm leading-snug truncate">${escapeHtml(r.titel)}</p>
+                <p class="text-[11px] text-ink-500 mt-0.5 line-clamp-2">${escapeHtml(r.beschreibung)}</p>
+                <div class="flex gap-1 mt-1.5 flex-wrap items-center">
+                  <span class="text-[10px] uppercase tracking-wider px-1.5 py-0.5 rounded font-semibold ${r.aktiv ? 'bg-purple-100 text-purple-700' : 'bg-ink-100 text-ink-500'}">${r.aktiv ? 'Aktiv' : 'Inaktiv'}</span>
+                  <span class="text-[10px] text-ink-400">${actCount} Aktion${actCount === 1 ? '' : 'en'}</span>
+                </div>
+              </div>
+              <label class="shrink-0 inline-flex items-center cursor-pointer">
+                <input type="checkbox" ${r.aktiv ? 'checked' : ''} onchange="onToggleRule('${r.id}', this.checked)" class="sr-only peer">
+                <div class="relative w-10 h-6 bg-ink-200 peer-checked:bg-purple-500 rounded-full peer transition-colors after:content-[''] after:absolute after:top-0.5 after:left-0.5 after:bg-white after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:after:translate-x-4"></div>
+              </label>
+            </div>
+            <div class="flex gap-1.5 mt-2 pt-2 border-t border-ink-100">
+              <button onclick="openRuleEditor('${r.id}')" class="text-[11px] text-brand-600 hover:underline inline-flex items-center gap-1 px-1.5 py-0.5"><i data-lucide="edit-3" class="w-3 h-3"></i> Bearbeiten</button>
+              <button onclick="confirmDeleteRule('${r.id}', '${escapeAttr(r.titel)}')" class="text-[11px] text-red-600 hover:underline inline-flex items-center gap-1 px-1.5 py-0.5"><i data-lucide="trash-2" class="w-3 h-3"></i> Löschen</button>
+            </div>
+          </div>`;
+      }).join('')}
+    </div>`;
+  if (window.lucide) lucide.createIcons();
+}
+
+async function onToggleRule(id, active) {
+  try {
+    await toggleRule(id, active);
+    toast(active ? 'Regel aktiviert' : 'Regel deaktiviert', 'success', 2000);
+  } catch (e) {
+    toast('Fehler: ' + e.message, 'error');
+    renderRulesList();
+  }
+}
+
+async function confirmDeleteRule(id, titel) {
+  const ok = await confirmDialog('Regel löschen', '„' + titel + "\" wirklich löschen?", { danger: true, okText: 'Löschen' });
+  if (!ok) return;
+  try {
+    await deleteRule(id);
+    toast('Gelöscht', 'success');
+    renderRulesList();
+  } catch (e) { toast('Fehler: ' + e.message, 'error'); }
+}
+
+/* === Rule-Editor (Voice + Text + Claude-Parse) === */
+let RULE_EDITOR_CTX = null;
+let RULE_REC = null;
+
+async function openRuleEditor(id) {
+  const existing = id ? RULES_CACHE.find(r => r.id === id) : null;
+  RULE_EDITOR_CTX = {
+    id: id || null,
+    beschreibung: existing?.beschreibung || '',
+    parsed: existing?.action || null,
+    aktiv: existing?.aktiv !== false,
+  };
+  let host = document.getElementById('subModalHost');
+  if (!host) { host = document.createElement('div'); host.id = 'subModalHost'; document.body.appendChild(host); }
+  const speechAvailable = !!(window.SpeechRecognition || window.webkitSpeechRecognition);
+  host.innerHTML = `
+    <div class="fixed inset-0 z-[60] bg-white flex flex-col">
+      <header class="sticky top-0 z-10 bg-white border-b border-ink-200 safe-top">
+        <div class="px-2 py-2.5 flex items-center gap-1.5">
+          <button onclick="closeRuleEditor()" class="w-9 h-9 rounded-lg hover:bg-ink-100 flex items-center justify-center"><i data-lucide="arrow-left" class="w-5 h-5 text-ink-700"></i></button>
+          <div class="flex-1 min-w-0">
+            <h1 class="font-bold text-ink-900 leading-tight inline-flex items-center gap-1.5"><i data-lucide="sparkles" class="w-4 h-4 text-purple-600"></i> ${existing ? 'Regel bearbeiten' : 'Neue Regel'}</h1>
+          </div>
+        </div>
+      </header>
+      <div id="ruleEditorContent" class="flex-1 overflow-y-auto p-4">
+        <div class="space-y-4 max-w-2xl mx-auto">
+          <div>
+            <label class="text-xs font-semibold text-ink-700 uppercase tracking-wider">Beschreibe die Regel</label>
+            <p class="text-[11px] text-ink-500 mb-2">In freier Sprache: z.B. „Wenn ein Kunde sich über Lieferverzug beschwert, schreib eine freundliche Antwort dass wir uns kümmern und füge eine Notiz für die Logistik hinzu."</p>
+            ${speechAvailable ? `
+              <button id="ruleMicBtn" onclick="toggleRuleVoice()" class="w-full py-3 mb-2 rounded-xl bg-gradient-to-br from-purple-500 to-brand-600 text-white font-semibold flex flex-col items-center gap-1.5 active:opacity-80 shadow shadow-purple-500/20">
+                <div id="ruleMicIcon" class="w-10 h-10 rounded-full bg-white/20 flex items-center justify-center">
+                  <i data-lucide="mic" class="w-5 h-5"></i>
+                </div>
+                <span id="ruleMicLabel" class="text-xs">Tippen und sprechen</span>
+              </button>
+            ` : ''}
+            <textarea id="ruleDescription" rows="5" placeholder="Beschreibe die Regel — wann, was, wie…" class="w-full px-3 py-2.5 border border-ink-200 rounded-xl text-sm focus:ring-2 focus:ring-purple-500/30 focus:border-purple-500 resize-none">${escapeHtml(RULE_EDITOR_CTX.beschreibung)}</textarea>
+            <button onclick="parseRuleWithAI(this)" class="mt-2 w-full bg-brand-500 hover:bg-brand-600 text-white px-4 py-2.5 rounded-lg text-sm font-semibold inline-flex items-center justify-center gap-2">
+              <i data-lucide="sparkles" class="w-4 h-4"></i> Mit KI analysieren
+            </button>
+          </div>
+          <div id="ruleParsedPreview"></div>
+        </div>
+      </div>
+    </div>`;
+  if (window.lucide) lucide.createIcons();
+  // Falls existing → Preview gleich rendern
+  if (existing && existing.action) renderRuleParsedPreview();
+}
+
+function closeRuleEditor() {
+  if (RULE_REC) { try { RULE_REC.stop(); } catch (_) {} RULE_REC = null; }
+  const host = document.getElementById('subModalHost');
+  if (host) host.innerHTML = '';
+  RULE_EDITOR_CTX = null;
+}
+
+function toggleRuleVoice() {
+  if (RULE_REC) { try { RULE_REC.stop(); } catch (_) {} RULE_REC = null; updateRuleMicUI(false); return; }
+  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if (!SR) return toast('Sprach-Eingabe nicht verfügbar', 'warn');
+  const rec = new SR();
+  rec.lang = 'de-DE'; rec.continuous = true; rec.interimResults = true;
+  const ta = $('ruleDescription');
+  let base = (ta?.value || '');
+  if (base && !/\s$/.test(base)) base += ' ';
+  rec.onresult = (event) => {
+    let final = '', interim = '';
+    for (let i = event.resultIndex; i < event.results.length; i++) {
+      const tr = event.results[i][0].transcript;
+      if (event.results[i].isFinal) final += tr;
+      else interim += tr;
+    }
+    if (final) base += final;
+    if (ta) ta.value = base + interim;
+  };
+  rec.onerror = (e) => {
+    if (e.error !== 'aborted' && e.error !== 'no-speech') toast('Sprach-Fehler: ' + (e.error || ''), 'warn');
+    RULE_REC = null; updateRuleMicUI(false);
+  };
+  rec.onend = () => { RULE_REC = null; updateRuleMicUI(false); };
+  try { rec.start(); RULE_REC = rec; updateRuleMicUI(true); }
+  catch (_) { toast('Mikrofon nicht zugänglich', 'warn'); }
+}
+
+function updateRuleMicUI(active) {
+  const icon = $('ruleMicIcon'), label = $('ruleMicLabel');
+  if (!icon) return;
+  if (active) {
+    icon.classList.add('animate-pulse');
+    icon.innerHTML = '<i data-lucide="square" class="w-5 h-5"></i>';
+    if (label) label.textContent = 'Aufnahme läuft — nochmal tippen zum Stoppen';
+  } else {
+    icon.classList.remove('animate-pulse');
+    icon.innerHTML = '<i data-lucide="mic" class="w-5 h-5"></i>';
+    if (label) label.textContent = 'Tippen und sprechen';
+  }
+  if (window.lucide) lucide.createIcons();
+}
+
+async function parseRuleWithAI(btnEl) {
+  const ctx = RULE_EDITOR_CTX;
+  if (!ctx) return;
+  if (RULE_REC) { try { RULE_REC.stop(); } catch (_) {} RULE_REC = null; }
+  const text = ($('ruleDescription')?.value || '').trim();
+  if (!text) return toast('Bitte beschreibe die Regel', 'warn');
+  ctx.beschreibung = text;
+  setBusy(btnEl, true, 'Claude analysiert…');
+  try {
+    const parsed = await aiParseRule(text);
+    ctx.parsed = parsed;
+    renderRuleParsedPreview();
+    setBusy(btnEl, false);
+  } catch (e) {
+    setBusy(btnEl, false);
+    toast('AI-Fehler: ' + e.message, 'error', 8000);
+  }
+}
+
+async function aiParseRule(description) {
+  const sysPrompt = 'Du wandelst natürlich-sprachige Helpdesk-Regeln in strukturiertes JSON um. Der User beschreibt eine Regel auf Deutsch ("wenn X, dann Y"). Antworte AUSSCHLIESSLICH mit einem JSON-Objekt.\n\n' +
+    'AKTIONS-TYPEN:\n' +
+    '- {"type":"note", "body":"interner Notiz-Text (Deutsch, professionell, mit \\n für Absätze)"}\n' +
+    '- {"type":"reply", "body":"öffentlicher Antwort-Text an Kunde (Deutsch, höflich, mit Anrede + Abschluss)"}\n' +
+    '- {"type":"assign", "agentHint":"Name oder Rollen-Hinweis des Agents"}\n' +
+    '- {"type":"group", "groupHint":"Name oder Hinweis der Gruppe"}\n' +
+    '- {"type":"status", "status":"open|pending|resolved|closed"}\n' +
+    '- {"type":"type", "typeHint":"Hinweis auf den Ticket-Typ"}\n' +
+    '- {"type":"wiedervorlage", "days":N, "grund":"manuell|antwort|notiz|zuweisung"}\n\n' +
+    'JSON-FORMAT:\n' +
+    '{\n' +
+    '  "title":"Kurzer Titel auf Deutsch, 3-6 Wörter",\n' +
+    '  "matchCriteria":"In welcher Situation diese Regel greift (Deutsch, präzise)",\n' +
+    '  "actions":[ ...Aktions-Objekte... ]\n' +
+    '}\n\n' +
+    'Mehrere Aktionen sind erlaubt (Reihenfolge zählt). Sei kompakt und konkret.';
+  const data = await proxyJson('/anthropic/v1/messages', {
+    method: 'POST',
+    body: JSON.stringify({
+      model: 'claude-sonnet-4-5-20250929',
+      max_tokens: 1500,
+      system: sysPrompt,
+      messages: [{ role: 'user', content: 'REGEL-BESCHREIBUNG:\n' + description }]
+    })
+  });
+  const text = (data.content && data.content[0] && data.content[0].text) || '';
+  let jsonText = text.trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '');
+  try { return JSON.parse(jsonText); }
+  catch (_) { throw new Error('AI-Antwort nicht parsbar: ' + text.slice(0, 200)); }
+}
+
+function renderRuleParsedPreview() {
+  const ctx = RULE_EDITOR_CTX;
+  if (!ctx || !ctx.parsed) { $('ruleParsedPreview').innerHTML = ''; return; }
+  const p = ctx.parsed;
+  const acts = p.actions || [];
+  const actionDetails = acts.map(a => {
+    if (a.type === 'note')          return { icon:'sticky-note', color:'amber',   label:'Interne Notiz',           detail: (a.body || '').slice(0, 200) };
+    if (a.type === 'reply')         return { icon:'reply',       color:'emerald', label:'Antwort an Kunde',         detail: (a.body || '').slice(0, 200) };
+    if (a.type === 'assign')        return { icon:'user',        color:'brand',   label:'Bearbeiter zuweisen',      detail: a.agentHint || '' };
+    if (a.type === 'group')         return { icon:'users',       color:'brand',   label:'Gruppe zuweisen',          detail: a.groupHint || '' };
+    if (a.type === 'status')        return { icon:'flag',        color:'brand',   label:'Status setzen',            detail: ({open:'Offen',pending:'Wartet',resolved:'Gelöst',closed:'Geschlossen'}[a.status] || a.status) };
+    if (a.type === 'type')          return { icon:'tag',         color:'purple',  label:'Typ setzen',               detail: a.typeHint || '' };
+    if (a.type === 'wiedervorlage') return { icon:'clock',       color:'indigo',  label:'Auf Wiedervorlage',        detail: (a.days || '?') + ' Tage' };
+    return { icon:'help-circle', color:'ink', label:'Unbekannte Aktion', detail: JSON.stringify(a).slice(0, 100) };
+  });
+  $('ruleParsedPreview').innerHTML = `
+    <div class="bg-white border border-ink-200 rounded-2xl p-4">
+      <p class="text-[10px] font-semibold text-ink-500 uppercase tracking-wider mb-2">KI-Analyse</p>
+      <div class="space-y-2 mb-3">
+        <div>
+          <p class="text-[10px] text-ink-500 uppercase tracking-wider">Titel</p>
+          <input id="ruleTitleEdit" type="text" value="${escapeAttr(p.title || '')}" class="w-full mt-0.5 px-2 py-1.5 border border-ink-200 rounded-lg text-sm font-medium">
+        </div>
+        <div>
+          <p class="text-[10px] text-ink-500 uppercase tracking-wider">Match-Kriterium</p>
+          <p class="text-sm text-ink-700 italic mt-0.5">${escapeHtml(p.matchCriteria || '')}</p>
+        </div>
+        <div>
+          <p class="text-[10px] text-ink-500 uppercase tracking-wider">Aktionen (${acts.length})</p>
+          <div class="space-y-1 mt-1">
+            ${actionDetails.map(a => `
+              <div class="flex items-start gap-2 px-2 py-1.5 bg-${a.color}-50 border border-${a.color}-200 rounded-lg text-xs">
+                <i data-lucide="${a.icon}" class="w-4 h-4 text-${a.color}-700 shrink-0 mt-0.5"></i>
+                <div class="flex-1 min-w-0">
+                  <p class="font-semibold text-${a.color}-900">${escapeHtml(a.label)}</p>
+                  ${a.detail ? `<p class="text-${a.color}-800 whitespace-pre-line break-words">${escapeHtml(a.detail)}</p>` : ''}
+                </div>
+              </div>`).join('')}
+          </div>
+        </div>
+      </div>
+      <div class="flex gap-2">
+        <button onclick="closeRuleEditor()" class="flex-1 bg-white border border-ink-200 px-3 py-2 rounded-lg text-sm font-medium hover:bg-ink-50">Abbrechen</button>
+        <button onclick="saveRuleAndClose(this)" class="flex-[2] bg-purple-600 hover:bg-purple-700 text-white px-4 py-2 rounded-lg text-sm font-semibold inline-flex items-center justify-center gap-2">
+          <i data-lucide="save" class="w-4 h-4"></i> Speichern
+        </button>
+      </div>
+    </div>`;
+  if (window.lucide) lucide.createIcons();
+}
+
+async function saveRuleAndClose(btnEl) {
+  const ctx = RULE_EDITOR_CTX;
+  if (!ctx || !ctx.parsed) return;
+  const title = ($('ruleTitleEdit')?.value || ctx.parsed.title || 'Unbenannte Regel').trim();
+  setBusy(btnEl, true, 'Speichere…');
+  try {
+    await saveRule({
+      id:           ctx.id,
+      titel:        title,
+      beschreibung: ctx.beschreibung,
+      action:       { ...ctx.parsed, title },
+      aktiv:        ctx.aktiv,
+    });
+    closeRuleEditor();
+    toast(ctx.id ? 'Regel aktualisiert' : 'Regel gespeichert', 'success');
+    await loadRules();
+    renderRulesList();
+  } catch (e) {
+    setBusy(btnEl, false);
+    toast('Speichern fehlgeschlagen: ' + e.message, 'error', 6000);
+  }
 }
 
 /* ===================== SETTINGS / VAL.TOWN WIZARD ===================== */
@@ -4806,6 +5267,8 @@ async function showApp() {
   await loadAccounts();
   // Wiedervorlage-Cache laden (im Hintergrund, blockiert UI nicht)
   loadWiedervorlage().catch(e => console.warn('Wiedervorlage-Load:', e.message));
+  // Rules-Cache laden (im Hintergrund — Tabelle muss noch nicht existieren)
+  loadRules().catch(e => console.warn('Rules-Load:', e.message));
   navTo('tickets');
   // Update-Check (lautlos)
   checkForUpdate(false);
