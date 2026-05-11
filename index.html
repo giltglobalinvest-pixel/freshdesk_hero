@@ -224,7 +224,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.5.0';
+const APP_VERSION = 'v2.5.1';
 // Read-Token absichtlich gesplittet, damit GitHub Secret-Scanning beim Push nicht blockt.
 // Der Token ist read-only und Base-scoped → bewusst eingebettet (Architektur-Entscheidung).
 const _RK = 'patu8KWM8aWB' + 'yxCGL.69fae5d9fa4b94c2' + '66b426dadd71a51f574945d840b33569058ab5e9d89ebef3';
@@ -2985,14 +2985,24 @@ async function openTicketSummaryModal(accountId, ticketId) {
     ]);
     SUMMARY_CTX.contact = contact;
     SUMMARY_CTX.summary = summary;
+    SUMMARY_CTX.alreadySaved = hasExistingSummaryNote(ticket);
     renderSummaryBody(ticket, summary);
-    // Auto-Save als private Notiz im Hintergrund
-    saveSummaryAsNote(accountId, ticketId, summary).then(ok => {
-      if (ok) toast('KI-Zusammenfassung als private Notiz gespeichert', 'success', 4000);
-    }).catch(e => {
-      console.warn('Note-Speichern fehlgeschlagen:', e);
-      toast('Notiz-Speichern fehlgeschlagen: ' + e.message, 'warn', 6000);
-    });
+    // Auto-Save nur wenn noch keine Zusammenfassungs-Notiz im Ticket vorhanden ist
+    if (SUMMARY_CTX.alreadySaved) {
+      toast('Bereits eine Zusammenfassungs-Notiz im Ticket — nicht erneut gespeichert', 'info', 4000);
+    } else {
+      saveSummaryAsNote(accountId, ticketId, summary).then(ok => {
+        if (ok) {
+          SUMMARY_CTX.alreadySaved = true;
+          toast('KI-Zusammenfassung als private Notiz gespeichert', 'success', 4000);
+          // Re-render damit der Footer-Hinweis stimmt
+          if (SUMMARY_CTX && SUMMARY_CTX.ticket) renderSummaryBody(SUMMARY_CTX.ticket, SUMMARY_CTX.summary);
+        }
+      }).catch(e => {
+        console.warn('Note-Speichern fehlgeschlagen:', e);
+        toast('Notiz-Speichern fehlgeschlagen: ' + e.message, 'warn', 6000);
+      });
+    }
   } catch (e) {
     $('summaryContent').innerHTML = `<div class="bg-red-50 border border-red-200 rounded-2xl p-4 text-sm text-red-800">${escapeHtml(e.message)}</div>`;
   }
@@ -3039,9 +3049,19 @@ async function aiSummarizeTicket(ticket) {
   return (data.content && data.content[0] && data.content[0].text) || '';
 }
 
+const SUMMARY_NOTE_MARKER = '🤖 KI-Zusammenfassung';
+
+function hasExistingSummaryNote(ticket) {
+  return (ticket?.conversations || []).some(c => {
+    if (c.private !== true) return false;
+    const text = htmlToText(c.body_text || c.body || '');
+    return text.includes(SUMMARY_NOTE_MARKER) || /KI[\s-]?Zusammenfassung/i.test(text);
+  });
+}
+
 async function saveSummaryAsNote(accountId, ticketId, summary) {
   if (!summary) return false;
-  const body = '🤖 KI-Zusammenfassung (' + new Date().toLocaleString('de') + ')\n\n' + summary;
+  const body = SUMMARY_NOTE_MARKER + ' (' + new Date().toLocaleString('de') + ')\n\n' + summary;
   await proxyJson('/freshdesk/' + encodeURIComponent(accountId) + '/api/v2/tickets/' + ticketId + '/notes', {
     method: 'POST',
     body: JSON.stringify({ body: textToHtmlForFreshdesk(body), private: true })
@@ -3262,9 +3282,32 @@ function renderSummaryBody(ticket, summary) {
         <p class="text-[10px] text-amber-700 mt-2 italic">Nur intern sichtbar — der Kunde bekommt das nicht.</p>
       </div>
 
-      <p class="text-[10px] text-center text-ink-400 italic mt-2">Die KI-Zusammenfassung oben wurde automatisch als private Notiz im Ticket gespeichert.</p>
+      <div class="text-center mt-2">
+        <p class="text-[10px] text-ink-400 italic">${SUMMARY_CTX?.alreadySaved
+          ? 'Eine KI-Zusammenfassung ist bereits als private Notiz im Ticket gespeichert.'
+          : 'Die KI-Zusammenfassung oben wurde automatisch als private Notiz im Ticket gespeichert.'}</p>
+        ${SUMMARY_CTX?.alreadySaved ? `
+          <button onclick="forceSaveSummaryAsNote(this)" class="mt-1 text-[11px] text-brand-600 hover:underline inline-flex items-center gap-1">
+            <i data-lucide="refresh-cw" class="w-3 h-3"></i> Trotzdem erneut speichern
+          </button>` : ''}
+      </div>
     </div>`;
   if (window.lucide) lucide.createIcons();
+}
+
+async function forceSaveSummaryAsNote(btnEl) {
+  if (!SUMMARY_CTX?.summary || !SUMMARY_CTX?.accountId || !SUMMARY_CTX?.ticketId) return;
+  setBusy(btnEl, true, 'Speichere…');
+  try {
+    await saveSummaryAsNote(SUMMARY_CTX.accountId, SUMMARY_CTX.ticketId, SUMMARY_CTX.summary);
+    SUMMARY_CTX.alreadySaved = true;
+    toast('Neue Zusammenfassungs-Notiz gespeichert', 'success', 3000);
+    setBusy(btnEl, false);
+    renderSummaryBody(SUMMARY_CTX.ticket, SUMMARY_CTX.summary);
+  } catch (e) {
+    setBusy(btnEl, false);
+    toast('Fehler: ' + e.message, 'error', 6000);
+  }
 }
 
 /* === Voice + Save für eigene Notiz im Summary-Modal === */
