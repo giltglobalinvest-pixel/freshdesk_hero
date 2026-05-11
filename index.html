@@ -248,7 +248,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.15.0';
+const APP_VERSION = 'v2.15.1';
 // Read-Token absichtlich gesplittet, damit GitHub Secret-Scanning beim Push nicht blockt.
 // Der Token ist read-only und Base-scoped → bewusst eingebettet (Architektur-Entscheidung).
 const _RK = 'patu8KWM8aWB' + 'yxCGL.69fae5d9fa4b94c2' + '66b426dadd71a51f574945d840b33569058ab5e9d89ebef3';
@@ -1177,6 +1177,43 @@ async function recordMyNote(accountId, ticketId, body, typ) {
 
 function getMyNotesForTicket(accountId, ticketId) {
   return APP_STATE.myNotesMap?.get(accountId + '|' + ticketId) || [];
+}
+
+/* === Spracherkennung — zentrale Helper für Permission + Fehlermeldungen ====
+   iOS-Eigenheit: Web Speech API verlangt eine vorab erteilte Mikrofon-Permission.
+   Im Home-Screen-PWA-Standalone-Mode war/ist die API auf iOS blockiert; klare
+   Fehlermeldung mit Workaround zeigen statt nur „not-allowed". =================*/
+function _isStandalonePWA() {
+  return (window.matchMedia && window.matchMedia('(display-mode: standalone)').matches)
+      || navigator.standalone === true;
+}
+
+function _explainSpeechError(errCode) {
+  if (errCode === 'no-speech' || errCode === 'aborted') return null; // unterdrücken
+  if (errCode === 'not-allowed' || errCode === 'service-not-allowed') {
+    return _isStandalonePWA()
+      ? 'Mikrofon im Home-Screen-Modus von iOS blockiert. Öffne die App in Safari direkt (über die Loader-URL), nicht über das Home-Screen-Icon — dann läuft die Spracherkennung.'
+      : 'Mikrofon-Zugriff verweigert. iOS: Einstellungen → Safari → Mikrofon → für diese Website erlauben, dann Seite neu laden.';
+  }
+  if (errCode === 'audio-capture') return 'Kein Mikrofon verfügbar';
+  if (errCode === 'network')       return 'Netzwerkfehler bei der Spracherkennung';
+  return 'Spracherkennung: ' + (errCode || 'unbekannter Fehler');
+}
+
+/* Triggert explizit den Mikrofon-Permission-Prompt — vor rec.start(), damit
+   iOS Safari den Dialog zeigt (manchmal versäumt es die Web Speech API). */
+async function ensureMicPermission() {
+  if (!navigator.mediaDevices?.getUserMedia) return; // älteres iOS — Probe nicht möglich
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    stream.getTracks().forEach(t => t.stop()); // sofort wieder schließen, war nur die Permission
+  } catch (e) {
+    const msg = _isStandalonePWA()
+      ? 'Mikrofon im Home-Screen-Modus von iOS blockiert. Öffne die App in Safari direkt (nicht über das App-Icon), dann klappt es.'
+      : 'Mikrofon-Zugriff verweigert. Bitte in iOS-Einstellungen → Safari → Mikrofon erlauben, danach Seite neu laden.';
+    const err = new Error(msg); err.name = e.name || 'NotAllowedError';
+    throw err;
+  }
 }
 
 function _relTimeFull(iso) {
@@ -2861,10 +2898,11 @@ function closeQuickNoteSheet() {
   QUICK_NOTE_CTX = null;
 }
 
-function toggleQuickNoteVoice() {
+async function toggleQuickNoteVoice() {
   if (QUICK_NOTE_REC) { try { QUICK_NOTE_REC.stop(); } catch (_) {} QUICK_NOTE_REC = null; updateQuickNoteMicUI(false); return; }
   const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
-  if (!SR) return toast('Sprach-Eingabe nicht verfügbar', 'warn');
+  if (!SR) return toast('Sprach-Eingabe nicht verfügbar in diesem Browser', 'warn', 6000);
+  try { await ensureMicPermission(); } catch (e) { return toast(e.message, 'error', 10000); }
   const rec = new SR();
   rec.lang = 'de-DE'; rec.continuous = true; rec.interimResults = true;
   const ta = $('quickNoteText');
@@ -2881,12 +2919,13 @@ function toggleQuickNoteVoice() {
     if (ta) ta.value = base + interim;
   };
   rec.onerror = (e) => {
-    if (e.error !== 'aborted' && e.error !== 'no-speech') toast('Sprach-Fehler: ' + (e.error || ''), 'warn');
+    const msg = _explainSpeechError(e.error);
+    if (msg) toast(msg, 'warn', 8000);
     QUICK_NOTE_REC = null; updateQuickNoteMicUI(false);
   };
   rec.onend = () => { QUICK_NOTE_REC = null; updateQuickNoteMicUI(false); };
   try { rec.start(); QUICK_NOTE_REC = rec; updateQuickNoteMicUI(true); }
-  catch (_) { toast('Mikrofon nicht zugänglich', 'warn'); }
+  catch (_) { toast('Mikrofon-Start fehlgeschlagen — Berechtigung prüfen', 'warn', 6000); }
 }
 
 function updateQuickNoteMicUI(active) {
@@ -3699,7 +3738,7 @@ function attachSummarySwipeBack() {
 
 /* === Voice für KI-Assistent inline im Summary-Modal === */
 let SUMMARY_ASSIST_REC = null;
-function toggleSummaryAssistVoice() {
+async function toggleSummaryAssistVoice() {
   if (SUMMARY_ASSIST_REC) {
     try { SUMMARY_ASSIST_REC.stop(); } catch (_) {}
     SUMMARY_ASSIST_REC = null;
@@ -3707,7 +3746,8 @@ function toggleSummaryAssistVoice() {
     return;
   }
   const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
-  if (!SR) return toast('Sprach-Eingabe nicht verfügbar', 'warn');
+  if (!SR) return toast('Sprach-Eingabe nicht verfügbar in diesem Browser', 'warn', 6000);
+  try { await ensureMicPermission(); } catch (e) { return toast(e.message, 'error', 10000); }
   const rec = new SR();
   rec.lang = 'de-DE';
   rec.continuous = true;
@@ -3727,7 +3767,8 @@ function toggleSummaryAssistVoice() {
     if (ta) ta.value = baseText + interim;
   };
   rec.onerror = (e) => {
-    if (e.error !== 'aborted' && e.error !== 'no-speech') toast('Spracherkennung: ' + (e.error || 'Fehler'), 'warn');
+    const msg = _explainSpeechError(e.error);
+    if (msg) toast(msg, 'warn', 8000);
     SUMMARY_ASSIST_REC = null;
     updateSummaryAssistMicUI(false);
   };
@@ -3737,7 +3778,7 @@ function toggleSummaryAssistVoice() {
     SUMMARY_ASSIST_REC = rec;
     updateSummaryAssistMicUI(true);
   } catch (e) {
-    toast('Mikrofon nicht zugänglich — Berechtigung prüfen', 'warn');
+    toast('Mikrofon-Start fehlgeschlagen — Berechtigung prüfen', 'warn', 6000);
   }
 }
 
@@ -4127,10 +4168,11 @@ async function forceSaveSummaryAsNote(btnEl) {
 /* === Voice + Save für eigene Notiz im Summary-Modal === */
 let NOTE_REC = null;
 
-function toggleNoteVoice() {
+async function toggleNoteVoice() {
   if (NOTE_REC) { try { NOTE_REC.stop(); } catch (_) {} NOTE_REC = null; updateNoteMicUI(false); return; }
   const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
-  if (!SR) return toast('Sprach-Eingabe nicht verfügbar', 'warn');
+  if (!SR) return toast('Sprach-Eingabe nicht verfügbar in diesem Browser', 'warn', 6000);
+  try { await ensureMicPermission(); } catch (e) { return toast(e.message, 'error', 10000); }
   const rec = new SR();
   rec.lang = 'de-DE';
   rec.continuous = true;
@@ -4149,13 +4191,13 @@ function toggleNoteVoice() {
     if (ta) ta.value = base + interim;
   };
   rec.onerror = (e) => {
-    console.warn('Voice error', e);
-    if (e.error !== 'aborted' && e.error !== 'no-speech') toast('Sprach-Fehler: ' + (e.error || ''), 'warn');
+    const msg = _explainSpeechError(e.error);
+    if (msg) toast(msg, 'warn', 8000);
     NOTE_REC = null; updateNoteMicUI(false);
   };
   rec.onend = () => { NOTE_REC = null; updateNoteMicUI(false); };
   try { rec.start(); NOTE_REC = rec; updateNoteMicUI(true); }
-  catch (_) { toast('Mikrofon nicht zugänglich', 'warn'); }
+  catch (_) { toast('Mikrofon-Start fehlgeschlagen — Berechtigung prüfen', 'warn', 6000); }
 }
 
 function updateNoteMicUI(active) {
@@ -4318,7 +4360,7 @@ function renderAssistantInput() {
   if (window.lucide) lucide.createIcons();
 }
 
-function toggleAssistantVoice() {
+async function toggleAssistantVoice() {
   if (ASSISTANT_REC) {
     try { ASSISTANT_REC.stop(); } catch (_) {}
     ASSISTANT_REC = null;
@@ -4326,7 +4368,8 @@ function toggleAssistantVoice() {
     return;
   }
   const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
-  if (!SR) return toast('Sprach-Eingabe nicht verfügbar', 'warn');
+  if (!SR) return toast('Sprach-Eingabe nicht verfügbar in diesem Browser', 'warn', 6000);
+  try { await ensureMicPermission(); } catch (e) { return toast(e.message, 'error', 10000); }
   const rec = new SR();
   rec.lang = 'de-DE';
   rec.continuous = true;
@@ -4346,8 +4389,8 @@ function toggleAssistantVoice() {
     if (ta) ta.value = baseText + interim;
   };
   rec.onerror = (e) => {
-    console.warn('Voice error', e);
-    if (e.error !== 'aborted' && e.error !== 'no-speech') toast('Spracherkennung: ' + (e.error || 'Fehler'), 'warn');
+    const msg = _explainSpeechError(e.error);
+    if (msg) toast(msg, 'warn', 8000);
     ASSISTANT_REC = null;
     updateAssistantMicUI(false);
   };
@@ -4357,7 +4400,7 @@ function toggleAssistantVoice() {
     ASSISTANT_REC = rec;
     updateAssistantMicUI(true);
   } catch (e) {
-    toast('Mikrofon nicht zugänglich — Berechtigung prüfen', 'warn');
+    toast('Mikrofon-Start fehlgeschlagen — Berechtigung prüfen', 'warn', 6000);
   }
 }
 
@@ -5464,10 +5507,11 @@ function closeRuleEditor() {
   RULE_EDITOR_CTX = null;
 }
 
-function toggleRuleVoice() {
+async function toggleRuleVoice() {
   if (RULE_REC) { try { RULE_REC.stop(); } catch (_) {} RULE_REC = null; updateRuleMicUI(false); return; }
   const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
-  if (!SR) return toast('Sprach-Eingabe nicht verfügbar', 'warn');
+  if (!SR) return toast('Sprach-Eingabe nicht verfügbar in diesem Browser', 'warn', 6000);
+  try { await ensureMicPermission(); } catch (e) { return toast(e.message, 'error', 10000); }
   const rec = new SR();
   rec.lang = 'de-DE'; rec.continuous = true; rec.interimResults = true;
   const ta = $('ruleDescription');
@@ -5484,12 +5528,13 @@ function toggleRuleVoice() {
     if (ta) ta.value = base + interim;
   };
   rec.onerror = (e) => {
-    if (e.error !== 'aborted' && e.error !== 'no-speech') toast('Sprach-Fehler: ' + (e.error || ''), 'warn');
+    const msg = _explainSpeechError(e.error);
+    if (msg) toast(msg, 'warn', 8000);
     RULE_REC = null; updateRuleMicUI(false);
   };
   rec.onend = () => { RULE_REC = null; updateRuleMicUI(false); };
   try { rec.start(); RULE_REC = rec; updateRuleMicUI(true); }
-  catch (_) { toast('Mikrofon nicht zugänglich', 'warn'); }
+  catch (_) { toast('Mikrofon-Start fehlgeschlagen — Berechtigung prüfen', 'warn', 6000); }
 }
 
 function updateRuleMicUI(active) {
