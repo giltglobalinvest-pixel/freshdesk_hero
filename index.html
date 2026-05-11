@@ -248,7 +248,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.13.0';
+const APP_VERSION = 'v2.14.0';
 // Read-Token absichtlich gesplittet, damit GitHub Secret-Scanning beim Push nicht blockt.
 // Der Token ist read-only und Base-scoped → bewusst eingebettet (Architektur-Entscheidung).
 const _RK = 'patu8KWM8aWB' + 'yxCGL.69fae5d9fa4b94c2' + '66b426dadd71a51f574945d840b33569058ab5e9d89ebef3';
@@ -1229,6 +1229,61 @@ const FD_STATUS = {
   4: { label:'Gelöst',    short:'SOLVED',  cls:'bg-emerald-100 text-emerald-700 border-emerald-200' },
   5: { label:'Geschlossen',short:'CLOSED', cls:'bg-ink-100 text-ink-600 border-ink-200' },
 };
+
+/* === Robustes JSON-Parsing für Claude-Antworten ============================
+   Claude liefert manchmal trotz Anweisung Markdown-Fences (```json ... ```),
+   manchmal Erklärtext vor/nach dem JSON. Diese Funktion versucht in mehreren
+   Stufen das eigentliche JSON-Objekt zu extrahieren, und bei abgeschnittenen
+   Strings (max_tokens-Limit erreicht) versucht sie eine konservative Reparatur.
+   ========================================================================== */
+function parseAIJson(rawText) {
+  if (!rawText) throw new Error('AI-Antwort leer');
+  const original = String(rawText).trim();
+
+  // 1. Code-Fences entfernen (überall, nicht nur am Rand)
+  let s = original
+    .replace(/^[\s\S]*?```(?:json)?\s*\n/i, '')   // alles vor dem ersten Code-Fence wegschneiden
+    .replace(/\n```[\s\S]*$/, '')                  // alles ab dem Schluss-Fence wegschneiden
+    .trim();
+  // Falls keine Fences gefunden wurden, bleibt s == original.trim() (siehe oben)
+  if (s === original.trim().replace(/^[\s\S]*?```(?:json)?\s*\n/i, '')) {
+    // Keine Fences → mit Original arbeiten
+    s = original;
+  }
+
+  // 2. Versuche zuerst sauberes Parse
+  try { return JSON.parse(s); } catch (_) {}
+
+  // 3. Suche das erste { bis zum letzten } im String
+  const firstBrace = s.indexOf('{');
+  const lastBrace  = s.lastIndexOf('}');
+  if (firstBrace >= 0 && lastBrace > firstBrace) {
+    const candidate = s.slice(firstBrace, lastBrace + 1);
+    try { return JSON.parse(candidate); } catch (_) {}
+  }
+
+  // 4. Abgeschnittenes JSON (max_tokens erreicht): String wahrscheinlich mitten
+  // im body-Feld abgebrochen. Versuche fehlende Klammern/Quotes zu ergänzen.
+  if (firstBrace >= 0) {
+    let repair = s.slice(firstBrace);
+    // schließende ``` und folgender Text raus
+    repair = repair.replace(/```[\s\S]*$/, '').trim();
+    // Wenn ungerade Anzahl an unescaped Quotes → letztes " ergänzen
+    const unescapedQuotes = (repair.match(/(?<!\\)"/g) || []).length;
+    if (unescapedQuotes % 2 === 1) repair += '"';
+    // Offene Klammern zählen und schließen
+    const opens  = (repair.match(/\{/g) || []).length;
+    const closes = (repair.match(/\}/g) || []).length;
+    if (opens > closes) repair += '}'.repeat(opens - closes);
+    try { return JSON.parse(repair); } catch (_) {}
+  }
+
+  // 5. Aufgeben — präzise Fehlermeldung
+  const preview = original.slice(0, 220) + (original.length > 220 ? '…' : '');
+  const err = new Error('AI-Antwort nicht parsbar (mögl. Token-Limit erreicht — bitte Befehl kürzer formulieren oder das Modell hat mit Markdown geantwortet). Vorschau: ' + preview);
+  err._aiRaw = original;
+  throw err;
+}
 const FD_PRIORITY = {
   1: { label:'Niedrig',  cls:'bg-ink-100 text-ink-600' },
   2: { label:'Normal',   cls:'bg-blue-100 text-blue-700' },
@@ -4365,18 +4420,13 @@ async function aiInterpretCommand(ticket, command, accountId) {
     method: 'POST',
     body: JSON.stringify({
       model: 'claude-sonnet-4-5-20250929',
-      max_tokens: 1500,
+      max_tokens: 4000,
       system: sysPrompt,
       messages: [{ role: 'user', content: userPrompt }]
     })
   });
   const text = (data.content && data.content[0] && data.content[0].text) || '';
-  let jsonText = text.trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '');
-  try {
-    return JSON.parse(jsonText);
-  } catch (e) {
-    throw new Error('AI-Antwort nicht parsbar: ' + text.slice(0, 200));
-  }
+  return parseAIJson(text);
 }
 
 function renderAssistantPreview() {
@@ -5292,15 +5342,13 @@ async function aiParseRule(description) {
     method: 'POST',
     body: JSON.stringify({
       model: 'claude-sonnet-4-5-20250929',
-      max_tokens: 1500,
+      max_tokens: 3000,
       system: sysPrompt,
       messages: [{ role: 'user', content: 'REGEL-BESCHREIBUNG:\n' + description }]
     })
   });
   const text = (data.content && data.content[0] && data.content[0].text) || '';
-  let jsonText = text.trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '');
-  try { return JSON.parse(jsonText); }
-  catch (_) { throw new Error('AI-Antwort nicht parsbar: ' + text.slice(0, 200)); }
+  return parseAIJson(text);
 }
 
 function renderRuleParsedPreview() {
@@ -5557,9 +5605,8 @@ async function evaluateRulesForTickets(tickets, rules) {
     })
   });
   const text = (data.content && data.content[0] && data.content[0].text) || '';
-  let jsonText = text.trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '');
   try {
-    const parsed = JSON.parse(jsonText);
+    const parsed = parseAIJson(text);
     const flat = [];
     (parsed.matches || []).forEach(m => {
       const tId = parseInt(m.ticketId, 10);
@@ -5568,7 +5615,7 @@ async function evaluateRulesForTickets(tickets, rules) {
     });
     return flat;
   } catch (e) {
-    console.warn('Rule eval JSON parse error:', text.slice(0, 200));
+    console.warn('Rule eval JSON parse error:', text.slice(0, 300));
     return [];
   }
 }
