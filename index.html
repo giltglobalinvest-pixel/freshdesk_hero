@@ -245,7 +245,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.6.0';
+const APP_VERSION = 'v2.7.0';
 // Read-Token absichtlich gesplittet, damit GitHub Secret-Scanning beim Push nicht blockt.
 // Der Token ist read-only und Base-scoped → bewusst eingebettet (Architektur-Entscheidung).
 const _RK = 'patu8KWM8aWB' + 'yxCGL.69fae5d9fa4b94c2' + '66b426dadd71a51f574945d840b33569058ab5e9d89ebef3';
@@ -952,6 +952,7 @@ const ACCOUNT_COLORS = ['#0ea5e9','#10b981','#f59e0b','#ef4444','#8b5cf6','#ec48
 
 const WIEDERVORLAGE_TABLE = 'Wiedervorlage';
 const REGELN_TABLE = 'Regeln';
+const NOTIZEN_TABLE = 'MeineNotizen';
 
 async function ensureAppTables() {
   // Accounts-Tabelle anlegen falls nicht vorhanden
@@ -978,6 +979,14 @@ async function ensureAppTables() {
     { name: 'aktion_json',   type: 'multilineText'  },  // {matchCriteria, actions:[...]}
     { name: 'aktiv',         type: 'singleLineText' },  // 'ja' | 'nein'
     { name: 'created',       type: 'singleLineText' },
+  ]);
+  await ensureTable(NOTIZEN_TABLE, [
+    { name: 'api_key',    type: 'singleLineText' },  // User-Owner
+    { name: 'account_id', type: 'singleLineText' },  // Airtable record ID des FD-Accounts
+    { name: 'ticket_id',  type: 'singleLineText' },
+    { name: 'body',       type: 'multilineText'  },  // Notiz-Text (für Anzeige)
+    { name: 'typ',        type: 'singleLineText' },  // 'summary' | 'manuell' | 'regel' | 'assistant'
+    { name: 'created',    type: 'singleLineText' },
   ]);
 }
 
@@ -1089,6 +1098,83 @@ const GRUND_LABEL = {
   notiz:     'wegen Notiz',
   zuweisung: 'wegen Zuweisung',
 };
+
+/* === Eigene Notizen-Index (zeigt in Card-Liste, dass User Notiz hinzugefügt hat) === */
+async function loadMyNotes() {
+  APP_STATE.myNotesMap = new Map();
+  if (!APP_KEYS.user?.api_key) return;
+  const filter = "{api_key}='" + escapeFormula(APP_KEYS.user.api_key) + "'";
+  let recs = [];
+  try {
+    recs = await airtableRead(NOTIZEN_TABLE, { filter, sort: [{ field: 'created', direction: 'desc' }] });
+  } catch (_) { recs = []; }
+  recs.forEach(r => {
+    const f = r.fields || {};
+    if (!f.account_id || !f.ticket_id) return;
+    const key = f.account_id + '|' + f.ticket_id;
+    const list = APP_STATE.myNotesMap.get(key) || [];
+    list.push({
+      recordId: r.id,
+      body:     f.body || '',
+      typ:      f.typ || 'manuell',
+      created:  f.created || '',
+    });
+    APP_STATE.myNotesMap.set(key, list);
+  });
+  // Auto-Cleanup älterer Einträge (>90 Tage) — nicht blockierend
+  const cutoff = Date.now() - 90 * 86400e3;
+  for (const [key, list] of APP_STATE.myNotesMap.entries()) {
+    const fresh = list.filter(n => new Date(n.created).getTime() > cutoff);
+    if (fresh.length === 0) {
+      list.forEach(n => airtableDelete(NOTIZEN_TABLE, n.recordId).catch(() => {}));
+      APP_STATE.myNotesMap.delete(key);
+    } else if (fresh.length < list.length) {
+      const stale = list.filter(n => new Date(n.created).getTime() <= cutoff);
+      stale.forEach(n => airtableDelete(NOTIZEN_TABLE, n.recordId).catch(() => {}));
+      APP_STATE.myNotesMap.set(key, fresh);
+    }
+  }
+}
+
+async function recordMyNote(accountId, ticketId, body, typ) {
+  if (!accountId || !ticketId || !APP_KEYS.user?.api_key) return;
+  try {
+    const fields = {
+      api_key:    APP_KEYS.user.api_key,
+      account_id: accountId,
+      ticket_id:  String(ticketId),
+      body:       String(body || '').slice(0, 4000),
+      typ:        typ || 'manuell',
+      created:    nowIso(),
+    };
+    const rec = await airtableWrite(NOTIZEN_TABLE, fields);
+    if (!APP_STATE.myNotesMap) APP_STATE.myNotesMap = new Map();
+    const key = accountId + '|' + ticketId;
+    const list = APP_STATE.myNotesMap.get(key) || [];
+    list.unshift({ recordId: rec.id, body: fields.body, typ: fields.typ, created: fields.created });
+    APP_STATE.myNotesMap.set(key, list);
+  } catch (e) {
+    console.warn('recordMyNote fehlgeschlagen:', e.message);
+  }
+}
+
+function getMyNotesForTicket(accountId, ticketId) {
+  return APP_STATE.myNotesMap?.get(accountId + '|' + ticketId) || [];
+}
+
+function _relTimeFull(iso) {
+  if (!iso) return '';
+  const d = new Date(iso);
+  if (isNaN(d)) return '';
+  const sec = Math.floor((Date.now() - d.getTime()) / 1000);
+  if (sec < 60)              return 'gerade eben';
+  if (sec < 3600)            return 'vor ' + Math.floor(sec/60) + ' Min';
+  if (sec < 86400)           return 'vor ' + Math.floor(sec/3600) + ' Std';
+  if (sec < 86400 * 7)       { const d_ = Math.floor(sec/86400); return 'vor ' + d_ + ' Tag' + (d_===1?'':'en'); }
+  if (sec < 86400 * 30)      { const w = Math.floor(sec/86400/7); return 'vor ' + w + ' Woche' + (w===1?'':'n'); }
+  if (sec < 86400 * 365)     { const m = Math.floor(sec/86400/30); return 'vor ' + m + ' Monat' + (m===1?'':'en'); }
+  return d.toLocaleDateString('de', { day: '2-digit', month: '2-digit', year: 'numeric' });
+}
 
 async function loadAccounts() {
   if (!APP_KEYS.user?.api_key) { APP_STATE.accounts = []; return; }
@@ -1790,6 +1876,11 @@ function renderTicketList(tickets) {
                 <div class="flex-1 min-w-0">
                   <div class="flex items-baseline gap-2">
                     <p class="font-semibold text-ink-900 text-sm leading-snug truncate flex-1">${escapeHtml(subj)}</p>
+                    ${(() => {
+                      const my = getMyNotesForTicket(t._accountId, t.id);
+                      if (!my.length) return '';
+                      return `<button data-action="myNotes" data-account-id="${escapeAttr(t._accountId)}" data-ticket-id="${t.id}" class="text-amber-600 active:text-amber-800 hover:bg-amber-50 -m-1 p-1 rounded shrink-0 relative" title="${my.length} eigene Notiz${my.length===1?'':'en'}"><i data-lucide="sticky-note" class="w-4 h-4"></i>${my.length > 1 ? `<span class="absolute -top-0.5 -right-0.5 bg-amber-500 text-white text-[8px] font-bold leading-none w-3.5 h-3.5 rounded-full flex items-center justify-center">${my.length}</span>` : ''}</button>`;
+                    })()}
                     <button data-action="summarize" data-account-id="${escapeAttr(t._accountId)}" data-ticket-id="${t.id}" class="text-purple-500 active:text-purple-700 hover:bg-purple-50 -m-1 p-1 rounded shrink-0" title="KI-Zusammenfassung">
                       <i data-lucide="sparkles" class="w-4 h-4"></i>
                     </button>
@@ -2297,6 +2388,10 @@ function attachSwipeToCards() {
           if (_openSwipedContent) _resetSwipe();
           openTicketSummaryModal(accId, tId);
         }
+        else if (action === 'myNotes') {
+          if (_openSwipedContent) _resetSwipe();
+          openMyNotesPopup(accId, tId);
+        }
       });
     });
   });
@@ -2466,6 +2561,52 @@ async function clearWiedervorlage() {
     if (fromList) renderTicketsPage();
     else if (CURRENT_TICKET && CURRENT_TICKET.id === ticketId) renderTicketDetailBody(CURRENT_TICKET);
   } catch (e) { toast('Fehler: ' + e.message, 'error', 6000); }
+}
+
+/* === Meine-Notizen-Popup (Bottom-Sheet) === */
+function openMyNotesPopup(accountId, ticketId) {
+  const notes = getMyNotesForTicket(accountId, ticketId);
+  if (!notes.length) return toast('Noch keine eigenen Notizen für dieses Ticket', 'info', 2000);
+  let host = document.getElementById('subModalHost');
+  if (!host) { host = document.createElement('div'); host.id = 'subModalHost'; document.body.appendChild(host); }
+  const typLabel = { summary: 'KI-Zusammenfassung', manuell: 'Eigene Notiz', regel: 'KI-Regel', assistant: 'KI-Assistent' };
+  const typIcon  = { summary: 'sparkles',           manuell: 'sticky-note',  regel: 'sparkles',  assistant: 'mic' };
+  host.innerHTML = `
+    <div class="fixed inset-0 z-[60] flex items-end justify-center bg-black/40" onclick="if(event.target===this)closeMyNotesPopup()">
+      <div class="bg-white w-full max-w-md rounded-t-2xl shadow-2xl flex flex-col safe-bottom" style="max-height:80vh">
+        <div class="px-4 py-3 border-b border-ink-200 flex items-center justify-between">
+          <div>
+            <h3 class="font-bold text-ink-900 inline-flex items-center gap-1.5"><i data-lucide="sticky-note" class="w-4 h-4 text-amber-600"></i> Meine Notizen</h3>
+            <p class="text-[11px] text-ink-500">Ticket #${ticketId} · ${notes.length} private Notiz${notes.length===1?'':'en'}</p>
+          </div>
+          <button onclick="closeMyNotesPopup()" class="w-9 h-9 rounded-lg hover:bg-ink-100 flex items-center justify-center"><i data-lucide="x" class="w-5 h-5 text-ink-700"></i></button>
+        </div>
+        <div class="flex-1 overflow-y-auto p-3 space-y-2">
+          ${notes.map(n => {
+            const label = typLabel[n.typ] || 'Notiz';
+            const icon  = typIcon[n.typ]  || 'sticky-note';
+            const rel   = _relTimeFull(n.created);
+            return `
+              <div class="bg-amber-50 border border-amber-200 rounded-xl p-3">
+                <div class="flex items-baseline justify-between mb-1.5 gap-2">
+                  <span class="inline-flex items-center gap-1 text-[10px] uppercase tracking-wider text-amber-800 font-bold"><i data-lucide="${icon}" class="w-3 h-3"></i> ${escapeHtml(label)}</span>
+                  <span class="text-[10px] text-amber-700 shrink-0 font-medium">${escapeHtml(rel)}</span>
+                </div>
+                <p class="text-sm text-ink-800 whitespace-pre-line break-words">${escapeHtml(n.body)}</p>
+              </div>`;
+          }).join('')}
+        </div>
+        <div class="px-3 py-3 border-t border-ink-100 flex gap-2">
+          <button onclick="openTicketDetail('${escapeAttr(accountId)}', ${ticketId}); closeMyNotesPopup();" class="flex-1 bg-white border border-ink-200 px-3 py-2 rounded-lg text-xs font-medium hover:bg-ink-50 inline-flex items-center justify-center gap-1.5"><i data-lucide="ticket" class="w-3.5 h-3.5"></i> Ticket öffnen</button>
+          <button onclick="openTicketSummaryModal('${escapeAttr(accountId)}', ${ticketId}); closeMyNotesPopup();" class="flex-1 bg-brand-500 hover:bg-brand-600 text-white px-3 py-2 rounded-lg text-xs font-semibold inline-flex items-center justify-center gap-1.5"><i data-lucide="sparkles" class="w-3.5 h-3.5"></i> Notiz hinzufügen</button>
+        </div>
+      </div>
+    </div>`;
+  if (window.lucide) lucide.createIcons();
+}
+function closeMyNotesPopup() {
+  const host = document.getElementById('subModalHost');
+  if (host) host.innerHTML = '';
 }
 
 function openInFreshdesk(accountId, ticketId) {
@@ -3097,6 +3238,7 @@ async function saveSummaryAsNote(accountId, ticketId, summary) {
     method: 'POST',
     body: JSON.stringify({ body: textToHtmlForFreshdesk(body), private: true })
   });
+  recordMyNote(accountId, ticketId, summary, 'summary').catch(() => {});
   return true;
 }
 
@@ -3456,6 +3598,7 @@ async function saveCustomNote(btn) {
       body:  text,
       timestamp: new Date().toISOString(),
     });
+    recordMyNote(SUMMARY_CTX.accountId, SUMMARY_CTX.ticketId, text, 'manuell').catch(() => {});
     toast('Notiz im Ticket gespeichert', 'success', 4000);
     renderSummaryBody(SUMMARY_CTX.ticket, SUMMARY_CTX.summary);
   } catch (e) {
@@ -3786,6 +3929,7 @@ async function executeAssistantAction(btn) {
       wvDays = autoWvDays.reply; wvGrund = 'antwort';
     } else if (a.action === 'note') {
       await proxyJson(base + '/notes', { method: 'POST', body: JSON.stringify({ body: textToHtmlForFreshdesk(a.body), private: true }) });
+      recordMyNote(ctx.accountId, ctx.ticketId, a.body, 'assistant').catch(() => {});
       successMsg = 'Notiz hinzugefügt';
       wvDays = autoWvDays.note; wvGrund = 'notiz';
     } else if (a.action === 'forward') {
@@ -4699,6 +4843,7 @@ async function applyRuleActions(rule, ticket) {
           method: 'POST',
           body: JSON.stringify({ body: textToHtmlForFreshdesk('🤖 KI-Regel „' + rule.titel + "\"\n\n" + a.body), private: true })
         });
+        recordMyNote(accountId, ticketId, a.body, 'regel').catch(() => {});
         performed.push('Notiz');
       } else if (a.type === 'reply' && a.body) {
         await proxyJson(base + '/reply', {
@@ -5615,6 +5760,8 @@ async function showApp() {
   loadWiedervorlage().catch(e => console.warn('Wiedervorlage-Load:', e.message));
   // Rules-Cache laden (im Hintergrund — Tabelle muss noch nicht existieren)
   loadRules().catch(e => console.warn('Rules-Load:', e.message));
+  // Meine-Notizen-Index laden (im Hintergrund)
+  loadMyNotes().catch(e => console.warn('MyNotes-Load:', e.message));
   navTo('tickets');
   // Update-Check (lautlos)
   checkForUpdate(false);
