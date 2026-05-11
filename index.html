@@ -245,7 +245,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.7.0';
+const APP_VERSION = 'v2.7.1';
 // Read-Token absichtlich gesplittet, damit GitHub Secret-Scanning beim Push nicht blockt.
 // Der Token ist read-only und Base-scoped → bewusst eingebettet (Architektur-Entscheidung).
 const _RK = 'patu8KWM8aWB' + 'yxCGL.69fae5d9fa4b94c2' + '66b426dadd71a51f574945d840b33569058ab5e9d89ebef3';
@@ -4406,6 +4406,10 @@ async function loadRules() {
 
 function getActiveRules() { return RULES_CACHE.filter(r => r.aktiv); }
 
+function clearProcessedRulesCache() {
+  try { localStorage.removeItem(PROCESSED_RULES_KEY); } catch (_) {}
+}
+
 async function saveRule({ id, titel, beschreibung, action, aktiv }) {
   const fields = {
     api_key:      APP_KEYS.user.api_key,
@@ -4420,17 +4424,21 @@ async function saveRule({ id, titel, beschreibung, action, aktiv }) {
   } else {
     await airtableWrite(REGELN_TABLE, fields);
   }
+  // Bei jeder Regel-Änderung den Verarbeitet-Cache leeren, damit Tickets neu evaluiert werden
+  clearProcessedRulesCache();
 }
 
 async function toggleRule(id, active) {
   await airtableUpdate(REGELN_TABLE, id, { aktiv: active ? 'ja' : 'nein' });
   const r = RULES_CACHE.find(x => x.id === id);
   if (r) r.aktiv = active;
+  clearProcessedRulesCache();
 }
 
 async function deleteRule(id) {
   await airtableDelete(REGELN_TABLE, id);
   RULES_CACHE = RULES_CACHE.filter(r => r.id !== id);
+  clearProcessedRulesCache();
 }
 
 async function renderRulesPage() {
@@ -4653,8 +4661,14 @@ async function aiParseRule(description) {
     '- {"type":"status", "status":"open|pending|resolved|closed"}\n' +
     '- {"type":"type", "typeHint":"Hinweis auf den Ticket-Typ"}\n' +
     '- {"type":"wiedervorlage", "days":N, "grund":"manuell|antwort|notiz|zuweisung"}\n' +
-    '- {"type":"hide"}  // Ticket dauerhaft aus persönlicher Sicht des Users ausblenden\n\n' +
-    'WICHTIG: Wenn der User Formulierungen verwendet wie "ich will das nicht sehen", "aus meiner Sicht weg", "soll mich nicht stören", "blende aus", "andere kümmern sich drum", "interessiert mich nicht" → IMMER die "hide"-Aktion ergänzen (zusätzlich zu allen anderen Aktionen wie assign/group/status).\n\n' +
+    '- {"type":"hide"}  // NUR lokales Ausblenden in der App des Users (= 30 Tage Wiedervorlage)\n\n' +
+    'KRITISCHE UNTERSCHEIDUNG — status vs hide sind NICHT austauschbar:\n' +
+    '• "status" ändert den Freshdesk-Ticket-Status FÜR ALLE (Kunde, andere Agents, Workflows). Nutze AUSSCHLIESSLICH wenn der User explizit einen Status nennt: "auf Wartet setzen", "schließe das Ticket", "Status gelöst", "öffne wieder".\n' +
+    '• "hide" verändert den Ticket-Status NICHT. Es blendet das Ticket NUR aus der persönlichen App-Sicht des aktuellen Users aus (lokal). Andere sehen das Ticket weiterhin im normalen Status.\n\n' +
+    'Wenn der User sagt:\n' +
+    '- "ich will das nicht sehen" / "aus meiner Sicht weg" / "soll mich nicht stören" / "interessiert mich nicht" / "andere kümmern sich drum" / "blende aus" / "ausblenden" / "verstecken"\n' +
+    '→ NUR "hide" verwenden. NIEMALS "status" hinzufügen, es sei denn ausdrücklich gewünscht.\n\n' +
+    'Im Zweifel: lieber "hide" statt "status:pending" — Status-Änderungen sind sichtbar für alle und können Workflows triggern.\n\n' +
     'JSON-FORMAT:\n' +
     '{\n' +
     '  "title":"Kurzer Titel auf Deutsch, 3-6 Wörter",\n' +
@@ -4687,10 +4701,10 @@ function renderRuleParsedPreview() {
     if (a.type === 'reply')         return { icon:'reply',       color:'emerald', label:'Antwort an Kunde',         detail: (a.body || '').slice(0, 200) };
     if (a.type === 'assign')        return { icon:'user',        color:'brand',   label:'Bearbeiter zuweisen',      detail: a.agentHint || '' };
     if (a.type === 'group')         return { icon:'users',       color:'brand',   label:'Gruppe zuweisen',          detail: a.groupHint || '' };
-    if (a.type === 'status')        return { icon:'flag',        color:'brand',   label:'Status setzen',            detail: ({open:'Offen',pending:'Wartet',resolved:'Gelöst',closed:'Geschlossen'}[a.status] || a.status) };
+    if (a.type === 'status')        return { icon:'flag',        color:'brand',   label:'Freshdesk-Status ändern (für alle sichtbar)', detail: ({open:'Offen',pending:'Wartet',resolved:'Gelöst',closed:'Geschlossen'}[a.status] || a.status) };
     if (a.type === 'type')          return { icon:'tag',         color:'purple',  label:'Typ setzen',               detail: a.typeHint || '' };
     if (a.type === 'wiedervorlage') return { icon:'clock',       color:'indigo',  label:'Auf Wiedervorlage',        detail: (a.days || '?') + ' Tage' };
-    if (a.type === 'hide')          return { icon:'eye-off',     color:'purple',  label:'Aus meiner Sicht ausblenden', detail: 'Wiedervorlage 30 Tage' };
+    if (a.type === 'hide')          return { icon:'eye-off',     color:'purple',  label:'Aus meiner Sicht ausblenden (lokal, ändert NICHT den Status)', detail: '30 Tage Wiedervorlage in deiner App' };
     return { icon:'help-circle', color:'ink', label:'Unbekannte Aktion', detail: JSON.stringify(a).slice(0, 100) };
   });
   $('ruleParsedPreview').innerHTML = `
