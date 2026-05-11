@@ -51,6 +51,27 @@
   }
   /* Eigenes Update-Banner (sauber kodiert, ersetzt Loader-Banner) */
   .update-banner { background: linear-gradient(90deg, #10b981, #059669); }
+  /* AI-Processing-Indicator: pulsierender lila Glow auf Tickets, die gerade von KI bearbeitet werden */
+  [data-swipe-content].ai-processing {
+    box-shadow: 0 0 0 2px rgba(168, 85, 247, 0.4);
+    animation: ai-pulse 1.4s ease-in-out infinite;
+    position: relative;
+  }
+  @keyframes ai-pulse {
+    0%, 100% { box-shadow: 0 0 0 2px rgba(168, 85, 247, 0.3), 0 0 10px rgba(168, 85, 247, 0.15); }
+    50%      { box-shadow: 0 0 0 3px rgba(168, 85, 247, 0.6), 0 0 22px rgba(168, 85, 247, 0.35); }
+  }
+  [data-swipe-content].ai-processing::after {
+    content: ''; position: absolute; top: 6px; right: 6px;
+    width: 18px; height: 18px; border-radius: 9999px;
+    background: linear-gradient(135deg, #a855f7, #0ea5e9);
+    box-shadow: 0 0 12px rgba(168, 85, 247, 0.7);
+    animation: ai-pulse-dot 1s ease-in-out infinite;
+  }
+  @keyframes ai-pulse-dot {
+    0%, 100% { transform: scale(1); opacity: 1; }
+    50%      { transform: scale(1.3); opacity: 0.7; }
+  }
   /* Swipe-Cards (Tickets) */
   [data-swipe-card] { position: relative; overflow: hidden; border-radius: 1rem; }
   [data-swipe-content] { position: relative; transition: transform .22s ease; will-change: transform; touch-action: pan-y; -webkit-touch-callout: none; -webkit-user-select: none; user-select: none; }
@@ -224,7 +245,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.5.2';
+const APP_VERSION = 'v2.6.0';
 // Read-Token absichtlich gesplittet, damit GitHub Secret-Scanning beim Push nicht blockt.
 // Der Token ist read-only und Base-scoped → bewusst eingebettet (Architektur-Entscheidung).
 const _RK = 'patu8KWM8aWB' + 'yxCGL.69fae5d9fa4b94c2' + '66b426dadd71a51f574945d840b33569058ab5e9d89ebef3';
@@ -1806,6 +1827,10 @@ function renderTicketList(tickets) {
   if (window.lucide) lucide.createIcons();
   attachSwipeToCards();
   renderMultiSelectBar();
+  // Phase C: Aktive Regeln auf neu geladene Tickets anwenden (Hintergrund, non-blocking)
+  if (typeof RULES_CACHE !== 'undefined' && RULES_CACHE.some(r => r.aktiv)) {
+    setTimeout(() => { autoApplyRulesForTickets(tickets).catch(e => console.warn('autoApplyRules:', e)); }, 600);
+  }
 }
 
 /* === Multi-Select Action-Bar + Bulk-Operations === */
@@ -4483,7 +4508,9 @@ async function aiParseRule(description) {
     '- {"type":"group", "groupHint":"Name oder Hinweis der Gruppe"}\n' +
     '- {"type":"status", "status":"open|pending|resolved|closed"}\n' +
     '- {"type":"type", "typeHint":"Hinweis auf den Ticket-Typ"}\n' +
-    '- {"type":"wiedervorlage", "days":N, "grund":"manuell|antwort|notiz|zuweisung"}\n\n' +
+    '- {"type":"wiedervorlage", "days":N, "grund":"manuell|antwort|notiz|zuweisung"}\n' +
+    '- {"type":"hide"}  // Ticket dauerhaft aus persönlicher Sicht des Users ausblenden\n\n' +
+    'WICHTIG: Wenn der User Formulierungen verwendet wie "ich will das nicht sehen", "aus meiner Sicht weg", "soll mich nicht stören", "blende aus", "andere kümmern sich drum", "interessiert mich nicht" → IMMER die "hide"-Aktion ergänzen (zusätzlich zu allen anderen Aktionen wie assign/group/status).\n\n' +
     'JSON-FORMAT:\n' +
     '{\n' +
     '  "title":"Kurzer Titel auf Deutsch, 3-6 Wörter",\n' +
@@ -4519,6 +4546,7 @@ function renderRuleParsedPreview() {
     if (a.type === 'status')        return { icon:'flag',        color:'brand',   label:'Status setzen',            detail: ({open:'Offen',pending:'Wartet',resolved:'Gelöst',closed:'Geschlossen'}[a.status] || a.status) };
     if (a.type === 'type')          return { icon:'tag',         color:'purple',  label:'Typ setzen',               detail: a.typeHint || '' };
     if (a.type === 'wiedervorlage') return { icon:'clock',       color:'indigo',  label:'Auf Wiedervorlage',        detail: (a.days || '?') + ' Tage' };
+    if (a.type === 'hide')          return { icon:'eye-off',     color:'purple',  label:'Aus meiner Sicht ausblenden', detail: 'Wiedervorlage 30 Tage' };
     return { icon:'help-circle', color:'ink', label:'Unbekannte Aktion', detail: JSON.stringify(a).slice(0, 100) };
   });
   $('ruleParsedPreview').innerHTML = `
@@ -4577,6 +4605,236 @@ async function saveRuleAndClose(btnEl) {
   } catch (e) {
     setBusy(btnEl, false);
     toast('Speichern fehlgeschlagen: ' + e.message, 'error', 6000);
+  }
+}
+
+/* ============================================================
+   PHASE C — Auto-Anwendung der KI-Regeln auf Tickets im Hintergrund
+   ============================================================ */
+const PROCESSED_RULES_KEY = 'fdh_processed_rules_' + APP_CONFIG.PROJECT_ID;
+
+function _getProcessedMap() {
+  try { return JSON.parse(localStorage.getItem(PROCESSED_RULES_KEY) || '{}'); }
+  catch (_) { return {}; }
+}
+function _setProcessed(accountId, ticketId, ruleHash) {
+  const m = _getProcessedMap();
+  m[accountId + '|' + ticketId] = { hash: ruleHash, at: Date.now() };
+  try {
+    // Cleanup: alles älter als 30 Tage rauswerfen, damit localStorage nicht explodiert
+    const cutoff = Date.now() - 30 * 86400e3;
+    Object.keys(m).forEach(k => { if ((m[k].at || 0) < cutoff) delete m[k]; });
+    localStorage.setItem(PROCESSED_RULES_KEY, JSON.stringify(m));
+  } catch (_) {}
+}
+function _isProcessed(accountId, ticketId, ruleHash) {
+  const m = _getProcessedMap();
+  return m[accountId + '|' + ticketId]?.hash === ruleHash;
+}
+function _ruleHash(rules) {
+  // Hash über Regel-IDs und letztes-Update; ändert sich → Re-Processing
+  return rules.map(r => r.id).sort().join('|');
+}
+
+// Fuzzy-Matching: hint → ID
+function findAgentByHint(accountId, hint) {
+  if (!hint) return null;
+  const cache = APP_STATE.agentsCache?.[accountId];
+  if (!cache?.agents?.length) return null;
+  const h = String(hint).toLowerCase().trim();
+  const exact = cache.agents.find(a => a.name.toLowerCase() === h);
+  if (exact) return exact.id;
+  const firstName = cache.agents.find(a => a.name.toLowerCase().split(/\s+/)[0] === h);
+  if (firstName) return firstName.id;
+  const contains = cache.agents.find(a => a.name.toLowerCase().includes(h));
+  if (contains) return contains.id;
+  // E-Mail-Match
+  const byEmail = cache.agents.find(a => (a.email || '').toLowerCase() === h);
+  if (byEmail) return byEmail.id;
+  return null;
+}
+function findGroupByHint(accountId, hint) {
+  if (!hint) return null;
+  const cache = APP_STATE.groupsCache?.[accountId];
+  if (!cache?.groups?.length) return null;
+  const h = String(hint).toLowerCase().trim();
+  const exact = cache.groups.find(g => g.name.toLowerCase() === h);
+  if (exact) return exact.id;
+  const contains = cache.groups.find(g => g.name.toLowerCase().includes(h) || h.includes(g.name.toLowerCase()));
+  if (contains) return contains.id;
+  return null;
+}
+function findTypeByHint(accountId, hint) {
+  if (!hint) return null;
+  const types = APP_STATE.typesCache?.[accountId]?.types || [];
+  const h = String(hint).toLowerCase().trim();
+  const exact = types.find(t => t.toLowerCase() === h);
+  if (exact) return exact;
+  const contains = types.find(t => t.toLowerCase().includes(h) || h.includes(t.toLowerCase()));
+  if (contains) return contains;
+  return null;
+}
+
+// Visueller Indikator: pulsing-glow während KI ein Ticket bearbeitet
+function markCardProcessing(accountId, ticketId, isOn) {
+  try {
+    const card = document.querySelector(`[data-swipe-content][data-account-id="${CSS.escape(accountId)}"][data-ticket-id="${ticketId}"]`);
+    if (!card) return;
+    if (isOn) card.classList.add('ai-processing');
+    else      card.classList.remove('ai-processing');
+  } catch (_) {}
+}
+
+// Eine Regel auf ein konkretes Ticket anwenden
+async function applyRuleActions(rule, ticket) {
+  const accountId = ticket._accountId;
+  const ticketId  = ticket.id;
+  const base = '/freshdesk/' + encodeURIComponent(accountId) + '/api/v2/tickets/' + ticketId;
+  const actions = rule.action?.actions || [];
+  const performed = [];
+  for (const a of actions) {
+    try {
+      if (a.type === 'note' && a.body) {
+        await proxyJson(base + '/notes', {
+          method: 'POST',
+          body: JSON.stringify({ body: textToHtmlForFreshdesk('🤖 KI-Regel „' + rule.titel + "\"\n\n" + a.body), private: true })
+        });
+        performed.push('Notiz');
+      } else if (a.type === 'reply' && a.body) {
+        await proxyJson(base + '/reply', {
+          method: 'POST',
+          body: JSON.stringify({ body: textToHtmlForFreshdesk(a.body) })
+        });
+        performed.push('Antwort');
+      } else if (a.type === 'assign') {
+        const agentId = findAgentByHint(accountId, a.agentHint);
+        if (agentId) {
+          await proxyJson(base, { method: 'PUT', body: JSON.stringify({ responder_id: agentId }) });
+          performed.push('Assignee=' + getAgentName(accountId, agentId));
+        } else {
+          console.warn('Rule: Agent nicht gefunden für hint', a.agentHint);
+        }
+      } else if (a.type === 'group') {
+        const groupId = findGroupByHint(accountId, a.groupHint);
+        if (groupId) {
+          await proxyJson(base, { method: 'PUT', body: JSON.stringify({ group_id: groupId }) });
+          performed.push('Gruppe=' + getGroupName(accountId, groupId));
+        }
+      } else if (a.type === 'status') {
+        const statusMap = { open: 2, pending: 3, resolved: 4, closed: 5 };
+        const s = statusMap[String(a.status).toLowerCase()];
+        if (s) {
+          await proxyJson(base, { method: 'PUT', body: JSON.stringify({ status: s }) });
+          performed.push('Status=' + a.status);
+        }
+      } else if (a.type === 'type') {
+        const tName = findTypeByHint(accountId, a.typeHint) || a.typeHint;
+        if (tName) {
+          await proxyJson(base, { method: 'PUT', body: JSON.stringify({ type: tName }) });
+          performed.push('Typ=' + tName);
+        }
+      } else if (a.type === 'wiedervorlage') {
+        const days = a.days || 3;
+        await addWiedervorlage(accountId, ticketId, _daysToFrist(days, { morning: true }), a.grund || 'regel');
+        performed.push('Wiedervorlage ' + days + 'd');
+      } else if (a.type === 'hide') {
+        await addWiedervorlage(accountId, ticketId, _daysToFrist(30, { morning: true }), 'regel');
+        performed.push('Ausgeblendet 30d');
+      }
+    } catch (e) {
+      console.warn('Rule action failed:', a, e);
+    }
+  }
+  return performed;
+}
+
+// Claude (Haiku — schnell + günstig) entscheidet welche Tickets welche Regel matchen
+async function evaluateRulesForTickets(tickets, rules) {
+  if (!tickets.length || !rules.length) return [];
+  const ticketsBlob = tickets.map(t => {
+    const desc = htmlToText(t.description_text || t.description || '').slice(0, 600);
+    const lastConv = (t.conversations || []).slice(-1).map(c => htmlToText(c.body_text || c.body || '').slice(0, 300))[0] || '';
+    return '[TICKET ' + t.id + ']\nBetreff: ' + (t.subject || '') + '\nBeschreibung: ' + desc + (lastConv ? '\nLetzte Nachricht: ' + lastConv : '');
+  }).join('\n\n---\n\n');
+  const rulesBlob = rules.map(r => '[REGEL ' + r.id + '] "' + r.titel + '"\nMatch-Kriterium: ' + (r.action?.matchCriteria || r.beschreibung || '')).join('\n\n');
+  const sysPrompt = 'Du analysierst Helpdesk-Tickets und entscheidest welche Regel auf welches Ticket passt. Sei zurückhaltend — match nur wenn ein Match-Kriterium klar zutrifft.\n\nREGELN:\n' + rulesBlob + '\n\nAntworte AUSSCHLIESSLICH mit JSON in diesem Format:\n{"matches":[{"ticketId":12345,"ruleIds":["reg_xxx"]}]}\n\nEin Ticket kann mehrere Regeln matchen oder gar keine. Liefere nur Matches die klar sind.';
+  const data = await proxyJson('/anthropic/v1/messages', {
+    method: 'POST',
+    body: JSON.stringify({
+      model: 'claude-haiku-4-5-20251001',
+      max_tokens: 1500,
+      system: sysPrompt,
+      messages: [{ role: 'user', content: 'TICKETS:\n\n' + ticketsBlob }]
+    })
+  });
+  const text = (data.content && data.content[0] && data.content[0].text) || '';
+  let jsonText = text.trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '');
+  try {
+    const parsed = JSON.parse(jsonText);
+    const flat = [];
+    (parsed.matches || []).forEach(m => {
+      const tId = parseInt(m.ticketId, 10);
+      const ruleIds = m.ruleIds || (m.ruleId ? [m.ruleId] : []);
+      ruleIds.forEach(rid => flat.push({ ticketId: tId, ruleId: rid }));
+    });
+    return flat;
+  } catch (e) {
+    console.warn('Rule eval JSON parse error:', text.slice(0, 200));
+    return [];
+  }
+}
+
+let AUTO_APPLY_RUNNING = false;
+async function autoApplyRulesForTickets(tickets) {
+  if (AUTO_APPLY_RUNNING) return;
+  if (!APP_KEYS.user?.api_key) return;
+  const activeRules = getActiveRules();
+  if (!activeRules.length || !tickets.length) return;
+  const hash = _ruleHash(activeRules);
+  // Nur unverarbeitete Tickets
+  const toProcess = tickets.filter(t => !_isProcessed(t._accountId, t.id, hash));
+  if (!toProcess.length) return;
+  AUTO_APPLY_RUNNING = true;
+  console.log('Phase C: Anwenden von', activeRules.length, 'Regeln auf', toProcess.length, 'Tickets');
+  try {
+    // In Chunks von 5 Tickets pro Claude-Call
+    const CHUNK = 5;
+    let totalActions = 0;
+    let processedTickets = 0;
+    for (let i = 0; i < toProcess.length; i += CHUNK) {
+      const chunk = toProcess.slice(i, i + CHUNK);
+      chunk.forEach(t => markCardProcessing(t._accountId, t.id, true));
+      try {
+        // Für jedes Ticket im Chunk die Conversations laden (zur besseren Regel-Match-Genauigkeit)
+        const enriched = await Promise.all(chunk.map(async t => {
+          if (t.conversations) return t;
+          try { const full = await fetchTicketDetail(t._accountId, t.id); return { ...t, ...full }; }
+          catch (_) { return t; }
+        }));
+        const matches = await evaluateRulesForTickets(enriched, activeRules);
+        // Aktionen pro Match anwenden
+        for (const m of matches) {
+          const rule   = activeRules.find(r => r.id === m.ruleId);
+          const ticket = enriched.find(t => t.id === m.ticketId);
+          if (rule && ticket) {
+            const performed = await applyRuleActions(rule, ticket);
+            if (performed.length) totalActions += performed.length;
+          }
+        }
+        chunk.forEach(t => { _setProcessed(t._accountId, t.id, hash); processedTickets++; });
+      } catch (e) {
+        console.warn('Phase C chunk failed:', e);
+      } finally {
+        chunk.forEach(t => markCardProcessing(t._accountId, t.id, false));
+      }
+    }
+    if (totalActions > 0) {
+      toast('KI-Regeln: ' + totalActions + ' Aktion' + (totalActions === 1 ? '' : 'en') + ' auf ' + processedTickets + ' Ticket' + (processedTickets === 1 ? '' : 's') + ' angewendet', 'success', 5000);
+      // Liste aktualisieren, damit veränderte Tickets ihre neuen Werte zeigen + ggf. ausgeblendet werden
+      if (APP_STATE.page === 'tickets') renderTicketsPage();
+    }
+  } finally {
+    AUTO_APPLY_RUNNING = false;
   }
 }
 
