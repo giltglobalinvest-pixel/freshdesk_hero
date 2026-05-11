@@ -248,7 +248,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.9.0';
+const APP_VERSION = 'v2.10.0';
 // Read-Token absichtlich gesplittet, damit GitHub Secret-Scanning beim Push nicht blockt.
 // Der Token ist read-only und Base-scoped → bewusst eingebettet (Architektur-Entscheidung).
 const _RK = 'patu8KWM8aWB' + 'yxCGL.69fae5d9fa4b94c2' + '66b426dadd71a51f574945d840b33569058ab5e9d89ebef3';
@@ -1570,9 +1570,14 @@ async function renderTicketsPage() {
               <span class="opacity-70">${escapeHtml(label)}:</span> ${escapeHtml(value)}
               <i data-lucide="${icon}" class="w-3 h-3 ${active ? 'opacity-90' : 'opacity-60'}"></i>
             </button>`;
+          // Schnellbutton: Unzugewiesen (one-tap toggle, account-übergreifend)
+          const unassignedActive = f.responderId === 'unassigned';
+          let html = `<button onclick="toggleUnassignedFilter()" title="${unassignedActive ? 'Unzugewiesen-Filter ausschalten' : 'Nur Tickets ohne Bearbeiter zeigen'}" class="shrink-0 px-2.5 py-1 rounded-md text-[11px] font-semibold inline-flex items-center gap-1 border ${unassignedActive ? 'bg-amber-500 text-white border-amber-500 shadow-sm' : 'bg-amber-50 text-amber-700 border-amber-200 active:bg-amber-100'}">
+              <i data-lucide="user-x" class="w-3 h-3"></i> Unzugewiesen
+            </button>`;
           const statusLabels = { open:'Offen', pending:'Wartet', resolved:'Gelöst', closed:'Geschlossen', all:'alle' };
           const statusActive = f.status && f.status !== 'all';
-          let html = chip(statusActive, 'Status', statusLabels[f.status] || 'alle', "openFilterStatus()");
+          html += chip(statusActive, 'Status', statusLabels[f.status] || 'alle', "openFilterStatus()");
           const visLabels = { active:'Aktiv', wiedervorlage:'Wiedervorlage', all:'alle' };
           const visActive = f.visibility && f.visibility !== 'active';
           html += chip(visActive, 'Sicht', visLabels[f.visibility] || 'Aktiv', "openFilterVisibility()");
@@ -1703,9 +1708,12 @@ async function loadMoreTickets(btnEl) {
 
 function setCurrentAccount(id) {
   if (id !== APP_STATE.currentAccount) {
-    // Account-spezifische Filter zurücksetzen, da Group-/Agent-IDs nicht zwischen Accounts gelten
+    // Account-spezifische Filter zurücksetzen, da Group-/Agent-IDs nicht zwischen Accounts gelten.
+    // 'unassigned' ist account-übergreifend → bleibt erhalten.
     APP_STATE.filters.groupId = null;
-    APP_STATE.filters.responderId = null;
+    if (APP_STATE.filters.responderId !== 'unassigned') {
+      APP_STATE.filters.responderId = null;
+    }
   }
   APP_STATE.currentAccount = id;
   localStorage.setItem(LAST_ACCOUNT_KEY, id);
@@ -1714,6 +1722,15 @@ function setCurrentAccount(id) {
 
 function resetFilters() {
   APP_STATE.filters = { status: 'all', groupId: null, type: null, responderId: null, visibility: 'active' };
+  renderTicketsPage();
+}
+
+function toggleUnassignedFilter() {
+  if (APP_STATE.filters.responderId === 'unassigned') {
+    APP_STATE.filters.responderId = null;
+  } else {
+    APP_STATE.filters.responderId = 'unassigned';
+  }
   renderTicketsPage();
 }
 
