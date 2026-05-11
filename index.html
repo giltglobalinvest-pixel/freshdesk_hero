@@ -245,7 +245,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.7.1';
+const APP_VERSION = 'v2.7.2';
 // Read-Token absichtlich gesplittet, damit GitHub Secret-Scanning beim Push nicht blockt.
 // Der Token ist read-only und Base-scoped → bewusst eingebettet (Architektur-Entscheidung).
 const _RK = 'patu8KWM8aWB' + 'yxCGL.69fae5d9fa4b94c2' + '66b426dadd71a51f574945d840b33569058ab5e9d89ebef3';
@@ -4661,7 +4661,7 @@ async function aiParseRule(description) {
     '- {"type":"status", "status":"open|pending|resolved|closed"}\n' +
     '- {"type":"type", "typeHint":"Hinweis auf den Ticket-Typ"}\n' +
     '- {"type":"wiedervorlage", "days":N, "grund":"manuell|antwort|notiz|zuweisung"}\n' +
-    '- {"type":"hide"}  // NUR lokales Ausblenden in der App des Users (= 30 Tage Wiedervorlage)\n\n' +
+    '- {"type":"hide", "days":N}  // NUR lokales Ausblenden in der App des Users (default 30 Tage Wiedervorlage). Optional eine andere Dauer in Tagen.\n\n' +
     'KRITISCHE UNTERSCHEIDUNG — status vs hide sind NICHT austauschbar:\n' +
     '• "status" ändert den Freshdesk-Ticket-Status FÜR ALLE (Kunde, andere Agents, Workflows). Nutze AUSSCHLIESSLICH wenn der User explizit einen Status nennt: "auf Wartet setzen", "schließe das Ticket", "Status gelöst", "öffne wieder".\n' +
     '• "hide" verändert den Ticket-Status NICHT. Es blendet das Ticket NUR aus der persönlichen App-Sicht des aktuellen Users aus (lokal). Andere sehen das Ticket weiterhin im normalen Status.\n\n' +
@@ -4669,6 +4669,7 @@ async function aiParseRule(description) {
     '- "ich will das nicht sehen" / "aus meiner Sicht weg" / "soll mich nicht stören" / "interessiert mich nicht" / "andere kümmern sich drum" / "blende aus" / "ausblenden" / "verstecken"\n' +
     '→ NUR "hide" verwenden. NIEMALS "status" hinzufügen, es sei denn ausdrücklich gewünscht.\n\n' +
     'Im Zweifel: lieber "hide" statt "status:pending" — Status-Änderungen sind sichtbar für alle und können Workflows triggern.\n\n' +
+    'Dauer für hide: Wenn der User eine konkrete Dauer nennt ("für 7 Tage", "für 2 Wochen ausblenden", "1 Monat weg", "für immer"), in das Feld "days" schreiben. Umrechnung: 1 Woche=7, 1 Monat=30, 1 Jahr=365, "für immer"=365. Wenn nichts genannt: weglassen (Default ist 30 Tage).\n\n' +
     'JSON-FORMAT:\n' +
     '{\n' +
     '  "title":"Kurzer Titel auf Deutsch, 3-6 Wörter",\n' +
@@ -4704,7 +4705,7 @@ function renderRuleParsedPreview() {
     if (a.type === 'status')        return { icon:'flag',        color:'brand',   label:'Freshdesk-Status ändern (für alle sichtbar)', detail: ({open:'Offen',pending:'Wartet',resolved:'Gelöst',closed:'Geschlossen'}[a.status] || a.status) };
     if (a.type === 'type')          return { icon:'tag',         color:'purple',  label:'Typ setzen',               detail: a.typeHint || '' };
     if (a.type === 'wiedervorlage') return { icon:'clock',       color:'indigo',  label:'Auf Wiedervorlage',        detail: (a.days || '?') + ' Tage' };
-    if (a.type === 'hide')          return { icon:'eye-off',     color:'purple',  label:'Aus meiner Sicht ausblenden (lokal, ändert NICHT den Status)', detail: '30 Tage Wiedervorlage in deiner App' };
+    if (a.type === 'hide')          return { icon:'eye-off',     color:'purple',  label:'Aus meiner Sicht ausblenden (lokal, ändert NICHT den Status)', detail: (a.days || 30) + ' Tage in deiner App' };
     return { icon:'help-circle', color:'ink', label:'Unbekannte Aktion', detail: JSON.stringify(a).slice(0, 100) };
   });
   $('ruleParsedPreview').innerHTML = `
@@ -4897,8 +4898,9 @@ async function applyRuleActions(rule, ticket) {
         await addWiedervorlage(accountId, ticketId, _daysToFrist(days, { morning: true }), a.grund || 'regel');
         performed.push('Wiedervorlage ' + days + 'd');
       } else if (a.type === 'hide') {
-        await addWiedervorlage(accountId, ticketId, _daysToFrist(30, { morning: true }), 'regel');
-        performed.push('Ausgeblendet 30d');
+        const days = Math.max(1, Math.min(365, a.days || 30));
+        await addWiedervorlage(accountId, ticketId, _daysToFrist(days, { morning: true }), 'regel');
+        performed.push('Ausgeblendet ' + days + 'd');
       }
     } catch (e) {
       console.warn('Rule action failed:', a, e);
