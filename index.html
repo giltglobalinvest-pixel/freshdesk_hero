@@ -248,7 +248,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.11.0';
+const APP_VERSION = 'v2.12.0';
 // Read-Token absichtlich gesplittet, damit GitHub Secret-Scanning beim Push nicht blockt.
 // Der Token ist read-only und Base-scoped → bewusst eingebettet (Architektur-Entscheidung).
 const _RK = 'patu8KWM8aWB' + 'yxCGL.69fae5d9fa4b94c2' + '66b426dadd71a51f574945d840b33569058ab5e9d89ebef3';
@@ -3383,14 +3383,17 @@ async function openTicketSummaryModal(accountId, ticketId) {
   let host = document.getElementById('subModalHost');
   if (!host) { host = document.createElement('div'); host.id = 'subModalHost'; document.body.appendChild(host); }
   host.innerHTML = `
-    <div class="fixed inset-0 z-[60] bg-white flex flex-col">
+    <div id="summaryRoot" class="fixed inset-0 z-[60] bg-white flex flex-col">
       <header class="sticky top-0 z-10 bg-white border-b border-ink-200 safe-top">
         <div class="px-2 py-2.5 flex items-center gap-1.5">
-          <button onclick="closeSummaryModal()" class="w-9 h-9 rounded-lg hover:bg-ink-100 flex items-center justify-center"><i data-lucide="arrow-left" class="w-5 h-5 text-ink-700"></i></button>
+          <button onclick="closeSummaryModal()" class="w-9 h-9 rounded-lg hover:bg-ink-100 flex items-center justify-center" aria-label="Zurück"><i data-lucide="arrow-left" class="w-5 h-5 text-ink-700"></i></button>
           <div class="flex-1 min-w-0">
             <h1 class="font-bold text-ink-900 leading-tight inline-flex items-center gap-1.5"><i data-lucide="sparkles" class="w-4 h-4 text-brand-600"></i> Zusammenfassung</h1>
-            <p class="text-[11px] text-ink-500 truncate">Ticket #${ticketId}</p>
+            <p class="text-[11px] text-ink-500 truncate">Ticket #${ticketId} · nach rechts wischen = zurück</p>
           </div>
+          <button id="summaryCloseTicketBtn" onclick="closeTicketFromSummary(this)" class="px-2.5 h-9 rounded-lg bg-emerald-500 hover:bg-emerald-600 active:bg-emerald-700 text-white inline-flex items-center gap-1 text-xs font-semibold shadow-sm" aria-label="Ticket schließen und zurück">
+            <i data-lucide="check-circle-2" class="w-4 h-4"></i> Schließen
+          </button>
           <button onclick="openInFreshdesk('${accountId}', ${ticketId})" class="w-9 h-9 rounded-lg hover:bg-ink-100 flex items-center justify-center" aria-label="In Freshdesk öffnen"><i data-lucide="external-link" class="w-4 h-4 text-ink-700"></i></button>
         </div>
       </header>
@@ -3402,6 +3405,7 @@ async function openTicketSummaryModal(accountId, ticketId) {
       </div>
     </div>`;
   if (window.lucide) lucide.createIcons();
+  attachSummarySwipeBack();
 
   try {
     const ticket = await fetchTicketDetail(accountId, ticketId);
@@ -3449,9 +3453,146 @@ async function openTicketSummaryModal(accountId, ticketId) {
 
 function closeSummaryModal() {
   if (NOTE_REC) { try { NOTE_REC.stop(); } catch (_) {} NOTE_REC = null; }
+  if (SUMMARY_ASSIST_REC) { try { SUMMARY_ASSIST_REC.stop(); } catch (_) {} SUMMARY_ASSIST_REC = null; }
   const host = document.getElementById('subModalHost');
   if (host) host.innerHTML = '';
   SUMMARY_CTX = null;
+}
+
+/* === Schließen-Schnellaktion aus dem Summary-Modal heraus === */
+async function closeTicketFromSummary(btnEl) {
+  if (!SUMMARY_CTX?.accountId || !SUMMARY_CTX?.ticketId) return;
+  const { accountId, ticketId } = SUMMARY_CTX;
+  setBusy(btnEl, true, '…');
+  try {
+    await proxyJson('/freshdesk/' + encodeURIComponent(accountId) + '/api/v2/tickets/' + ticketId, {
+      method: 'PUT',
+      body: JSON.stringify({ status: 5 })
+    });
+    closeSummaryModal();
+    toast('Ticket #' + ticketId + ' geschlossen', 'success');
+    renderTicketsPage();
+  } catch (e) {
+    setBusy(btnEl, false);
+    toast('Schließen fehlgeschlagen: ' + e.message, 'error', 6000);
+  }
+}
+
+/* === Swipe-Right im Summary-Modal → zurück zur Übersicht === */
+function attachSummarySwipeBack() {
+  const root = document.getElementById('summaryRoot');
+  if (!root) return;
+  let startX = 0, startY = 0, tracking = false;
+  root.addEventListener('touchstart', (e) => {
+    // In Inputs/Buttons/Links nicht auslösen — Text-Auswahl, Voice-Knopf etc. sollen ungestört bleiben
+    if (e.target.closest('input, textarea, button, a, [contenteditable="true"], select')) { tracking = false; return; }
+    const t = e.touches[0];
+    startX = t.clientX; startY = t.clientY; tracking = true;
+  }, { passive: true });
+  root.addEventListener('touchmove', (e) => {
+    if (!tracking) return;
+    const t = e.touches[0];
+    const dx = t.clientX - startX;
+    const dy = t.clientY - startY;
+    // Wenn klar vertikal → kein Swipe, normales Scrollen
+    if (Math.abs(dy) > Math.abs(dx)) tracking = false;
+  }, { passive: true });
+  root.addEventListener('touchend', (e) => {
+    if (!tracking) return;
+    tracking = false;
+    const t = (e.changedTouches && e.changedTouches[0]) || null;
+    if (!t) return;
+    const dx = t.clientX - startX;
+    const dy = t.clientY - startY;
+    if (dx > 90 && Math.abs(dy) < 60) {
+      closeSummaryModal();
+    }
+  }, { passive: true });
+}
+
+/* === Voice für KI-Assistent inline im Summary-Modal === */
+let SUMMARY_ASSIST_REC = null;
+function toggleSummaryAssistVoice() {
+  if (SUMMARY_ASSIST_REC) {
+    try { SUMMARY_ASSIST_REC.stop(); } catch (_) {}
+    SUMMARY_ASSIST_REC = null;
+    updateSummaryAssistMicUI(false);
+    return;
+  }
+  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if (!SR) return toast('Sprach-Eingabe nicht verfügbar', 'warn');
+  const rec = new SR();
+  rec.lang = 'de-DE';
+  rec.continuous = true;
+  rec.interimResults = true;
+  const ta = $('summaryAssistInput');
+  let baseText = (ta?.value || '');
+  if (baseText && !/\s$/.test(baseText)) baseText += ' ';
+  rec.onresult = (event) => {
+    let final = '';
+    let interim = '';
+    for (let i = event.resultIndex; i < event.results.length; i++) {
+      const tr = event.results[i][0].transcript;
+      if (event.results[i].isFinal) final += tr;
+      else interim += tr;
+    }
+    if (final) baseText += final;
+    if (ta) ta.value = baseText + interim;
+  };
+  rec.onerror = (e) => {
+    if (e.error !== 'aborted' && e.error !== 'no-speech') toast('Spracherkennung: ' + (e.error || 'Fehler'), 'warn');
+    SUMMARY_ASSIST_REC = null;
+    updateSummaryAssistMicUI(false);
+  };
+  rec.onend = () => { SUMMARY_ASSIST_REC = null; updateSummaryAssistMicUI(false); };
+  try {
+    rec.start();
+    SUMMARY_ASSIST_REC = rec;
+    updateSummaryAssistMicUI(true);
+  } catch (e) {
+    toast('Mikrofon nicht zugänglich — Berechtigung prüfen', 'warn');
+  }
+}
+
+function updateSummaryAssistMicUI(active) {
+  const btn = $('summaryAssistMicBtn');
+  const lbl = $('summaryAssistMicLabel');
+  if (!btn) return;
+  if (active) {
+    btn.classList.add('animate-pulse');
+    if (lbl) lbl.textContent = 'Stop';
+  } else {
+    btn.classList.remove('animate-pulse');
+    if (lbl) lbl.textContent = 'Sprechen';
+  }
+}
+
+/* === „Verarbeiten" im Summary → in den vollwertigen Assistant-Flow wechseln === */
+function runSummaryAssistant(btnEl) {
+  const cmd = ($('summaryAssistInput')?.value || '').trim();
+  if (!cmd) return toast('Bitte etwas eingeben oder sprechen', 'warn');
+  if (!SUMMARY_CTX?.accountId || !SUMMARY_CTX?.ticketId) return;
+  if (SUMMARY_ASSIST_REC) { try { SUMMARY_ASSIST_REC.stop(); } catch (_) {} SUMMARY_ASSIST_REC = null; }
+  const accountId = SUMMARY_CTX.accountId;
+  const ticketId  = SUMMARY_CTX.ticketId;
+  // Summary schließen und Assistant öffnen — der zeigt Preview vor Apply, gleicher Flow wie Swipe-Links
+  closeSummaryModal();
+  openAssistantModal(accountId, ticketId).then(() => {
+    // Nach Bereit-Render: Command vorbefüllen und gleich verarbeiten
+    const tryFill = (attempt = 0) => {
+      const ta = $('assistantCommand');
+      const btn = document.querySelector('button[onclick="processAssistantCommand(this)"]');
+      if (ta && btn) {
+        ta.value = cmd;
+        btn.click();
+      } else if (attempt < 30) {
+        setTimeout(() => tryFill(attempt + 1), 100);
+      }
+    };
+    tryFill();
+  }).catch(e => {
+    toast('Assistent öffnen fehlgeschlagen: ' + e.message, 'error', 6000);
+  });
 }
 
 async function aiSummarizeTicket(ticket) {
@@ -3613,12 +3754,17 @@ function renderSummaryBody(ticket, summary) {
   const contactCanAddPhone  = contact && !contact.phone;
   const contactCanAddMobile = contact && !contact.mobile;
 
+  const statusInfo = FD_STATUS[ticket.status] || { label: 'Status ' + ticket.status, cls: 'bg-ink-100 text-ink-600 border-ink-200' };
+
   $('summaryContent').innerHTML = `
     <div class="space-y-3 max-w-2xl mx-auto">
-      <!-- Ticket-Header -->
+      <!-- Ticket-Header mit klickbarem Status -->
       <div class="bg-ink-50 rounded-xl p-3 text-xs">
         <p class="font-semibold text-ink-900 leading-snug">${escapeHtml(ticket.subject || '(ohne Betreff)')}</p>
-        <p class="text-ink-500 mt-0.5">#${ticket.id}</p>
+        <div class="flex items-center gap-2 mt-1.5 flex-wrap">
+          <button onclick="openStatusModal('${escapeAttr(SUMMARY_CTX.accountId)}', ${ticket.id}, ${ticket.status}, false)" class="text-[10px] uppercase tracking-wider px-1.5 py-0.5 rounded font-semibold border ${statusInfo.cls} active:opacity-70 inline-flex items-center gap-1" title="Status ändern">${escapeHtml(statusInfo.label)} <i data-lucide="chevron-down" class="w-2.5 h-2.5"></i></button>
+          <span class="text-ink-500">#${ticket.id}</span>
+        </div>
       </div>
 
       <!-- Zusammenfassung -->
@@ -3703,23 +3849,33 @@ function renderSummaryBody(ticket, summary) {
           </div>
         </div>` : ''}
 
-      <!-- Eigene Notiz hinzufügen (Sprach- oder Texteingabe) -->
-      <div class="bg-amber-50 border border-amber-200 rounded-2xl p-4">
+      <!-- KI-Assistent (gleich wie Swipe-Links auf der Übersicht) -->
+      <div class="bg-gradient-to-br from-purple-50 to-brand-50 border border-brand-200 rounded-2xl p-4">
         <div class="flex items-center gap-2 mb-3">
-          <i data-lucide="sticky-note" class="w-4 h-4 text-amber-700"></i>
-          <h3 class="font-semibold text-amber-900 text-sm">Eigene Notiz hinzufügen</h3>
+          <i data-lucide="sparkles" class="w-4 h-4 text-brand-600"></i>
+          <h3 class="font-semibold text-ink-900 text-sm">KI-Assistent: Was soll passieren?</h3>
         </div>
-        <textarea id="noteInput" placeholder="Eigene Anmerkung — tippen oder diktieren…" rows="3" class="w-full px-3 py-2 border border-amber-300 bg-white rounded-lg text-sm focus:ring-2 focus:ring-amber-500/30 focus:border-amber-500 resize-none"></textarea>
+        <p class="text-[11px] text-ink-600 mb-2 leading-snug">Sag oder tippe was zu tun ist — Antwort, Notiz, Weiterleitung, Zuweisung oder Status. Wie der Swipe-nach-links-Assistent in der Übersicht.</p>
+        <textarea id="summaryAssistInput" placeholder="z.B. „Antworte: Wir liefern bis Freitag" / „Weise Sandra zu" / „Auf Gelöst setzen" / „Weiterleiten an pat@flp-shop.com"" rows="3" class="w-full px-3 py-2 border border-brand-200 bg-white rounded-lg text-sm focus:ring-2 focus:ring-brand-500/30 focus:border-brand-500 resize-none"></textarea>
         <div class="flex gap-2 mt-2">
           ${speechAvailable ? `
-            <button id="noteMicBtn" type="button" onclick="toggleNoteVoice()" class="px-3 py-2.5 bg-gradient-to-br from-purple-500 to-brand-600 text-white rounded-lg text-sm font-semibold inline-flex items-center gap-1.5 active:opacity-80 shrink-0">
-              <i data-lucide="mic" class="w-4 h-4"></i><span id="noteMicLabel">Sprechen</span>
+            <button id="summaryAssistMicBtn" type="button" onclick="toggleSummaryAssistVoice()" class="px-3 py-2.5 bg-gradient-to-br from-purple-500 to-brand-600 text-white rounded-lg text-sm font-semibold inline-flex items-center gap-1.5 active:opacity-80 shrink-0">
+              <i data-lucide="mic" class="w-4 h-4"></i><span id="summaryAssistMicLabel">Sprechen</span>
             </button>` : ''}
-          <button type="button" onclick="saveCustomNote(this)" class="flex-1 bg-amber-600 hover:bg-amber-700 text-white rounded-lg px-3 py-2.5 text-sm font-semibold inline-flex items-center justify-center gap-1.5">
-            <i data-lucide="save" class="w-4 h-4"></i> Als private Notiz speichern
+          <button type="button" onclick="runSummaryAssistant(this)" class="flex-1 bg-brand-500 hover:bg-brand-600 text-white rounded-lg px-3 py-2.5 text-sm font-semibold inline-flex items-center justify-center gap-1.5">
+            <i data-lucide="sparkles" class="w-4 h-4"></i> Verarbeiten
           </button>
         </div>
-        <p class="text-[10px] text-amber-700 mt-2 italic">Nur intern sichtbar — der Kunde bekommt das nicht.</p>
+        <details class="mt-3">
+          <summary class="text-[11px] text-brand-700 cursor-pointer hover:underline inline-flex items-center gap-1"><i data-lucide="lightbulb" class="w-3 h-3"></i> Beispiele</summary>
+          <div class="mt-2 space-y-1 text-[11px] text-ink-700 leading-relaxed pl-1">
+            <p>• „Antworte freundlich, dass wir bis Freitag bestätigen"</p>
+            <p>• „Interne Notiz: mit Lager abstimmen"</p>
+            <p>• „Weiterleiten an pat@flp-shop.com"</p>
+            <p>• „Weise Thomas zu"</p>
+            <p>• „Auf Gelöst setzen"</p>
+          </div>
+        </details>
       </div>
 
       <!-- Bestätigung: in dieser Session gespeicherte Notizen -->
