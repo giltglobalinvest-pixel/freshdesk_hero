@@ -248,7 +248,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.15.1';
+const APP_VERSION = 'v2.16.0';
 // Read-Token absichtlich gesplittet, damit GitHub Secret-Scanning beim Push nicht blockt.
 // Der Token ist read-only und Base-scoped → bewusst eingebettet (Architektur-Entscheidung).
 const _RK = 'patu8KWM8aWB' + 'yxCGL.69fae5d9fa4b94c2' + '66b426dadd71a51f574945d840b33569058ab5e9d89ebef3';
@@ -4301,6 +4301,7 @@ async function openAssistantModal(accountId, ticketId) {
     const [ticket] = await Promise.all([
       fetchTicketDetail(accountId, ticketId),
       ensureAgentsLoaded(accountId),
+      ensureGroupsLoaded(accountId),
     ]);
     ASSISTANT_CTX.ticket = ticket;
     renderAssistantInput();
@@ -4441,7 +4442,8 @@ async function processAssistantCommand(btn) {
 }
 
 async function aiInterpretCommand(ticket, command, accountId) {
-  const cache = APP_STATE.agentsCache?.[accountId] || { agents: [] };
+  const cache       = APP_STATE.agentsCache?.[accountId] || { agents: [] };
+  const groupsCache = APP_STATE.groupsCache?.[accountId] || { groups: [] };
   const conv = (ticket.conversations || [])
     .slice().sort((a, b) => new Date(a.created_at || 0) - new Date(b.created_at || 0))
     .slice(-3)
@@ -4452,27 +4454,34 @@ async function aiInterpretCommand(ticket, command, accountId) {
     .slice().sort((a, b) => a.name.localeCompare(b.name, 'de'))
     .map(a => '- ID ' + a.id + ': ' + a.name + (a.email ? ' (' + a.email + ')' : ''))
     .join('\n');
+  const groupsList = groupsCache.groups
+    .slice().sort((a, b) => a.name.localeCompare(b.name, 'de'))
+    .map(g => '- ID ' + g.id + ': ' + g.name + (g.description ? ' (' + g.description.slice(0, 60) + ')' : ''))
+    .join('\n');
 
   const sysPrompt = 'Du bist ein präziser AI-Assistent für eine deutschsprachige Freshdesk-Helpdesk-App auf dem Handy. Der User gibt dir einen kurzen Befehl (oft per Sprache). Du erkennst alle erforderlichen Schritte und gibst sie als JSON-Liste zurück.\n\n' +
     'AKTIONSTYPEN (Feld "type"):\n' +
     '- "reply": öffentliche Antwort an Kunde\n' +
     '- "note": interne Notiz (nur Agents sehen sie)\n' +
     '- "forward": E-Mail weiterleiten an externe Adresse\n' +
-    '- "assign": Bearbeiter ändern (responder_id setzen)\n' +
+    '- "assign": Bearbeiter ändern (responder_id setzen) — Feld "agent_id"\n' +
+    '- "group": Ticket einer Gruppe/Team zuweisen (group_id setzen) — Feld "group_id"\n' +
     '- "status": Status setzen (2=offen, 3=wartet, 4=gelöst, 5=geschlossen)\n' +
     '- "unknown": Befehl ist unklar oder mehrdeutig\n\n' +
     'WICHTIG — MEHRERE SCHRITTE:\n' +
-    'Ein User-Befehl kann mehrere Aktionen umfassen (z.B. „antworte… und weise Sandra zu und auf Gelöst setzen" = drei Aktionen). Liste sie in der logischen Reihenfolge auf (typisch: reply/note vor assign vor status, weil Status zuletzt geändert werden soll).\n' +
-    'Jede Aktion bekommt einen eigenen Eintrag in der "actions"-Liste. Wenn der User nur EINE Aktion verlangt, ist die Liste eben einelementig — das ist OK.\n\n' +
+    'Ein User-Befehl kann mehrere Aktionen umfassen (z.B. „antworte… und weise Sandra zu und Gruppe Vertrieb und auf Gelöst setzen" = vier Aktionen). Liste sie in der logischen Reihenfolge auf (typisch: reply/note vor assign/group vor status).\n' +
+    'Jede Aktion bekommt einen eigenen Eintrag in der "actions"-Liste.\n\n' +
     'REGELN PRO AKTION:\n' +
     '- Bei reply/note/forward: Verfasse einen fertigen, professionellen body-Text in der Sprache des Tickets (meist Deutsch). Mit Anrede (Name aus Ticket), klarer Aussage, freundlichem Abschluss. Verwende Zeilenumbrüche \\n für Absätze.\n' +
-    '- Bei assign: nur EINE eindeutige agent_id verwenden. Bei mehrdeutigen Vornamen (z.B. mehrere "Sandra") → type="unknown" mit Rückfrage in summary.\n' +
+    '- Bei assign: nur EINE eindeutige agent_id verwenden. Bei mehrdeutigen Vornamen (mehrere passen) ODER wenn KEINE passende ID im Pool ist → trotzdem type="assign", aber agent_id=null setzen. Im "summary" kurz erklären welche Auswahl der User treffen muss. Die App zeigt dann ein Dropdown.\n' +
+    '- Bei group: GENAU dieselbe Regel. Wenn Gruppen-Bezeichnung mehrdeutig oder unklar ist → type="group" mit group_id=null. Niemals raten.\n' +
     '- Bei forward: forward_to als Array von E-Mail-Adressen.\n' +
     '- Pro Aktion ein kurzes "summary"-Feld auf Deutsch, das knapp beschreibt was die Aktion bewirkt — der User sieht das als Kachel-Untertitel.\n' +
+    '- "unknown" nur als ALLERLETZTER Ausweg, wenn überhaupt nicht klar ist was der User will. Lieber type="assign"/"group" mit ID=null setzen, damit der User per Dropdown selber wählt.\n' +
     '- Antworte AUSSCHLIESSLICH mit dem JSON-Objekt, kein Markdown, keine Erklärung drumherum.\n\n' +
     'JSON-FORMAT:\n' +
     '{"overall_summary":"Kurz auf Deutsch was insgesamt passieren soll","actions":[\n' +
-    '  {"type":"reply|note|forward|assign|status|unknown","body":"...","forward_to":["..."],"agent_id":12345,"status":4,"summary":"Kurze deutsche Beschreibung dieses Schritts"}\n' +
+    '  {"type":"reply|note|forward|assign|group|status|unknown","body":"...","forward_to":["..."],"agent_id":12345,"group_id":67,"status":4,"summary":"Kurze deutsche Beschreibung dieses Schritts"}\n' +
     ']}';
 
   const userPrompt = 'TICKET:\n' +
@@ -4481,6 +4490,7 @@ async function aiInterpretCommand(ticket, command, accountId) {
     'Erste Anfrage:\n' + description + '\n\n' +
     (conv ? 'Verlauf:\n' + conv + '\n\n' : '') +
     'VERFÜGBARE AGENTS:\n' + (agentsList || '(keine)') + '\n\n' +
+    'VERFÜGBARE GRUPPEN:\n' + (groupsList || '(keine)') + '\n\n' +
     'BEFEHL DES USERS:\n"' + command + '"';
 
   const data = await proxyJson('/anthropic/v1/messages', {
@@ -4556,10 +4566,16 @@ function renderAssistantPreview() {
     reply:   { icon: 'reply',         color: 'emerald', label: 'Antwort an Kunde' },
     note:    { icon: 'sticky-note',   color: 'amber',   label: 'Interne Notiz' },
     forward: { icon: 'forward',       color: 'blue',    label: 'Weiterleiten' },
-    assign:  { icon: 'user',          color: 'brand',   label: 'Zuweisen' },
+    assign:  { icon: 'user',          color: 'brand',   label: 'Bearbeiter zuweisen' },
+    group:   { icon: 'users',         color: 'brand',   label: 'Gruppe zuweisen' },
     status:  { icon: 'flag',          color: 'purple',  label: 'Status setzen' },
     unknown: { icon: 'help-circle',   color: 'amber',   label: 'Befehl unklar' },
   };
+  // Vorab-Caches für die Dropdowns
+  const allAgents = (APP_STATE.agentsCache?.[ctx.accountId]?.agents || []).slice()
+    .sort((x, y) => x.name.localeCompare(y.name, 'de'));
+  const allGroups = (APP_STATE.groupsCache?.[ctx.accountId]?.groups || []).slice()
+    .sort((x, y) => x.name.localeCompare(y.name, 'de'));
   const stateMeta = {
     pending: { label: 'ausstehend', cls: 'bg-ink-100 text-ink-600 border-ink-200',           icon: 'circle' },
     running: { label: 'läuft…',      cls: 'bg-blue-100 text-blue-700 border-blue-200',       icon: 'loader' },
@@ -4606,12 +4622,81 @@ function renderAssistantPreview() {
                 <div class="text-[11px] text-ink-700 whitespace-pre-line bg-white/60 rounded p-2 max-h-24 overflow-y-auto border border-${meta.color}-200 mt-1">${escapeHtml(a.body || '')}</div>`;
       }
     } else if (a.type === 'assign') {
-      const name = getAgentName(ctx.accountId, a.agent_id) || ('Agent #' + a.agent_id);
-      body = `<p class="text-sm"><span class="text-ink-500">→</span> <span class="font-semibold text-ink-900">${escapeHtml(name)}</span></p>`;
+      const idSet = !!a.agent_id;
+      const guessName = idSet ? (getAgentName(ctx.accountId, a.agent_id) || ('Agent #' + a.agent_id)) : null;
+      if (isActive && isPending) {
+        // Aktive Kachel: Dropdown mit allen Agents, Vorschlag der KI vorausgewählt
+        const opts = allAgents.map(ag => `<option value="${ag.id}" ${a.agent_id === ag.id ? 'selected' : ''}>${escapeHtml(ag.name)}${ag.email ? ' · ' + escapeHtml(ag.email) : ''}</option>`).join('');
+        body = `${idSet ? `<p class="text-[11px] text-ink-600 mb-1">KI-Vorschlag: <span class="font-semibold text-ink-900">${escapeHtml(guessName)}</span> — du kannst unten ändern.</p>` : `<p class="text-[11px] text-amber-700 mb-1 inline-flex items-center gap-1"><i data-lucide="alert-circle" class="w-3 h-3"></i> Bearbeiter nicht eindeutig — bitte wählen:</p>`}
+                <label class="text-[10px] uppercase font-semibold text-brand-800 block">Bearbeiter</label>
+                <select id="stepAgent_${i}" class="w-full text-sm px-3 py-2 border border-brand-300 bg-white rounded-lg mt-1">
+                  ${!idSet ? '<option value="">— bitte wählen —</option>' : ''}
+                  ${opts || '<option value="">(keine Agents geladen)</option>'}
+                </select>`;
+      } else {
+        body = `<p class="text-sm"><span class="text-ink-500">→</span> <span class="font-semibold text-ink-900">${escapeHtml(guessName || '?')}</span></p>`;
+      }
+    } else if (a.type === 'group') {
+      const idSet = !!a.group_id;
+      const guessName = idSet ? (getGroupName(ctx.accountId, a.group_id) || ('Gruppe #' + a.group_id)) : null;
+      if (isActive && isPending) {
+        const opts = allGroups.map(g => `<option value="${g.id}" ${a.group_id === g.id ? 'selected' : ''}>${escapeHtml(g.name)}</option>`).join('');
+        body = `${idSet ? `<p class="text-[11px] text-ink-600 mb-1">KI-Vorschlag: <span class="font-semibold text-ink-900">${escapeHtml(guessName)}</span> — du kannst unten ändern.</p>` : `<p class="text-[11px] text-amber-700 mb-1 inline-flex items-center gap-1"><i data-lucide="alert-circle" class="w-3 h-3"></i> Gruppe nicht eindeutig — bitte wählen:</p>`}
+                <label class="text-[10px] uppercase font-semibold text-brand-800 block">Gruppe</label>
+                <select id="stepGroup_${i}" class="w-full text-sm px-3 py-2 border border-brand-300 bg-white rounded-lg mt-1">
+                  ${!idSet ? '<option value="">— bitte wählen —</option>' : ''}
+                  ${opts || '<option value="">(keine Gruppen geladen)</option>'}
+                </select>`;
+      } else {
+        body = `<p class="text-sm"><span class="text-ink-500">→</span> <span class="font-semibold text-ink-900">${escapeHtml(guessName || '?')}</span></p>`;
+      }
     } else if (a.type === 'status') {
-      body = `<p class="text-sm"><span class="text-ink-500">→</span> <span class="font-semibold text-ink-900">${escapeHtml(statusMap[a.status] || ('Status ' + a.status))}</span></p>`;
+      if (isActive && isPending) {
+        // Optional editierbar — Vorschlag vorausgewählt
+        const statusOpts = [2,3,4,5].map(v => `<option value="${v}" ${a.status === v ? 'selected' : ''}>${statusMap[v]}</option>`).join('');
+        body = `<label class="text-[10px] uppercase font-semibold text-purple-800 block">Status</label>
+                <select id="stepStatus_${i}" class="w-full text-sm px-3 py-2 border border-purple-300 bg-white rounded-lg mt-1">${statusOpts}</select>`;
+      } else {
+        body = `<p class="text-sm"><span class="text-ink-500">→</span> <span class="font-semibold text-ink-900">${escapeHtml(statusMap[a.status] || ('Status ' + a.status))}</span></p>`;
+      }
     } else {
-      body = `<p class="text-sm text-ink-800">${escapeHtml(a.summary || 'Bitte präziser formulieren.')}</p>`;
+      // unknown: dem User trotzdem nützliche Picker geben
+      if (isActive && isPending) {
+        const agOpts = allAgents.map(ag => `<option value="${ag.id}">${escapeHtml(ag.name)}</option>`).join('');
+        const grOpts = allGroups.map(g => `<option value="${g.id}">${escapeHtml(g.name)}</option>`).join('');
+        body = `
+          <p class="text-sm text-ink-800 mb-2">${escapeHtml(a.summary || 'Befehl unklar — wähle manuell was passieren soll:')}</p>
+          <div class="bg-white border border-amber-300 rounded-lg p-2 mb-2">
+            <label class="text-[10px] uppercase font-semibold text-amber-800 block">Bearbeiter zuweisen</label>
+            <div class="flex gap-2 mt-1">
+              <select id="unkAgent_${i}" class="flex-1 text-sm px-2 py-1.5 border border-amber-200 bg-white rounded">
+                <option value="">— wählen —</option>${agOpts}
+              </select>
+              <button onclick="reclassifyAssistantStep(${i}, 'assign')" class="px-2 py-1.5 bg-amber-600 text-white rounded text-xs font-semibold active:opacity-80">Setzen</button>
+            </div>
+          </div>
+          <div class="bg-white border border-amber-300 rounded-lg p-2 mb-2">
+            <label class="text-[10px] uppercase font-semibold text-amber-800 block">Gruppe zuweisen</label>
+            <div class="flex gap-2 mt-1">
+              <select id="unkGroup_${i}" class="flex-1 text-sm px-2 py-1.5 border border-amber-200 bg-white rounded">
+                <option value="">— wählen —</option>${grOpts}
+              </select>
+              <button onclick="reclassifyAssistantStep(${i}, 'group')" class="px-2 py-1.5 bg-amber-600 text-white rounded text-xs font-semibold active:opacity-80">Setzen</button>
+            </div>
+          </div>
+          <div class="bg-white border border-amber-300 rounded-lg p-2">
+            <label class="text-[10px] uppercase font-semibold text-amber-800 block">Status setzen</label>
+            <div class="flex gap-2 mt-1">
+              <select id="unkStatus_${i}" class="flex-1 text-sm px-2 py-1.5 border border-amber-200 bg-white rounded">
+                <option value="">— wählen —</option>
+                <option value="2">Offen</option><option value="3">Wartet</option><option value="4">Gelöst</option><option value="5">Geschlossen</option>
+              </select>
+              <button onclick="reclassifyAssistantStep(${i}, 'status')" class="px-2 py-1.5 bg-amber-600 text-white rounded text-xs font-semibold active:opacity-80">Setzen</button>
+            </div>
+          </div>`;
+      } else {
+        body = `<p class="text-sm text-ink-800">${escapeHtml(a.summary || 'Übersprungen.')}</p>`;
+      }
     }
 
     const stateBadge = `<span class="inline-flex items-center gap-1 text-[10px] uppercase tracking-wider px-1.5 py-0.5 rounded font-bold border ${stMeta.cls}"><i data-lucide="${stMeta.icon}" class="w-3 h-3 ${isRunning?'animate-spin':''}"></i>${stMeta.label}</span>`;
@@ -4713,6 +4798,21 @@ async function confirmAssistantStep(idx, btnEl) {
     a.forward_to = raw.split(',').map(s => s.trim()).filter(Boolean);
     if (!a.forward_to.length) return toast('Empfänger fehlt', 'warn');
   }
+  if (a.type === 'assign') {
+    const v = $('stepAgent_' + idx)?.value;
+    if (v) a.agent_id = parseInt(v, 10);
+    if (!a.agent_id) return toast('Bitte einen Bearbeiter aus der Liste wählen', 'warn');
+  }
+  if (a.type === 'group') {
+    const v = $('stepGroup_' + idx)?.value;
+    if (v) a.group_id = parseInt(v, 10);
+    if (!a.group_id) return toast('Bitte eine Gruppe aus der Liste wählen', 'warn');
+  }
+  if (a.type === 'status') {
+    const v = $('stepStatus_' + idx)?.value;
+    if (v) a.status = parseInt(v, 10);
+    if (!a.status) return toast('Bitte einen Status wählen', 'warn');
+  }
 
   a._state = 'running';
   renderAssistantPreview();
@@ -4748,6 +4848,40 @@ async function retryAssistantStep(idx, btnEl) {
   renderAssistantPreview();
 }
 
+/* Wenn die KI „unknown" lieferte, hat der User in der Kachel drei Dropdowns
+   (Bearbeiter / Gruppe / Status). „Setzen" tippt ruft hier mit dem gewünschten
+   Ziel-Aktionstyp und führt direkt aus. */
+async function reclassifyAssistantStep(idx, newType) {
+  const ctx = ASSISTANT_CTX;
+  if (!ctx?.plan) return;
+  const a = ctx.plan.actions[idx];
+  if (!a) return;
+  if (newType === 'assign') {
+    const v = $('unkAgent_' + idx)?.value;
+    if (!v) return toast('Bitte Bearbeiter wählen', 'warn');
+    a.type = 'assign';
+    a.agent_id = parseInt(v, 10);
+    a.summary = 'Bearbeiter setzen: ' + (getAgentName(ctx.accountId, a.agent_id) || ('#' + a.agent_id));
+  } else if (newType === 'group') {
+    const v = $('unkGroup_' + idx)?.value;
+    if (!v) return toast('Bitte Gruppe wählen', 'warn');
+    a.type = 'group';
+    a.group_id = parseInt(v, 10);
+    a.summary = 'Gruppe setzen: ' + (getGroupName(ctx.accountId, a.group_id) || ('#' + a.group_id));
+  } else if (newType === 'status') {
+    const v = $('unkStatus_' + idx)?.value;
+    if (!v) return toast('Bitte Status wählen', 'warn');
+    a.type = 'status';
+    a.status = parseInt(v, 10);
+    const lbl = { 2:'Offen', 3:'Wartet', 4:'Gelöst', 5:'Geschlossen' }[a.status] || ('Status ' + a.status);
+    a.summary = 'Status setzen: ' + lbl;
+  } else {
+    return;
+  }
+  // Direkt ausführen — gleiches Verhalten wie Bestätigen
+  return confirmAssistantStep(idx, null);
+}
+
 /* Führt eine einzelne Schritt-Aktion gegen die Freshdesk-API aus.
    Keine Toast/UI-Updates hier — die Schleife steuert das. */
 async function executeSingleAssistantAction(ctx, a) {
@@ -4760,7 +4894,11 @@ async function executeSingleAssistantAction(ctx, a) {
   } else if (a.type === 'forward') {
     await proxyJson(base + '/forward', { method: 'POST', body: JSON.stringify({ to_emails: a.forward_to, body: textToHtmlForFreshdesk(a.body) }) });
   } else if (a.type === 'assign') {
+    if (!a.agent_id) throw new Error('Kein Bearbeiter ausgewählt');
     await proxyJson(base, { method: 'PUT', body: JSON.stringify({ responder_id: a.agent_id }) });
+  } else if (a.type === 'group') {
+    if (!a.group_id) throw new Error('Keine Gruppe ausgewählt');
+    await proxyJson(base, { method: 'PUT', body: JSON.stringify({ group_id: a.group_id }) });
   } else if (a.type === 'status') {
     await proxyJson(base, { method: 'PUT', body: JSON.stringify({ status: a.status }) });
   } else {
