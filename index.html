@@ -248,7 +248,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.8.0';
+const APP_VERSION = 'v2.9.0';
 // Read-Token absichtlich gesplittet, damit GitHub Secret-Scanning beim Push nicht blockt.
 // Der Token ist read-only und Base-scoped → bewusst eingebettet (Architektur-Entscheidung).
 const _RK = 'patu8KWM8aWB' + 'yxCGL.69fae5d9fa4b94c2' + '66b426dadd71a51f574945d840b33569058ab5e9d89ebef3';
@@ -1882,13 +1882,26 @@ function renderTicketList(tickets) {
                     <p class="font-semibold text-ink-900 text-sm leading-snug truncate flex-1">${escapeHtml(subj)}</p>
                     ${(() => {
                       const my = getMyNotesForTicket(t._accountId, t.id);
-                      if (!my.length) return '';
+                      const hasNotes = my.length > 0;
                       const hasRule = my.some(n => n.typ === 'regel');
-                      const iconColor = hasRule ? 'text-purple-600 active:text-purple-800 hover:bg-purple-50' : 'text-amber-600 active:text-amber-800 hover:bg-amber-50';
-                      const badgeColor = hasRule ? 'bg-purple-500' : 'bg-amber-500';
-                      const iconName = hasRule ? 'bot' : 'sticky-note';
-                      const tooltip = hasRule ? 'Automatisiert per KI-Regel' : (my.length + ' eigene Notiz' + (my.length === 1 ? '' : 'en'));
-                      return `<button data-action="myNotes" data-account-id="${escapeAttr(t._accountId)}" data-ticket-id="${t.id}" class="${iconColor} -m-1 p-1 rounded shrink-0 relative" title="${tooltip}"><i data-lucide="${iconName}" class="w-4 h-4"></i>${my.length > 1 ? `<span class="absolute -top-0.5 -right-0.5 ${badgeColor} text-white text-[8px] font-bold leading-none w-3.5 h-3.5 rounded-full flex items-center justify-center">${my.length}</span>` : ''}</button>`;
+                      let iconColor, badgeColor, iconName, tooltip;
+                      if (!hasNotes) {
+                        iconColor  = 'text-ink-300 active:text-brand-600 hover:bg-brand-50';
+                        iconName   = 'edit-3';
+                        tooltip    = 'Notiz hinzufügen';
+                        badgeColor = '';
+                      } else if (hasRule) {
+                        iconColor  = 'text-purple-600 active:text-purple-800 hover:bg-purple-50';
+                        iconName   = 'bot';
+                        tooltip    = 'Automatisiert per KI-Regel';
+                        badgeColor = 'bg-purple-500';
+                      } else {
+                        iconColor  = 'text-amber-600 active:text-amber-800 hover:bg-amber-50';
+                        iconName   = 'sticky-note';
+                        tooltip    = my.length + ' eigene Notiz' + (my.length === 1 ? '' : 'en');
+                        badgeColor = 'bg-amber-500';
+                      }
+                      return `<button data-action="myNotes" data-account-id="${escapeAttr(t._accountId)}" data-ticket-id="${t.id}" class="${iconColor} -m-1 p-1 rounded shrink-0 relative" title="${tooltip}"><i data-lucide="${iconName}" class="w-4 h-4"></i>${hasNotes && my.length > 1 ? `<span class="absolute -top-0.5 -right-0.5 ${badgeColor} text-white text-[8px] font-bold leading-none w-3.5 h-3.5 rounded-full flex items-center justify-center">${my.length}</span>` : ''}</button>`;
                     })()}
                     <button data-action="summarize" data-account-id="${escapeAttr(t._accountId)}" data-ticket-id="${t.id}" class="text-purple-500 active:text-purple-700 hover:bg-purple-50 -m-1 p-1 rounded shrink-0" title="KI-Zusammenfassung">
                       <i data-lucide="sparkles" class="w-4 h-4"></i>
@@ -2399,7 +2412,9 @@ function attachSwipeToCards() {
         }
         else if (action === 'myNotes') {
           if (_openSwipedContent) _resetSwipe();
-          openMyNotesPopup(accId, tId);
+          const existing = getMyNotesForTicket(accId, tId);
+          if (existing.length) openMyNotesPopup(accId, tId);
+          else                 openQuickNoteSheet(accId, tId);
         }
       });
     });
@@ -2572,6 +2587,115 @@ async function clearWiedervorlage() {
   } catch (e) { toast('Fehler: ' + e.message, 'error', 6000); }
 }
 
+/* === Schnell-Notiz Sheet — direkt aus der Ticket-Übersicht === */
+let QUICK_NOTE_CTX = null;
+let QUICK_NOTE_REC = null;
+
+function openQuickNoteSheet(accountId, ticketId) {
+  QUICK_NOTE_CTX = { accountId, ticketId };
+  let host = document.getElementById('subModalHost');
+  if (!host) { host = document.createElement('div'); host.id = 'subModalHost'; document.body.appendChild(host); }
+  const speechAvailable = !!(window.SpeechRecognition || window.webkitSpeechRecognition);
+  host.innerHTML = `
+    <div class="fixed inset-0 z-[60] flex items-end justify-center bg-black/40" onclick="if(event.target===this)closeQuickNoteSheet()">
+      <div class="bg-white w-full max-w-md rounded-t-2xl shadow-2xl flex flex-col safe-bottom">
+        <div class="px-4 py-3 border-b border-ink-200 flex items-center justify-between">
+          <div>
+            <h3 class="font-bold text-ink-900 inline-flex items-center gap-1.5"><i data-lucide="sticky-note" class="w-4 h-4 text-amber-600"></i> Schnell-Notiz</h3>
+            <p class="text-[11px] text-ink-500">Ticket #${ticketId} · privat (nur intern)</p>
+          </div>
+          <button onclick="closeQuickNoteSheet()" class="w-9 h-9 rounded-lg hover:bg-ink-100 flex items-center justify-center"><i data-lucide="x" class="w-5 h-5 text-ink-700"></i></button>
+        </div>
+        <div class="p-4 space-y-3">
+          <textarea id="quickNoteText" placeholder="Notiz tippen — oder Mikrofon nutzen…" rows="4" class="w-full px-3 py-2.5 border border-amber-300 bg-amber-50/30 rounded-xl text-sm focus:ring-2 focus:ring-amber-500/30 focus:border-amber-500 resize-none"></textarea>
+          ${speechAvailable ? `
+            <button id="quickNoteMicBtn" type="button" onclick="toggleQuickNoteVoice()" class="w-full py-2.5 rounded-lg bg-gradient-to-br from-purple-500 to-brand-600 text-white font-semibold inline-flex items-center justify-center gap-2 active:opacity-80 shadow shadow-purple-500/20">
+              <i data-lucide="mic" class="w-4 h-4"></i><span id="quickNoteMicLabel">Tippen und sprechen</span>
+            </button>` : ''}
+          <div class="flex gap-2">
+            <button type="button" onclick="closeQuickNoteSheet()" class="flex-1 bg-white border border-ink-200 px-3 py-2.5 rounded-lg text-sm font-medium hover:bg-ink-50">Abbrechen</button>
+            <button type="button" onclick="saveQuickNote(this)" class="flex-[2] bg-amber-600 hover:bg-amber-700 text-white px-3 py-2.5 rounded-lg text-sm font-semibold inline-flex items-center justify-center gap-1.5">
+              <i data-lucide="save" class="w-4 h-4"></i> Als private Notiz speichern
+            </button>
+          </div>
+          <p class="text-[10px] text-amber-700 italic text-center">Nur intern sichtbar — der Kunde bekommt das nicht.</p>
+        </div>
+      </div>
+    </div>`;
+  if (window.lucide) lucide.createIcons();
+  setTimeout(() => $('quickNoteText')?.focus(), 80);
+}
+
+function closeQuickNoteSheet() {
+  if (QUICK_NOTE_REC) { try { QUICK_NOTE_REC.stop(); } catch (_) {} QUICK_NOTE_REC = null; }
+  const host = document.getElementById('subModalHost');
+  if (host) host.innerHTML = '';
+  QUICK_NOTE_CTX = null;
+}
+
+function toggleQuickNoteVoice() {
+  if (QUICK_NOTE_REC) { try { QUICK_NOTE_REC.stop(); } catch (_) {} QUICK_NOTE_REC = null; updateQuickNoteMicUI(false); return; }
+  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if (!SR) return toast('Sprach-Eingabe nicht verfügbar', 'warn');
+  const rec = new SR();
+  rec.lang = 'de-DE'; rec.continuous = true; rec.interimResults = true;
+  const ta = $('quickNoteText');
+  let base = (ta?.value || '');
+  if (base && !/\s$/.test(base)) base += ' ';
+  rec.onresult = (event) => {
+    let final = '', interim = '';
+    for (let i = event.resultIndex; i < event.results.length; i++) {
+      const tr = event.results[i][0].transcript;
+      if (event.results[i].isFinal) final += tr;
+      else interim += tr;
+    }
+    if (final) base += final;
+    if (ta) ta.value = base + interim;
+  };
+  rec.onerror = (e) => {
+    if (e.error !== 'aborted' && e.error !== 'no-speech') toast('Sprach-Fehler: ' + (e.error || ''), 'warn');
+    QUICK_NOTE_REC = null; updateQuickNoteMicUI(false);
+  };
+  rec.onend = () => { QUICK_NOTE_REC = null; updateQuickNoteMicUI(false); };
+  try { rec.start(); QUICK_NOTE_REC = rec; updateQuickNoteMicUI(true); }
+  catch (_) { toast('Mikrofon nicht zugänglich', 'warn'); }
+}
+
+function updateQuickNoteMicUI(active) {
+  const btn = $('quickNoteMicBtn'), label = $('quickNoteMicLabel');
+  if (!btn) return;
+  if (active) {
+    btn.classList.add('animate-pulse');
+    if (label) label.textContent = 'Aufnahme läuft — nochmal tippen zum Stoppen';
+  } else {
+    btn.classList.remove('animate-pulse');
+    if (label) label.textContent = 'Tippen und sprechen';
+  }
+}
+
+async function saveQuickNote(btn) {
+  if (!QUICK_NOTE_CTX) return;
+  if (QUICK_NOTE_REC) { try { QUICK_NOTE_REC.stop(); } catch (_) {} QUICK_NOTE_REC = null; }
+  const text = ($('quickNoteText')?.value || '').trim();
+  if (!text) return toast('Bitte etwas eingeben oder sprechen', 'warn');
+  const { accountId, ticketId } = QUICK_NOTE_CTX;
+  setBusy(btn, true, 'Speichere…');
+  try {
+    await proxyJson('/freshdesk/' + encodeURIComponent(accountId) + '/api/v2/tickets/' + ticketId + '/notes', {
+      method: 'POST',
+      body: JSON.stringify({ body: textToHtmlForFreshdesk(text), private: true })
+    });
+    await recordMyNote(accountId, ticketId, text, 'manuell');
+    closeQuickNoteSheet();
+    toast('Notiz gespeichert · Ticket #' + ticketId, 'success', 4000);
+    // Re-render damit das Card-Icon sofort aktualisiert wird
+    renderTicketsPage();
+  } catch (e) {
+    setBusy(btn, false);
+    toast('Speichern fehlgeschlagen: ' + e.message, 'error', 6000);
+  }
+}
+
 /* === Meine-Notizen-Popup (Bottom-Sheet) === */
 function openMyNotesPopup(accountId, ticketId) {
   const notes = getMyNotesForTicket(accountId, ticketId);
@@ -2589,6 +2713,11 @@ function openMyNotesPopup(accountId, ticketId) {
             <p class="text-[11px] text-ink-500">Ticket #${ticketId} · ${notes.length} private Notiz${notes.length===1?'':'en'}</p>
           </div>
           <button onclick="closeMyNotesPopup()" class="w-9 h-9 rounded-lg hover:bg-ink-100 flex items-center justify-center"><i data-lucide="x" class="w-5 h-5 text-ink-700"></i></button>
+        </div>
+        <div class="px-3 py-2 border-b border-ink-100 bg-amber-50/50">
+          <button onclick="closeMyNotesPopup(); openQuickNoteSheet('${escapeAttr(accountId)}', ${ticketId});" class="w-full bg-amber-600 hover:bg-amber-700 text-white px-3 py-2 rounded-lg text-sm font-semibold inline-flex items-center justify-center gap-1.5 active:opacity-80">
+            <i data-lucide="plus" class="w-4 h-4"></i> Neue Notiz hinzufügen
+          </button>
         </div>
         <div class="flex-1 overflow-y-auto p-3 space-y-2">
           ${notes.map(n => {
