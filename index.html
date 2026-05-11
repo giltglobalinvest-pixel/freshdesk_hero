@@ -248,7 +248,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.10.0';
+const APP_VERSION = 'v2.11.0';
 // Read-Token absichtlich gesplittet, damit GitHub Secret-Scanning beim Push nicht blockt.
 // Der Token ist read-only und Base-scoped → bewusst eingebettet (Architektur-Entscheidung).
 const _RK = 'patu8KWM8aWB' + 'yxCGL.69fae5d9fa4b94c2' + '66b426dadd71a51f574945d840b33569058ab5e9d89ebef3';
@@ -1899,26 +1899,41 @@ function renderTicketList(tickets) {
                     <p class="font-semibold text-ink-900 text-sm leading-snug truncate flex-1">${escapeHtml(subj)}</p>
                     ${(() => {
                       const my = getMyNotesForTicket(t._accountId, t.id);
-                      const hasNotes = my.length > 0;
-                      const hasRule = my.some(n => n.typ === 'regel');
-                      let iconColor, badgeColor, iconName, tooltip;
-                      if (!hasNotes) {
-                        iconColor  = 'text-ink-300 active:text-brand-600 hover:bg-brand-50';
-                        iconName   = 'edit-3';
-                        tooltip    = 'Notiz hinzufügen';
-                        badgeColor = '';
+                      // „Meine Notizen" = nur die, die ICH erstellt habe (manuell).
+                      // KI-Zusammenfassungen (summary), KI-Regel-Notes (regel) und KI-Assistant-Notes (assistant) zählen NICHT.
+                      const manual = my.filter(n => n.typ === 'manuell');
+                      const hasManual = manual.length > 0;
+                      const hasRule   = my.some(n => n.typ === 'regel');
+                      let iconColor, badgeColor, iconName, tooltip, timeLabel = '';
+                      if (hasManual) {
+                        // Manuelle Notizen haben immer Vorrang im Icon-Status.
+                        const latest = manual.slice().sort((a, b) => new Date(b.created || 0) - new Date(a.created || 0))[0];
+                        const rel = _relTimeFull(latest?.created);
+                        iconColor  = 'text-amber-600 active:text-amber-800 hover:bg-amber-50';
+                        iconName   = 'sticky-note';
+                        tooltip    = manual.length + ' eigene Notiz' + (manual.length === 1 ? '' : 'en') + (rel ? ' · letzte ' + rel : '');
+                        badgeColor = 'bg-amber-500';
+                        timeLabel  = rel;
                       } else if (hasRule) {
+                        // Keine eigenen Notizen, aber KI-Regel hat was hinterlassen → Bot-Indikator.
                         iconColor  = 'text-purple-600 active:text-purple-800 hover:bg-purple-50';
                         iconName   = 'bot';
                         tooltip    = 'Automatisiert per KI-Regel';
                         badgeColor = 'bg-purple-500';
                       } else {
-                        iconColor  = 'text-amber-600 active:text-amber-800 hover:bg-amber-50';
-                        iconName   = 'sticky-note';
-                        tooltip    = my.length + ' eigene Notiz' + (my.length === 1 ? '' : 'en');
-                        badgeColor = 'bg-amber-500';
+                        // Garnichts „mein" — Plus-Hinweis zum Hinzufügen.
+                        iconColor  = 'text-ink-300 active:text-brand-600 hover:bg-brand-50';
+                        iconName   = 'edit-3';
+                        tooltip    = 'Notiz hinzufügen';
+                        badgeColor = '';
                       }
-                      return `<button data-action="myNotes" data-account-id="${escapeAttr(t._accountId)}" data-ticket-id="${t.id}" class="${iconColor} -m-1 p-1 rounded shrink-0 relative" title="${tooltip}"><i data-lucide="${iconName}" class="w-4 h-4"></i>${hasNotes && my.length > 1 ? `<span class="absolute -top-0.5 -right-0.5 ${badgeColor} text-white text-[8px] font-bold leading-none w-3.5 h-3.5 rounded-full flex items-center justify-center">${my.length}</span>` : ''}</button>`;
+                      const countBadge = hasManual && manual.length > 1
+                        ? `<span class="absolute -top-0.5 -right-0.5 ${badgeColor} text-white text-[8px] font-bold leading-none w-3.5 h-3.5 rounded-full flex items-center justify-center">${manual.length}</span>`
+                        : '';
+                      const inlineTime = (hasManual && timeLabel)
+                        ? `<span class="text-[10px] font-medium text-amber-700 shrink-0">${escapeHtml(timeLabel)}</span>`
+                        : '';
+                      return `${inlineTime}<button data-action="myNotes" data-account-id="${escapeAttr(t._accountId)}" data-ticket-id="${t.id}" class="${iconColor} -m-1 p-1 rounded shrink-0 relative" title="${escapeAttr(tooltip)}"><i data-lucide="${iconName}" class="w-4 h-4"></i>${countBadge}</button>`;
                     })()}
                     <button data-action="summarize" data-account-id="${escapeAttr(t._accountId)}" data-ticket-id="${t.id}" class="text-purple-500 active:text-purple-700 hover:bg-purple-50 -m-1 p-1 rounded shrink-0" title="KI-Zusammenfassung">
                       <i data-lucide="sparkles" class="w-4 h-4"></i>
@@ -1928,7 +1943,7 @@ function renderTicketList(tickets) {
                   ${desc ? `<p class="text-[12px] text-ink-500 mt-0.5 line-clamp-2">${escapeHtml(desc)}</p>` : ''}
                   ${recentlyBack ? `<div class="mt-1 inline-flex items-center gap-1 text-[10px] font-bold uppercase tracking-wider bg-gradient-to-r from-brand-100 to-emerald-100 text-brand-800 border border-brand-300 px-1.5 py-0.5 rounded"><i data-lucide="rotate-cw" class="w-2.5 h-2.5"></i> Heute fällig${wv && wv.grund && GRUND_LABEL[wv.grund] ? ' · ' + GRUND_LABEL[wv.grund] : ''}</div>` : ''}
                   <div class="flex items-center gap-1.5 mt-1.5 flex-wrap">
-                    <span class="text-[10px] uppercase tracking-wider px-1.5 py-0.5 rounded font-semibold border ${st.cls}">${escapeHtml(st.label)}</span>
+                    <button data-action="status" data-account-id="${escapeAttr(t._accountId)}" data-ticket-id="${t.id}" data-status="${t.status}" class="text-[10px] uppercase tracking-wider px-1.5 py-0.5 rounded font-semibold border ${st.cls} active:opacity-70 inline-flex items-center gap-1">${escapeHtml(st.label)} <i data-lucide="chevron-down" class="w-2.5 h-2.5"></i></button>
                     ${onWv ? `<span class="text-[10px] uppercase tracking-wider px-1.5 py-0.5 rounded font-semibold bg-indigo-50 text-indigo-700 border border-indigo-200 inline-flex items-center gap-1"><i data-lucide="clock" class="w-2.5 h-2.5"></i> WV ${escapeHtml(_fmtFrist(wv.frist_am))}</span>` : ''}
                     ${assigneeFirst
                       ? `<button data-action="assign" data-account-id="${escapeAttr(t._accountId)}" data-ticket-id="${t.id}" data-responder-id="${t.responder_id || ''}" class="text-[10px] uppercase tracking-wider px-1.5 py-0.5 rounded font-semibold bg-ink-100 text-ink-700 active:bg-ink-200 inline-flex items-center gap-1"><i data-lucide="user" class="w-2.5 h-2.5"></i>${escapeHtml(assigneeFirst)} <i data-lucide="chevron-down" class="w-2.5 h-2.5"></i></button>`
@@ -2423,15 +2438,24 @@ function attachSwipeToCards() {
           if (_openSwipedContent) _resetSwipe();
           openTypeModal(accId, tId, tType, true);
         }
+        else if (action === 'status') {
+          const sRaw = btn.dataset.status;
+          const sVal = sRaw ? parseInt(sRaw, 10) : null;
+          if (_openSwipedContent) _resetSwipe();
+          openStatusModal(accId, tId, sVal, true);
+        }
         else if (action === 'summarize') {
           if (_openSwipedContent) _resetSwipe();
           openTicketSummaryModal(accId, tId);
         }
         else if (action === 'myNotes') {
           if (_openSwipedContent) _resetSwipe();
-          const existing = getMyNotesForTicket(accId, tId);
-          if (existing.length) openMyNotesPopup(accId, tId);
-          else                 openQuickNoteSheet(accId, tId);
+          const all = getMyNotesForTicket(accId, tId);
+          // Nur manuelle Notizen oder KI-Regel-Tracking lösen das Popup aus.
+          // KI-Zusammenfassungen alleine zählen NICHT als „meine Notiz" → direkt QuickNote.
+          const hasRelevant = all.some(n => n.typ === 'manuell' || n.typ === 'regel');
+          if (hasRelevant) openMyNotesPopup(accId, tId);
+          else             openQuickNoteSheet(accId, tId);
         }
       });
     });
@@ -2721,13 +2745,18 @@ function openMyNotesPopup(accountId, ticketId) {
   if (!host) { host = document.createElement('div'); host.id = 'subModalHost'; document.body.appendChild(host); }
   const typLabel = { summary: 'KI-Zusammenfassung', manuell: 'Eigene Notiz', regel: 'KI-Regel', assistant: 'KI-Assistent' };
   const typIcon  = { summary: 'sparkles',           manuell: 'sticky-note',  regel: 'sparkles',  assistant: 'mic' };
+  const manualCount = notes.filter(n => n.typ === 'manuell').length;
+  const otherCount  = notes.length - manualCount;
+  const headerSub = manualCount > 0
+    ? ('Ticket #' + ticketId + ' · ' + manualCount + ' eigene' + (otherCount ? ' + ' + otherCount + ' KI' : ''))
+    : ('Ticket #' + ticketId + ' · ' + otherCount + ' KI-Eintrag' + (otherCount === 1 ? '' : 'e'));
   host.innerHTML = `
     <div class="fixed inset-0 z-[60] flex items-end justify-center bg-black/40" onclick="if(event.target===this)closeMyNotesPopup()">
       <div class="bg-white w-full max-w-md rounded-t-2xl shadow-2xl flex flex-col safe-bottom" style="max-height:80vh">
         <div class="px-4 py-3 border-b border-ink-200 flex items-center justify-between">
           <div>
-            <h3 class="font-bold text-ink-900 inline-flex items-center gap-1.5"><i data-lucide="sticky-note" class="w-4 h-4 text-amber-600"></i> Meine Notizen</h3>
-            <p class="text-[11px] text-ink-500">Ticket #${ticketId} · ${notes.length} private Notiz${notes.length===1?'':'en'}</p>
+            <h3 class="font-bold text-ink-900 inline-flex items-center gap-1.5"><i data-lucide="sticky-note" class="w-4 h-4 text-amber-600"></i> Notizen &amp; KI-Aktivität</h3>
+            <p class="text-[11px] text-ink-500">${escapeHtml(headerSub)}</p>
           </div>
           <button onclick="closeMyNotesPopup()" class="w-9 h-9 rounded-lg hover:bg-ink-100 flex items-center justify-center"><i data-lucide="x" class="w-5 h-5 text-ink-700"></i></button>
         </div>
@@ -2836,7 +2865,7 @@ function renderTicketDetailBody(ticket) {
       <div class="bg-white rounded-2xl border border-ink-200 p-4">
         <h2 class="font-bold text-ink-900 text-base leading-snug">${escapeHtml(ticket.subject || '(ohne Betreff)')}</h2>
         <div class="flex flex-wrap gap-1.5 mt-2 items-center">
-          <span class="text-[10px] uppercase tracking-wider px-1.5 py-0.5 rounded font-semibold border ${status.cls}">${escapeHtml(status.label)}</span>
+          <button onclick="openStatusModal()" class="text-[10px] uppercase tracking-wider px-1.5 py-0.5 rounded font-semibold border ${status.cls} active:opacity-70 inline-flex items-center gap-1" title="Status ändern">${escapeHtml(status.label)} <i data-lucide="chevron-down" class="w-2.5 h-2.5"></i></button>
           <span class="text-[10px] text-ink-400">·</span>
           <span class="text-[11px] text-ink-500">${escapeHtml(fmtDate(ticket.updated_at))}</span>
           <span class="text-[10px] text-ink-400 ml-auto">erstellt ${escapeHtml(fmtDate(ticket.created_at))}</span>
@@ -3258,6 +3287,89 @@ async function assignTypeAndClose(typeName) {
   } catch (e) {
     closeTypeModal();
     toast('Typ-Änderung fehlgeschlagen: ' + e.message, 'error', 6000);
+  }
+}
+
+/* === Status-Modal (Ticket-Status auf Card und im Detail ändern) === */
+let STATUS_CTX = null;
+
+function openStatusModal(accountId, ticketId, currentStatus, fromList = false) {
+  if (accountId === undefined) {
+    if (!CURRENT_TICKET) return;
+    accountId = CURRENT_TICKET._accountId;
+    ticketId = CURRENT_TICKET.id;
+    currentStatus = CURRENT_TICKET.status;
+    fromList = false;
+  }
+  if (!accountId || !ticketId) return;
+  STATUS_CTX = { accountId, ticketId, currentStatus: currentStatus || null, fromList };
+
+  const options = [
+    { value: 2, label: 'Offen',       icon: 'circle',         color: 'from-blue-400 to-blue-600',       hint: 'Bearbeitung läuft' },
+    { value: 3, label: 'Wartet',      icon: 'clock',          color: 'from-amber-400 to-amber-600',     hint: 'Wartet auf Kunden' },
+    { value: 4, label: 'Gelöst',      icon: 'check-circle-2', color: 'from-emerald-400 to-emerald-600', hint: 'Antwort gegeben, Kunde kann reagieren' },
+    { value: 5, label: 'Geschlossen', icon: 'lock',           color: 'from-ink-400 to-ink-600',         hint: 'Abgeschlossen, archiviert' },
+  ];
+
+  let host = document.getElementById('subModalHost');
+  if (!host) { host = document.createElement('div'); host.id = 'subModalHost'; document.body.appendChild(host); }
+  const curLbl = (FD_STATUS[currentStatus] || {}).label || '–';
+  host.innerHTML = `
+    <div class="fixed inset-0 z-[60] flex items-end justify-center bg-black/40" onclick="if(event.target===this)closeStatusModal()">
+      <div class="bg-white w-full max-w-md rounded-t-2xl shadow-2xl safe-bottom">
+        <div class="px-4 py-3 border-b border-ink-200 flex items-center justify-between">
+          <div>
+            <h3 class="font-bold text-ink-900">Ticket #${ticketId} → Status</h3>
+            <p class="text-[11px] text-ink-500">aktuell: ${escapeHtml(curLbl)}</p>
+          </div>
+          <button onclick="closeStatusModal()" class="w-9 h-9 rounded-lg hover:bg-ink-100 flex items-center justify-center">
+            <i data-lucide="x" class="w-5 h-5 text-ink-700"></i>
+          </button>
+        </div>
+        <div>
+          ${options.map(o => `
+            <button onclick="assignStatusAndClose(${o.value})" class="w-full text-left px-4 py-3 active:bg-ink-50 border-b border-ink-100 flex items-center gap-3 ${currentStatus === o.value ? 'bg-brand-50' : ''}">
+              <span class="w-9 h-9 rounded-full bg-gradient-to-br ${o.color} flex items-center justify-center shrink-0 text-white">
+                <i data-lucide="${o.icon}" class="w-4 h-4"></i>
+              </span>
+              <div class="flex-1 min-w-0">
+                <p class="font-medium text-ink-900 text-sm">${o.label}</p>
+                <p class="text-[11px] text-ink-500 truncate">${escapeHtml(o.hint)}</p>
+              </div>
+              ${currentStatus === o.value ? '<i data-lucide="check" class="w-4 h-4 text-brand-600 shrink-0"></i>' : ''}
+            </button>
+          `).join('')}
+        </div>
+      </div>
+    </div>`;
+  if (window.lucide) lucide.createIcons();
+}
+
+function closeStatusModal() {
+  const host = document.getElementById('subModalHost');
+  if (host) host.innerHTML = '';
+  STATUS_CTX = null;
+}
+
+async function assignStatusAndClose(statusValue) {
+  if (!STATUS_CTX) return;
+  const { accountId, ticketId, fromList } = STATUS_CTX;
+  try {
+    await proxyJson('/freshdesk/' + encodeURIComponent(accountId) + '/api/v2/tickets/' + ticketId, {
+      method: 'PUT',
+      body: JSON.stringify({ status: statusValue })
+    });
+    closeStatusModal();
+    const lbl = (FD_STATUS[statusValue] || {}).label || ('Status ' + statusValue);
+    toast('Status: ' + lbl, 'success');
+    if (CURRENT_TICKET && CURRENT_TICKET.id === ticketId) {
+      CURRENT_TICKET.status = statusValue;
+      renderTicketDetailBody(CURRENT_TICKET);
+    }
+    if (fromList) renderTicketsPage();
+  } catch (e) {
+    closeStatusModal();
+    toast('Status-Änderung fehlgeschlagen: ' + e.message, 'error', 6000);
   }
 }
 
