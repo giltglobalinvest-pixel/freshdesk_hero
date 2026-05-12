@@ -267,7 +267,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.27.1';
+const APP_VERSION = 'v2.27.2';
 // Read-Token absichtlich gesplittet, damit GitHub Secret-Scanning beim Push nicht blockt.
 // Der Token ist read-only und Base-scoped → bewusst eingebettet (Architektur-Entscheidung).
 const _RK = 'patu8KWM8aWB' + 'yxCGL.69fae5d9fa4b94c2' + '66b426dadd71a51f574945d840b33569058ab5e9d89ebef3';
@@ -9900,7 +9900,7 @@ export default async function (req) {
     let fdKey = ownKey;
     if (!fdKey && userAllowsDefault) fdKey = acc.api_key;
     if (!fdKey) {
-      return jsonResponse({ error: "Kein API-Key. Bitte in der App unter „Accounts" deinen persönlichen Freshdesk-API-Key eintragen." }, 400);
+      return jsonResponse({ error: "Kein API-Key. Bitte in der App unter 'Accounts' deinen persoenlichen Freshdesk-API-Key eintragen." }, 400);
     }
     const target = \`https://\${acc.domain}.freshdesk.com/\${fdPath}\${url.search}\`;
     const basic = btoa(\`\${fdKey}:X\`);
@@ -9954,7 +9954,7 @@ export default async function (req) {
     const ownFsKey = (fsAccess?.freshsales_api_key && fsAccess.freshsales_api_key.trim()) || "";
     let fsKey = ownFsKey;
     if (!fsKey && userAllowsFsDefault) fsKey = acc.fs_api_key;
-    if (!fsKey) return jsonResponse({ error: "Kein Freshsales-API-Key. Bitte unter „Accounts" eintragen." }, 400);
+    if (!fsKey) return jsonResponse({ error: "Kein Freshsales-API-Key. Bitte unter 'Accounts' eintragen." }, 400);
     const target = \`https://\${acc.fs_domain}.myfreshworks.com/crm/sales/\${fsPath}\${url.search}\`;
     const fsInit: any = {
       method: req.method,
