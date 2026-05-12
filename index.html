@@ -267,7 +267,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.28.1';
+const APP_VERSION = 'v2.28.2';
 // Read-Token absichtlich gesplittet, damit GitHub Secret-Scanning beim Push nicht blockt.
 // Der Token ist read-only und Base-scoped → bewusst eingebettet (Architektur-Entscheidung).
 const _RK = 'patu8KWM8aWB' + 'yxCGL.69fae5d9fa4b94c2' + '66b426dadd71a51f574945d840b33569058ab5e9d89ebef3';
@@ -7044,8 +7044,8 @@ async function aiInterpretCommand(ticket, command, accountId) {
     'MEHRERE SCHRITTE: Ein User-Befehl kann mehrere Aktionen umfassen (z.B. „antworte… und weise Sandra zu und Gruppe Vertrieb und auf Gelöst setzen" = vier Aktionen). Liste sie in der logischen Reihenfolge auf (typisch: reply/note vor assign/group vor status).\n' +
     'Jede Aktion bekommt einen eigenen Eintrag in der "actions"-Liste.\n\n' +
     'REGELN PRO AKTION:\n' +
-    '- Bei reply/note/forward: Verfasse einen fertigen, professionellen body-Text in der Sprache des Tickets (meist Deutsch). Mit Anrede (Name aus Ticket), klarer Aussage, freundlichem Abschluss (z.B. „Mit freundlichen Grüßen"). Verwende Zeilenumbrüche \\n für Absätze.\n' +
-    '- WICHTIG: Schreibe KEINEN Namen, KEINE Firma, KEINE Telefonnummer, KEINE Position am Ende — die Signatur des Users wird automatisch aus Freshdesk angehängt. Beende den Text mit dem freundlichen Abschluss („Mit freundlichen Grüßen,") und einem Zeilenumbruch — sonst nichts.\n' +
+    '- Bei reply/note/forward: Verfasse einen fertigen, professionellen body-Text in der Sprache des Tickets (meist Deutsch). Mit Anrede (Name aus Ticket), klarer Aussage. Verwende Zeilenumbrüche \\n für Absätze.\n' +
+    '- WICHTIG — KEINE GRUSSFORMEL UND KEINE SIGNATUR AM ENDE: Die Freshdesk-Signatur des Users enthält bereits eine Grußformel (z.B. „Mit freundlichen Grüßen") sowie Name, Firma, Telefon, Position. Die Signatur wird automatisch angehängt. Schreibe deshalb NIEMALS „Mit freundlichen Grüßen", „Viele Grüße", „Beste Grüße", „Liebe Grüße", einen Namen, eine Firma, eine Telefonnummer oder eine Position. Beende den Text mit dem letzten inhaltlichen Satz — sonst nichts. (Bei Notizen reicht ebenfalls der Inhalt — keine Grußformel.)\n' +
     '- Bei assign: nur EINE eindeutige agent_id verwenden. Bei mehrdeutigen Vornamen (mehrere passen) ODER wenn KEINE passende ID im Pool ist → trotzdem type="assign", aber agent_id=null setzen. Im "summary" kurz erklären welche Auswahl der User treffen muss. Die App zeigt dann ein Dropdown.\n' +
     '- Bei group: GENAU dieselbe Regel. Wenn Gruppen-Bezeichnung mehrdeutig oder unklar ist → type="group" mit group_id=null. Niemals raten.\n' +
     '- Bei forward: forward_to als Array von E-Mail-Adressen.\n' +
