@@ -267,7 +267,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.30.0';
+const APP_VERSION = 'v2.30.1';
 // Read-Token absichtlich gesplittet, damit GitHub Secret-Scanning beim Push nicht blockt.
 // Der Token ist read-only und Base-scoped → bewusst eingebettet (Architektur-Entscheidung).
 const _RK = 'patu8KWM8aWB' + 'yxCGL.69fae5d9fa4b94c2' + '66b426dadd71a51f574945d840b33569058ab5e9d89ebef3';
@@ -581,33 +581,48 @@ function _extractMissingFieldName(errMsg) {
 }
 
 /* Wrapper für airtableWrite/Update der bei UNKNOWN_FIELD_NAME-Fehlern automatisch das Feld
-   anlegt und den Schreibvorgang einmal wiederholt. */
-async function airtableWriteWithAutoField(tableName, fields, defaultTypes) {
-  try {
-    return await airtableWrite(tableName, fields);
-  } catch (e) {
-    const missingField = _extractMissingFieldName(e.message);
-    if (missingField && fields[missingField] !== undefined) {
-      console.log('Auto-Field anlegen: ' + tableName + '.' + missingField);
-      await ensureAirtableField(tableName, missingField, (defaultTypes && defaultTypes[missingField]) || 'singleLineText');
-      return await airtableWrite(tableName, fields);
+   anlegt und den Schreibvorgang wiederholt. Schleife (max 6 Versuche), weil:
+   1. Airtable meldet pro Fehler nur EIN fehlendes Feld — bei mehreren neuen Feldern
+      brauchen wir mehrere Iterationen.
+   2. Nach dem Field-Create gibt es eine kurze Meta-API-Cache-Verzögerung — Sleep
+      zwischen Create und Retry vermeidet einen falschen „UNKNOWN_FIELD_NAME"-Retry. */
+async function _runWithAutoField(opLabel, runFn, fields, defaultTypes) {
+  const seen = new Set();
+  const maxAttempts = 6;
+  let lastErr = null;
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    try {
+      return await runFn();
+    } catch (e) {
+      lastErr = e;
+      const missingField = _extractMissingFieldName(e.message);
+      if (!missingField || fields[missingField] === undefined) throw e;
+      if (seen.has(missingField)) {
+        // Schon versucht anzulegen, aber Retry klagt erneut über dasselbe Feld → echter Fehler
+        console.warn('Auto-Field bereits angelegt, aber Retry klagt erneut über', missingField);
+        throw e;
+      }
+      seen.add(missingField);
+      console.log('Auto-Field anlegen: ' + opLabel + '.' + missingField);
+      try {
+        await ensureAirtableField(opLabel, missingField, (defaultTypes && defaultTypes[missingField]) || 'singleLineText');
+      } catch (createErr) {
+        console.warn('ensureAirtableField fehlgeschlagen:', createErr.message);
+        throw new Error('Feld „' + missingField + '" konnte nicht angelegt werden: ' + createErr.message);
+      }
+      // 400-600ms Pause, damit Airtable Meta-Cache + Datenpfad sich abstimmen
+      await new Promise(r => setTimeout(r, 450));
     }
-    throw e;
   }
+  throw lastErr || new Error(opLabel + ': zu viele Auto-Field-Versuche');
+}
+
+async function airtableWriteWithAutoField(tableName, fields, defaultTypes) {
+  return _runWithAutoField(tableName, () => airtableWrite(tableName, fields), fields, defaultTypes);
 }
 
 async function airtableUpdateWithAutoField(tableName, id, fields, defaultTypes) {
-  try {
-    return await airtableUpdate(tableName, id, fields);
-  } catch (e) {
-    const missingField = _extractMissingFieldName(e.message);
-    if (missingField && fields[missingField] !== undefined) {
-      console.log('Auto-Field anlegen: ' + tableName + '.' + missingField);
-      await ensureAirtableField(tableName, missingField, (defaultTypes && defaultTypes[missingField]) || 'singleLineText');
-      return await airtableUpdate(tableName, id, fields);
-    }
-    throw e;
-  }
+  return _runWithAutoField(tableName, () => airtableUpdate(tableName, id, fields), fields, defaultTypes);
 }
 
 /* ============================================================
