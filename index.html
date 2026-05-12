@@ -179,6 +179,9 @@
       <button onclick="openSearchModal()" class="w-9 h-9 rounded-lg hover:bg-brand-50 flex items-center justify-center group" aria-label="Suche" title="Suche (KI-gestützt)">
         <i data-lucide="search" class="w-5 h-5 text-brand-600 group-active:text-brand-800"></i>
       </button>
+      <button onclick="openHelpModal()" class="w-9 h-9 rounded-lg hover:bg-ink-100 flex items-center justify-center group" aria-label="Hilfe / Anleitung" title="Anleitung zur App">
+        <i data-lucide="circle-help" class="w-5 h-5 text-ink-600 group-active:text-ink-900"></i>
+      </button>
       <button onclick="toggleMenu()" class="w-9 h-9 rounded-lg hover:bg-ink-100 flex items-center justify-center" aria-label="Menü">
         <i data-lucide="menu" class="w-5 h-5 text-ink-700"></i>
       </button>
@@ -256,7 +259,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.21.1';
+const APP_VERSION = 'v2.22.0';
 // Read-Token absichtlich gesplittet, damit GitHub Secret-Scanning beim Push nicht blockt.
 // Der Token ist read-only und Base-scoped → bewusst eingebettet (Architektur-Entscheidung).
 const _RK = 'patu8KWM8aWB' + 'yxCGL.69fae5d9fa4b94c2' + '66b426dadd71a51f574945d840b33569058ab5e9d89ebef3';
@@ -2120,10 +2123,12 @@ async function fetchTicketsAllAccounts(opts = {}) {
 async function fetchUsers() {
   return await airtableRead('User', { sort: [{ field: 'name', direction: 'asc' }] });
 }
-async function createUser({ api_key, name, role, status }) {
-  return await airtableWrite('User', {
+async function createUser({ api_key, name, role, status, phone }) {
+  const fields = {
     api_key, name, role: role || 'user', status: status || 'aktiv', created: nowIso(),
-  });
+  };
+  if (phone) fields.phone = phone;
+  return await airtableWrite('User', fields);
 }
 async function updateUser(id, fields) { return await airtableUpdate('User', id, fields); }
 async function deleteUser(id)         { return await airtableDelete('User', id); }
@@ -2158,6 +2163,317 @@ function navTo(page) {
   else if (page === 'rules')    renderRulesPage();
   else if (page === 'automated') renderAutomatedPage();
   else                          renderTicketsPage();
+}
+
+/* === Hilfe / Anleitung ====================================================
+   In-App-Hilfe mit illustrierten Sektionen — keine externen Bilder, alles
+   inline (SVG + Lucide-Icons). Sektionen sind ein/ausklappbar. */
+function openHelpModal() {
+  let host = document.getElementById('subModalHost');
+  if (!host) { host = document.createElement('div'); host.id = 'subModalHost'; document.body.appendChild(host); }
+  host.innerHTML = `
+    <div class="fixed inset-0 z-[60] bg-white flex flex-col">
+      <header class="sticky top-0 z-10 bg-white border-b border-ink-200 safe-top">
+        <div class="px-2 py-2.5 flex items-center gap-1.5">
+          <button onclick="closeHelpModal()" class="w-9 h-9 rounded-lg hover:bg-ink-100 flex items-center justify-center" aria-label="Zurück">
+            <i data-lucide="arrow-left" class="w-5 h-5 text-ink-700"></i>
+          </button>
+          <div class="flex-1 min-w-0">
+            <h1 class="font-bold text-ink-900 leading-tight inline-flex items-center gap-1.5"><i data-lucide="circle-help" class="w-4 h-4 text-brand-600"></i> Anleitung</h1>
+            <p class="text-[11px] text-ink-500 truncate">Wie nutze ich Freshdesk Hero?</p>
+          </div>
+        </div>
+      </header>
+      <div class="flex-1 overflow-y-auto p-4">
+        <div class="space-y-3 max-w-2xl mx-auto">
+          ${_helpIntro()}
+          ${_helpSections().map(s => _helpAccordion(s)).join('')}
+          <div class="text-center text-[11px] text-ink-400 italic mt-6">
+            ${escapeHtml(APP_VERSION)} · Bei Fragen melde dich beim Admin
+          </div>
+        </div>
+      </div>
+    </div>`;
+  if (window.lucide) lucide.createIcons();
+}
+
+function closeHelpModal() {
+  const host = document.getElementById('subModalHost');
+  if (host) host.innerHTML = '';
+}
+
+function _helpIntro() {
+  return `
+    <div class="bg-gradient-to-br from-brand-500 to-brand-700 text-white rounded-2xl p-5">
+      <div class="flex items-start gap-3">
+        <div class="w-12 h-12 rounded-xl bg-white/20 flex items-center justify-center text-white shrink-0">
+          <i data-lucide="zap" class="w-6 h-6"></i>
+        </div>
+        <div class="flex-1 min-w-0">
+          <p class="font-bold text-lg leading-tight">Freshdesk Hero</p>
+          <p class="text-[13px] opacity-90 mt-1 leading-snug">Mobile Helpdesk-App für mehrere Freshdesk-Accounts gleichzeitig — mit Sprach-KI, Auto-Regeln und CRM-Anbindung.</p>
+        </div>
+      </div>
+      <div class="grid grid-cols-3 gap-2 mt-4 text-[10px]">
+        <div class="bg-white/15 rounded-lg p-2 text-center"><i data-lucide="layers" class="w-4 h-4 inline mb-1"></i><br>Mehrere Accounts</div>
+        <div class="bg-white/15 rounded-lg p-2 text-center"><i data-lucide="sparkles" class="w-4 h-4 inline mb-1"></i><br>KI-Assistent</div>
+        <div class="bg-white/15 rounded-lg p-2 text-center"><i data-lucide="mic" class="w-4 h-4 inline mb-1"></i><br>Spracheingabe</div>
+      </div>
+    </div>`;
+}
+
+function _helpAccordion(s) {
+  return `
+    <details class="bg-white border border-ink-200 rounded-2xl overflow-hidden" ${s.open ? 'open' : ''}>
+      <summary class="px-4 py-3 cursor-pointer flex items-center gap-3 hover:bg-ink-50">
+        <div class="w-9 h-9 rounded-lg bg-${s.color}-100 flex items-center justify-center shrink-0">
+          <i data-lucide="${s.icon}" class="w-4 h-4 text-${s.color}-700"></i>
+        </div>
+        <div class="flex-1 min-w-0">
+          <p class="font-semibold text-ink-900 text-sm leading-tight">${escapeHtml(s.title)}</p>
+          <p class="text-[11px] text-ink-500 truncate">${escapeHtml(s.subtitle)}</p>
+        </div>
+        <i data-lucide="chevron-down" class="w-4 h-4 text-ink-400 shrink-0"></i>
+      </summary>
+      <div class="px-4 pb-4 pt-1 text-sm text-ink-800 space-y-3 leading-relaxed">
+        ${s.body}
+      </div>
+    </details>`;
+}
+
+// Sketch-Helper: Bottom-Bar / Tab-Bar visualisieren
+function _helpVizTabs() {
+  return `
+    <div class="bg-ink-50 border border-ink-200 rounded-lg p-3 my-2">
+      <div class="bg-white rounded-lg border border-ink-200 p-2 flex justify-around">
+        <div class="text-center text-brand-500"><i data-lucide="ticket" class="w-5 h-5 mx-auto"></i><p class="text-[9px] mt-0.5">Tickets</p></div>
+        <div class="text-center text-ink-400"><i data-lucide="building-2" class="w-5 h-5 mx-auto"></i><p class="text-[9px] mt-0.5">Accounts</p></div>
+        <div class="text-center text-ink-400"><i data-lucide="user" class="w-5 h-5 mx-auto"></i><p class="text-[9px] mt-0.5">Profil</p></div>
+      </div>
+      <p class="text-[10px] text-ink-500 mt-1 text-center">Untere Leiste — zwischen Hauptbereichen wechseln</p>
+    </div>`;
+}
+
+// Sketch-Helper: Header mit allen Icons
+function _helpVizHeader() {
+  return `
+    <div class="bg-ink-50 border border-ink-200 rounded-lg p-3 my-2">
+      <div class="bg-white rounded-lg border border-ink-200 px-2 py-2 flex items-center gap-1">
+        <div class="w-7 h-7 rounded bg-gradient-to-br from-brand-400 to-brand-700 shrink-0"></div>
+        <div class="flex-1 text-xs font-semibold text-ink-700">Tickets</div>
+        <i data-lucide="home" class="w-4 h-4 text-brand-600"></i>
+        <i data-lucide="search" class="w-4 h-4 text-brand-600"></i>
+        <i data-lucide="circle-help" class="w-4 h-4 text-ink-600"></i>
+        <i data-lucide="menu" class="w-4 h-4 text-ink-700"></i>
+      </div>
+      <p class="text-[10px] text-ink-500 mt-1 text-center">Header: Logo (Home) · Titel · Home · Suche · Hilfe · Menü</p>
+    </div>`;
+}
+
+// Sketch-Helper: Swipe-Gesten
+function _helpVizSwipes() {
+  return `
+    <div class="bg-ink-50 border border-ink-200 rounded-lg p-3 my-2 space-y-1.5">
+      <div class="bg-white border border-ink-200 rounded-lg p-2 flex items-center gap-2 text-xs">
+        <i data-lucide="arrow-right" class="w-4 h-4 text-emerald-600"></i>
+        <span class="bg-emerald-100 text-emerald-700 px-1.5 py-0.5 rounded text-[10px] font-bold">SCHLIESSEN</span>
+        <span class="bg-red-100 text-red-700 px-1.5 py-0.5 rounded text-[10px] font-bold">SPAM</span>
+        <span class="text-ink-500 text-[10px]">→ Wisch nach rechts</span>
+      </div>
+      <div class="bg-white border border-ink-200 rounded-lg p-2 flex items-center gap-2 text-xs">
+        <i data-lucide="arrow-right-from-line" class="w-4 h-4 text-indigo-600"></i>
+        <span class="bg-indigo-100 text-indigo-700 px-1.5 py-0.5 rounded text-[10px] font-bold">WIEDERVORLAGE</span>
+        <span class="text-ink-500 text-[10px]">→ Wisch weiter rechts</span>
+      </div>
+      <div class="bg-white border border-ink-200 rounded-lg p-2 flex items-center gap-2 text-xs">
+        <i data-lucide="arrow-left" class="w-4 h-4 text-purple-600"></i>
+        <span class="bg-purple-100 text-purple-700 px-1.5 py-0.5 rounded text-[10px] font-bold">KI-ASSISTENT</span>
+        <span class="text-ink-500 text-[10px]">→ Wisch nach links</span>
+      </div>
+      <div class="bg-white border border-ink-200 rounded-lg p-2 flex items-center gap-2 text-xs">
+        <i data-lucide="more-vertical" class="w-4 h-4 text-ink-700"></i>
+        <span class="text-ink-700 font-semibold">⋮-Icon</span>
+        <span class="text-ink-500 text-[10px]">→ Alle Aktionen (Desktop-freundlich)</span>
+      </div>
+    </div>`;
+}
+
+function _helpVizAssistantPlan() {
+  return `
+    <div class="bg-ink-50 border border-ink-200 rounded-lg p-3 my-2 space-y-1.5">
+      <div class="bg-emerald-50 border-2 border-emerald-300 rounded-lg p-2 text-xs">
+        <div class="flex items-center gap-1.5"><span class="w-5 h-5 rounded-full bg-emerald-100 text-emerald-700 inline-flex items-center justify-center text-[10px] font-bold">1</span><i data-lucide="reply" class="w-3 h-3 text-emerald-700"></i><span class="font-semibold">Antwort an Kunde</span><span class="ml-auto text-[9px] bg-emerald-100 text-emerald-700 px-1 rounded font-bold">AUSSTEHEND</span></div>
+        <div class="mt-1 flex gap-1"><button class="flex-1 bg-emerald-600 text-white px-2 py-1 rounded text-[10px] font-semibold">✓ Bestätigen</button><button class="bg-white border border-ink-200 px-2 py-1 rounded text-[10px]">Überspringen</button></div>
+      </div>
+      <div class="bg-white border border-ink-200 rounded-lg p-2 text-xs opacity-50">
+        <div class="flex items-center gap-1.5"><span class="w-5 h-5 rounded-full bg-ink-100 text-ink-500 inline-flex items-center justify-center text-[10px] font-bold">2</span><i data-lucide="user" class="w-3 h-3 text-brand-700"></i><span class="font-semibold">Bearbeiter zuweisen</span></div>
+        <p class="text-[10px] text-ink-500 italic mt-1"><i data-lucide="lock" class="w-3 h-3 inline"></i> Vorheriger Schritt zuerst bestätigen</p>
+      </div>
+    </div>
+    <p class="text-[11px] text-ink-500 italic">Jeder Schritt wird einzeln bestätigt — nichts läuft automatisch.</p>`;
+}
+
+function _helpSections() {
+  return [
+    {
+      icon: 'log-in', color: 'brand', open: true,
+      title: 'Login & Setup',
+      subtitle: 'Erstes Einrichten',
+      body: `
+        <p><b>Login</b> mit dem persönlichen Login-Schlüssel (vom Admin). Optional „Eingeloggt bleiben" für 30 Tage.</p>
+        <p><b>Accounts hinzufügen:</b> Über das Menü → „Accounts" lassen sich beliebig viele Freshdesk-Konten verbinden. Pro Account brauchst du Subdomain (z.B. <code>flpliftparts</code>) und API-Key (Freshdesk-Profil → Profile Settings → API Key).</p>
+        <p><b>Optional Freshsales-CRM</b> pro Account verbinden — dann kannst du Kontakte auch dort aktualisieren.</p>
+        <p><b>Als App installieren:</b></p>
+        <ul class="list-disc pl-5 text-[13px] space-y-1">
+          <li><b>iOS Safari:</b> Teilen-Symbol → „Zum Home-Bildschirm"</li>
+          <li><b>Android Chrome:</b> 3-Punkte-Menü → „Zum Startbildschirm"</li>
+        </ul>`,
+    },
+    {
+      icon: 'compass', color: 'brand',
+      title: 'Navigation',
+      subtitle: 'Header + Tab-Bar',
+      body: `
+        ${_helpVizHeader()}
+        <p>Im Header rechts:</p>
+        <ul class="list-disc pl-5 text-[13px] space-y-1">
+          <li><b>Home</b> 🏠 — alle Fenster schließen + zurück zur Ticket-Übersicht</li>
+          <li><b>Suche</b> 🔍 — KI-Suche über alle Tickets und Kontakte</li>
+          <li><b>Hilfe</b> ❓ — diese Anleitung</li>
+          <li><b>Menü</b> ☰ — Profil, Regeln, automatisierte Tickets, Settings, Logout</li>
+        </ul>
+        ${_helpVizTabs()}
+        <p><b>Tipp:</b> Das App-Logo links oben ist auch ein Home-Button.</p>`,
+    },
+    {
+      icon: 'ticket', color: 'brand',
+      title: 'Tickets-Übersicht',
+      subtitle: 'Filter, Account-Wechsel, Pagination',
+      body: `
+        <p><b>Account-Wechsel:</b> Chip-Reihe oben → „Alle" für gemerged, oder einzelner Account.</p>
+        <p><b>Filter-Chips:</b></p>
+        <ul class="list-disc pl-5 text-[13px] space-y-1">
+          <li><b>Unzugewiesen</b> 🟠 — One-Tap, alle Tickets ohne Bearbeiter</li>
+          <li><b>Status</b> — Offen / Wartet / Gelöst / Geschlossen</li>
+          <li><b>Sicht</b> — Aktiv / Wiedervorlage / alle</li>
+          <li><b>Typ, Gruppe, Wer</b> — Server-Filter pro Account</li>
+        </ul>
+        <p>Auf jeder Card: Status/Bearbeiter/Gruppe/Typ als Badges — direkt antippen zum Ändern.</p>
+        <p><b>Telefonnummern</b> 📞 werden automatisch aus dem Ticket-Text extrahiert und als klickbare Pills angezeigt — Tap = Anruf.</p>
+        <p><b>„Mehr laden"</b> am Ende für weitere 30 Tickets pro Account.</p>`,
+    },
+    {
+      icon: 'hand', color: 'brand',
+      title: 'Aktionen pro Ticket',
+      subtitle: 'Swipes (Mobile) + 3-Punkte-Menü (Desktop)',
+      body: `
+        ${_helpVizSwipes()}
+        <p><b>Auf Mobile</b> sind alle Aktionen per Wisch-Geste erreichbar. <b>Auf Desktop/Laptop</b> über das <i data-lucide="more-vertical" class="w-3 h-3 inline"></i>-Icon rechts oben auf jeder Card.</p>
+        <p><b>Im Ticket-Detail</b> gibt es eine eigene Icon-Toolbar direkt unter dem Header mit allen Quick-Aktionen.</p>
+        <p><b>Multi-Select:</b> Lange auf eine Card drücken (Mobile) oder über das 3-Punkte-Menü starten — dann mehrere Tickets gleichzeitig bearbeiten (Schließen / Zuweisen / Status / Gruppe).</p>`,
+    },
+    {
+      icon: 'sparkles', color: 'purple',
+      title: 'KI-Assistent',
+      subtitle: 'Antworten / Zuweisen / Notizen per Sprache',
+      body: `
+        <p>Tap auf <i data-lucide="mic" class="w-3 h-3 inline text-purple-600"></i>-Mikrofon, sag was passieren soll. Die KI versteht freie Sprache mit mehreren Aktionen:</p>
+        <div class="bg-purple-50 border border-purple-200 rounded-lg p-2 text-[12px] italic">
+          „Antworte dass wir bis Freitag liefern, weise Sandra zu und auf Gelöst setzen"
+        </div>
+        <p>Die KI erstellt einen <b>Schritt-für-Schritt-Plan</b> als Kacheln:</p>
+        ${_helpVizAssistantPlan()}
+        <p>Bei unklarer Auswahl (z.B. mehrere „Sandra") öffnet sich ein <b>Dropdown</b> zur manuellen Wahl.</p>
+        <p><b>Hide-Befehl:</b> „Bei mir für 3 Tage ausblenden" → lokal weg, Status bleibt unverändert.</p>`,
+    },
+    {
+      icon: 'wand-2', color: 'purple',
+      title: 'KI-Regeln',
+      subtitle: 'Automatisierung aus Ticket lernen',
+      body: `
+        <p>Im Ticket auf das <i data-lucide="wand-2" class="w-3 h-3 inline text-purple-600"></i>-Wand-Icon. Mic an, sag was bei <b>ähnlichen Tickets</b> in Zukunft passieren soll — die KI lernt das Muster automatisch aus dem aktuellen Ticket.</p>
+        <p>Regeln werden im <b>Hintergrund</b> auf neue Tickets angewandt (sichtbar am pulsierenden Glow auf der Card).</p>
+        <p>Alle Regeln verwalten: Menü → „KI-Regeln". Dort an/ausschalten, bearbeiten, löschen.</p>
+        <p><b>Automatisierte Tickets:</b> Menü → „Automatisierte Tickets" zeigt eine Übersicht aller Tickets, die per KI-Regel bearbeitet wurden.</p>`,
+    },
+    {
+      icon: 'sticky-note', color: 'amber',
+      title: 'Notizen & KI-Zusammenfassung',
+      subtitle: 'Eigene Notizen pro Ticket',
+      body: `
+        <p><b>Schnell-Notiz:</b> Notiz-Icon oben rechts auf jeder Card. Tippen oder per Sprache. Nur für dich/dein Team sichtbar (lokal in Airtable).</p>
+        <p><b>KI-Zusammenfassung:</b> Sparkles-Icon ✨ — Claude liest das ganze Ticket und liefert: Anliegen / Verlauf / Status / Nächster Schritt. Wird automatisch auch als private Notiz im Freshdesk-Ticket abgelegt.</p>
+        <p>Im Card-Icon-Status:</p>
+        <ul class="list-disc pl-5 text-[13px] space-y-1">
+          <li><i data-lucide="edit-3" class="w-3 h-3 inline text-ink-400"></i> grau = keine eigene Notiz</li>
+          <li><i data-lucide="sticky-note" class="w-3 h-3 inline text-amber-600"></i> amber = eigene Notiz(en) — letzte Zeit daneben</li>
+          <li><i data-lucide="bot" class="w-3 h-3 inline text-purple-600"></i> lila = KI-Regel hat was hinterlassen</li>
+        </ul>`,
+    },
+    {
+      icon: 'user-cog', color: 'brand',
+      title: 'Kontakt-Daten bearbeiten',
+      subtitle: 'KI + manuell',
+      body: `
+        <p>Im Ticket-Detail: <b>„Kontakt bearbeiten"</b> beim Anfragenden. Modal zeigt alle Felder (Name, Email, Telefon, Mobil, Job-Titel, Adresse) — direkt änderbar.</p>
+        <p><b>KI-Vervollständigung:</b> Beim Öffnen analysiert Claude automatisch das Ticket (Subject + Anfragen + <b>Email-Signaturen</b>) und schlägt Werte für fehlende Felder vor. Pro Feld lila Banner mit Quelle und „Übernehmen"-Button. „Alle (X)" für Bulk-Übernahme.</p>
+        <p>Wird in <b>Freshdesk</b> aktualisiert. Wenn dein Account zusätzlich mit <b>Freshsales-CRM</b> verbunden ist (Account-Setup), erscheint ein zweiter Block für CRM-Updates.</p>`,
+    },
+    {
+      icon: 'search', color: 'brand',
+      title: 'Globale Suche',
+      subtitle: 'KI-gestützt über alle Accounts',
+      body: `
+        <p>Lupen-Icon 🔍 oben im Header → Suchmodal mit zwei Modi:</p>
+        <ul class="list-disc pl-5 text-[13px] space-y-1">
+          <li><b>„Suchen"</b> — Volltext-Match (schnell)</li>
+          <li><b>„Mit KI verstehen"</b> 💜 — Claude analysiert auch <b>freie Sätze</b>: „Frau Rommel anrufen" → erkennt Stichwort + Intent</li>
+        </ul>
+        <p>Bei Intent „anrufen" werden Telefonnummern <b>groß und grün</b> gerendert — ein Tap = Anruf.</p>
+        <p>Findet auch <b>bei dir ausgeblendete Tickets</b> (Indigo-Badge im Ergebnis).</p>`,
+    },
+    {
+      icon: 'clock', color: 'indigo',
+      title: 'Wiedervorlage (Hide)',
+      subtitle: 'Aus eigener Sicht ausblenden',
+      body: `
+        <p>Wenn ein Ticket dich gerade nicht stört, aber den Status NICHT ändern soll (für Kunden/andere Agents sichtbar): <b>Wiedervorlage</b> setzen.</p>
+        <p>Optionen: 1 Tag / 3 Tage / 7 Tage / 30 Tage / für immer / freies Datum.</p>
+        <p>Sicht-Filter <i>„Aktiv / Wiedervorlage / alle"</i> oben in der Übersicht steuert was du siehst.</p>
+        <p>Im KI-Assistent: einfach sagen „bei mir für 3 Tage ausblenden" — die KI erkennt den <b>hide-Befehl</b> und verändert KEINEN Freshdesk-Status.</p>`,
+    },
+    {
+      icon: 'users', color: 'brand',
+      title: 'Userverwaltung (nur Admin)',
+      subtitle: 'Login-Schlüssel + WhatsApp-Einladung',
+      body: `
+        <p>Menü → „Userverwaltung". Neue Benutzer mit Name + Login-Schlüssel (auto-generiert) + Rolle + Status.</p>
+        <p><b>WhatsApp-Einladung:</b> 💬 Button beim User → fertige Nachricht mit App-URL + Login-Schlüssel + Installations-Hinweisen wird vorbereitet → editierbar → ein Tap, WhatsApp öffnet sich.</p>
+        <p>Wenn Telefonnummer im User-Profil hinterlegt: Empfänger ist direkt vorbefüllt. Sonst wählst du in WhatsApp den Empfänger.</p>`,
+    },
+    {
+      icon: 'shield-check', color: 'emerald',
+      title: 'Sicherheit & Architektur',
+      subtitle: 'Wo liegen die Daten?',
+      body: `
+        <p><b>Freshdesk-API-Keys</b> liegen serverseitig im Val.town-Proxy — nie im Browser.</p>
+        <p><b>Sessions</b> laufen über ein zufälliges Token (Cookie-frei) — wird im Val.town-Blob-Storage gehalten, 8 Stunden gültig (30 Tage mit „Eingeloggt bleiben").</p>
+        <p><b>Airtable</b> hält: User-Records, Accounts, Wiedervorlage, KI-Regeln, Meine Notizen.</p>
+        <p><b>Claude (Anthropic)</b> bekommt Ticket-Texte zur Analyse — keine personenbezogenen Daten werden trainiert (Standard API-Vertrag).</p>
+        <p><b>Logout:</b> Menü → „Logout" beendet die Session sofort. „Alle Sessions widerrufen" für komplette Abmeldung von allen Geräten.</p>`,
+    },
+    {
+      icon: 'help-circle', color: 'amber',
+      title: 'Hilfe & Probleme',
+      subtitle: 'Was tun wenn was nicht klappt?',
+      body: `
+        <p><b>Update prüfen:</b> Oben in der Versions-Leiste „Update prüfen" tippen — lädt die neueste Version (oder „Pull-to-Refresh" auf Mobile).</p>
+        <p><b>Mikrofon klappt nicht:</b> iOS blockiert Web Speech API im PWA-Standalone-Mode oft. Lösung: App in Safari direkt öffnen (Loader-URL) statt vom Home-Screen.</p>
+        <p><b>KI-Fehler:</b> Wenn die KI „Antwort nicht parsbar" sagt, oft Token-Limit. Befehl kürzer formulieren.</p>
+        <p><b>Status „Geschlossen" wird nicht gesetzt:</b> Freshdesk verlangt manchmal Pflichtfelder beim Schließen — die App fällt automatisch auf „Gelöst" zurück (Toast erscheint).</p>
+        <p><b>Tickets laden nicht:</b> Val.town-Proxy ist evtl. nicht eingerichtet (Admin → Settings) oder API-Key auf Freshdesk-Seite abgelaufen.</p>`,
+    },
+  ];
 }
 
 /* Home-Button: alle offenen Modals/Sheets/Voice-Recorder schließen und zur Tickets-Übersicht.
@@ -3690,6 +4006,32 @@ async function copyTicketLink(accountId, ticketId, btnEl) {
 
 let CURRENT_TICKET = null;
 
+/* Generiert die Icon-Toolbar für die Ticket-Detail-Ansicht — Schnellzugriff auf alle
+   Aktionen die sonst nur über das 3-Punkte-Sheet oder Swipes erreichbar wären.
+   Auf Mobile horizontal scrollbar, auf Desktop alle Icons sichtbar. */
+function _ticketActionBarIcons(accountId, ticketId) {
+  const accIdAttr = escapeAttr(accountId);
+  const btn = (icon, color, label, onclick) =>
+    `<button onclick="${onclick}" class="shrink-0 w-9 h-9 rounded-lg hover:bg-${color}-50 active:bg-${color}-100 inline-flex items-center justify-center group" aria-label="${escapeAttr(label)}" title="${escapeAttr(label)}">
+      <i data-lucide="${icon}" class="w-4 h-4 text-${color}-700 group-active:text-${color}-900"></i>
+    </button>`;
+  return [
+    btn('check-circle-2', 'emerald', 'Ticket schließen (Status: Geschlossen)',                  `ticketActionClose('${accIdAttr}', ${ticketId}, this)`),
+    btn('ban',            'red',     'Als SPAM markieren / in Papierkorb',                     `ticketActionSpam('${accIdAttr}', ${ticketId}, this)`),
+    `<span class="shrink-0 w-px h-5 bg-ink-200 mx-0.5"></span>`,
+    btn('sparkles',       'purple',  'KI-Zusammenfassung',                                     `openTicketSummaryModal('${accIdAttr}', ${ticketId})`),
+    btn('mic',            'purple',  'KI-Assistent (Antworten/Notizen/Zuweisen per Sprache)',  `openAssistantModal('${accIdAttr}', ${ticketId})`),
+    btn('sticky-note',    'amber',   'Schnell-Notiz hinzufügen',                               `openQuickNoteSheet('${accIdAttr}', ${ticketId})`),
+    btn('wand-2',         'purple',  'KI-Regel aus diesem Ticket erstellen',                   `openRuleFromTicket('${accIdAttr}', ${ticketId})`),
+    `<span class="shrink-0 w-px h-5 bg-ink-200 mx-0.5"></span>`,
+    btn('clock',          'indigo',  'Auf Wiedervorlage / aus meiner Sicht ausblenden',        `openWiedervorlagePicker('${accIdAttr}', ${ticketId})`),
+    btn('check-square',   'brand',   'Mehrfach-Auswahl starten',                               `closeModal(); msEnter('${accIdAttr}', ${ticketId})`),
+    `<span class="shrink-0 w-px h-5 bg-ink-200 mx-0.5"></span>`,
+    btn('link',           'ink',     'Freshdesk-Link kopieren',                                `copyTicketLink('${accIdAttr}', ${ticketId}, this)`),
+    btn('external-link',  'ink',     'In Freshdesk öffnen (neuer Tab)',                        `openInFreshdesk('${accIdAttr}', ${ticketId})`),
+  ].join('');
+}
+
 async function openTicketDetail(accountId, ticketId) {
   CURRENT_TICKET = null;
   const acc = APP_STATE.accounts.find(a => a.id === accountId);
@@ -3704,18 +4046,13 @@ async function openTicketDetail(accountId, ticketId) {
             <h1 class="font-bold text-ink-900 leading-tight truncate">Ticket #${ticketId}</h1>
             ${acc ? `<p class="text-[11px] text-ink-500 flex items-center gap-1.5 truncate"><span class="w-2 h-2 rounded-full inline-block" style="background:${escapeAttr(acc.color)}"></span>${escapeHtml(acc.name)}</p>` : ''}
           </div>
-          <button onclick="openRuleFromTicket('${accountId}', ${ticketId})" class="w-9 h-9 rounded-lg hover:bg-purple-100 flex items-center justify-center group" aria-label="KI-Regel aus diesem Ticket erstellen" title="Regel daraus lernen (per Sprache)">
-            <i data-lucide="wand-2" class="w-4.5 h-4.5 text-purple-600 group-active:text-purple-800"></i>
-          </button>
-          <button onclick="openWiedervorlagePicker('${accountId}', ${ticketId})" class="w-9 h-9 rounded-lg hover:bg-ink-100 flex items-center justify-center" aria-label="Auf Wiedervorlage">
-            <i data-lucide="clock" class="w-4.5 h-4.5 text-ink-700"></i>
-          </button>
-          <button onclick="copyTicketLink('${accountId}', ${ticketId}, this)" class="w-9 h-9 rounded-lg hover:bg-ink-100 flex items-center justify-center" aria-label="Ticket-Link kopieren" title="Freshdesk-Link kopieren">
-            <i data-lucide="link" class="w-4.5 h-4.5 text-ink-700"></i>
-          </button>
           <button onclick="openInFreshdesk('${accountId}', ${ticketId})" class="w-9 h-9 rounded-lg hover:bg-ink-100 flex items-center justify-center" aria-label="In Freshdesk öffnen">
             <i data-lucide="external-link" class="w-4.5 h-4.5 text-ink-700"></i>
           </button>
+        </div>
+        <!-- Action-Toolbar: alle Quick-Aktionen als Icon-Reihe, horizontal scrollbar auf Mobile -->
+        <div class="px-2 py-1.5 border-t border-ink-100 bg-white/60 flex items-center gap-1 overflow-x-auto scrollbar-hidden">
+          ${_ticketActionBarIcons(accountId, ticketId)}
         </div>
       </header>
       <div id="ticketDetailBody" class="flex-1 overflow-y-auto px-4 py-4 pb-20">
@@ -6462,8 +6799,11 @@ function renderUsersList(recs) {
               <p class="text-[11px] text-ink-500">${escapeHtml(f.role || 'user')} ${active?'· aktiv':'· inaktiv'}</p>
             </div>
             ${isAdmin ? '<span class="text-[10px] uppercase tracking-wider bg-brand-100 text-brand-700 px-1.5 py-0.5 rounded font-semibold">Admin</span>' : ''}
-            <button onclick='openUserModal(${JSON.stringify({ id:r.id, ...f }).replace(/'/g, "&#39;")})' class="text-ink-500 hover:text-brand-600 p-2"><i data-lucide="edit-3" class="w-4 h-4"></i></button>
-            <button onclick="confirmDeleteUser('${r.id}', '${escapeAttr(name)}')" class="text-ink-500 hover:text-red-600 p-2"><i data-lucide="trash-2" class="w-4 h-4"></i></button>
+            <button onclick='openWhatsAppInvite(${JSON.stringify({ id:r.id, ...f }).replace(/'/g, "&#39;")})' class="text-ink-500 hover:text-emerald-600 p-2" title="Per WhatsApp einladen / Login-Daten schicken">
+              <i data-lucide="message-circle" class="w-4 h-4"></i>
+            </button>
+            <button onclick='openUserModal(${JSON.stringify({ id:r.id, ...f }).replace(/'/g, "&#39;")})' class="text-ink-500 hover:text-brand-600 p-2" title="Bearbeiten"><i data-lucide="edit-3" class="w-4 h-4"></i></button>
+            <button onclick="confirmDeleteUser('${r.id}', '${escapeAttr(name)}')" class="text-ink-500 hover:text-red-600 p-2" title="Löschen"><i data-lucide="trash-2" class="w-4 h-4"></i></button>
           </div>`;
       }).join('')}
     </div>`;
@@ -6509,6 +6849,11 @@ function openUserModal(user) {
               </select>
             </div>
           </div>
+          <div>
+            <label class="text-xs font-semibold text-ink-700">Telefon (für WhatsApp-Einladung)</label>
+            <input id="usrPhone" type="tel" value="${escapeAttr(user?.phone || '')}" placeholder="z.B. +49170123456" class="mt-1 w-full px-3 py-2 border border-ink-200 rounded-lg text-sm font-mono focus:ring-2 focus:ring-brand-500/30 focus:border-brand-500">
+            <p class="text-[10px] text-ink-500 mt-1">Mit Ländervorwahl (+49…). Wird nur für WhatsApp-Einladung genutzt, optional.</p>
+          </div>
           <div id="usrFormError" class="hidden text-xs text-red-700 bg-red-50 border border-red-200 rounded px-2 py-1.5"></div>
           <div class="flex gap-2 pt-1">
             <button type="button" onclick="closeModal()" class="flex-1 px-3 py-2.5 border border-ink-200 rounded-lg text-sm font-medium hover:bg-ink-50">Abbrechen</button>
@@ -6528,9 +6873,10 @@ function openUserModal(user) {
         api_key: $('usrApiKey').value.trim(),
         role:    $('usrRole').value,
         status:  $('usrStatus').value,
+        phone:   $('usrPhone')?.value.trim() || '',
       };
       if (isEdit) {
-        const upd = { name: fields.name, role: fields.role, status: fields.status };
+        const upd = { name: fields.name, role: fields.role, status: fields.status, phone: fields.phone };
         await updateUser(user.id, upd);
       } else {
         await createUser(fields);
@@ -6544,6 +6890,98 @@ function openUserModal(user) {
       errEl.classList.remove('hidden');
     }
   };
+}
+
+/* === WhatsApp-Einladung für einen User =====================================
+   Generiert eine erklärende Nachricht (App-Zweck, Login-URL, User-Key, Installation
+   auf iOS/Android) und öffnet WhatsApp mit dem Text. Wenn der User eine Telefonnummer
+   hinterlegt hat, wird die direkt vorbefüllt — sonst kann der Absender den Empfänger
+   in WhatsApp wählen. */
+function openWhatsAppInvite(user) {
+  const name    = (user?.name || '').trim();
+  const apiKey  = (user?.api_key || '').trim();
+  const phoneRaw = (user?.phone || '').trim();
+  const phone   = phoneRaw.replace(/\D/g, ''); // nur Ziffern für wa.me
+  // Loader-URL aus aktueller Location ableiten — Standard ist same-origin
+  const baseUrl = window.location.origin + window.location.pathname.replace(/\/[^\/]*$/, '/');
+  const appUrl  = baseUrl + 'loader.html';
+  const defaultText =
+    'Hallo' + (name ? ' ' + name.split(/\s+/)[0] : '') + ',\n\n' +
+    'du bist eingeladen für *Freshdesk Hero* — unsere mobile App zur zentralen Verwaltung der Freshdesk-Tickets mit KI-Unterstützung (Spracheingabe, automatische Zusammenfassung, Regeln, Multi-Account).\n\n' +
+    '*So loggst du dich ein:*\n' +
+    '1. Öffne diesen Link auf dem Handy in Safari/Chrome:\n' +
+    appUrl + '\n\n' +
+    '2. Login-Schlüssel (genau so eingeben):\n' +
+    apiKey + '\n\n' +
+    '3. *Auf dem iPhone (für ein App-Icon auf dem Homescreen):*\n' +
+    '   Safari → Teilen-Symbol → "Zum Home-Bildschirm" → dann öffnest du sie wie eine richtige App.\n\n' +
+    '   *Auf Android:*\n' +
+    '   Chrome → 3-Punkte-Menü → "Zum Startbildschirm hinzufügen".\n\n' +
+    'Bei Fragen melde dich. Viel Erfolg!';
+
+  let host = document.getElementById('subModalHost');
+  if (!host) { host = document.createElement('div'); host.id = 'subModalHost'; document.body.appendChild(host); }
+  host.innerHTML = `
+    <div class="fixed inset-0 z-[60] flex items-end sm:items-center justify-center bg-black/40 px-4" onclick="if(event.target===this)closeWhatsAppInvite()">
+      <div class="bg-white w-full max-w-md rounded-2xl shadow-2xl flex flex-col safe-bottom" style="max-height:90vh">
+        <div class="px-4 py-3 border-b border-ink-200 flex items-center justify-between">
+          <div class="flex items-center gap-2">
+            <div class="w-8 h-8 rounded-full bg-emerald-500 flex items-center justify-center text-white">
+              <i data-lucide="message-circle" class="w-4 h-4"></i>
+            </div>
+            <div>
+              <h3 class="font-bold text-ink-900 text-sm leading-tight">WhatsApp-Einladung</h3>
+              <p class="text-[11px] text-ink-500">an ${escapeHtml(name || '(unbenannt)')}${phoneRaw ? ' · ' + escapeHtml(phoneRaw) : ''}</p>
+            </div>
+          </div>
+          <button onclick="closeWhatsAppInvite()" class="w-9 h-9 rounded-lg hover:bg-ink-100 flex items-center justify-center"><i data-lucide="x" class="w-5 h-5 text-ink-700"></i></button>
+        </div>
+        <div class="flex-1 overflow-y-auto p-4 space-y-3">
+          <div>
+            <label class="text-[10px] uppercase font-semibold text-ink-700 tracking-wider">Nachricht (editierbar)</label>
+            <textarea id="waInviteText" rows="14" class="mt-1 w-full px-3 py-2 border border-ink-200 rounded-lg text-xs focus:ring-2 focus:ring-emerald-500/30 focus:border-emerald-500 resize-y font-sans">${escapeHtml(defaultText)}</textarea>
+          </div>
+          ${!phoneRaw ? `
+            <div class="bg-amber-50 border border-amber-200 rounded-lg p-2.5 text-[11px] text-amber-800">
+              <i data-lucide="info" class="w-3 h-3 inline"></i> Keine Telefonnummer im Profil hinterlegt — beim Senden wählst du in WhatsApp den Empfänger. Oder im User-Profil eine Telefonnummer eintragen damit's direkt geht.
+            </div>` : ''}
+          <div class="bg-emerald-50 border border-emerald-200 rounded-lg p-2.5 text-[11px] text-emerald-800">
+            <i data-lucide="shield" class="w-3 h-3 inline"></i> Login-Schlüssel ist im Text enthalten — Empfänger vertrauen, WhatsApp-Chat behandelt's wie eine normale Nachricht.
+          </div>
+        </div>
+        <div class="px-4 py-3 border-t border-ink-100 flex gap-2 safe-bottom">
+          <button type="button" onclick="copyWhatsAppText(this)" class="flex-1 bg-white border border-ink-200 px-3 py-2.5 rounded-lg text-sm font-medium hover:bg-ink-50 inline-flex items-center justify-center gap-1.5">
+            <i data-lucide="copy" class="w-4 h-4"></i> Nur kopieren
+          </button>
+          <button type="button" onclick="sendWhatsAppInvite('${escapeAttr(phone)}', this)" class="flex-[1.5] bg-emerald-600 hover:bg-emerald-700 text-white px-3 py-2.5 rounded-lg text-sm font-semibold inline-flex items-center justify-center gap-1.5">
+            <i data-lucide="send" class="w-4 h-4"></i> ${phone ? 'An ' + escapeHtml(phoneRaw) + ' senden' : 'In WhatsApp öffnen'}
+          </button>
+        </div>
+      </div>
+    </div>`;
+  if (window.lucide) lucide.createIcons();
+}
+
+function closeWhatsAppInvite() {
+  const host = document.getElementById('subModalHost');
+  if (host) host.innerHTML = '';
+}
+
+async function copyWhatsAppText(btnEl) {
+  const txt = $('waInviteText')?.value || '';
+  try { await navigator.clipboard.writeText(txt); toast('Text kopiert', 'success', 2500); }
+  catch (_) { toast('Kopieren fehlgeschlagen', 'warn'); }
+}
+
+function sendWhatsAppInvite(phoneDigits, btnEl) {
+  const txt = ($('waInviteText')?.value || '').trim();
+  if (!txt) return toast('Text ist leer', 'warn');
+  // wa.me akzeptiert nur Ziffern (kein +, keine Leerzeichen)
+  const url = phoneDigits
+    ? 'https://wa.me/' + phoneDigits + '?text=' + encodeURIComponent(txt)
+    : 'https://wa.me/?text=' + encodeURIComponent(txt);
+  window.open(url, '_blank');
+  closeWhatsAppInvite();
 }
 
 async function confirmDeleteUser(id, name) {
