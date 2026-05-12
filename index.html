@@ -267,7 +267,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.26.4';
+const APP_VERSION = 'v2.27.0';
 // Read-Token absichtlich gesplittet, damit GitHub Secret-Scanning beim Push nicht blockt.
 // Der Token ist read-only und Base-scoped → bewusst eingebettet (Architektur-Entscheidung).
 const _RK = 'patu8KWM8aWB' + 'yxCGL.69fae5d9fa4b94c2' + '66b426dadd71a51f574945d840b33569058ab5e9d89ebef3';
@@ -3212,6 +3212,119 @@ function openFilterAssignee() {
   ]);
 }
 
+/* === Native Inline-Dropdowns auf der Card =================================
+   Statt eines Bottom-Sheet-Modals (mit Loading) öffnet ein einfacher Tap das
+   native `<select>` des Browsers — auf iOS Wheel-Picker, auf Android Native-Dropdown.
+   Beim change-Event API-Call + lokales Re-Render. */
+function _statusBadgeDropdown(t) {
+  const st = FD_STATUS[t.status] || { label: '?', short: '?', cls: 'bg-ink-100 text-ink-600 border-ink-200' };
+  const statusOpts = [
+    { v: 2, label: 'Offen' },
+    { v: 3, label: 'Wartet' },
+    { v: 4, label: 'Gelöst' },
+    { v: 5, label: 'Geschlossen' },
+  ];
+  return `
+    <span class="relative inline-flex items-center" onclick="event.stopPropagation()">
+      <span class="text-[10px] uppercase tracking-wider px-1.5 py-0.5 rounded font-semibold border ${st.cls} pointer-events-none inline-flex items-center gap-1">${escapeHtml(st.label)} <i data-lucide="chevron-down" class="w-2.5 h-2.5"></i></span>
+      <select data-account-id="${escapeAttr(t._accountId)}" data-ticket-id="${t.id}" onchange="cardChangeStatus(this)" class="absolute inset-0 opacity-0 cursor-pointer w-full">
+        ${statusOpts.map(o => `<option value="${o.v}" ${t.status === o.v ? 'selected' : ''}>${o.label}</option>`).join('')}
+      </select>
+    </span>`;
+}
+
+function _assigneeBadgeDropdown(t) {
+  const cache = APP_STATE.agentsCache?.[t._accountId];
+  const agents = (cache?.agents || []).slice().sort((a, b) => (a.name || '').localeCompare(b.name || '', 'de'));
+  const currentName = getAgentFirstName(t._accountId, t.responder_id);
+  const hasOne = !!currentName;
+  const badgeCls = hasOne ? 'bg-ink-100 text-ink-700' : 'bg-amber-50 text-amber-700 border border-amber-200';
+  return `
+    <span class="relative inline-flex items-center" onclick="event.stopPropagation()">
+      <span class="text-[10px] uppercase tracking-wider px-1.5 py-0.5 rounded font-semibold ${badgeCls} pointer-events-none inline-flex items-center gap-1"><i data-lucide="user" class="w-2.5 h-2.5"></i>${escapeHtml(currentName || 'unzugewiesen')} <i data-lucide="chevron-down" class="w-2.5 h-2.5"></i></span>
+      <select data-account-id="${escapeAttr(t._accountId)}" data-ticket-id="${t.id}" onchange="cardChangeAssignee(this)" class="absolute inset-0 opacity-0 cursor-pointer w-full">
+        <option value="" ${!t.responder_id ? 'selected' : ''}>— unzugewiesen —</option>
+        ${agents.map(a => `<option value="${a.id}" ${a.id === t.responder_id ? 'selected' : ''}>${escapeHtml(a.name)}</option>`).join('')}
+      </select>
+    </span>`;
+}
+
+function _groupBadgeDropdown(t) {
+  const cache = APP_STATE.groupsCache?.[t._accountId];
+  const groups = (cache?.groups || []).slice().sort((a, b) => (a.name || '').localeCompare(b.name || '', 'de'));
+  const currentName = getGroupName(t._accountId, t.group_id);
+  const hasOne = !!t.group_id;
+  const badgeCls = hasOne ? 'bg-brand-50 text-brand-700 border border-brand-200' : 'bg-ink-50 text-ink-500 border border-ink-200';
+  return `
+    <span class="relative inline-flex items-center" onclick="event.stopPropagation()">
+      <span class="text-[10px] uppercase tracking-wider px-1.5 py-0.5 rounded font-semibold ${badgeCls} pointer-events-none inline-flex items-center gap-1"><i data-lucide="users" class="w-2.5 h-2.5"></i>${escapeHtml(currentName || 'keine Gruppe')} <i data-lucide="chevron-down" class="w-2.5 h-2.5"></i></span>
+      <select data-account-id="${escapeAttr(t._accountId)}" data-ticket-id="${t.id}" onchange="cardChangeGroup(this)" class="absolute inset-0 opacity-0 cursor-pointer w-full">
+        <option value="" ${!t.group_id ? 'selected' : ''}>— keine Gruppe —</option>
+        ${groups.map(g => `<option value="${g.id}" ${g.id === t.group_id ? 'selected' : ''}>${escapeHtml(g.name)}</option>`).join('')}
+      </select>
+    </span>`;
+}
+
+function _typeBadgeDropdown(t) {
+  const cache = APP_STATE.typesCache?.[t._accountId];
+  const types = (cache?.types || []).slice().sort((a, b) => a.localeCompare(b, 'de'));
+  const hasOne = !!t.type;
+  const badgeCls = hasOne ? 'bg-purple-50 text-purple-700 border border-purple-200' : 'bg-ink-50 text-ink-500 border border-ink-200';
+  return `
+    <span class="relative inline-flex items-center" onclick="event.stopPropagation()">
+      <span class="text-[10px] uppercase tracking-wider px-1.5 py-0.5 rounded font-semibold ${badgeCls} pointer-events-none inline-flex items-center gap-1"><i data-lucide="tag" class="w-2.5 h-2.5"></i>${escapeHtml(t.type || 'kein Typ')} <i data-lucide="chevron-down" class="w-2.5 h-2.5"></i></span>
+      <select data-account-id="${escapeAttr(t._accountId)}" data-ticket-id="${t.id}" onchange="cardChangeType(this)" class="absolute inset-0 opacity-0 cursor-pointer w-full">
+        <option value="" ${!t.type ? 'selected' : ''}>— kein Typ —</option>
+        ${types.map(ty => `<option value="${escapeAttr(ty)}" ${ty === t.type ? 'selected' : ''}>${escapeHtml(ty)}</option>`).join('')}
+      </select>
+    </span>`;
+}
+
+/* Generischer Helper: führt PUT auf das Ticket aus, patcht den Cache und re-rendert.
+   Bei Fehler: Toast + Selektion zurücksetzen. */
+async function _cardSetField(sel, fieldName, parsedValue, successMsg, errLabel) {
+  const accountId = sel.dataset.accountId;
+  const ticketId  = parseInt(sel.dataset.ticketId, 10);
+  if (!accountId || !ticketId) return;
+  const path = '/freshdesk/' + encodeURIComponent(accountId) + '/api/v2/tickets/' + ticketId;
+  // Optimistisch updaten + UI re-rendern
+  const patch = {}; patch[fieldName] = parsedValue;
+  patchTicketInList(accountId, ticketId, patch);
+  refreshTicketsListFromCache();
+  try {
+    const body = {}; body[fieldName] = parsedValue;
+    await proxyJson(path, { method: 'PUT', body: JSON.stringify(body) });
+    if (successMsg) toast(successMsg, 'success', 2500);
+  } catch (e) {
+    toast((errLabel || 'Änderung') + ' fehlgeschlagen: ' + e.message, 'error', 6000);
+    // Bei Fehler: Liste neu laden, damit der lokale Cache korrigiert wird
+    renderTicketsPage();
+  }
+}
+
+async function cardChangeStatus(sel) {
+  const v = parseInt(sel.value, 10);
+  if (!v) return;
+  const lbl = (FD_STATUS[v] || {}).label || ('Status ' + v);
+  await _cardSetField(sel, 'status', v, 'Status: ' + lbl, 'Status');
+}
+async function cardChangeAssignee(sel) {
+  const v = sel.value ? parseInt(sel.value, 10) : null;
+  const accountId = sel.dataset.accountId;
+  const name = v ? (getAgentName(accountId, v) || ('#' + v)) : null;
+  await _cardSetField(sel, 'responder_id', v, v ? 'Zugewiesen an ' + name : 'Zuweisung entfernt', 'Zuweisung');
+}
+async function cardChangeGroup(sel) {
+  const v = sel.value ? parseInt(sel.value, 10) : null;
+  const accountId = sel.dataset.accountId;
+  const name = v ? (getGroupName(accountId, v) || ('#' + v)) : null;
+  await _cardSetField(sel, 'group_id', v, v ? 'Gruppe: ' + name : 'Gruppe entfernt', 'Gruppe');
+}
+async function cardChangeType(sel) {
+  const v = sel.value || null;
+  await _cardSetField(sel, 'type', v, v ? 'Typ: ' + v : 'Typ entfernt', 'Typ');
+}
+
 function renderTicketList(tickets) {
   if (!tickets.length) {
     $('ticketList').innerHTML = `
@@ -3373,17 +3486,11 @@ function renderTicketList(tickets) {
                     </div>` : ''}
                   ${recentlyBack ? `<div class="mt-1 inline-flex items-center gap-1 text-[10px] font-bold uppercase tracking-wider bg-gradient-to-r from-brand-100 to-emerald-100 text-brand-800 border border-brand-300 px-1.5 py-0.5 rounded"><i data-lucide="rotate-cw" class="w-2.5 h-2.5"></i> Heute fällig${wv && wv.grund && GRUND_LABEL[wv.grund] ? ' · ' + GRUND_LABEL[wv.grund] : ''}</div>` : ''}
                   <div class="flex items-center gap-1.5 mt-1.5 flex-wrap">
-                    <button data-action="status" data-account-id="${escapeAttr(t._accountId)}" data-ticket-id="${t.id}" data-status="${t.status}" class="text-[10px] uppercase tracking-wider px-1.5 py-0.5 rounded font-semibold border ${st.cls} active:opacity-70 inline-flex items-center gap-1">${escapeHtml(st.label)} <i data-lucide="chevron-down" class="w-2.5 h-2.5"></i></button>
+                    ${_statusBadgeDropdown(t)}
                     ${onWv ? `<span class="text-[10px] uppercase tracking-wider px-1.5 py-0.5 rounded font-semibold bg-indigo-50 text-indigo-700 border border-indigo-200 inline-flex items-center gap-1"><i data-lucide="clock" class="w-2.5 h-2.5"></i> WV ${escapeHtml(_fmtFrist(wv.frist_am))}</span>` : ''}
-                    ${assigneeFirst
-                      ? `<button data-action="assign" data-account-id="${escapeAttr(t._accountId)}" data-ticket-id="${t.id}" data-responder-id="${t.responder_id || ''}" class="text-[10px] uppercase tracking-wider px-1.5 py-0.5 rounded font-semibold bg-ink-100 text-ink-700 active:bg-ink-200 inline-flex items-center gap-1"><i data-lucide="user" class="w-2.5 h-2.5"></i>${escapeHtml(assigneeFirst)} <i data-lucide="chevron-down" class="w-2.5 h-2.5"></i></button>`
-                      : `<button data-action="assign" data-account-id="${escapeAttr(t._accountId)}" data-ticket-id="${t.id}" data-responder-id="" class="text-[10px] uppercase tracking-wider px-1.5 py-0.5 rounded font-semibold bg-amber-50 text-amber-700 border border-amber-200 active:bg-amber-100 inline-flex items-center gap-1">unzugewiesen <i data-lucide="chevron-down" class="w-2.5 h-2.5"></i></button>`}
-                    ${groupName
-                      ? `<button data-action="group" data-account-id="${escapeAttr(t._accountId)}" data-ticket-id="${t.id}" data-group-id="${t.group_id || ''}" class="text-[10px] uppercase tracking-wider px-1.5 py-0.5 rounded font-semibold bg-brand-50 text-brand-700 border border-brand-200 active:bg-brand-100 inline-flex items-center gap-1"><i data-lucide="users" class="w-2.5 h-2.5"></i>${escapeHtml(groupName)} <i data-lucide="chevron-down" class="w-2.5 h-2.5"></i></button>`
-                      : `<button data-action="group" data-account-id="${escapeAttr(t._accountId)}" data-ticket-id="${t.id}" data-group-id="" class="text-[10px] uppercase tracking-wider px-1.5 py-0.5 rounded font-semibold bg-ink-50 text-ink-500 border border-ink-200 active:bg-ink-100 inline-flex items-center gap-1">keine Gruppe <i data-lucide="chevron-down" class="w-2.5 h-2.5"></i></button>`}
-                    ${t.type
-                      ? `<button data-action="type" data-account-id="${escapeAttr(t._accountId)}" data-ticket-id="${t.id}" data-type="${escapeAttr(t.type)}" class="text-[10px] uppercase tracking-wider px-1.5 py-0.5 rounded font-semibold bg-purple-50 text-purple-700 border border-purple-200 active:bg-purple-100 inline-flex items-center gap-1"><i data-lucide="tag" class="w-2.5 h-2.5"></i>${escapeHtml(t.type)} <i data-lucide="chevron-down" class="w-2.5 h-2.5"></i></button>`
-                      : `<button data-action="type" data-account-id="${escapeAttr(t._accountId)}" data-ticket-id="${t.id}" data-type="" class="text-[10px] uppercase tracking-wider px-1.5 py-0.5 rounded font-semibold bg-ink-50 text-ink-500 border border-ink-200 active:bg-ink-100 inline-flex items-center gap-1">kein Typ <i data-lucide="chevron-down" class="w-2.5 h-2.5"></i></button>`}
+                    ${_assigneeBadgeDropdown(t)}
+                    ${_groupBadgeDropdown(t)}
+                    ${_typeBadgeDropdown(t)}
                     <span class="text-[10px] text-ink-400">#${t.id}</span>
                     ${showAccount ? `<span class="text-[10px] text-ink-500 ml-auto">${escapeHtml(t._accountName)}</span>` : ''}
                   </div>
