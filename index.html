@@ -259,7 +259,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.23.0';
+const APP_VERSION = 'v2.23.1';
 // Read-Token absichtlich gesplittet, damit GitHub Secret-Scanning beim Push nicht blockt.
 // Der Token ist read-only und Base-scoped → bewusst eingebettet (Architektur-Entscheidung).
 const _RK = 'patu8KWM8aWB' + 'yxCGL.69fae5d9fa4b94c2' + '66b426dadd71a51f574945d840b33569058ab5e9d89ebef3';
@@ -2751,16 +2751,24 @@ async function renderTicketsPage() {
     return;
   }
   if (!APP_STATE.accounts.length) {
+    const isAdmin = APP_KEYS.user?.is_admin;
     $('pageContent').innerHTML = `
       <div class="bg-white rounded-2xl border border-ink-200 p-6 text-center">
         <div class="w-14 h-14 mx-auto rounded-2xl bg-brand-50 flex items-center justify-center mb-3">
           <i data-lucide="building-2" class="w-7 h-7 text-brand-600"></i>
         </div>
         <h3 class="font-semibold text-ink-900">Noch keine Accounts</h3>
-        <p class="text-sm text-ink-500 mt-1">Lege deinen ersten Freshdesk-Account an, um Tickets zu sehen.</p>
-        <button onclick="navTo('accounts')" class="mt-4 inline-flex items-center gap-2 bg-brand-500 hover:bg-brand-600 text-white rounded-lg px-4 py-2 text-sm font-medium">
-          <i data-lucide="plus" class="w-4 h-4"></i> Account anlegen
-        </button>
+        ${isAdmin ? `
+          <p class="text-sm text-ink-500 mt-1">Lege deinen ersten Freshdesk-Account an, um Tickets zu sehen.</p>
+          <button onclick="navTo('accounts')" class="mt-4 inline-flex items-center gap-2 bg-brand-500 hover:bg-brand-600 text-white rounded-lg px-4 py-2 text-sm font-medium">
+            <i data-lucide="plus" class="w-4 h-4"></i> Account anlegen
+          </button>
+        ` : `
+          <p class="text-sm text-ink-500 mt-1 leading-relaxed">Dir wurden noch keine Accounts zugewiesen.<br>Bitte den Admin, dir Zugriff zu geben.</p>
+          <button onclick="loadAccounts().then(() => renderTicketsPage())" class="mt-4 inline-flex items-center gap-2 bg-white border border-ink-200 hover:bg-ink-50 text-ink-700 rounded-lg px-4 py-2 text-sm font-medium">
+            <i data-lucide="refresh-cw" class="w-4 h-4"></i> Neu laden
+          </button>
+        `}
       </div>`;
     if (window.lucide) lucide.createIcons();
     return;
@@ -6747,6 +6755,10 @@ async function renderAccountsPage() {
       </div>`;
     return;
   }
+  // Nicht-Admin: Self-Service-View
+  if (!APP_KEYS.user?.is_admin) {
+    return renderAccountsSelfService();
+  }
   $('pageContent').innerHTML = `
     <div class="space-y-3">
       <button onclick="openAccountModal()" class="w-full bg-brand-500 hover:bg-brand-600 text-white rounded-xl py-2.5 font-medium flex items-center justify-center gap-2">
@@ -6761,6 +6773,103 @@ async function renderAccountsPage() {
   if (window.lucide) lucide.createIcons();
   await loadAccounts();
   renderAccountsList();
+}
+
+/* Self-Service-Ansicht für normale User: Zeigt ihre zugewiesenen Accounts und
+   ermöglicht das Eintragen/Ändern des eigenen Freshdesk-API-Keys (+ optional Freshsales).
+   Account-Daten selbst (Name, Domain) sind read-only — nur Admins können das ändern. */
+async function renderAccountsSelfService() {
+  const userKey = APP_KEYS.user?.api_key;
+  $('pageContent').innerHTML = `
+    <div class="space-y-3">
+      <div class="bg-brand-50 border border-brand-200 rounded-2xl p-3">
+        <p class="text-sm text-ink-800 leading-snug"><i data-lucide="info" class="w-4 h-4 inline text-brand-600"></i> Hier siehst du die Accounts, die dir der Admin zugewiesen hat. Trag deinen <b>persönlichen Freshdesk-API-Key</b> pro Account ein — der Admin kennt deinen Key nicht.</p>
+      </div>
+      <div id="accountsList">
+        <div class="bg-white rounded-2xl border border-ink-200 p-6 text-center">
+          <div class="spinner inline-block text-brand-500 w-6 h-6 border-[3px]"></div>
+        </div>
+      </div>
+    </div>`;
+  if (window.lucide) lucide.createIcons();
+  await loadAccounts();
+  // Aktuelle AccountAccess-Einträge des Users
+  let myAccess = [];
+  try { myAccess = await loadAccessForUser(userKey); } catch (_) {}
+  const accessByAccountId = {};
+  myAccess.forEach(a => { accessByAccountId[a.account_id] = a; });
+
+  const list = APP_STATE.accounts;
+  if (!list.length) {
+    $('accountsList').innerHTML = `
+      <div class="bg-white rounded-2xl border border-ink-200 p-6 text-center">
+        <i data-lucide="building-2" class="w-10 h-10 mx-auto text-ink-400"></i>
+        <p class="text-sm text-ink-500 mt-2">Dir wurden noch keine Accounts zugewiesen.</p>
+        <p class="text-[11px] text-ink-400 mt-1">Bitte den Admin, dir Zugriff zu geben.</p>
+      </div>`;
+    if (window.lucide) lucide.createIcons();
+    return;
+  }
+  $('accountsList').innerHTML = `
+    <div class="space-y-2">
+      ${list.map(a => {
+        const ac = accessByAccountId[a.id];
+        const hasKey = !!(ac?.freshdesk_api_key);
+        return `
+          <div class="bg-white rounded-2xl border border-ink-200 p-3" data-self-row data-account-id="${escapeAttr(a.id)}">
+            <div class="flex items-center gap-3">
+              <span class="w-10 h-10 rounded-xl flex items-center justify-center shrink-0 text-white font-semibold" style="background:${escapeAttr(a.color)}">
+                ${escapeHtml((a.name || '?').charAt(0).toUpperCase())}
+              </span>
+              <div class="flex-1 min-w-0">
+                <p class="font-semibold text-ink-900 text-sm truncate">${escapeHtml(a.name)}</p>
+                <p class="text-[11px] text-ink-500 truncate">${escapeHtml(a.domain)}.freshdesk.com</p>
+              </div>
+              <span class="shrink-0 text-[10px] uppercase tracking-wider px-1.5 py-0.5 rounded font-semibold ${hasKey ? 'bg-emerald-100 text-emerald-700' : 'bg-amber-100 text-amber-700'}">
+                ${hasKey ? 'verbunden' : 'Key fehlt'}
+              </span>
+            </div>
+            <div class="mt-2 space-y-1.5">
+              <label class="text-[10px] uppercase font-semibold text-brand-800 block">Mein Freshdesk-API-Key</label>
+              <input type="password" class="self-fd-key w-full px-2 py-1.5 border border-ink-200 bg-white rounded text-xs font-mono" value="${escapeAttr(ac?.freshdesk_api_key || '')}" placeholder="${hasKey ? '•••••• gespeichert (zum Ändern überschreiben)' : 'Dein persönlicher API-Key aus Freshdesk'}">
+              ${a.freshsales_domain ? `
+                <label class="text-[10px] uppercase font-semibold text-purple-800 block mt-1.5">Mein Freshsales-API-Key (optional)</label>
+                <input type="password" class="self-fs-key w-full px-2 py-1.5 border border-ink-200 bg-white rounded text-xs font-mono" value="${escapeAttr(ac?.freshsales_api_key || '')}" placeholder="leer = Account-Default">
+              ` : ''}
+              <button type="button" onclick="saveSelfAccountAccess('${escapeAttr(a.id)}', this)" class="w-full mt-2 bg-brand-500 hover:bg-brand-600 text-white px-3 py-2 rounded-lg text-xs font-semibold inline-flex items-center justify-center gap-1.5">
+                <i data-lucide="save" class="w-3.5 h-3.5"></i> Speichern
+              </button>
+            </div>
+            <details class="mt-2 text-[11px]">
+              <summary class="text-ink-500 cursor-pointer">Wo finde ich meinen API-Key?</summary>
+              <p class="text-ink-600 mt-1 leading-snug">In Freshdesk: Profil-Avatar oben rechts → „Profile settings" → unter dem Bereich „Your API Key" auf „View API Key" klicken. Den langen Schlüssel hier eintragen.</p>
+            </details>
+          </div>`;
+      }).join('')}
+    </div>`;
+  if (window.lucide) lucide.createIcons();
+}
+
+async function saveSelfAccountAccess(accountId, btnEl) {
+  const userKey = APP_KEYS.user?.api_key;
+  if (!userKey) return toast('Nicht eingeloggt', 'error');
+  const row = btnEl.closest('[data-self-row]');
+  if (!row) return;
+  const fdKey = row.querySelector('.self-fd-key')?.value.trim() || '';
+  const fsKey = row.querySelector('.self-fs-key')?.value.trim() || '';
+  if (!fdKey) return toast('Freshdesk-API-Key fehlt — bitte eintragen', 'warn');
+  setBusy(btnEl, true, 'Speichere…');
+  try {
+    await upsertAccountAccess(userKey, accountId, fdKey, fsKey);
+    setBusy(btnEl, false);
+    toast('API-Key gespeichert', 'success', 3000);
+    // Accounts neu laden, damit die Tickets-Übersicht den neuen Key nutzt
+    await loadAccounts();
+    renderAccountsSelfService();
+  } catch (e) {
+    setBusy(btnEl, false);
+    toast('Speichern fehlgeschlagen: ' + e.message, 'error', 6000);
+  }
 }
 
 function renderAccountsList() {
@@ -7104,7 +7213,7 @@ async function openUserModal(user) {
               Account-Zugriff (${existingAccess.length} aktiv)
             </summary>
             <div class="px-3 pb-3 space-y-2">
-              <p class="text-[11px] text-ink-600 leading-snug">Pro Account auswählen ob der User Zugriff hat. Jeder User hat einen eigenen Freshdesk-API-Key — bitte einzeln hier hinterlegen.</p>
+              <p class="text-[11px] text-ink-600 leading-snug">Pro Account auswählen ob der User Zugriff hat. <b>API-Key kann leer bleiben</b> — der User trägt ihn dann selbst über „Accounts" in der App ein (Self-Service).</p>
               ${allAccounts.length === 0
                 ? `<p class="text-[11px] text-ink-500 italic bg-white border border-ink-200 rounded-lg p-2.5">Noch keine Accounts angelegt. Erst über „Accounts" einen Freshdesk-Account hinzufügen.</p>`
                 : allAccounts.map(acc => {
