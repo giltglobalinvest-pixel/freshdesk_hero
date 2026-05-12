@@ -171,6 +171,9 @@
         <h1 id="pageTitle" class="font-bold text-ink-900 leading-tight truncate">Tickets</h1>
         <p id="pageSubtitle" class="text-[11px] text-ink-500 truncate"></p>
       </div>
+      <button onclick="openSearchModal()" class="w-9 h-9 rounded-lg hover:bg-brand-50 flex items-center justify-center group" aria-label="Suche" title="Suche (KI-gestützt)">
+        <i data-lucide="search" class="w-5 h-5 text-brand-600 group-active:text-brand-800"></i>
+      </button>
       <button onclick="toggleMenu()" class="w-9 h-9 rounded-lg hover:bg-ink-100 flex items-center justify-center" aria-label="Menü">
         <i data-lucide="menu" class="w-5 h-5 text-ink-700"></i>
       </button>
@@ -248,7 +251,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.17.2';
+const APP_VERSION = 'v2.18.0';
 // Read-Token absichtlich gesplittet, damit GitHub Secret-Scanning beim Push nicht blockt.
 // Der Token ist read-only und Base-scoped → bewusst eingebettet (Architektur-Entscheidung).
 const _RK = 'patu8KWM8aWB' + 'yxCGL.69fae5d9fa4b94c2' + '66b426dadd71a51f574945d840b33569058ab5e9d89ebef3';
@@ -3845,6 +3848,387 @@ function runSummaryAssistant(btnEl) {
   }).catch(e => {
     toast('Assistent öffnen fehlgeschlagen: ' + e.message, 'error', 6000);
   });
+}
+
+/* ============================================================
+   GLOBALE SUCHE — Volltext + KI-Smart-Mode
+   Sucht parallel über alle Accounts: lokale Tickets im Cache,
+   Freshdesk-Search-API und Contacts-Autocomplete.
+   ============================================================ */
+let SEARCH_CTX = null;
+let SEARCH_REC = null;
+
+function openSearchModal() {
+  SEARCH_CTX = { query: '', results: null, summary: null, busy: false };
+  let host = document.getElementById('subModalHost');
+  if (!host) { host = document.createElement('div'); host.id = 'subModalHost'; document.body.appendChild(host); }
+  const speechAvailable = !!(window.SpeechRecognition || window.webkitSpeechRecognition);
+  host.innerHTML = `
+    <div class="fixed inset-0 z-[60] bg-white flex flex-col">
+      <header class="sticky top-0 z-10 bg-white border-b border-ink-200 safe-top">
+        <div class="px-2 py-2.5 flex items-center gap-1.5">
+          <button onclick="closeSearchModal()" class="w-9 h-9 rounded-lg hover:bg-ink-100 flex items-center justify-center" aria-label="Schließen">
+            <i data-lucide="arrow-left" class="w-5 h-5 text-ink-700"></i>
+          </button>
+          <div class="flex-1 min-w-0">
+            <h1 class="font-bold text-ink-900 leading-tight inline-flex items-center gap-1.5"><i data-lucide="search" class="w-4 h-4 text-brand-600"></i> Suche</h1>
+            <p class="text-[11px] text-ink-500 truncate">Name, Stichwort, Auftrag — oder freie Frage</p>
+          </div>
+        </div>
+        <div class="px-3 pb-2 flex items-center gap-1.5">
+          <input id="searchInput" type="search" placeholder="z.B. „Rommel anrufen" oder „Dachser Import" …" autocomplete="off"
+                 class="flex-1 text-sm px-3 py-2 border border-ink-200 rounded-lg focus:ring-2 focus:ring-brand-500/30 focus:border-brand-500">
+          ${speechAvailable ? `
+            <button id="searchMicBtn" onclick="toggleSearchVoice()" class="w-10 h-10 rounded-lg bg-gradient-to-br from-purple-500 to-brand-600 text-white inline-flex items-center justify-center active:opacity-80 shrink-0" aria-label="Sprechen">
+              <i data-lucide="mic" class="w-4 h-4"></i>
+            </button>` : ''}
+        </div>
+        <div class="px-3 pb-2 flex items-center gap-2">
+          <button onclick="runSearch(false)" class="flex-1 bg-ink-100 hover:bg-ink-200 text-ink-800 px-3 py-2 rounded-lg text-xs font-semibold inline-flex items-center justify-center gap-1.5 active:opacity-80">
+            <i data-lucide="search" class="w-3.5 h-3.5"></i> Suchen
+          </button>
+          <button onclick="runSearch(true)" class="flex-[1.3] bg-gradient-to-br from-purple-500 to-brand-600 hover:opacity-95 text-white px-3 py-2 rounded-lg text-xs font-semibold inline-flex items-center justify-center gap-1.5 active:opacity-80 shadow-sm shadow-brand-500/20">
+            <i data-lucide="sparkles" class="w-3.5 h-3.5"></i> Mit KI verstehen
+          </button>
+        </div>
+      </header>
+      <div id="searchResults" class="flex-1 overflow-y-auto p-4">
+        <div class="text-center py-10 text-sm text-ink-500">
+          <i data-lucide="search" class="w-8 h-8 mx-auto text-ink-300"></i>
+          <p class="mt-3">Tippe oder sprich was du suchst.</p>
+          <div class="mt-4 max-w-xs mx-auto space-y-1.5 text-[11px] text-ink-600 text-left bg-ink-50 rounded-lg p-3">
+            <p>• „Rommel anrufen"</p>
+            <p>• „Letzte Bestellung Dachser"</p>
+            <p>• „Wo ist der Kone-Auftrag?"</p>
+            <p>• „Brauche Festnetznummer von Müller"</p>
+            <p class="text-ink-500 italic pt-1"><i data-lucide="sparkles" class="w-3 h-3 inline"></i> Mit KI: längere Sätze werden verstanden + Antworten zusammengefasst</p>
+          </div>
+        </div>
+      </div>
+    </div>`;
+  if (window.lucide) lucide.createIcons();
+  setTimeout(() => $('searchInput')?.focus(), 100);
+  // Enter im Input triggert KI-Suche
+  $('searchInput')?.addEventListener('keydown', e => {
+    if (e.key === 'Enter') { e.preventDefault(); runSearch(true); }
+  });
+}
+
+function closeSearchModal() {
+  if (SEARCH_REC) { try { SEARCH_REC.stop(); } catch (_) {} SEARCH_REC = null; }
+  const host = document.getElementById('subModalHost');
+  if (host) host.innerHTML = '';
+  SEARCH_CTX = null;
+}
+
+async function toggleSearchVoice() {
+  if (SEARCH_REC) { try { SEARCH_REC.stop(); } catch (_) {} SEARCH_REC = null; updateSearchMicUI(false); return; }
+  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if (!SR) return toast('Sprach-Eingabe nicht verfügbar in diesem Browser', 'warn', 6000);
+  try { await ensureMicPermission(); } catch (e) { return toast(e.message, 'error', 10000); }
+  const rec = new SR();
+  rec.lang = 'de-DE'; rec.continuous = true; rec.interimResults = true;
+  const ta = $('searchInput');
+  let base = (ta?.value || '');
+  if (base && !/\s$/.test(base)) base += ' ';
+  rec.onresult = (event) => {
+    let final = '', interim = '';
+    for (let i = event.resultIndex; i < event.results.length; i++) {
+      const tr = event.results[i][0].transcript;
+      if (event.results[i].isFinal) final += tr;
+      else interim += tr;
+    }
+    if (final) base += final;
+    if (ta) ta.value = base + interim;
+  };
+  rec.onerror = (e) => {
+    const msg = _explainSpeechError(e.error);
+    if (msg) toast(msg, 'warn', 8000);
+    SEARCH_REC = null; updateSearchMicUI(false);
+  };
+  rec.onend = () => {
+    SEARCH_REC = null; updateSearchMicUI(false);
+    // Nach Ende der Aufnahme automatisch KI-Suche starten — natürlicher Sprach-Flow
+    const txt = ($('searchInput')?.value || '').trim();
+    if (txt.length > 2) setTimeout(() => runSearch(true), 200);
+  };
+  try { rec.start(); SEARCH_REC = rec; updateSearchMicUI(true); }
+  catch (_) { toast('Mikrofon-Start fehlgeschlagen', 'warn', 6000); }
+}
+
+function updateSearchMicUI(active) {
+  const btn = $('searchMicBtn');
+  if (!btn) return;
+  if (active) {
+    btn.classList.add('animate-pulse');
+    btn.innerHTML = '<i data-lucide="square" class="w-4 h-4"></i>';
+  } else {
+    btn.classList.remove('animate-pulse');
+    btn.innerHTML = '<i data-lucide="mic" class="w-4 h-4"></i>';
+  }
+  if (window.lucide) lucide.createIcons();
+}
+
+/* Claude extrahiert aus dem User-Text das eigentliche Such-Keyword sowie Intent
+   (anrufen/email/finden). Bei nicht-KI-Modus wird der Rohtext als Keyword genutzt. */
+async function aiInterpretSearchQuery(rawText) {
+  const sys = 'Du extrahierst aus einer natürlichsprachigen Helpdesk-Sucheingabe das eigentliche Suchstichwort und den Intent. Antworte AUSSCHLIESSLICH mit JSON, kein Markdown.\n\n' +
+    'JSON-FORMAT:\n{\n' +
+    '  "keyword": "das eine wichtigste Stichwort/Begriff/Name zum Durchsuchen (max 3 Wörter, am besten 1)",\n' +
+    '  "keyword2": "optional ein zweites unabhängiges Stichwort, falls relevant",\n' +
+    '  "intent": "call|email|find|status|note|other",\n' +
+    '  "hint": "kurze deutsche Erklärung was die Suche tun soll, max 12 Wörter"\n}\n\n' +
+    'Beispiele:\n' +
+    '- "Frau Rommel anrufen" → {"keyword":"Rommel","intent":"call","hint":"Telefonnummer von Frau Rommel finden"}\n' +
+    '- "Letzte Bestellung von Dachser" → {"keyword":"Dachser","intent":"find","hint":"Tickets/Anfragen von Dachser zeigen"}\n' +
+    '- "Brauche Email von Müller wegen Auftrag 1344" → {"keyword":"Müller","keyword2":"1344","intent":"email","hint":"Email-Adresse von Müller + Auftrag 1344"}\n' +
+    '- "Status Kone Angebot" → {"keyword":"Kone","intent":"status","hint":"Status des Kone-Angebots"}';
+  const data = await proxyJson('/anthropic/v1/messages', {
+    method: 'POST',
+    body: JSON.stringify({
+      model: 'claude-haiku-4-5-20251001',
+      max_tokens: 400,
+      system: sys,
+      messages: [{ role: 'user', content: rawText }]
+    })
+  });
+  const text = (data.content && data.content[0] && data.content[0].text) || '';
+  return parseAIJson(text);
+}
+
+/* Sucht Tickets per Freshdesk Search-API für ein Keyword. Robuster Fallback auf null. */
+async function searchTicketsByKeyword(accountId, keyword) {
+  if (!keyword || keyword.length < 2) return [];
+  const safeKw = keyword.replace(/"/g, '');
+  const query = `subject:'${safeKw}' OR description:'${safeKw}' OR fr_email:'${safeKw}'`;
+  try {
+    const path = '/freshdesk/' + encodeURIComponent(accountId) +
+      '/api/v2/search/tickets?query=' + encodeURIComponent('"' + query + '"');
+    const data = await proxyJson(path);
+    const list = Array.isArray(data) ? data : (data.results || []);
+    return list.filter(t => !t.deleted && !t.spam).slice(0, 20).map(t => {
+      const acc = APP_STATE.accounts.find(a => a.id === accountId);
+      return { ...t, _accountId: accountId, _accountName: acc?.name || '?', _accountColor: acc?.color || '#64748b' };
+    });
+  } catch (e) {
+    console.warn('search tickets failed for', accountId, e.message);
+    return [];
+  }
+}
+
+/* Contacts-Autocomplete liefert max 10 Treffer pro Account. */
+async function searchContactsByKeyword(accountId, keyword) {
+  if (!keyword || keyword.length < 2) return [];
+  try {
+    const path = '/freshdesk/' + encodeURIComponent(accountId) +
+      '/api/v2/contacts/autocomplete?term=' + encodeURIComponent(keyword);
+    const data = await proxyJson(path);
+    // Autocomplete liefert {results:[...]} mit name/email/id; manche Pläne nur Array
+    const list = Array.isArray(data) ? data : (data.results || data.contacts || []);
+    const acc = APP_STATE.accounts.find(a => a.id === accountId);
+    return list.slice(0, 10).map(c => ({
+      id: c.id, name: c.name, email: c.email,
+      _accountId: accountId, _accountName: acc?.name || '?', _accountColor: acc?.color || '#64748b',
+    }));
+  } catch (e) {
+    console.warn('search contacts failed for', accountId, e.message);
+    return [];
+  }
+}
+
+/* Holt Details (Telefon, Mobil) für die Contact-Treffer nach. Parallel und resilient. */
+async function hydrateContactDetails(contacts) {
+  await Promise.allSettled(contacts.map(async c => {
+    if (!c.id) return;
+    try {
+      const full = await fetchContact(c._accountId, c.id);
+      if (full) {
+        c.phone  = full.phone  || null;
+        c.mobile = full.mobile || null;
+        c.company_id = full.company_id || null;
+        c.job_title  = full.job_title  || null;
+      }
+    } catch (_) {}
+  }));
+}
+
+async function runSearch(useAI) {
+  if (!SEARCH_CTX) return;
+  if (SEARCH_REC) { try { SEARCH_REC.stop(); } catch (_) {} SEARCH_REC = null; }
+  const raw = ($('searchInput')?.value || '').trim();
+  if (!raw) return toast('Bitte einen Suchbegriff eingeben', 'warn');
+  SEARCH_CTX.query = raw;
+  SEARCH_CTX.busy = true;
+
+  $('searchResults').innerHTML = `
+    <div class="text-center py-10">
+      <div class="spinner inline-block w-7 h-7 border-[3px] text-brand-500"></div>
+      <p class="text-sm text-ink-500 mt-3">${useAI ? 'KI analysiert die Frage…' : 'Suche läuft…'}</p>
+    </div>`;
+
+  let keyword = raw, keyword2 = null, intent = 'find', hint = '';
+  if (useAI) {
+    try {
+      const parsed = await aiInterpretSearchQuery(raw);
+      keyword  = (parsed.keyword || raw).trim();
+      keyword2 = (parsed.keyword2 || '').trim() || null;
+      intent   = parsed.intent || 'find';
+      hint     = parsed.hint || '';
+    } catch (e) {
+      console.warn('AI-Search-Parse fehlgeschlagen:', e.message);
+      // weiter mit Rohtext
+    }
+  }
+
+  $('searchResults').innerHTML = `
+    <div class="text-center py-10">
+      <div class="spinner inline-block w-7 h-7 border-[3px] text-brand-500"></div>
+      <p class="text-sm text-ink-500 mt-3">Suche „${escapeHtml(keyword)}"${keyword2 ? ' + „' + escapeHtml(keyword2) + '"' : ''}…</p>
+    </div>`;
+
+  // Lokale Suche im aktuellen Tickets-Cache (schnell, kein API-Call)
+  const localTickets = searchLocalTickets(keyword) || [];
+  if (keyword2) {
+    const more = searchLocalTickets(keyword2);
+    more.forEach(t => { if (!localTickets.some(lt => lt._accountId === t._accountId && lt.id === t.id)) localTickets.push(t); });
+  }
+
+  // Server-Suche pro Account
+  const accs = APP_STATE.accounts;
+  const ticketPromises  = accs.flatMap(a => [searchTicketsByKeyword(a.id, keyword), ...(keyword2 ? [searchTicketsByKeyword(a.id, keyword2)] : [])]);
+  const contactPromises = accs.flatMap(a => [searchContactsByKeyword(a.id, keyword), ...(keyword2 ? [searchContactsByKeyword(a.id, keyword2)] : [])]);
+  const [tRes, cRes] = await Promise.all([Promise.all(ticketPromises), Promise.all(contactPromises)]);
+
+  // Mergen + Dedupen
+  const allTickets = [];
+  const seenTickets = new Set();
+  [...localTickets, ...tRes.flat()].forEach(t => {
+    const k = t._accountId + '|' + t.id;
+    if (!seenTickets.has(k)) { seenTickets.add(k); allTickets.push(t); }
+  });
+  const allContacts = [];
+  const seenContacts = new Set();
+  cRes.flat().forEach(c => {
+    const k = c._accountId + '|' + c.id;
+    if (!seenContacts.has(k)) { seenContacts.add(k); allContacts.push(c); }
+  });
+
+  // Telefon-/Mobil-Details für Contacts nachladen
+  await hydrateContactDetails(allContacts);
+
+  SEARCH_CTX.busy = false;
+  SEARCH_CTX.results = { tickets: allTickets, contacts: allContacts, keyword, keyword2, intent, hint, aiUsed: useAI };
+  renderSearchResults();
+}
+
+function searchLocalTickets(keyword) {
+  const kw = keyword.toLowerCase();
+  const list = APP_STATE.pageState?.tickets || [];
+  return list.filter(t => {
+    const subj = (t.subject || '').toLowerCase();
+    const desc = (t.description_text || t.description || '').toLowerCase();
+    const reqName  = (t.requester?.name  || '').toLowerCase();
+    const reqEmail = (t.requester?.email || '').toLowerCase();
+    return subj.includes(kw) || desc.includes(kw) || reqName.includes(kw) || reqEmail.includes(kw);
+  });
+}
+
+function renderSearchResults() {
+  const r = SEARCH_CTX?.results;
+  if (!r) return;
+  const { tickets, contacts, keyword, keyword2, intent, hint, aiUsed } = r;
+  const total = tickets.length + contacts.length;
+
+  if (!total) {
+    $('searchResults').innerHTML = `
+      <div class="text-center py-10">
+        <i data-lucide="search-x" class="w-10 h-10 mx-auto text-ink-300"></i>
+        <p class="text-sm text-ink-500 mt-3">Keine Treffer für „${escapeHtml(keyword)}"${keyword2 ? ' / „' + escapeHtml(keyword2) + '"' : ''}</p>
+        <p class="text-[11px] text-ink-400 mt-1">Anderes Stichwort probieren oder „Mit KI verstehen" nutzen.</p>
+      </div>`;
+    if (window.lucide) lucide.createIcons();
+    return;
+  }
+
+  // Intent-Highlighting: Bei „call" Telefonnummern prominent zeigen
+  const showPhonesProminently = intent === 'call';
+
+  const contactBlock = contacts.length ? `
+    <div class="mb-4">
+      <p class="text-[10px] uppercase font-bold text-ink-500 tracking-wider mb-2">Kontakte (${contacts.length})</p>
+      <div class="space-y-2">
+        ${contacts.map(c => {
+          const phones = [];
+          if (c.phone)  phones.push({ label: 'Festnetz', num: c.phone });
+          if (c.mobile) phones.push({ label: 'Mobil',    num: c.mobile });
+          return `
+            <div class="bg-white border border-ink-200 rounded-xl p-3">
+              <div class="flex items-start gap-2">
+                <div class="w-9 h-9 rounded-full bg-gradient-to-br from-brand-400 to-brand-600 flex items-center justify-center text-white shrink-0 font-bold text-sm">${escapeHtml((c.name||'?').charAt(0).toUpperCase())}</div>
+                <div class="flex-1 min-w-0">
+                  <p class="font-semibold text-ink-900 text-sm truncate">${escapeHtml(c.name || '(ohne Name)')}</p>
+                  ${c.job_title ? `<p class="text-[11px] text-ink-500 truncate">${escapeHtml(c.job_title)}</p>` : ''}
+                  ${c.email ? `<a href="mailto:${escapeAttr(c.email)}" class="text-[11px] text-brand-600 inline-flex items-center gap-1 truncate active:underline"><i data-lucide="mail" class="w-3 h-3"></i>${escapeHtml(c.email)}</a>` : ''}
+                  <p class="text-[10px] text-ink-400 mt-0.5"><span class="inline-block w-1.5 h-1.5 rounded-full mr-1" style="background:${escapeAttr(c._accountColor)}"></span>${escapeHtml(c._accountName)}</p>
+                </div>
+              </div>
+              ${phones.length ? `
+                <div class="mt-2 ${showPhonesProminently ? 'space-y-1.5' : 'space-y-1'}">
+                  ${phones.map(p => {
+                    const cleanTel = _cleanPhoneForTel(p.num);
+                    return showPhonesProminently
+                      ? `<a href="tel:${escapeAttr(cleanTel)}" class="flex items-center gap-2 px-3 py-2 bg-emerald-50 active:bg-emerald-200 border border-emerald-200 rounded-lg">
+                           <div class="w-8 h-8 rounded-full bg-emerald-500 flex items-center justify-center text-white shrink-0"><i data-lucide="phone-call" class="w-4 h-4"></i></div>
+                           <div class="flex-1 min-w-0">
+                             <p class="font-mono text-sm text-ink-900 truncate">${escapeHtml(p.num)}</p>
+                             <p class="text-[10px] text-emerald-700 uppercase tracking-wider">${p.label} · tippen zum Anrufen</p>
+                           </div>
+                         </a>`
+                      : `<a href="tel:${escapeAttr(cleanTel)}" class="flex items-center gap-2 text-[12px] text-emerald-700 active:underline"><i data-lucide="phone" class="w-3.5 h-3.5"></i><span class="font-mono">${escapeHtml(p.num)}</span><span class="text-[10px] text-ink-400">${p.label}</span></a>`;
+                  }).join('')}
+                </div>` : '<p class="text-[11px] text-ink-400 italic mt-1.5">Keine Telefonnummer im Kontakt hinterlegt</p>'}
+            </div>`;
+        }).join('')}
+      </div>
+    </div>` : '';
+
+  const ticketBlock = tickets.length ? `
+    <div>
+      <p class="text-[10px] uppercase font-bold text-ink-500 tracking-wider mb-2">Tickets (${tickets.length})</p>
+      <div class="space-y-2">
+        ${tickets.map(t => {
+          const st = FD_STATUS[t.status] || { label: '?', cls: 'bg-ink-100 text-ink-600 border-ink-200' };
+          const reqDisplay = getRequesterDisplay(t);
+          const senderTxt = reqDisplay.name || reqDisplay.email || t.requester?.email || '?';
+          return `
+            <button onclick="closeSearchModal(); openTicketDetail('${escapeAttr(t._accountId)}', ${t.id})" class="w-full text-left bg-white border border-ink-200 rounded-xl p-3 active:bg-ink-50">
+              <div class="flex items-start gap-2">
+                <span class="shrink-0 mt-1.5 w-2 h-2 rounded-full" style="background:${escapeAttr(t._accountColor)}"></span>
+                <div class="flex-1 min-w-0">
+                  <p class="font-semibold text-ink-900 text-sm leading-snug">${escapeHtml(t.subject || '(ohne Betreff)')}</p>
+                  <p class="text-[11px] text-ink-600 mt-0.5 inline-flex items-center gap-1 truncate"><i data-lucide="user" class="w-3 h-3 text-brand-500 shrink-0"></i>${escapeHtml(senderTxt)}</p>
+                  <div class="flex items-center gap-1.5 mt-1.5 flex-wrap">
+                    <span class="text-[10px] uppercase tracking-wider px-1.5 py-0.5 rounded font-semibold border ${st.cls}">${escapeHtml(st.label)}</span>
+                    <span class="text-[10px] text-ink-400">#${t.id}</span>
+                    <span class="text-[10px] text-ink-500 ml-auto truncate">${escapeHtml(t._accountName)}</span>
+                  </div>
+                </div>
+                <i data-lucide="chevron-right" class="w-4 h-4 text-ink-400 shrink-0 mt-2"></i>
+              </div>
+            </button>`;
+        }).join('')}
+      </div>
+    </div>` : '';
+
+  const headerSummary = aiUsed && hint ? `
+    <div class="bg-gradient-to-br from-purple-50 to-brand-50 border border-brand-200 rounded-xl p-3 mb-3">
+      <p class="text-[10px] uppercase tracking-wider text-brand-800 font-bold inline-flex items-center gap-1"><i data-lucide="sparkles" class="w-3 h-3"></i> KI-Interpretation</p>
+      <p class="text-sm text-ink-800 mt-0.5">${escapeHtml(hint)}</p>
+      <p class="text-[11px] text-ink-600 mt-1">Stichwort: <span class="font-mono bg-white border border-brand-200 px-1.5 py-0.5 rounded">${escapeHtml(keyword)}</span>${keyword2 ? ' · <span class="font-mono bg-white border border-brand-200 px-1.5 py-0.5 rounded">' + escapeHtml(keyword2) + '</span>' : ''}</p>
+    </div>` : '';
+
+  $('searchResults').innerHTML = headerSummary + contactBlock + ticketBlock;
+  if (window.lucide) lucide.createIcons();
 }
 
 async function aiSummarizeTicket(ticket) {
