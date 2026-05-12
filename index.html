@@ -267,7 +267,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.28.2';
+const APP_VERSION = 'v2.28.3';
 // Read-Token absichtlich gesplittet, damit GitHub Secret-Scanning beim Push nicht blockt.
 // Der Token ist read-only und Base-scoped → bewusst eingebettet (Architektur-Entscheidung).
 const _RK = 'patu8KWM8aWB' + 'yxCGL.69fae5d9fa4b94c2' + '66b426dadd71a51f574945d840b33569058ab5e9d89ebef3';
@@ -1777,6 +1777,50 @@ async function updateContact(accountId, contactId, fields) {
   });
 }
 
+/* === Freshdesk-Company-API ================================================
+   Companies sind eigene Records in Freshdesk. Contacts haben company_id als
+   Verweis. Helper für Lookup/Create/Search nach Name. */
+async function fetchCompanyById(accountId, companyId) {
+  if (!accountId || !companyId) return null;
+  try {
+    return await proxyJson('/freshdesk/' + encodeURIComponent(accountId) + '/api/v2/companies/' + companyId);
+  } catch (e) {
+    console.warn('Company-Fetch fehlgeschlagen für #' + companyId + ':', e.message);
+    return null;
+  }
+}
+
+async function searchCompanies(accountId, term) {
+  if (!accountId || !term || term.length < 2) return [];
+  try {
+    const path = '/freshdesk/' + encodeURIComponent(accountId) +
+      '/api/v2/companies/autocomplete?name=' + encodeURIComponent(term);
+    const data = await proxyJson(path);
+    // Antwort: { companies: [{ id, name, ... }] }  oder direkt Array
+    const list = Array.isArray(data) ? data : (data.companies || []);
+    return list.map(c => ({ id: c.id, name: c.name || '(ohne Name)' }));
+  } catch (e) {
+    console.warn('Company-Search fehlgeschlagen:', e.message);
+    return [];
+  }
+}
+
+async function createCompany(accountId, name) {
+  if (!accountId || !name || !name.trim()) throw new Error('Firmenname fehlt');
+  const data = await proxyJson('/freshdesk/' + encodeURIComponent(accountId) + '/api/v2/companies', {
+    method: 'POST',
+    body: JSON.stringify({ name: name.trim() })
+  });
+  return data; // enthält id, name etc.
+}
+
+async function updateCompany(accountId, companyId, fields) {
+  return await proxyJson('/freshdesk/' + encodeURIComponent(accountId) + '/api/v2/companies/' + companyId, {
+    method: 'PUT',
+    body: JSON.stringify(fields)
+  });
+}
+
 /* === Freshsales (CRM) — optional pro Account =================================
    Wenn der Account die zusätzlichen Felder freshsales_domain + freshsales_api_key
    in Airtable gepflegt hat, wird über die Proxy-Route /freshsales/<account_id>
@@ -1812,7 +1856,7 @@ async function freshsalesUpdateContact(accountId, contactId, fields) {
 
 /* Claude analysiert Ticket-Inhalt + bestehende Contact-Daten und schlägt Werte für
    fehlende oder unvollständige Felder vor (besonders aus Email-Signaturen). */
-async function aiSuggestContactFields(contact, ticket) {
+async function aiSuggestContactFields(contact, ticket, currentCompanyName) {
   const desc = htmlToText(ticket.description_text || ticket.description || '').slice(0, 2500);
   const conv = (ticket.conversations || [])
     .slice().sort((a, b) => new Date(a.created_at || 0) - new Date(b.created_at || 0))
@@ -1828,6 +1872,7 @@ async function aiSuggestContactFields(contact, ticket) {
       mobile:    contact.mobile    || null,
       job_title: contact.job_title || null,
       address:   contact.address   || null,
+      company:   currentCompanyName || null,
     }, null, 2) + '\n\n' +
     'REGELN:\n' +
     '- Schlage nur Werte vor, die du KLAR aus dem Text belegen kannst.\n' +
@@ -1835,13 +1880,15 @@ async function aiSuggestContactFields(contact, ticket) {
     '- Telefonnummern bevorzugt im internationalen Format (+49 …) wenn erkennbar.\n' +
     '- Bei Telefon: erkenne Festnetz vs Mobil (Mobil = +491XX, 015X, 016X, 017X bei Deutschland).\n' +
     '- Adresse als ein zusammenhängender String mit Zeilenumbrüchen \\n (Straße, PLZ Ort, Land).\n' +
+    '- Bei company: NUR den reinen Firmennamen ohne Rechtsform-Variation (z.B. „KONE GmbH" wenn klar erkennbar). Aus Email-Domain ableiten ist OK wenn keine Signatur (z.B. @kone.com → „KONE"). Wenn aktuelle Firma schon korrekt aussieht, weglassen.\n' +
     '- Antworte AUSSCHLIESSLICH mit JSON, kein Markdown. Pro Feld: {"value":"…", "source":"woraus du es ablesen konntest, max 60 Zeichen"}.\n\n' +
     'JSON-FORMAT (Felder weglassen wenn unsicher):\n{\n' +
     '  "name":      {"value": "...", "source": "Signatur in Email 2"},\n' +
     '  "phone":     {"value": "+49 30 …", "source": "Footer Email 1"},\n' +
     '  "mobile":    {"value": "+49 170 …", "source": "..."},\n' +
     '  "job_title": {"value": "...", "source": "..."},\n' +
-    '  "address":   {"value": "...", "source": "..."}\n' +
+    '  "address":   {"value": "...", "source": "..."},\n' +
+    '  "company":   {"value": "Firmenname", "source": "Signatur / Email-Domain"}\n' +
     '}';
 
   const user = 'TICKET:\nBetreff: ' + (ticket.subject || '') + '\n' +
@@ -1882,6 +1929,10 @@ async function openContactEditModal(accountId, contactId, opts) {
     suggestions: null,         // {field: {value, source, accepted}}
     suggestionsLoading: false,
     suggestionsError: null,
+    company: null,             // { id, name } — aktueller Company-Link
+    companySearchResults: [],
+    companySearchQuery: '',
+    companySearchBusy: false,
   };
 
   let host = document.getElementById('subModalHost');
@@ -1911,6 +1962,15 @@ async function openContactEditModal(accountId, contactId, opts) {
   try {
     // Freshdesk-Contact laden (Pflicht)
     CONTACT_EDIT_CTX.fd = await fetchContact(accountId, contactId);
+    // Falls Contact eine company_id hat: Firma-Details laden (für Anzeige)
+    if (CONTACT_EDIT_CTX.fd?.company_id) {
+      try {
+        const c = await fetchCompanyById(accountId, CONTACT_EDIT_CTX.fd.company_id);
+        if (c) CONTACT_EDIT_CTX.company = { id: c.id, name: c.name || '(unbenannt)' };
+      } catch (_) {}
+    }
+    CONTACT_EDIT_CTX.companySearchResults = [];
+    CONTACT_EDIT_CTX.companySearchQuery   = '';
     // Wenn Freshsales konfiguriert: per Email parallel suchen
     if (CONTACT_EDIT_CTX.hasFreshsales && CONTACT_EDIT_CTX.fd?.email) {
       try {
@@ -1936,10 +1996,10 @@ async function loadContactSuggestions() {
   ctx.suggestionsError = null;
   renderContactEditBody();
   try {
-    const raw = await aiSuggestContactFields(ctx.fd, ctx.ticket);
+    const raw = await aiSuggestContactFields(ctx.fd, ctx.ticket, ctx.company?.name || null);
     // Suggestion-Objekt normalisieren — Felder mit leerem value rauswerfen
     const norm = {};
-    ['name', 'email', 'phone', 'mobile', 'job_title', 'address'].forEach(f => {
+    ['name', 'email', 'phone', 'mobile', 'job_title', 'address', 'company'].forEach(f => {
       const s = raw?.[f];
       if (s && s.value && String(s.value).trim()) {
         norm[f] = { value: String(s.value).trim(), source: String(s.source || 'KI-Analyse').slice(0, 80), accepted: false };
@@ -2182,6 +2242,7 @@ function renderContactEditBody() {
             <textarea id="fdAddress" rows="2" class="w-full mt-1 px-2 py-1.5 border border-brand-200 bg-white rounded text-sm resize-none">${escapeHtml(c.address || '')}</textarea>
             ${sBan('address', c.address)}
           </div>
+          ${_companyBlock(ctx)}
           <button type="button" onclick="saveFreshdeskContact(this)" class="w-full mt-2 bg-brand-600 hover:bg-brand-700 text-white px-3 py-2 rounded-lg text-sm font-semibold inline-flex items-center justify-center gap-1.5">
             <i data-lucide="save" class="w-4 h-4"></i> Im Freshdesk speichern
           </button>
@@ -2191,6 +2252,149 @@ function renderContactEditBody() {
       ${fsBlock}
     </div>`;
   if (window.lucide) lucide.createIcons();
+}
+
+/* === Firma-Block im Contact-Edit-Modal ====================================
+   Zeigt aktuelle Firma + Search-Feld mit Autocomplete + Optionen:
+   - bestehende Firma auswählen
+   - neue Firma anlegen (wenn Search keine passenden Treffer hat)
+   - Verknüpfung entfernen */
+function _companyBlock(ctx) {
+  const current = ctx.company;
+  const sugg = ctx.suggestions?.company;
+  const showSuggestion = sugg && !sugg.accepted && (!current || String(sugg.value).toLowerCase() !== String(current.name || '').toLowerCase());
+  const query = ctx.companySearchQuery || '';
+  const results = ctx.companySearchResults || [];
+  const busy = ctx.companySearchBusy;
+  const trimmedQuery = query.trim();
+  const exactMatch = results.find(r => r.name.toLowerCase() === trimmedQuery.toLowerCase());
+  const canCreate = trimmedQuery.length >= 2 && !exactMatch && (!current || current.name.toLowerCase() !== trimmedQuery.toLowerCase());
+
+  return `
+    <div class="mt-1">
+      <label class="text-[10px] uppercase font-semibold text-brand-800 block">Firma</label>
+      ${current ? `
+        <div class="mt-1 px-2 py-1.5 bg-brand-50 border border-brand-200 rounded flex items-center gap-2">
+          <i data-lucide="building-2" class="w-3.5 h-3.5 text-brand-700 shrink-0"></i>
+          <span class="text-sm text-ink-900 font-medium flex-1 truncate">${escapeHtml(current.name)}</span>
+          <span class="text-[10px] text-ink-500 shrink-0">#${current.id}</span>
+          <button type="button" onclick="contactCompanyUnlink()" class="text-[11px] text-red-600 hover:underline shrink-0" title="Firma-Verknüpfung entfernen">×</button>
+        </div>
+      ` : `
+        <p class="text-[11px] text-ink-500 italic mt-1">Keine Firma verknüpft</p>
+      `}
+      <div class="mt-2">
+        <div class="relative">
+          <input type="search" id="fdCompanyQuery" value="${escapeAttr(query)}" oninput="contactCompanySearch(this.value)" placeholder="Firma suchen oder neuen Namen eingeben…" class="w-full px-2 py-1.5 pr-7 border border-ink-200 bg-white rounded text-sm focus:ring-2 focus:ring-brand-500/30 focus:border-brand-500">
+          ${busy ? '<span class="absolute right-2 top-1/2 -translate-y-1/2 spinner w-3 h-3 border-[2px] text-brand-500"></span>' : ''}
+        </div>
+        ${trimmedQuery.length >= 2 ? `
+          <div class="mt-1 max-h-44 overflow-y-auto bg-white border border-ink-200 rounded text-sm divide-y divide-ink-100">
+            ${results.length ? results.map(r => `
+              <button type="button" onclick="contactCompanyPick(${r.id}, '${escapeAttr(r.name)}')" class="w-full text-left px-2 py-1.5 active:bg-ink-100 hover:bg-ink-50 flex items-center gap-2">
+                <i data-lucide="building" class="w-3.5 h-3.5 text-ink-500 shrink-0"></i>
+                <span class="text-ink-900 truncate flex-1">${escapeHtml(r.name)}</span>
+                <span class="text-[10px] text-ink-400 shrink-0">#${r.id}</span>
+              </button>
+            `).join('') : (!busy ? '<p class="px-2 py-1.5 text-[11px] text-ink-500 italic">Kein Treffer</p>' : '')}
+            ${canCreate ? `
+              <button type="button" onclick="contactCompanyCreate(this)" class="w-full text-left px-2 py-1.5 bg-emerald-50 hover:bg-emerald-100 active:bg-emerald-200 flex items-center gap-2">
+                <i data-lucide="plus-circle" class="w-3.5 h-3.5 text-emerald-700 shrink-0"></i>
+                <span class="text-emerald-800 font-semibold truncate flex-1">Neue Firma „${escapeHtml(trimmedQuery)}" anlegen</span>
+              </button>` : ''}
+          </div>
+        ` : ''}
+      </div>
+      ${showSuggestion ? `
+        <div class="bg-purple-50 border border-purple-200 rounded-lg p-2 mt-1 flex items-start gap-2">
+          <i data-lucide="sparkles" class="w-3 h-3 text-purple-600 shrink-0 mt-0.5"></i>
+          <div class="flex-1 min-w-0">
+            <p class="text-[11px] text-purple-900 font-medium">KI-Vorschlag: <span class="font-semibold">${escapeHtml(sugg.value)}</span></p>
+            <p class="text-[10px] text-purple-700 italic mt-0.5">aus: ${escapeHtml(sugg.source)}</p>
+          </div>
+          <button type="button" onclick="contactCompanyAcceptSuggestion()" class="shrink-0 inline-flex items-center gap-1 px-2 py-1 bg-purple-600 hover:bg-purple-700 text-white rounded text-[10px] font-semibold">
+            <i data-lucide="arrow-down" class="w-3 h-3"></i> Suchen
+          </button>
+        </div>` : ''}
+    </div>`;
+}
+
+let _companySearchTimer = null;
+function contactCompanySearch(value) {
+  const ctx = CONTACT_EDIT_CTX;
+  if (!ctx) return;
+  ctx.companySearchQuery = value;
+  // Debounce 300ms
+  clearTimeout(_companySearchTimer);
+  if (!value || value.trim().length < 2) {
+    ctx.companySearchResults = [];
+    ctx.companySearchBusy = false;
+    renderContactEditBody();
+    return;
+  }
+  ctx.companySearchBusy = true;
+  renderContactEditBody();
+  _companySearchTimer = setTimeout(async () => {
+    try {
+      ctx.companySearchResults = await searchCompanies(ctx.accountId, value.trim());
+    } catch (e) {
+      ctx.companySearchResults = [];
+    }
+    ctx.companySearchBusy = false;
+    renderContactEditBody();
+    // Re-focus auf das Search-Feld weil renderContactEditBody den DOM neu baut
+    setTimeout(() => { const el = $('fdCompanyQuery'); if (el) { el.focus(); el.setSelectionRange(el.value.length, el.value.length); } }, 50);
+  }, 300);
+}
+
+function contactCompanyPick(id, name) {
+  const ctx = CONTACT_EDIT_CTX;
+  if (!ctx) return;
+  _syncFreshdeskInputsToCtx(); // andere Inputs nicht verlieren
+  ctx.company = { id, name };
+  ctx.companySearchQuery = '';
+  ctx.companySearchResults = [];
+  renderContactEditBody();
+  toast('Firma „' + name + '" ausgewählt — jetzt unten speichern', 'success', 3000);
+}
+
+function contactCompanyUnlink() {
+  const ctx = CONTACT_EDIT_CTX;
+  if (!ctx) return;
+  _syncFreshdeskInputsToCtx();
+  ctx.company = null;
+  renderContactEditBody();
+}
+
+async function contactCompanyCreate(btnEl) {
+  const ctx = CONTACT_EDIT_CTX;
+  if (!ctx) return;
+  const name = (ctx.companySearchQuery || '').trim();
+  if (!name) return toast('Firmenname fehlt', 'warn');
+  _syncFreshdeskInputsToCtx();
+  setBusy(btnEl, true, 'Lege Firma an…');
+  try {
+    const created = await createCompany(ctx.accountId, name);
+    ctx.company = { id: created.id, name: created.name || name };
+    ctx.companySearchQuery = '';
+    ctx.companySearchResults = [];
+    setBusy(btnEl, false);
+    renderContactEditBody();
+    toast('Firma „' + (created.name || name) + '" angelegt — jetzt unten speichern', 'success', 4000);
+  } catch (e) {
+    setBusy(btnEl, false);
+    toast('Firma anlegen fehlgeschlagen: ' + e.message, 'error', 8000);
+  }
+}
+
+function contactCompanyAcceptSuggestion() {
+  const ctx = CONTACT_EDIT_CTX;
+  const s = ctx?.suggestions?.company;
+  if (!s) return;
+  s.accepted = true;
+  // Wert in Search-Feld setzen und Suche triggern
+  ctx.companySearchQuery = s.value;
+  contactCompanySearch(s.value);
 }
 
 async function saveFreshdeskContact(btnEl) {
@@ -2205,6 +2409,13 @@ async function saveFreshdeskContact(btnEl) {
     address:   ($('fdAddress')?.value || '').trim() || null,
   };
   if (!fields.name) return toast('Name darf nicht leer sein', 'warn');
+  // Firma-Link: aktuelle company_id oder null (Entkopplung)
+  // Nur ins PUT übernehmen wenn sich was geändert hat — sonst lassen wir's weg
+  const currentCompanyId = ctx.company?.id || null;
+  const originalCompanyId = ctx.fd.company_id || null;
+  if (currentCompanyId !== originalCompanyId) {
+    fields.company_id = currentCompanyId;
+  }
   setBusy(btnEl, true, 'Speichere…');
   try {
     await updateContact(ctx.accountId, ctx.contactId, fields);
@@ -2215,8 +2426,13 @@ async function saveFreshdeskContact(btnEl) {
       renderTicketDetailBody(CURRENT_TICKET);
     }
     Object.assign(ctx.fd, fields);
+    if ('company_id' in fields) ctx.fd.company_id = fields.company_id;
     setBusy(btnEl, false);
-    toast('Freshdesk-Kontakt gespeichert', 'success');
+    let msg = 'Freshdesk-Kontakt gespeichert';
+    if ('company_id' in fields) {
+      msg += currentCompanyId ? ' · Firma: ' + (ctx.company?.name || '') : ' · Firma entfernt';
+    }
+    toast(msg, 'success', 4000);
   } catch (e) {
     setBusy(btnEl, false);
     toast('Speichern fehlgeschlagen: ' + e.message, 'error', 6000);
