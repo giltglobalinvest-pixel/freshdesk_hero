@@ -158,19 +158,24 @@
       </button>
     </div>
     <div class="px-4 py-3 flex items-center gap-3">
-      <svg viewBox="0 0 1024 1024" class="w-9 h-9 rounded-xl shrink-0" aria-label="Freshdesk Hero">
-        <defs>
-          <linearGradient id="hd-bg" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#38bdf8"/><stop offset="1" stop-color="#0369a1"/></linearGradient>
-          <linearGradient id="hd-bolt" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#0ea5e9"/><stop offset="1" stop-color="#0c4a6e"/></linearGradient>
-        </defs>
-        <rect width="1024" height="1024" rx="230" fill="url(#hd-bg)"/>
-        <path d="M 200 360 H 824 Q 864 360 864 400 V 510 A 50 50 0 0 0 864 610 V 720 Q 864 760 824 760 H 200 Q 160 760 160 720 V 610 A 50 50 0 0 0 160 510 V 400 Q 160 360 200 360 Z" fill="#fff"/>
-        <path d="M 612 400 L 470 595 L 562 595 L 522 720 L 672 540 L 580 540 Z" fill="url(#hd-bolt)"/>
-      </svg>
+      <button onclick="goHome()" class="shrink-0 group" aria-label="Zum Startbildschirm" title="Zum Startbildschirm (alle offenen Fenster schließen)">
+        <svg viewBox="0 0 1024 1024" class="w-9 h-9 rounded-xl group-active:opacity-70 group-hover:ring-2 group-hover:ring-brand-300 transition" aria-hidden="true">
+          <defs>
+            <linearGradient id="hd-bg" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#38bdf8"/><stop offset="1" stop-color="#0369a1"/></linearGradient>
+            <linearGradient id="hd-bolt" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#0ea5e9"/><stop offset="1" stop-color="#0c4a6e"/></linearGradient>
+          </defs>
+          <rect width="1024" height="1024" rx="230" fill="url(#hd-bg)"/>
+          <path d="M 200 360 H 824 Q 864 360 864 400 V 510 A 50 50 0 0 0 864 610 V 720 Q 864 760 824 760 H 200 Q 160 760 160 720 V 610 A 50 50 0 0 0 160 510 V 400 Q 160 360 200 360 Z" fill="#fff"/>
+          <path d="M 612 400 L 470 595 L 562 595 L 522 720 L 672 540 L 580 540 Z" fill="url(#hd-bolt)"/>
+        </svg>
+      </button>
       <div class="flex-1 min-w-0">
         <h1 id="pageTitle" class="font-bold text-ink-900 leading-tight truncate">Tickets</h1>
         <p id="pageSubtitle" class="text-[11px] text-ink-500 truncate"></p>
       </div>
+      <button onclick="goHome()" class="w-9 h-9 rounded-lg hover:bg-brand-50 flex items-center justify-center group" aria-label="Startbildschirm" title="Zum Startbildschirm zurück">
+        <i data-lucide="home" class="w-5 h-5 text-brand-600 group-active:text-brand-800"></i>
+      </button>
       <button onclick="openSearchModal()" class="w-9 h-9 rounded-lg hover:bg-brand-50 flex items-center justify-center group" aria-label="Suche" title="Suche (KI-gestützt)">
         <i data-lucide="search" class="w-5 h-5 text-brand-600 group-active:text-brand-800"></i>
       </button>
@@ -251,7 +256,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.20.1';
+const APP_VERSION = 'v2.20.2';
 // Read-Token absichtlich gesplittet, damit GitHub Secret-Scanning beim Push nicht blockt.
 // Der Token ist read-only und Base-scoped → bewusst eingebettet (Architektur-Entscheidung).
 const _RK = 'patu8KWM8aWB' + 'yxCGL.69fae5d9fa4b94c2' + '66b426dadd71a51f574945d840b33569058ab5e9d89ebef3';
@@ -1928,6 +1933,40 @@ function navTo(page) {
   else if (page === 'rules')    renderRulesPage();
   else if (page === 'automated') renderAutomatedPage();
   else                          renderTicketsPage();
+}
+
+/* Home-Button: alle offenen Modals/Sheets/Voice-Recorder schließen und zur Tickets-Übersicht.
+   Falls der User schon auf 'tickets' ist OHNE offene Overlays → zum Listenanfang scrollen. */
+function goHome() {
+  let hadOverlay = false;
+  const m  = $('modalHost');
+  const sm = $('subModalHost');
+  if (m && m.innerHTML)  { m.innerHTML = '';  hadOverlay = true; }
+  if (sm && sm.innerHTML){ sm.innerHTML = ''; hadOverlay = true; }
+  // Aktive Spracherkennungen stoppen — vermeidet Mic-Indikator-Leaks
+  ['ASSISTANT_REC','SUMMARY_ASSIST_REC','NOTE_REC','QUICK_NOTE_REC','RULE_REC','SEARCH_REC'].forEach(k => {
+    const r = window[k];
+    if (r) { try { r.stop(); } catch (_) {} window[k] = null; }
+  });
+  // Modal-Kontexte zurücksetzen, damit kein State hängenbleibt
+  CURRENT_TICKET = null;
+  if (typeof SUMMARY_CTX        !== 'undefined') SUMMARY_CTX        = null;
+  if (typeof ASSISTANT_CTX      !== 'undefined') ASSISTANT_CTX      = null;
+  if (typeof CONTACT_EDIT_CTX   !== 'undefined') CONTACT_EDIT_CTX   = null;
+  if (typeof RULE_EDITOR_CTX    !== 'undefined') RULE_EDITOR_CTX    = null;
+  if (typeof SEARCH_CTX         !== 'undefined') SEARCH_CTX         = null;
+  if (typeof STATUS_CTX         !== 'undefined') STATUS_CTX         = null;
+  if (typeof ASSIGNEE_CTX       !== 'undefined') ASSIGNEE_CTX       = null;
+  if (typeof GROUP_CTX          !== 'undefined') GROUP_CTX          = null;
+  if (typeof TYPE_CTX           !== 'undefined') TYPE_CTX           = null;
+  if (typeof WV_CTX             !== 'undefined') WV_CTX             = null;
+  closeMenu && closeMenu();
+  if (APP_STATE.page === 'tickets' && !hadOverlay) {
+    // Schon auf Home, kein Overlay zu schließen → zum Listenanfang scrollen
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  } else {
+    navTo('tickets');
+  }
 }
 
 function toggleMenu() {
