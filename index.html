@@ -267,7 +267,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.28.4';
+const APP_VERSION = 'v2.29.0';
 // Read-Token absichtlich gesplittet, damit GitHub Secret-Scanning beim Push nicht blockt.
 // Der Token ist read-only und Base-scoped → bewusst eingebettet (Architektur-Entscheidung).
 const _RK = 'patu8KWM8aWB' + 'yxCGL.69fae5d9fa4b94c2' + '66b426dadd71a51f574945d840b33569058ab5e9d89ebef3';
@@ -1854,6 +1854,56 @@ async function freshsalesUpdateContact(accountId, contactId, fields) {
   });
 }
 
+/* === Freshsales-Sales-Account-API (= „Konto" / „Firma" im CRM) =============
+   In Freshsales sind Sales Accounts eigene Records analog zu Freshdesk-Companies.
+   Contacts haben das Feld `sales_accounts: [{id, is_primary}]` als Verknüpfung. */
+async function fetchFreshsalesSalesAccountById(accountId, saId) {
+  if (!accountId || !saId) return null;
+  try {
+    const data = await proxyJson('/freshsales/' + encodeURIComponent(accountId) +
+      '/api/sales_accounts/' + saId);
+    return data?.sales_account || data || null;
+  } catch (e) {
+    console.warn('Freshsales-Sales-Account-Fetch fehlgeschlagen für #' + saId + ':', e.message);
+    return null;
+  }
+}
+
+async function searchFreshsalesSalesAccounts(accountId, term) {
+  if (!accountId || !term || term.length < 2) return [];
+  try {
+    const path = '/freshsales/' + encodeURIComponent(accountId) +
+      '/api/lookup?q=' + encodeURIComponent(term) + '&f=name&entities=sales_account';
+    const data = await proxyJson(path);
+    // Antwort: { sales_accounts: { sales_accounts: [...] } } oder { sales_accounts: [...] }
+    const list = data?.sales_accounts?.sales_accounts || data?.sales_accounts || [];
+    return (Array.isArray(list) ? list : []).map(s => ({
+      id: s.id, name: s.name || '(ohne Name)', city: s.city || '', website: s.website || ''
+    }));
+  } catch (e) {
+    console.warn('Freshsales-Sales-Account-Search fehlgeschlagen:', e.message);
+    return [];
+  }
+}
+
+async function createFreshsalesSalesAccount(accountId, name) {
+  if (!accountId || !name || !name.trim()) throw new Error('Firmenname fehlt');
+  const data = await proxyJson('/freshsales/' + encodeURIComponent(accountId) +
+    '/api/sales_accounts', {
+    method: 'POST',
+    body: JSON.stringify({ sales_account: { name: name.trim() } })
+  });
+  return data?.sales_account || data;
+}
+
+async function updateFreshsalesSalesAccount(accountId, saId, fields) {
+  return await proxyJson('/freshsales/' + encodeURIComponent(accountId) +
+    '/api/sales_accounts/' + saId, {
+    method: 'PUT',
+    body: JSON.stringify({ sales_account: fields })
+  });
+}
+
 /* Claude analysiert Ticket-Inhalt + bestehende Contact-Daten und schlägt Werte für
    fehlende oder unvollständige Felder vor (besonders aus Email-Signaturen). */
 async function aiSuggestContactFields(contact, ticket, currentCompanyName) {
@@ -2102,10 +2152,14 @@ async function openContactEditModal(accountId, contactId, opts) {
     suggestions: null,         // {field: {value, source, accepted}}
     suggestionsLoading: false,
     suggestionsError: null,
-    company: null,             // { id, name } — aktueller Company-Link
+    company: null,             // { id, name } — aktueller Freshdesk-Company-Link
     companySearchResults: [],
     companySearchQuery: '',
     companySearchBusy: false,
+    fsAccount: null,           // { id, name } — aktueller Freshsales-Sales-Account-Link
+    fsAccountSearchResults: [],
+    fsAccountSearchQuery: '',
+    fsAccountSearchBusy: false,
   };
 
   let host = document.getElementById('subModalHost');
@@ -2148,6 +2202,15 @@ async function openContactEditModal(accountId, contactId, opts) {
     if (CONTACT_EDIT_CTX.hasFreshsales && CONTACT_EDIT_CTX.fd?.email) {
       try {
         CONTACT_EDIT_CTX.fs = await freshsalesLookupContact(accountId, CONTACT_EDIT_CTX.fd.email);
+        // Falls FS-Contact ein primary Sales-Account hat: dessen Details laden
+        const sa = CONTACT_EDIT_CTX.fs?.sales_accounts || [];
+        const primary = Array.isArray(sa) ? (sa.find(x => x.is_primary) || sa[0]) : null;
+        if (primary?.id) {
+          try {
+            const det = await fetchFreshsalesSalesAccountById(accountId, primary.id);
+            if (det) CONTACT_EDIT_CTX.fsAccount = { id: det.id, name: det.name || '(unbenannt)' };
+          } catch (_) {}
+        }
       } catch (e) {
         CONTACT_EDIT_CTX._fsError = e.message;
       }
@@ -2282,6 +2345,10 @@ function renderContactEditBody() {
             </div>
           </div>
           <div>
+            <label class="text-[10px] uppercase font-semibold text-purple-800 block">Anzeigename</label>
+            <input id="fsDisplayName" type="text" value="${escapeAttr(fs.display_name || '')}" class="w-full mt-1 px-2 py-1.5 border border-purple-200 bg-white rounded text-sm" placeholder="Wird automatisch aus Vor- + Nachname gebildet, falls leer">
+          </div>
+          <div>
             <label class="text-[10px] uppercase font-semibold text-purple-800 block">Email</label>
             <input id="fsEmail" type="email" value="${escapeAttr(fs.email || '')}" class="w-full mt-1 px-2 py-1.5 border border-purple-200 bg-white rounded text-sm">
           </div>
@@ -2299,6 +2366,31 @@ function renderContactEditBody() {
             <label class="text-[10px] uppercase font-semibold text-purple-800 block">Job-Titel</label>
             <input id="fsJob" type="text" value="${escapeAttr(fs.job_title || '')}" class="w-full mt-1 px-2 py-1.5 border border-purple-200 bg-white rounded text-sm">
           </div>
+          <div>
+            <label class="text-[10px] uppercase font-semibold text-purple-800 block">Adresse (Straße + Nr.)</label>
+            <input id="fsAddress" type="text" value="${escapeAttr(fs.address || '')}" class="w-full mt-1 px-2 py-1.5 border border-purple-200 bg-white rounded text-sm">
+          </div>
+          <div class="grid grid-cols-3 gap-2">
+            <div class="col-span-1">
+              <label class="text-[10px] uppercase font-semibold text-purple-800 block">PLZ</label>
+              <input id="fsZipcode" type="text" value="${escapeAttr(fs.zipcode || '')}" class="w-full mt-1 px-2 py-1.5 border border-purple-200 bg-white rounded text-sm">
+            </div>
+            <div class="col-span-2">
+              <label class="text-[10px] uppercase font-semibold text-purple-800 block">Stadt</label>
+              <input id="fsCity" type="text" value="${escapeAttr(fs.city || '')}" class="w-full mt-1 px-2 py-1.5 border border-purple-200 bg-white rounded text-sm">
+            </div>
+          </div>
+          <div class="grid grid-cols-2 gap-2">
+            <div>
+              <label class="text-[10px] uppercase font-semibold text-purple-800 block">Bundesland</label>
+              <input id="fsState" type="text" value="${escapeAttr(fs.state || '')}" class="w-full mt-1 px-2 py-1.5 border border-purple-200 bg-white rounded text-sm">
+            </div>
+            <div>
+              <label class="text-[10px] uppercase font-semibold text-purple-800 block">Land</label>
+              <input id="fsCountry" type="text" value="${escapeAttr(fs.country || '')}" class="w-full mt-1 px-2 py-1.5 border border-purple-200 bg-white rounded text-sm">
+            </div>
+          </div>
+          ${_freshsalesAccountBlock(ctx)}
           <button type="button" onclick="saveFreshsalesContact(this)" class="w-full mt-2 bg-purple-600 hover:bg-purple-700 text-white px-3 py-2 rounded-lg text-sm font-semibold inline-flex items-center justify-center gap-1.5">
             <i data-lucide="save" class="w-4 h-4"></i> Im Freshsales speichern
           </button>
@@ -2570,6 +2662,173 @@ function contactCompanyAcceptSuggestion() {
   contactCompanySearch(s.value);
 }
 
+/* === Freshsales-Sales-Account-Block im Contact-Edit-Modal ==================
+   Analog zu _companyBlock — zeigt aktuelle Sales-Account-Verknüpfung des FS-Contacts
+   + Autocomplete-Suche + „Neu anlegen". Klick auf KI-Vorschlag triggert die Suche. */
+function _freshsalesAccountBlock(ctx) {
+  const current = ctx.fsAccount;
+  const sugg = ctx.suggestions?.company;  // gleicher KI-Vorschlag wie für Freshdesk-Firma
+  const showSuggestion = sugg && !sugg.accepted && (!current || String(sugg.value).toLowerCase() !== String(current.name || '').toLowerCase());
+  const query = ctx.fsAccountSearchQuery || '';
+  const results = ctx.fsAccountSearchResults || [];
+  const busy = ctx.fsAccountSearchBusy;
+  const trimmedQuery = query.trim();
+  const exactMatch = results.find(r => r.name.toLowerCase() === trimmedQuery.toLowerCase());
+  const canCreate = trimmedQuery.length >= 2 && !exactMatch && (!current || current.name.toLowerCase() !== trimmedQuery.toLowerCase());
+
+  return `
+    <div class="mt-1 pt-2 border-t border-purple-200">
+      <label class="text-[10px] uppercase font-semibold text-purple-800 block">Konto / Firma im CRM</label>
+      ${current ? `
+        <div class="mt-1 px-2 py-1.5 bg-purple-50 border border-purple-200 rounded flex items-center gap-2">
+          <i data-lucide="briefcase" class="w-3.5 h-3.5 text-purple-700 shrink-0"></i>
+          <span class="text-sm text-ink-900 font-medium flex-1 truncate">${escapeHtml(current.name)}</span>
+          <span class="text-[10px] text-ink-500 shrink-0">#${current.id}</span>
+          <button type="button" onclick="freshsalesAccountUnlink()" class="text-[11px] text-red-600 hover:underline shrink-0" title="Konto-Verknüpfung entfernen">×</button>
+        </div>
+      ` : `
+        <p class="text-[11px] text-ink-500 italic mt-1">Kein Konto verknüpft</p>
+      `}
+      <div class="mt-2">
+        <div class="relative">
+          <input type="search" id="fsAccountQuery" value="${escapeAttr(query)}" oninput="freshsalesAccountSearch(this.value)" placeholder="Konto suchen oder neuen Namen eingeben…" class="w-full px-2 py-1.5 pr-7 border border-purple-200 bg-white rounded text-sm focus:ring-2 focus:ring-purple-500/30 focus:border-purple-500">
+          ${busy ? '<span class="absolute right-2 top-1/2 -translate-y-1/2 spinner w-3 h-3 border-[2px] text-purple-500"></span>' : ''}
+        </div>
+        ${trimmedQuery.length >= 2 ? `
+          <div class="mt-1 max-h-44 overflow-y-auto bg-white border border-purple-200 rounded text-sm divide-y divide-purple-100">
+            ${results.length ? results.map(r => `
+              <button type="button" onclick="freshsalesAccountPick(${r.id}, '${escapeAttr(r.name)}')" class="w-full text-left px-2 py-1.5 active:bg-purple-100 hover:bg-purple-50 flex items-center gap-2">
+                <i data-lucide="building" class="w-3.5 h-3.5 text-purple-500 shrink-0"></i>
+                <span class="text-ink-900 truncate flex-1">${escapeHtml(r.name)}${r.city ? '<span class="text-[10px] text-ink-500 ml-1">· ' + escapeHtml(r.city) + '</span>' : ''}</span>
+                <span class="text-[10px] text-ink-400 shrink-0">#${r.id}</span>
+              </button>
+            `).join('') : (!busy ? '<p class="px-2 py-1.5 text-[11px] text-ink-500 italic">Kein Treffer</p>' : '')}
+            ${canCreate ? `
+              <button type="button" onclick="freshsalesAccountCreate(this)" class="w-full text-left px-2 py-1.5 bg-emerald-50 hover:bg-emerald-100 active:bg-emerald-200 flex items-center gap-2">
+                <i data-lucide="plus-circle" class="w-3.5 h-3.5 text-emerald-700 shrink-0"></i>
+                <span class="text-emerald-800 font-semibold truncate flex-1">Neues Konto „${escapeHtml(trimmedQuery)}" im CRM anlegen</span>
+              </button>` : ''}
+          </div>
+        ` : ''}
+      </div>
+      ${showSuggestion ? `
+        <div class="bg-purple-50 border border-purple-200 rounded-lg p-2 mt-1 flex items-start gap-2">
+          <i data-lucide="sparkles" class="w-3 h-3 text-purple-600 shrink-0 mt-0.5"></i>
+          <div class="flex-1 min-w-0">
+            <p class="text-[11px] text-purple-900 font-medium">KI-Vorschlag: <span class="font-semibold">${escapeHtml(sugg.value)}</span></p>
+            <p class="text-[10px] text-purple-700 italic mt-0.5">aus: ${escapeHtml(sugg.source)}</p>
+          </div>
+          <button type="button" onclick="freshsalesAccountAcceptSuggestion()" class="shrink-0 inline-flex items-center gap-1 px-2 py-1 bg-purple-600 hover:bg-purple-700 text-white rounded text-[10px] font-semibold">
+            <i data-lucide="arrow-down" class="w-3 h-3"></i> Suchen
+          </button>
+        </div>` : ''}
+    </div>`;
+}
+
+/* Liest aktuelle Werte aus den Freshsales-Input-Feldern und schreibt sie zurück
+   in ctx.fs, damit ein Re-Render keine manuellen Edits verschluckt. */
+function _syncFreshsalesInputsToCtx() {
+  const ctx = CONTACT_EDIT_CTX;
+  if (!ctx?.fs) return;
+  const map = {
+    first_name:    'fsFirstName',
+    last_name:     'fsLastName',
+    display_name:  'fsDisplayName',
+    email:         'fsEmail',
+    work_number:   'fsWorkPhone',
+    mobile_number: 'fsMobile',
+    job_title:     'fsJob',
+    address:       'fsAddress',
+    city:          'fsCity',
+    zipcode:       'fsZipcode',
+    state:         'fsState',
+    country:       'fsCountry',
+  };
+  Object.entries(map).forEach(([field, id]) => {
+    const el = $(id);
+    if (el) ctx.fs[field] = el.value;
+  });
+}
+
+let _fsAccountSearchTimer = null;
+function freshsalesAccountSearch(value) {
+  const ctx = CONTACT_EDIT_CTX;
+  if (!ctx) return;
+  ctx.fsAccountSearchQuery = value;
+  clearTimeout(_fsAccountSearchTimer);
+  if (!value || value.trim().length < 2) {
+    ctx.fsAccountSearchResults = [];
+    ctx.fsAccountSearchBusy = false;
+    renderContactEditBody();
+    return;
+  }
+  ctx.fsAccountSearchBusy = true;
+  renderContactEditBody();
+  _fsAccountSearchTimer = setTimeout(async () => {
+    try {
+      ctx.fsAccountSearchResults = await searchFreshsalesSalesAccounts(ctx.accountId, value.trim());
+    } catch (e) {
+      ctx.fsAccountSearchResults = [];
+    }
+    ctx.fsAccountSearchBusy = false;
+    renderContactEditBody();
+    setTimeout(() => { const el = $('fsAccountQuery'); if (el) { el.focus(); el.setSelectionRange(el.value.length, el.value.length); } }, 50);
+  }, 300);
+}
+
+function freshsalesAccountPick(id, name) {
+  const ctx = CONTACT_EDIT_CTX;
+  if (!ctx) return;
+  _syncFreshdeskInputsToCtx();
+  _syncFreshsalesInputsToCtx();
+  ctx.fsAccount = { id, name };
+  ctx.fsAccountSearchQuery = '';
+  ctx.fsAccountSearchResults = [];
+  renderContactEditBody();
+  toast('Konto „' + name + '" ausgewählt — jetzt unten speichern', 'success', 3000);
+}
+
+function freshsalesAccountUnlink() {
+  const ctx = CONTACT_EDIT_CTX;
+  if (!ctx) return;
+  _syncFreshdeskInputsToCtx();
+  _syncFreshsalesInputsToCtx();
+  ctx.fsAccount = null;
+  renderContactEditBody();
+}
+
+async function freshsalesAccountCreate(btnEl) {
+  const ctx = CONTACT_EDIT_CTX;
+  if (!ctx) return;
+  const name = (ctx.fsAccountSearchQuery || '').trim();
+  if (!name) return toast('Kontoname fehlt', 'warn');
+  _syncFreshdeskInputsToCtx();
+  _syncFreshsalesInputsToCtx();
+  setBusy(btnEl, true, 'Lege Konto an…');
+  try {
+    const created = await createFreshsalesSalesAccount(ctx.accountId, name);
+    ctx.fsAccount = { id: created.id, name: created.name || name };
+    ctx.fsAccountSearchQuery = '';
+    ctx.fsAccountSearchResults = [];
+    setBusy(btnEl, false);
+    renderContactEditBody();
+    toast('Konto „' + (created.name || name) + '" angelegt — jetzt unten speichern', 'success', 4000);
+  } catch (e) {
+    setBusy(btnEl, false);
+    toast('Konto anlegen fehlgeschlagen: ' + e.message, 'error', 8000);
+  }
+}
+
+function freshsalesAccountAcceptSuggestion() {
+  const ctx = CONTACT_EDIT_CTX;
+  const s = ctx?.suggestions?.company;
+  if (!s) return;
+  // KI-Suggestion „company" akzeptieren — gilt für FS-Konto-Suche
+  // (NICHT s.accepted setzen — das macht freshdesk-seite separat)
+  ctx.fsAccountSearchQuery = s.value;
+  freshsalesAccountSearch(s.value);
+}
+
 async function saveFreshdeskContact(btnEl) {
   const ctx = CONTACT_EDIT_CTX;
   if (!ctx?.fd) return;
@@ -2618,17 +2877,43 @@ async function saveFreshsalesContact(btnEl) {
   const fields = {
     first_name:    ($('fsFirstName')?.value || '').trim() || null,
     last_name:     ($('fsLastName')?.value || '').trim() || null,
+    display_name:  ($('fsDisplayName')?.value || '').trim() || null,
     email:         ($('fsEmail')?.value || '').trim() || null,
     work_number:   ($('fsWorkPhone')?.value || '').trim() || null,
     mobile_number: ($('fsMobile')?.value || '').trim() || null,
     job_title:     ($('fsJob')?.value || '').trim() || null,
+    address:       ($('fsAddress')?.value || '').trim() || null,
+    city:          ($('fsCity')?.value || '').trim() || null,
+    zipcode:       ($('fsZipcode')?.value || '').trim() || null,
+    state:         ($('fsState')?.value || '').trim() || null,
+    country:       ($('fsCountry')?.value || '').trim() || null,
   };
+  if (!fields.first_name && !fields.last_name && !fields.display_name) {
+    return toast('Mindestens Vor-/Nachname oder Anzeigename muss ausgefüllt sein', 'warn');
+  }
+  // Konto-Verknüpfung: aktuelle vs. bisherige primary-Verknüpfung vergleichen
+  const currentSaId = ctx.fsAccount?.id || null;
+  const prev = ctx.fs.sales_accounts || [];
+  const prevPrimary = Array.isArray(prev) ? (prev.find(x => x.is_primary) || prev[0]) : null;
+  const prevSaId = prevPrimary?.id || null;
+  if (currentSaId !== prevSaId) {
+    if (currentSaId) {
+      fields.sales_accounts = [{ id: currentSaId, is_primary: true }];
+    } else {
+      // Entkopplung: leeres Array sendet Unlink
+      fields.sales_accounts = [];
+    }
+  }
   setBusy(btnEl, true, 'Speichere…');
   try {
     await freshsalesUpdateContact(ctx.accountId, ctx.fs.id, fields);
     Object.assign(ctx.fs, fields);
     setBusy(btnEl, false);
-    toast('Freshsales-Kontakt gespeichert', 'success');
+    let msg = 'Freshsales-Kontakt gespeichert';
+    if ('sales_accounts' in fields) {
+      msg += currentSaId ? ' · Konto: ' + (ctx.fsAccount?.name || '') : ' · Konto entfernt';
+    }
+    toast(msg, 'success', 4000);
   } catch (e) {
     setBusy(btnEl, false);
     toast('Freshsales-Speichern fehlgeschlagen: ' + e.message, 'error', 8000);
@@ -3129,9 +3414,10 @@ function _helpSections() {
       title: 'Kontakt-Daten bearbeiten',
       subtitle: 'KI + manuell',
       body: `
-        <p>Im Ticket-Detail: <b>„Kontakt bearbeiten"</b> beim Anfragenden. Modal zeigt alle Felder (Name, Email, Telefon, Mobil, Job-Titel, Adresse) — direkt änderbar.</p>
+        <p>Im Ticket-Detail: <b>„Kontakt bearbeiten"</b> beim Anfragenden. Modal zeigt alle Felder (Name, Email, Telefon, Mobil, Job-Titel, Adresse, Firma) — direkt änderbar.</p>
         <p><b>KI-Vervollständigung:</b> Beim Öffnen analysiert Claude automatisch das Ticket (Subject + Anfragen + <b>Email-Signaturen</b>) und schlägt Werte für fehlende Felder vor. Pro Feld lila Banner mit Quelle und „Übernehmen"-Button. „Alle (X)" für Bulk-Übernahme.</p>
-        <p>Wird in <b>Freshdesk</b> aktualisiert. Wenn dein Account zusätzlich mit <b>Freshsales-CRM</b> verbunden ist (Account-Setup), erscheint ein zweiter Block für CRM-Updates.</p>`,
+        <p><b>Firma:</b> Live-Autocomplete der Freshdesk-Companies — Treffer auswählen oder „Neue Firma anlegen". KI-Vorschlag triggert direkt die Suche.</p>
+        <p>Wenn dein Account zusätzlich mit <b>Freshsales-CRM</b> verbunden ist (Account-Setup), erscheint ein zweiter Block für CRM-Updates: alle Kontaktfelder (inkl. Adresse + Bundesland + Land), <b>Konto-Verknüpfung</b> (Sales Account) mit Autocomplete + „Neu anlegen", analog zur Freshdesk-Firma.</p>`,
     },
     {
       icon: 'search', color: 'brand',
