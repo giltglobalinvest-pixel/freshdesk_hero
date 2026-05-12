@@ -259,7 +259,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.25.1';
+const APP_VERSION = 'v2.26.0';
 // Read-Token absichtlich gesplittet, damit GitHub Secret-Scanning beim Push nicht blockt.
 // Der Token ist read-only und Base-scoped → bewusst eingebettet (Architektur-Entscheidung).
 const _RK = 'patu8KWM8aWB' + 'yxCGL.69fae5d9fa4b94c2' + '66b426dadd71a51f574945d840b33569058ab5e9d89ebef3';
@@ -1468,6 +1468,48 @@ async function removeAccountAccess(userApiKey, accountId) {
     const existing = await airtableRead(ACCESS_TABLE, { filter });
     for (const rec of existing) await airtableDelete(ACCESS_TABLE, rec.id);
   } catch (e) { console.warn('removeAccountAccess:', e.message); }
+}
+
+/* Liefert alle aktiven User die Zugriff auf einen Account haben.
+   Quellen: AccountAccess-Eintrag, Legacy-Owner (acc.api_key == user.api_key) ODER Admin. */
+async function loadUsersWithAccessToAccount(accountId) {
+  if (!accountId) return [];
+  // 1. AccountAccess-Einträge für diesen Account
+  let accessKeys = new Set();
+  try {
+    const filter = "{account_id}='" + escapeFormula(accountId) + "'";
+    const recs = await airtableRead(ACCESS_TABLE, { filter });
+    recs.forEach(r => { if (r.fields.user_api_key) accessKeys.add(r.fields.user_api_key); });
+  } catch (_) {}
+  // 2. Account selbst laden (für Legacy-Owner-Key)
+  let ownerKey = '';
+  try {
+    const recs = await airtableRead(ACCOUNTS_TABLE, { filter: "RECORD_ID()='" + escapeFormula(accountId) + "'" });
+    if (recs[0]) ownerKey = (recs[0].fields.api_key || '').trim();
+  } catch (_) {}
+  // 3. Alle User durchgehen und filtern
+  let allUsers = [];
+  try {
+    allUsers = await airtableRead('User');
+  } catch (_) { return []; }
+  return allUsers
+    .filter(u => (u.fields?.status || 'aktiv').toLowerCase() === 'aktiv')
+    .map(u => {
+      const f = u.fields || {};
+      const role = String(f.role || '').toLowerCase();
+      const isAdmin = role === 'admin' || f.is_admin === true;
+      const hasAccess = accessKeys.has(f.api_key) || f.api_key === ownerKey || isAdmin;
+      return {
+        id:        u.id,
+        name:      f.name || '–',
+        api_key:   f.api_key || '',
+        phone:     f.phone || '',
+        role:      f.role || 'user',
+        is_admin:  isAdmin,
+        hasAccess,
+      };
+    })
+    .filter(u => u.hasAccess);
 }
 
 async function createAccount({ name, domain, apiKey, color, freshsalesDomain, freshsalesApiKey }) {
@@ -3279,6 +3321,9 @@ function renderTicketList(tickets) {
                     <button data-action="snooze" data-account-id="${escapeAttr(t._accountId)}" data-ticket-id="${t.id}" class="hidden sm:inline-flex text-indigo-500 active:text-indigo-700 hover:bg-indigo-50 -m-1 p-1 rounded shrink-0" title="Auf Wiedervorlage (bei dir ausblenden)">
                       <i data-lucide="clock" class="w-4 h-4"></i>
                     </button>
+                    <button data-action="whatsapp" data-account-id="${escapeAttr(t._accountId)}" data-ticket-id="${t.id}" class="hidden sm:inline-flex text-emerald-600 active:text-emerald-800 hover:bg-emerald-50 -m-1 p-1 rounded shrink-0" title="Per WhatsApp an Kollegen schicken">
+                      <i data-lucide="message-circle" class="w-4 h-4"></i>
+                    </button>
                     <button data-action="copyLink" data-account-id="${escapeAttr(t._accountId)}" data-ticket-id="${t.id}" class="hidden sm:inline-flex text-ink-500 active:text-ink-800 hover:bg-ink-100 -m-1 p-1 rounded shrink-0" title="Freshdesk-Link kopieren">
                       <i data-lucide="link" class="w-4 h-4"></i>
                     </button>
@@ -3879,6 +3924,10 @@ function attachSwipeToCards() {
           if (_openSwipedContent) _resetSwipe();
           copyTicketLink(accId, tId, btn);
         }
+        else if (action === 'whatsapp') {
+          if (_openSwipedContent) _resetSwipe();
+          openWhatsAppTicketShare(accId, tId);
+        }
       });
     });
   });
@@ -3938,6 +3987,7 @@ function openCardActionsSheet(accountId, ticketId) {
           ${row('check-circle-2',   'emerald', 'Schließen (Status: Geschlossen)',`closeCardActionsSheet(); ticketActionClose('${escapeAttr(accountId)}', ${ticketId}, null)`, 'Ticket im Freshdesk schließen')}
           ${row('ban',              'red',     'Als SPAM markieren',             `closeCardActionsSheet(); ticketActionSpam('${escapeAttr(accountId)}', ${ticketId}, null)`, 'In den Papierkorb verschieben')}
           ${row('clock',            'indigo',  'Auf Wiedervorlage…',             `closeCardActionsSheet(); openWiedervorlagePicker('${escapeAttr(accountId)}', ${ticketId}, true)`, 'Aus meiner Sicht ausblenden bis…')}
+          ${row('message-circle',   'emerald', 'Per WhatsApp an Kollegen',       `closeCardActionsSheet(); openWhatsAppTicketShare('${escapeAttr(accountId)}', ${ticketId})`, 'Mit Deep-Link + optionaler KI-Begleittext')}
           ${row('wand-2',           'purple',  'KI-Regel aus Ticket erstellen',  `closeCardActionsSheet(); openRuleFromTicket('${escapeAttr(accountId)}', ${ticketId})`, 'Muster lernen für zukünftige Tickets')}
           ${row('link',             'ink',     'Freshdesk-Link kopieren',        `copyTicketLink('${escapeAttr(accountId)}', ${ticketId}, this); closeCardActionsSheet()`, buildTicketLink(accountId, ticketId) || '')}
           ${row('external-link',    'ink',     'In Freshdesk öffnen',            `closeCardActionsSheet(); openInFreshdesk('${escapeAttr(accountId)}', ${ticketId})`, 'Neuer Tab')}
@@ -4293,6 +4343,319 @@ function buildTicketLink(accountId, ticketId) {
   return 'https://' + acc.domain + '.freshdesk.com/a/tickets/' + ticketId;
 }
 
+/* Tiefer Link in unsere App, der nach Login direkt das Ticket öffnet.
+   Format: <app-base>loader.html#t=<accountId>:<ticketId>
+   Wird beim App-Boot ausgewertet (siehe handleDeepLink unten). */
+function buildAppTicketLink(accountId, ticketId) {
+  const base = window.location.origin + window.location.pathname.replace(/\/[^\/]*$/, '/');
+  return base + 'loader.html#t=' + encodeURIComponent(accountId) + ':' + ticketId;
+}
+
+/* Prüft beim App-Boot den URL-Hash und öffnet ggf. ein Ticket direkt.
+   Wird nach showApp() aufgerufen wenn die Accounts geladen sind. */
+function handleDeepLink() {
+  try {
+    const hash = window.location.hash || '';
+    const m = hash.match(/^#t=([^:]+):(\d+)/);
+    if (!m) return;
+    const accountId = decodeURIComponent(m[1]);
+    const ticketId  = parseInt(m[2], 10);
+    if (!accountId || !ticketId) return;
+    // Hash entfernen damit es nicht beim nächsten Reload nochmal triggert
+    history.replaceState({}, '', window.location.pathname + window.location.search);
+    // Hat der User Zugriff auf den Account?
+    const acc = APP_STATE.accounts.find(a => a.id === accountId);
+    if (!acc) {
+      toast('Kein Zugriff auf das verlinkte Ticket — Account fehlt oder ist nicht zugewiesen', 'warn', 8000);
+      return;
+    }
+    // Kurz warten bis renderTicketsPage durch ist, dann das Ticket öffnen
+    setTimeout(() => openTicketDetail(accountId, ticketId), 500);
+  } catch (e) { console.warn('handleDeepLink:', e.message); }
+}
+
+/* === WhatsApp-Ticket-Share: Kollegen per WhatsApp auf ein Ticket aufmerksam machen ===
+   - User-Auswahl (nur User mit Zugriff auf den Account)
+   - Vorgenerierter Standard-Text mit Deep-Link zur App-Ticket-Detail-Ansicht
+   - Optionaler KI-erzeugter Zusatztext (Spracheingabe + Text)
+   - WhatsApp-Send öffnet wa.me mit der Nachricht an die hinterlegte Mobilnummer */
+let WA_SHARE_CTX = null;
+let WA_SHARE_REC = null;
+
+async function openWhatsAppTicketShare(accountId, ticketId) {
+  WA_SHARE_CTX = { accountId, ticketId, ticket: null, users: [], selectedUser: null, aiBusy: false };
+  let host = document.getElementById('subModalHost');
+  if (!host) { host = document.createElement('div'); host.id = 'subModalHost'; document.body.appendChild(host); }
+  host.innerHTML = `
+    <div class="fixed inset-0 z-[60] bg-white flex flex-col">
+      <header class="sticky top-0 z-10 bg-white border-b border-ink-200 safe-top">
+        <div class="px-2 py-2.5 flex items-center gap-1.5">
+          <button onclick="closeWhatsAppShare()" class="w-9 h-9 rounded-lg hover:bg-ink-100 flex items-center justify-center" aria-label="Zurück">
+            <i data-lucide="arrow-left" class="w-5 h-5 text-ink-700"></i>
+          </button>
+          <div class="flex-1 min-w-0">
+            <h1 class="font-bold text-ink-900 leading-tight inline-flex items-center gap-1.5">
+              <i data-lucide="message-circle" class="w-4 h-4 text-emerald-600"></i> Per WhatsApp teilen
+            </h1>
+            <p class="text-[11px] text-ink-500 truncate">Ticket #${ticketId} — Kollegen Bescheid geben</p>
+          </div>
+        </div>
+      </header>
+      <div id="waShareBody" class="flex-1 overflow-y-auto p-4">
+        <div class="text-center py-10">
+          <div class="spinner inline-block w-7 h-7 border-[3px] text-emerald-500"></div>
+          <p class="text-sm text-ink-500 mt-3">Lade User-Liste…</p>
+        </div>
+      </div>
+    </div>`;
+  if (window.lucide) lucide.createIcons();
+
+  // Ticket + User-Liste parallel laden
+  try {
+    const [ticket, users] = await Promise.all([
+      (CURRENT_TICKET && CURRENT_TICKET.id === ticketId && CURRENT_TICKET._accountId === accountId)
+        ? Promise.resolve(CURRENT_TICKET)
+        : fetchTicketDetail(accountId, ticketId),
+      loadUsersWithAccessToAccount(accountId),
+    ]);
+    WA_SHARE_CTX.ticket = ticket;
+    // Eigenen User aus der Liste rausfiltern
+    const myKey = APP_KEYS.user?.api_key;
+    WA_SHARE_CTX.users = users.filter(u => u.api_key !== myKey);
+    // Standard-Text generieren
+    WA_SHARE_CTX.bodyText = _waShareDefaultText(ticket, accountId, ticketId);
+    WA_SHARE_CTX.aiExtraText = '';
+    renderWhatsAppShareBody();
+  } catch (e) {
+    $('waShareBody').innerHTML = `<div class="bg-red-50 border border-red-200 rounded-2xl p-4 text-sm text-red-800">${escapeHtml(e.message || 'Fehler')}</div>`;
+  }
+}
+
+function closeWhatsAppShare() {
+  if (WA_SHARE_REC) { try { WA_SHARE_REC.stop(); } catch (_) {} WA_SHARE_REC = null; }
+  const host = document.getElementById('subModalHost');
+  if (host) host.innerHTML = '';
+  WA_SHARE_CTX = null;
+}
+
+function _waShareDefaultText(ticket, accountId, ticketId) {
+  const subj = (ticket?.subject || '(ohne Betreff)').slice(0, 120);
+  const link = buildAppTicketLink(accountId, ticketId);
+  return 'Hallo {Name},\n\n' +
+    'kannst du dir bitte mal das Ticket #' + ticketId + ' anschauen?\n' +
+    'Betreff: ' + subj + '\n\n' +
+    'Direkt in der App öffnen:\n' + link + '\n\n' +
+    'Danke!';
+}
+
+function renderWhatsAppShareBody() {
+  const ctx = WA_SHARE_CTX;
+  if (!ctx) return;
+  const ticket = ctx.ticket;
+  const users  = ctx.users;
+  const speechAvailable = !!(window.SpeechRecognition || window.webkitSpeechRecognition);
+
+  // Mark fehlende Telefonnummern
+  const usersWithPhone   = users.filter(u => u.phone && u.phone.trim());
+  const usersOhnePhone   = users.filter(u => !u.phone || !u.phone.trim());
+
+  $('waShareBody').innerHTML = `
+    <div class="space-y-3 max-w-2xl mx-auto">
+      <!-- Ticket-Vorschau -->
+      <div class="bg-ink-50 rounded-xl p-3 text-xs">
+        <p class="text-[10px] text-ink-500 uppercase tracking-wider">Ticket #${ticket.id}</p>
+        <p class="font-semibold text-ink-900 leading-snug mt-0.5">${escapeHtml(ticket.subject || '(ohne Betreff)')}</p>
+        <p class="text-ink-500 mt-0.5 truncate">von ${escapeHtml(ticket.requester?.name || '?')}${ticket.requester?.email ? ' · ' + escapeHtml(ticket.requester.email) : ''}</p>
+      </div>
+
+      <!-- User-Auswahl -->
+      <div>
+        <label class="text-xs font-semibold text-ink-700 uppercase tracking-wider">Empfänger</label>
+        ${usersWithPhone.length === 0 ? `
+          <div class="bg-amber-50 border border-amber-200 rounded-xl p-3 mt-2">
+            <p class="text-[12px] text-amber-800"><i data-lucide="alert-triangle" class="w-3 h-3 inline"></i> Keine Kollegen mit hinterlegter Handynummer für diesen Account verfügbar.</p>
+            <p class="text-[11px] text-amber-700 mt-1">Der Admin muss bei den Usern eine Telefonnummer eintragen (Userverwaltung → Bearbeiten → Telefon).</p>
+          </div>
+        ` : `
+          <div class="mt-2 space-y-1 max-h-64 overflow-y-auto">
+            ${usersWithPhone.map(u => {
+              const sel = ctx.selectedUser?.id === u.id;
+              return `
+                <button type="button" onclick="selectWhatsAppRecipient('${escapeAttr(u.id)}')" class="w-full text-left bg-white border ${sel ? 'border-emerald-400 ring-2 ring-emerald-200' : 'border-ink-200'} rounded-lg p-2.5 flex items-center gap-2 active:bg-emerald-50">
+                  <div class="w-8 h-8 rounded-full ${sel ? 'bg-emerald-500' : 'bg-ink-300'} flex items-center justify-center text-white font-semibold text-xs shrink-0">${escapeHtml((u.name || '?').charAt(0).toUpperCase())}</div>
+                  <div class="flex-1 min-w-0">
+                    <p class="text-sm font-semibold text-ink-900 truncate">${escapeHtml(u.name)}${u.is_admin ? ' · <span class="text-[10px] text-brand-700 font-normal">Admin</span>' : ''}</p>
+                    <p class="text-[11px] text-ink-500 font-mono truncate">${escapeHtml(u.phone)}</p>
+                  </div>
+                  ${sel ? '<i data-lucide="check-circle-2" class="w-4 h-4 text-emerald-600 shrink-0"></i>' : ''}
+                </button>`;
+            }).join('')}
+          </div>
+        `}
+        ${usersOhnePhone.length > 0 ? `
+          <details class="mt-2">
+            <summary class="text-[11px] text-ink-500 cursor-pointer hover:underline">${usersOhnePhone.length} Kollege${usersOhnePhone.length===1?'':'n'} ohne Handynummer ausgeblendet</summary>
+            <div class="mt-1.5 text-[11px] text-ink-600 space-y-0.5">
+              ${usersOhnePhone.map(u => `<p>• ${escapeHtml(u.name)}</p>`).join('')}
+              <p class="text-ink-500 italic mt-1">Admin: Userverwaltung → Bearbeiten → Telefon-Feld</p>
+            </div>
+          </details>
+        ` : ''}
+      </div>
+
+      <!-- KI-Zusatztext-Generator -->
+      <div class="bg-gradient-to-br from-purple-50 to-brand-50 border border-brand-200 rounded-2xl p-3">
+        <div class="flex items-center gap-2 mb-2">
+          <i data-lucide="sparkles" class="w-4 h-4 text-brand-600"></i>
+          <h3 class="font-semibold text-ink-900 text-sm">Zusätzlicher Hinweis (per KI)</h3>
+        </div>
+        <p class="text-[11px] text-ink-600 leading-snug mb-2">Sag oder tippe was du dem Kollegen mitteilen möchtest — die KI formuliert einen netten Hinweis-Text, der oben an die Nachricht angehängt wird.</p>
+        <textarea id="waAiInput" rows="3" placeholder="z.B. „Soll sich das Ticket anschauen und dem Chef Rückmeldung geben warum es noch nicht erledigt ist"" class="w-full px-3 py-2 border border-brand-200 bg-white rounded-lg text-sm focus:ring-2 focus:ring-brand-500/30 focus:border-brand-500 resize-none"></textarea>
+        <div class="flex gap-2 mt-2">
+          ${speechAvailable ? `
+            <button id="waAiMicBtn" type="button" onclick="toggleWaShareVoice()" class="px-3 py-2 bg-gradient-to-br from-purple-500 to-brand-600 text-white rounded-lg text-sm font-semibold inline-flex items-center gap-1.5 active:opacity-80 shrink-0">
+              <i data-lucide="mic" class="w-4 h-4"></i><span id="waAiMicLabel">Sprechen</span>
+            </button>` : ''}
+          <button type="button" onclick="generateWaShareAiText(this)" class="flex-1 bg-brand-500 hover:bg-brand-600 text-white rounded-lg px-3 py-2 text-sm font-semibold inline-flex items-center justify-center gap-1.5">
+            <i data-lucide="sparkles" class="w-4 h-4"></i> Mit KI erzeugen
+          </button>
+        </div>
+      </div>
+
+      <!-- Vorschau-Textbereich (editierbar) -->
+      <div>
+        <label class="text-xs font-semibold text-ink-700 uppercase tracking-wider">Nachricht (editierbar)</label>
+        <p class="text-[11px] text-ink-500 mb-1.5">Diese Nachricht wird in WhatsApp eingefügt. Du kannst sie vor dem Senden noch anpassen.</p>
+        <textarea id="waBodyText" rows="10" class="w-full px-3 py-2 border border-ink-200 rounded-lg text-xs font-sans focus:ring-2 focus:ring-emerald-500/30 focus:border-emerald-500 resize-y">${escapeHtml(_waShareCombinedText())}</textarea>
+        <p class="text-[10px] text-ink-500 mt-1">{Name} wird automatisch durch den Vornamen ersetzt.</p>
+      </div>
+    </div>`;
+  if (window.lucide) lucide.createIcons();
+
+  // Action-Bar fixiert unten
+  const oldBar = document.getElementById('waShareActionBar');
+  if (oldBar) oldBar.remove();
+  const root = $('waShareBody').closest('.flex.flex-col');
+  const bar = document.createElement('div');
+  bar.id = 'waShareActionBar';
+  bar.className = 'px-4 py-3 border-t border-ink-200 bg-white flex gap-2 safe-bottom';
+  bar.innerHTML = `
+    <button type="button" onclick="closeWhatsAppShare()" class="flex-1 px-3 py-2.5 border border-ink-200 rounded-lg text-sm font-medium hover:bg-ink-50">Abbrechen</button>
+    <button id="waSendBtn" type="button" onclick="sendWhatsAppShare()" ${!ctx.selectedUser ? 'disabled' : ''} class="flex-[1.5] bg-emerald-600 hover:bg-emerald-700 disabled:bg-ink-300 disabled:cursor-not-allowed text-white px-3 py-2.5 rounded-lg text-sm font-semibold inline-flex items-center justify-center gap-1.5">
+      <i data-lucide="send" class="w-4 h-4"></i> ${ctx.selectedUser ? 'An ' + escapeHtml((ctx.selectedUser.name || '').split(/\s+/)[0]) + ' senden' : 'Empfänger wählen'}
+    </button>`;
+  root.appendChild(bar);
+  if (window.lucide) lucide.createIcons();
+}
+
+function _waShareCombinedText() {
+  const ctx = WA_SHARE_CTX;
+  if (!ctx) return '';
+  let text = '';
+  if (ctx.aiExtraText && ctx.aiExtraText.trim()) {
+    text = ctx.aiExtraText.trim() + '\n\n' + ctx.bodyText;
+  } else {
+    text = ctx.bodyText;
+  }
+  // {Name}-Platzhalter ersetzen falls User ausgewählt
+  if (ctx.selectedUser?.name) {
+    const firstName = ctx.selectedUser.name.split(/\s+/)[0];
+    text = text.replace(/\{Name\}/g, firstName);
+  }
+  return text;
+}
+
+function selectWhatsAppRecipient(userId) {
+  const ctx = WA_SHARE_CTX;
+  if (!ctx) return;
+  ctx.selectedUser = ctx.users.find(u => u.id === userId) || null;
+  renderWhatsAppShareBody();
+}
+
+async function toggleWaShareVoice() {
+  if (WA_SHARE_REC) { try { WA_SHARE_REC.stop(); } catch (_) {} WA_SHARE_REC = null; _updateWaMicUI(false); return; }
+  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if (!SR) return toast('Sprach-Eingabe nicht verfügbar', 'warn', 6000);
+  try { await ensureMicPermission(); } catch (e) { return toast(e.message, 'error', 10000); }
+  const rec = new SR();
+  rec.lang = 'de-DE'; rec.continuous = true; rec.interimResults = true;
+  const ta = $('waAiInput');
+  let base = (ta?.value || '');
+  if (base && !/\s$/.test(base)) base += ' ';
+  rec.onresult = (event) => {
+    let final = '', interim = '';
+    for (let i = event.resultIndex; i < event.results.length; i++) {
+      const tr = event.results[i][0].transcript;
+      if (event.results[i].isFinal) final += tr;
+      else interim += tr;
+    }
+    if (final) base += final;
+    if (ta) ta.value = base + interim;
+  };
+  rec.onerror = (e) => {
+    const msg = _explainSpeechError(e.error);
+    if (msg) toast(msg, 'warn', 8000);
+    WA_SHARE_REC = null; _updateWaMicUI(false);
+  };
+  rec.onend = () => { WA_SHARE_REC = null; _updateWaMicUI(false); };
+  try { rec.start(); WA_SHARE_REC = rec; _updateWaMicUI(true); }
+  catch (_) { toast('Mikrofon-Start fehlgeschlagen', 'warn', 6000); }
+}
+
+function _updateWaMicUI(active) {
+  const btn = $('waAiMicBtn');
+  const lbl = $('waAiMicLabel');
+  if (!btn) return;
+  if (active) { btn.classList.add('animate-pulse'); if (lbl) lbl.textContent = 'Stop'; }
+  else        { btn.classList.remove('animate-pulse'); if (lbl) lbl.textContent = 'Sprechen'; }
+}
+
+async function generateWaShareAiText(btnEl) {
+  const ctx = WA_SHARE_CTX;
+  if (!ctx) return;
+  const input = ($('waAiInput')?.value || '').trim();
+  if (!input) return toast('Bitte zuerst beschreiben was du sagen möchtest', 'warn');
+  if (WA_SHARE_REC) { try { WA_SHARE_REC.stop(); } catch (_) {} WA_SHARE_REC = null; }
+  const targetName = ctx.selectedUser?.name ? ctx.selectedUser.name.split(/\s+/)[0] : '{Name}';
+  setBusy(btnEl, true, 'Claude formuliert…');
+  try {
+    const sys = 'Du formulierst kurze, kollegiale WhatsApp-Nachrichten auf Deutsch. Stil: locker-professionell, freundlich, 1-3 Sätze. Keine Anrede (kommt separat dazu), keine Signatur, keine Floskeln. Antwort NUR der Nachrichten-Text, kein JSON, kein Markdown.';
+    const ticket = ctx.ticket;
+    const user = 'KOLLEGE: ' + targetName + '\n' +
+      'TICKET: #' + ticket.id + ' — ' + (ticket.subject || '') + '\n\n' +
+      'WAS ICH SAGEN MÖCHTE:\n' + input + '\n\n' +
+      'Formuliere daraus 1-3 kurze Sätze, die als Kontext am Anfang einer WhatsApp-Nachricht stehen. Direkt ansprechen aber OHNE Anrede ("Hallo X" wird separat ergänzt).';
+    const data = await proxyJson('/anthropic/v1/messages', {
+      method: 'POST',
+      body: JSON.stringify({
+        model: 'claude-haiku-4-5-20251001',
+        max_tokens: 400,
+        system: sys,
+        messages: [{ role: 'user', content: user }]
+      })
+    });
+    const text = (data.content && data.content[0] && data.content[0].text) || '';
+    ctx.aiExtraText = String(text).trim();
+    setBusy(btnEl, false);
+    renderWhatsAppShareBody();
+  } catch (e) {
+    setBusy(btnEl, false);
+    toast('KI-Fehler: ' + e.message, 'error', 8000);
+  }
+}
+
+function sendWhatsAppShare() {
+  const ctx = WA_SHARE_CTX;
+  if (!ctx?.selectedUser) return toast('Bitte zuerst Empfänger wählen', 'warn');
+  const text = ($('waBodyText')?.value || '').trim();
+  if (!text) return toast('Nachricht ist leer', 'warn');
+  const phone = ctx.selectedUser.phone.replace(/\D/g, '');
+  if (!phone) return toast('Empfänger hat keine Telefonnummer', 'warn');
+  const url = 'https://wa.me/' + phone + '?text=' + encodeURIComponent(text);
+  window.open(url, '_blank');
+  closeWhatsAppShare();
+}
+
 /* Kopiert den vollständigen Freshdesk-URL eines Tickets in die Zwischenablage.
    Mit Fallback auf execCommand für ältere Browser / unsichere Kontexte. */
 async function copyTicketLink(accountId, ticketId, btnEl) {
@@ -4346,6 +4709,7 @@ function _ticketActionBarIcons(accountId, ticketId) {
     btn('wand-2',         'purple',  'KI-Regel aus diesem Ticket erstellen',                   `openRuleFromTicket('${accIdAttr}', ${ticketId})`),
     `<span class="shrink-0 w-px h-5 bg-ink-200 mx-0.5"></span>`,
     btn('clock',          'indigo',  'Auf Wiedervorlage / aus meiner Sicht ausblenden',        `openWiedervorlagePicker('${accIdAttr}', ${ticketId})`),
+    btn('message-circle', 'emerald', 'Per WhatsApp an Kollegen schicken',                     `openWhatsAppTicketShare('${accIdAttr}', ${ticketId})`),
     btn('check-square',   'brand',   'Mehrfach-Auswahl starten',                               `closeModal(); msEnter('${accIdAttr}', ${ticketId})`),
     `<span class="shrink-0 w-px h-5 bg-ink-200 mx-0.5"></span>`,
     btn('link',           'ink',     'Freshdesk-Link kopieren',                                `copyTicketLink('${accIdAttr}', ${ticketId}, this)`),
@@ -9439,6 +9803,8 @@ async function showApp() {
   // Meine-Notizen-Index laden (im Hintergrund)
   loadMyNotes().catch(e => console.warn('MyNotes-Load:', e.message));
   navTo('tickets');
+  // Deep-Link: wenn URL-Hash auf ein Ticket zeigt, direkt öffnen
+  handleDeepLink();
   // Update-Check (lautlos)
   checkForUpdate(false);
 }
