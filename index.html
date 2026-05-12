@@ -251,7 +251,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.20.0';
+const APP_VERSION = 'v2.20.1';
 // Read-Token absichtlich gesplittet, damit GitHub Secret-Scanning beim Push nicht blockt.
 // Der Token ist read-only und Base-scoped → bewusst eingebettet (Architektur-Entscheidung).
 const _RK = 'patu8KWM8aWB' + 'yxCGL.69fae5d9fa4b94c2' + '66b426dadd71a51f574945d840b33569058ab5e9d89ebef3';
@@ -6909,13 +6909,31 @@ function markCardProcessing(accountId, ticketId, isOn) {
 }
 
 // Eine Regel auf ein konkretes Ticket anwenden
+/* Akzeptiert String ("closed"), Zahl (5), deutschen Namen ("geschlossen") und liefert die Freshdesk-Status-ID. */
+function _normalizeRuleStatus(v) {
+  if (v == null) return null;
+  if (typeof v === 'number' && [2, 3, 4, 5].includes(v)) return v;
+  const map = {
+    '2':2, '3':3, '4':4, '5':5,
+    open:2, offen:2,
+    pending:3, wartet:3, waiting:3,
+    resolved:4, geloest:4, 'gelöst':4, solved:4,
+    closed:5, geschlossen:5, close:5,
+  };
+  const k = String(v).toLowerCase().trim();
+  return map[k] || null;
+}
+
 async function applyRuleActions(rule, ticket) {
   const accountId = ticket._accountId;
   const ticketId  = ticket.id;
   const base = '/freshdesk/' + encodeURIComponent(accountId) + '/api/v2/tickets/' + ticketId;
   const actions = rule.action?.actions || [];
   const performed = [];
+  const failures  = []; // {what, error} — werden als Toast + ins Tracking-Note geschrieben
   let wroteNote = false;
+  const _short = (s) => String(s || '').replace(/^HTTP \d+ · /, '').slice(0, 160);
+
   for (const a of actions) {
     try {
       if (a.type === 'note' && a.body) {
@@ -6936,22 +6954,41 @@ async function applyRuleActions(rule, ticket) {
         const agentId = findAgentByHint(accountId, a.agentHint);
         if (agentId) {
           await proxyJson(base, { method: 'PUT', body: JSON.stringify({ responder_id: agentId }) });
-          performed.push('Assignee=' + getAgentName(accountId, agentId));
+          performed.push('Bearbeiter=' + getAgentName(accountId, agentId));
         } else {
-          console.warn('Rule: Agent nicht gefunden für hint', a.agentHint);
+          failures.push({ what: 'Bearbeiter', error: 'Kein Agent gefunden für „' + (a.agentHint || '?') + '"' });
         }
       } else if (a.type === 'group') {
         const groupId = findGroupByHint(accountId, a.groupHint);
         if (groupId) {
           await proxyJson(base, { method: 'PUT', body: JSON.stringify({ group_id: groupId }) });
           performed.push('Gruppe=' + getGroupName(accountId, groupId));
+        } else {
+          failures.push({ what: 'Gruppe', error: 'Keine Gruppe gefunden für „' + (a.groupHint || '?') + '"' });
         }
       } else if (a.type === 'status') {
-        const statusMap = { open: 2, pending: 3, resolved: 4, closed: 5 };
-        const s = statusMap[String(a.status).toLowerCase()];
-        if (s) {
-          await proxyJson(base, { method: 'PUT', body: JSON.stringify({ status: s }) });
-          performed.push('Status=' + a.status);
+        const s = _normalizeRuleStatus(a.status);
+        if (!s) {
+          failures.push({ what: 'Status', error: 'Status-Wert nicht erkannt: ' + JSON.stringify(a.status) });
+        } else {
+          try {
+            await proxyJson(base, { method: 'PUT', body: JSON.stringify({ status: s }) });
+            performed.push('Status=' + (FD_STATUS[s]?.label || s));
+          } catch (e1) {
+            // Freshdesk lehnt „Geschlossen" (5) häufig ab wenn Pflichtfelder fehlen.
+            // Fallback: auf „Gelöst" (4) — Freshdesk schließt das Ticket dann automatisch nach X Tagen.
+            if (s === 5 && /validat|required|missing|mandatory/i.test(e1.message || '')) {
+              try {
+                await proxyJson(base, { method: 'PUT', body: JSON.stringify({ status: 4 }) });
+                performed.push('Status=Gelöst (Geschlossen war blockiert)');
+                failures.push({ what: 'Status', error: 'Geschlossen wurde von Freshdesk abgelehnt (Pflichtfelder fehlen) → stattdessen auf Gelöst gesetzt. Im Freshdesk-Admin prüfen welche Felder beim Schließen pflicht sind.' });
+              } catch (e2) {
+                failures.push({ what: 'Status', error: 'Geschlossen + Gelöst fehlgeschlagen: ' + _short(e2.message) });
+              }
+            } else {
+              failures.push({ what: 'Status', error: _short(e1.message) });
+            }
+          }
         }
       } else if (a.type === 'type') {
         const tName = findTypeByHint(accountId, a.typeHint) || a.typeHint;
@@ -6970,11 +7007,14 @@ async function applyRuleActions(rule, ticket) {
       }
     } catch (e) {
       console.warn('Rule action failed:', a, e);
+      failures.push({ what: a.type, error: _short(e.message || String(e)) });
     }
   }
+
   // Wenn Aktionen gelaufen sind und keine eigene Note-Action dabei war: kurze Bestätigungs-Notiz in Freshdesk
   if (performed.length > 0 && !wroteNote) {
-    const summaryBody = '🤖 KI-Regel „' + rule.titel + '" automatisch angewandt\n\nAktionen: ' + performed.join(' · ');
+    let summaryBody = '🤖 KI-Regel „' + rule.titel + '" automatisch angewandt\n\nAktionen: ' + performed.join(' · ');
+    if (failures.length) summaryBody += '\n\n⚠ Fehlgeschlagen:\n' + failures.map(f => '• ' + f.what + ': ' + f.error).join('\n');
     try {
       await proxyJson(base + '/notes', {
         method: 'POST',
@@ -6983,10 +7023,19 @@ async function applyRuleActions(rule, ticket) {
     } catch (e) { console.warn('Summary-Note fehlgeschlagen:', e.message); }
   }
   // Immer in MeineNotizen indexieren — egal welche Aktionen gelaufen sind, damit UI „automatisiert" erkennt
-  if (performed.length > 0) {
-    const trackingBody = 'Regel „' + rule.titel + '" angewandt: ' + performed.join(' · ');
+  if (performed.length > 0 || failures.length > 0) {
+    let trackingBody = 'Regel „' + rule.titel + '"';
+    if (performed.length) trackingBody += ' angewandt: ' + performed.join(' · ');
+    if (failures.length)  trackingBody += '\nFehler: ' + failures.map(f => f.what + ': ' + f.error).join(' · ');
     recordMyNote(accountId, ticketId, trackingBody, 'regel').catch(() => {});
   }
+
+  // User-Toast bei Fehlern, damit sie nicht still in der Console verschwinden
+  if (failures.length) {
+    const msg = 'Regel „' + rule.titel + '" Ticket #' + ticketId + ' — ' + failures.length + ' Aktion' + (failures.length === 1 ? '' : 'en') + ' fehlgeschlagen: ' + failures.map(f => f.what + ' (' + f.error.slice(0, 90) + ')').join(' | ');
+    toast(msg, 'warn', 12000);
+  }
+
   return performed;
 }
 
