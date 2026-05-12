@@ -267,7 +267,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.27.2';
+const APP_VERSION = 'v2.27.3';
 // Read-Token absichtlich gesplittet, damit GitHub Secret-Scanning beim Push nicht blockt.
 // Der Token ist read-only und Base-scoped → bewusst eingebettet (Architektur-Entscheidung).
 const _RK = 'patu8KWM8aWB' + 'yxCGL.69fae5d9fa4b94c2' + '66b426dadd71a51f574945d840b33569058ab5e9d89ebef3';
@@ -3280,6 +3280,51 @@ function _typeBadgeDropdown(t) {
     </span>`;
 }
 
+/* === Detail-Ansicht-Dropdowns ===============================================
+   Das Ticket-Detail hat ein eigenes Grid-Layout (Zugewiesen / Gruppe / Typ als Kachel
+   mit Label oben + Wert groß drunter). Hier rendern wir die gleichen Selects, nur
+   in einem anderen Layout — Change-Handler sind die gleichen (cardChangeAssignee etc.) */
+function _detailFieldDropdown(label, displayValue, valueColorCls, selectInnerHtml, refId) {
+  return `
+    <div class="relative min-w-0 -m-1 p-1 rounded-lg hover:bg-ink-50 transition" onclick="event.stopPropagation()">
+      <p class="text-ink-500 text-[10px] uppercase tracking-wider flex items-center gap-1">
+        ${escapeHtml(label)} <i data-lucide="chevron-down" class="w-3 h-3"></i>
+      </p>
+      <p class="font-semibold ${valueColorCls} truncate mt-0.5 pointer-events-none">${escapeHtml(displayValue)}</p>
+      ${selectInnerHtml}
+    </div>`;
+}
+
+function _detailAssigneeSelectInner(t) {
+  const cache = APP_STATE.agentsCache?.[t._accountId];
+  const agents = (cache?.agents || []).slice().sort((a, b) => (a.name || '').localeCompare(b.name || '', 'de'));
+  return `
+    <select data-account-id="${escapeAttr(t._accountId)}" data-ticket-id="${t.id}" onchange="cardChangeAssignee(this)" class="absolute inset-0 opacity-0 cursor-pointer w-full">
+      <option value="" ${!t.responder_id ? 'selected' : ''}>— niemand —</option>
+      ${agents.map(a => `<option value="${a.id}" ${a.id === t.responder_id ? 'selected' : ''}>${escapeHtml(a.name)}</option>`).join('')}
+    </select>`;
+}
+
+function _detailGroupSelectInner(t) {
+  const cache = APP_STATE.groupsCache?.[t._accountId];
+  const groups = (cache?.groups || []).slice().sort((a, b) => (a.name || '').localeCompare(b.name || '', 'de'));
+  return `
+    <select data-account-id="${escapeAttr(t._accountId)}" data-ticket-id="${t.id}" onchange="cardChangeGroup(this)" class="absolute inset-0 opacity-0 cursor-pointer w-full">
+      <option value="" ${!t.group_id ? 'selected' : ''}>— keine Gruppe —</option>
+      ${groups.map(g => `<option value="${g.id}" ${g.id === t.group_id ? 'selected' : ''}>${escapeHtml(g.name)}</option>`).join('')}
+    </select>`;
+}
+
+function _detailTypeSelectInner(t) {
+  const cache = APP_STATE.typesCache?.[t._accountId];
+  const types = (cache?.types || []).slice().sort((a, b) => a.localeCompare(b, 'de'));
+  return `
+    <select data-account-id="${escapeAttr(t._accountId)}" data-ticket-id="${t.id}" onchange="cardChangeType(this)" class="absolute inset-0 opacity-0 cursor-pointer w-full">
+      <option value="" ${!t.type ? 'selected' : ''}>— kein Typ —</option>
+      ${types.map(ty => `<option value="${escapeAttr(ty)}" ${ty === t.type ? 'selected' : ''}>${escapeHtml(ty)}</option>`).join('')}
+    </select>`;
+}
+
 /* Generischer Helper: führt PUT auf das Ticket aus, patcht den Cache und re-rendert.
    Bei Fehler: Toast + Selektion zurücksetzen. */
 async function _cardSetField(sel, fieldName, parsedValue, successMsg, errLabel) {
@@ -3291,6 +3336,10 @@ async function _cardSetField(sel, fieldName, parsedValue, successMsg, errLabel) 
   const patch = {}; patch[fieldName] = parsedValue;
   patchTicketInList(accountId, ticketId, patch);
   refreshTicketsListFromCache();
+  // Falls Ticket-Detail offen ist: dort auch neu rendern (CURRENT_TICKET wurde von patchTicketInList aktualisiert)
+  if (CURRENT_TICKET && CURRENT_TICKET.id === ticketId && CURRENT_TICKET._accountId === accountId && $('ticketDetailBody')) {
+    renderTicketDetailBody(CURRENT_TICKET);
+  }
   try {
     const body = {}; body[fieldName] = parsedValue;
     await proxyJson(path, { method: 'PUT', body: JSON.stringify(body) });
@@ -4984,7 +5033,7 @@ function renderTicketDetailBody(ticket) {
       <div class="bg-white rounded-2xl border border-ink-200 p-4">
         <h2 class="font-bold text-ink-900 text-base leading-snug">${escapeHtml(ticket.subject || '(ohne Betreff)')}</h2>
         <div class="flex flex-wrap gap-1.5 mt-2 items-center">
-          <button onclick="openStatusModal()" class="text-[10px] uppercase tracking-wider px-1.5 py-0.5 rounded font-semibold border ${status.cls} active:opacity-70 inline-flex items-center gap-1" title="Status ändern">${escapeHtml(status.label)} <i data-lucide="chevron-down" class="w-2.5 h-2.5"></i></button>
+          ${_statusBadgeDropdown(ticket)}
           <span class="text-[10px] text-ink-400">·</span>
           <span class="text-[11px] text-ink-500">${escapeHtml(fmtDate(ticket.updated_at))}</span>
           <span class="text-[10px] text-ink-400 ml-auto">erstellt ${escapeHtml(fmtDate(ticket.created_at))}</span>
@@ -5015,24 +5064,9 @@ function renderTicketDetailBody(ticket) {
               </div>` : ''}
           </div>
           <div class="grid grid-cols-3 gap-2">
-            <button onclick="openAssigneeModal()" class="min-w-0 text-left -m-1 p-1 rounded-lg active:bg-ink-50 hover:bg-ink-50 transition">
-              <p class="text-ink-500 text-[10px] uppercase tracking-wider flex items-center gap-1">
-                Zugewiesen <i data-lucide="chevron-down" class="w-3 h-3"></i>
-              </p>
-              <p class="font-semibold ${assigneeName ? 'text-ink-900' : 'text-amber-700'} truncate mt-0.5">${escapeHtml(assigneeName || 'niemand')}</p>
-            </button>
-            <button onclick="openGroupModal()" class="min-w-0 text-left -m-1 p-1 rounded-lg active:bg-ink-50 hover:bg-ink-50 transition">
-              <p class="text-ink-500 text-[10px] uppercase tracking-wider flex items-center gap-1">
-                Gruppe <i data-lucide="chevron-down" class="w-3 h-3"></i>
-              </p>
-              <p class="font-semibold ${groupName ? 'text-ink-900' : 'text-ink-500'} truncate mt-0.5">${escapeHtml(groupName || 'keine')}</p>
-            </button>
-            <button onclick="openTypeModal()" class="min-w-0 text-left -m-1 p-1 rounded-lg active:bg-ink-50 hover:bg-ink-50 transition">
-              <p class="text-ink-500 text-[10px] uppercase tracking-wider flex items-center gap-1">
-                Typ <i data-lucide="chevron-down" class="w-3 h-3"></i>
-              </p>
-              <p class="font-semibold ${ticket.type ? 'text-ink-900' : 'text-ink-500'} truncate mt-0.5">${escapeHtml(ticket.type || 'keiner')}</p>
-            </button>
+            ${_detailFieldDropdown('Zugewiesen', assigneeName || 'niemand', assigneeName ? 'text-ink-900' : 'text-amber-700', _detailAssigneeSelectInner(ticket), 'detailAssignee')}
+            ${_detailFieldDropdown('Gruppe', groupName || 'keine', groupName ? 'text-ink-900' : 'text-ink-500', _detailGroupSelectInner(ticket), 'detailGroup')}
+            ${_detailFieldDropdown('Typ', ticket.type || 'keiner', ticket.type ? 'text-ink-900' : 'text-ink-500', _detailTypeSelectInner(ticket), 'detailType')}
           </div>
         </div>
       </div>
