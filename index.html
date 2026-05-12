@@ -259,7 +259,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.24.0';
+const APP_VERSION = 'v2.25.0';
 // Read-Token absichtlich gesplittet, damit GitHub Secret-Scanning beim Push nicht blockt.
 // Der Token ist read-only und Base-scoped → bewusst eingebettet (Architektur-Entscheidung).
 const _RK = 'patu8KWM8aWB' + 'yxCGL.69fae5d9fa4b94c2' + '66b426dadd71a51f574945d840b33569058ab5e9d89ebef3';
@@ -1688,6 +1688,36 @@ async function fetchContact(accountId, contactId) {
     console.warn('Contact-Fetch fehlgeschlagen für #' + contactId + ':', e.message);
     return null;
   }
+}
+
+/* === Agent-Me / Signatur-Cache ============================================
+   Holt den Freshdesk-Agent-Record des eingeloggten Users (= „mich" auf diesem Account)
+   und liefert die persönliche Signatur. Caching pro Account, 10 min TTL. */
+const AGENT_ME_CACHE = {};
+async function fetchAgentMe(accountId) {
+  if (!accountId) return null;
+  const cached = AGENT_ME_CACHE[accountId];
+  if (cached && cached.expires > Date.now()) return cached.data;
+  try {
+    const data = await proxyJson('/freshdesk/' + encodeURIComponent(accountId) + '/api/v2/agents/me');
+    // Freshdesk liefert manchmal {contact: {signature: ...}, ...}, manchmal direkt {signature}
+    const sig = (data?.signature || data?.contact?.signature || '').trim();
+    const name = data?.contact?.name || data?.name || '';
+    const email = data?.contact?.email || data?.email || '';
+    const me = { id: data?.id || null, name, email, signature: sig, raw: data };
+    AGENT_ME_CACHE[accountId] = { data: me, expires: Date.now() + 10 * 60 * 1000 };
+    return me;
+  } catch (e) {
+    console.warn('agents/me fehlgeschlagen für', accountId, e.message);
+    // Negative cache mit kurzer TTL — verhindert Endlos-Retries pro Render
+    AGENT_ME_CACHE[accountId] = { data: null, expires: Date.now() + 60 * 1000 };
+    return null;
+  }
+}
+
+function clearAgentMeCache(accountId) {
+  if (accountId) delete AGENT_ME_CACHE[accountId];
+  else Object.keys(AGENT_ME_CACHE).forEach(k => delete AGENT_ME_CACHE[k]);
 }
 
 async function updateContact(accountId, contactId, fields) {
@@ -6038,12 +6068,14 @@ async function openAssistantModal(accountId, ticketId) {
   if (window.lucide) lucide.createIcons();
 
   try {
-    const [ticket] = await Promise.all([
+    const [ticket, , , me] = await Promise.all([
       fetchTicketDetail(accountId, ticketId),
       ensureAgentsLoaded(accountId),
       ensureGroupsLoaded(accountId),
+      fetchAgentMe(accountId), // Signatur des eingeloggten Users für diesen Account vorladen
     ]);
     ASSISTANT_CTX.ticket = ticket;
+    ASSISTANT_CTX.me     = me;
     renderAssistantInput();
   } catch (e) {
     $('assistantContent').innerHTML = `<div class="bg-red-50 border border-red-200 rounded-2xl p-4 text-sm text-red-800">${escapeHtml(e.message)}</div>`;
@@ -6224,7 +6256,8 @@ async function aiInterpretCommand(ticket, command, accountId) {
     'MEHRERE SCHRITTE: Ein User-Befehl kann mehrere Aktionen umfassen (z.B. „antworte… und weise Sandra zu und Gruppe Vertrieb und auf Gelöst setzen" = vier Aktionen). Liste sie in der logischen Reihenfolge auf (typisch: reply/note vor assign/group vor status).\n' +
     'Jede Aktion bekommt einen eigenen Eintrag in der "actions"-Liste.\n\n' +
     'REGELN PRO AKTION:\n' +
-    '- Bei reply/note/forward: Verfasse einen fertigen, professionellen body-Text in der Sprache des Tickets (meist Deutsch). Mit Anrede (Name aus Ticket), klarer Aussage, freundlichem Abschluss. Verwende Zeilenumbrüche \\n für Absätze.\n' +
+    '- Bei reply/note/forward: Verfasse einen fertigen, professionellen body-Text in der Sprache des Tickets (meist Deutsch). Mit Anrede (Name aus Ticket), klarer Aussage, freundlichem Abschluss (z.B. „Mit freundlichen Grüßen"). Verwende Zeilenumbrüche \\n für Absätze.\n' +
+    '- WICHTIG: Schreibe KEINEN Namen, KEINE Firma, KEINE Telefonnummer, KEINE Position am Ende — die Signatur des Users wird automatisch aus Freshdesk angehängt. Beende den Text mit dem freundlichen Abschluss („Mit freundlichen Grüßen,") und einem Zeilenumbruch — sonst nichts.\n' +
     '- Bei assign: nur EINE eindeutige agent_id verwenden. Bei mehrdeutigen Vornamen (mehrere passen) ODER wenn KEINE passende ID im Pool ist → trotzdem type="assign", aber agent_id=null setzen. Im "summary" kurz erklären welche Auswahl der User treffen muss. Die App zeigt dann ein Dropdown.\n' +
     '- Bei group: GENAU dieselbe Regel. Wenn Gruppen-Bezeichnung mehrdeutig oder unklar ist → type="group" mit group_id=null. Niemals raten.\n' +
     '- Bei forward: forward_to als Array von E-Mail-Adressen.\n' +
@@ -6355,12 +6388,28 @@ function renderAssistantPreview() {
                   : isActive   ? `bg-${meta.color}-50 border-${meta.color}-300 shadow-sm`
                   :              'bg-white border-ink-200 opacity-60';
 
+    // Signatur-Block für reply/forward — nur Anzeige, wird beim Senden separat angehängt
+    const _sigBlock = () => {
+      const sig = ctx.me?.signature || '';
+      if (!sig) {
+        return `<div class="mt-2 bg-amber-50 border border-amber-200 rounded-lg p-2 text-[11px] text-amber-800 leading-snug">
+          <i data-lucide="alert-circle" class="w-3 h-3 inline"></i> Keine Signatur in Freshdesk hinterlegt für ${escapeHtml(ctx.me?.name || 'dich')} auf diesem Account. Setze sie in Freshdesk → Profile settings → Signature.
+        </div>`;
+      }
+      return `<details class="mt-2 bg-${meta.color}-50/40 border border-${meta.color}-200 rounded-lg" open>
+        <summary class="px-2 py-1.5 cursor-pointer text-[11px] font-semibold text-${meta.color}-800 inline-flex items-center gap-1.5"><i data-lucide="pen-line" class="w-3 h-3"></i> Signatur wird angehängt${ctx.me?.name ? ' (' + escapeHtml(ctx.me.name) + ')' : ''}</summary>
+        <div class="px-2 pb-2 pt-1 text-[11px] text-ink-700 leading-relaxed border-t border-${meta.color}-200 max-h-32 overflow-y-auto bg-white/60 rounded-b">${sig}</div>
+      </details>`;
+    };
+
     // Body / Edit-Fields nur in der aktiven Karte editierbar, vorher/nachher readonly Anzeige
     let body = '';
     if (a.type === 'reply' || a.type === 'note') {
+      const showSig = a.type === 'reply';  // Notiz braucht keine Signatur
       if (isActive && isPending) {
         body = `<label class="text-[10px] uppercase font-semibold text-${meta.color}-800 block">Text — kannst du anpassen</label>
-                <textarea id="stepBody_${i}" class="w-full text-sm px-3 py-2 border border-${meta.color}-300 bg-white rounded-lg whitespace-pre-line mt-1" rows="${a.type==='reply'?8:6}">${escapeHtml(a.body || '')}</textarea>`;
+                <textarea id="stepBody_${i}" class="w-full text-sm px-3 py-2 border border-${meta.color}-300 bg-white rounded-lg whitespace-pre-line mt-1" rows="${a.type==='reply'?8:6}">${escapeHtml(a.body || '')}</textarea>
+                ${showSig ? _sigBlock() : ''}`;
       } else {
         body = `<div class="text-[11px] text-ink-700 whitespace-pre-line bg-white/60 rounded p-2 max-h-32 overflow-y-auto border border-${meta.color}-200">${escapeHtml(a.body || '')}</div>`;
       }
@@ -6369,7 +6418,8 @@ function renderAssistantPreview() {
         body = `<label class="text-[10px] uppercase font-semibold text-${meta.color}-800 block">Empfänger (kommagetrennt)</label>
                 <input id="stepForwardTo_${i}" class="w-full text-sm px-3 py-2 border border-${meta.color}-300 bg-white rounded-lg mt-1 mb-2 font-mono" value="${escapeAttr((a.forward_to || []).join(', '))}" placeholder="empfaenger@beispiel.de">
                 <label class="text-[10px] uppercase font-semibold text-${meta.color}-800 block">Nachricht</label>
-                <textarea id="stepBody_${i}" class="w-full text-sm px-3 py-2 border border-${meta.color}-300 bg-white rounded-lg whitespace-pre-line mt-1" rows="6">${escapeHtml(a.body || '')}</textarea>`;
+                <textarea id="stepBody_${i}" class="w-full text-sm px-3 py-2 border border-${meta.color}-300 bg-white rounded-lg whitespace-pre-line mt-1" rows="6">${escapeHtml(a.body || '')}</textarea>
+                ${_sigBlock()}`;
       } else {
         body = `<p class="text-[11px] text-ink-600">an <span class="font-mono">${escapeHtml((a.forward_to||[]).join(', '))}</span></p>
                 <div class="text-[11px] text-ink-700 whitespace-pre-line bg-white/60 rounded p-2 max-h-24 overflow-y-auto border border-${meta.color}-200 mt-1">${escapeHtml(a.body || '')}</div>`;
@@ -6666,12 +6716,19 @@ async function reclassifyAssistantStep(idx, newType) {
 async function executeSingleAssistantAction(ctx, a) {
   const base = '/freshdesk/' + encodeURIComponent(ctx.accountId) + '/api/v2/tickets/' + ctx.ticketId;
   if (a.type === 'reply') {
-    await proxyJson(base + '/reply', { method: 'POST', body: JSON.stringify({ body: textToHtmlForFreshdesk(a.body) }) });
+    const me = await fetchAgentMe(ctx.accountId);
+    const sig = me?.signature || '';
+    const body = appendSignatureHtml(textToHtmlForFreshdesk(a.body), sig);
+    await proxyJson(base + '/reply', { method: 'POST', body: JSON.stringify({ body }) });
   } else if (a.type === 'note') {
+    // Notizen ohne Signatur (intern, kein Mail-Versand)
     await proxyJson(base + '/notes', { method: 'POST', body: JSON.stringify({ body: textToHtmlForFreshdesk(a.body), private: true }) });
     recordMyNote(ctx.accountId, ctx.ticketId, a.body, 'assistant').catch(() => {});
   } else if (a.type === 'forward') {
-    await proxyJson(base + '/forward', { method: 'POST', body: JSON.stringify({ to_emails: a.forward_to, body: textToHtmlForFreshdesk(a.body) }) });
+    const me = await fetchAgentMe(ctx.accountId);
+    const sig = me?.signature || '';
+    const body = appendSignatureHtml(textToHtmlForFreshdesk(a.body), sig);
+    await proxyJson(base + '/forward', { method: 'POST', body: JSON.stringify({ to_emails: a.forward_to, body }) });
   } else if (a.type === 'assign') {
     if (!a.agent_id) throw new Error('Kein Bearbeiter ausgewählt');
     await proxyJson(base, { method: 'PUT', body: JSON.stringify({ responder_id: a.agent_id }) });
@@ -6729,9 +6786,62 @@ async function finalizeAssistantRun() {
   renderTicketsPage();
 }
 
+/* Wandelt einen Klartext in lesbares HTML für Freshdesk:
+   - Trim, normalisiert Whitespace
+   - Absätze (Doppel-Newline) → <p>
+   - Einzelne Newlines innerhalb Absatz → <br>
+   - Listen-Bullets (- / • / * am Zeilenanfang) → <ul><li>
+   - Nummerierte Listen (1. 2. 3.) → <ol><li>
+   - URLs/Emails → klickbare Links
+*/
 function textToHtmlForFreshdesk(text) {
   if (!text) return '';
-  return text.split(/\n\n+/).map(p => '<p>' + escapeHtml(p).replace(/\n/g, '<br>') + '</p>').join('');
+  const raw = String(text).replace(/\r\n/g, '\n').trim();
+  if (!raw) return '';
+
+  const paragraphs = raw.split(/\n{2,}/);
+  const html = paragraphs.map(p => _formatParagraph(p)).join('\n');
+  return html;
+}
+
+function _formatParagraph(p) {
+  const trimmed = p.replace(/^\n+|\n+$/g, '');
+  if (!trimmed) return '';
+  const lines = trimmed.split('\n');
+
+  // Unordered list — wenn alle Zeilen mit Bullet starten
+  const isUlList = lines.length > 1 && lines.every(l => /^\s*[-•*]\s+/.test(l));
+  if (isUlList) {
+    const items = lines.map(l => '<li>' + _formatInline(l.replace(/^\s*[-•*]\s+/, '')) + '</li>').join('');
+    return '<ul>' + items + '</ul>';
+  }
+  // Ordered list — wenn alle Zeilen mit 1. 2. 3. ... starten
+  const isOlList = lines.length > 1 && lines.every(l => /^\s*\d+[\.)]\s+/.test(l));
+  if (isOlList) {
+    const items = lines.map(l => '<li>' + _formatInline(l.replace(/^\s*\d+[\.)]\s+/, '')) + '</li>').join('');
+    return '<ol>' + items + '</ol>';
+  }
+  // Normaler Absatz mit <br> bei einzelnen Newlines
+  return '<p>' + lines.map(_formatInline).join('<br>') + '</p>';
+}
+
+function _formatInline(line) {
+  // Erst HTML-escape, dann URL/Email-Linkify (escape macht keine URL-Zeichen kaputt
+  // außer & → &amp;, was im href trotzdem korrekt ist)
+  let out = escapeHtml(line);
+  // URL erkennen (http/https)
+  out = out.replace(/(https?:\/\/[^\s<>"']+[^\s<>"'.,;:!?)\]])/g, '<a href="$1" target="_blank" rel="noopener">$1</a>');
+  // Bare-Email
+  out = out.replace(/\b([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})\b/g, '<a href="mailto:$1">$1</a>');
+  return out;
+}
+
+/* Hängt eine Signatur (HTML) an einen formatierten HTML-Body. Trennt mit Leerzeile.
+   Signatur ist normalerweise schon HTML, deshalb kein escape. */
+function appendSignatureHtml(bodyHtml, signatureHtml) {
+  const sig = String(signatureHtml || '').trim();
+  if (!sig) return bodyHtml;
+  return bodyHtml + '<br><br>' + sig;
 }
 
 // Legacy-Wrapper: alte Single-Action-Funktion delegiert jetzt auf den
@@ -8203,9 +8313,13 @@ async function applyRuleActions(rule, ticket) {
         performed.push('Notiz');
         wroteNote = true;
       } else if (a.type === 'reply' && a.body) {
+        // Auch automatische Regel-Antworten bekommen die Signatur des Users
+        const me = await fetchAgentMe(accountId);
+        const sig = me?.signature || '';
+        const body = appendSignatureHtml(textToHtmlForFreshdesk(a.body), sig);
         await proxyJson(base + '/reply', {
           method: 'POST',
-          body: JSON.stringify({ body: textToHtmlForFreshdesk(a.body) })
+          body: JSON.stringify({ body })
         });
         performed.push('Antwort');
       } else if (a.type === 'assign') {
