@@ -259,7 +259,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.22.3';
+const APP_VERSION = 'v2.22.4';
 // Read-Token absichtlich gesplittet, damit GitHub Secret-Scanning beim Push nicht blockt.
 // Der Token ist read-only und Base-scoped → bewusst eingebettet (Architektur-Entscheidung).
 const _RK = 'patu8KWM8aWB' + 'yxCGL.69fae5d9fa4b94c2' + '66b426dadd71a51f574945d840b33569058ab5e9d89ebef3';
@@ -546,19 +546,43 @@ async function ensureAirtableField(tableName, fieldName, fieldType) {
   return addRes.json();
 }
 
+/* Extrahiert den fehlenden Feldnamen aus einer Airtable-UNKNOWN_FIELD_NAME-Fehlermeldung.
+   Versucht erst JSON zu parsen (robust), fällt dann auf Regex zurück. */
+function _extractMissingFieldName(errMsg) {
+  if (!errMsg) return null;
+  const s = String(errMsg);
+  // Versuch 1: JSON-Block extrahieren und parsen
+  const jsonMatch = s.match(/\{[\s\S]*\}/);
+  if (jsonMatch) {
+    try {
+      const obj = JSON.parse(jsonMatch[0]);
+      const msg = obj?.error?.message || obj?.message || '';
+      const fm = /Unknown field name[s]?:\s*"([^"]+)"/i.exec(msg);
+      if (fm && fm[1]) return fm[1].trim();
+      // Manche Airtable-Versionen liefern eine Liste
+      const fm2 = /Unknown field name[s]?:\s*\[([^\]]+)\]/i.exec(msg);
+      if (fm2 && fm2[1]) {
+        const first = fm2[1].split(',')[0].replace(/["'\s]/g, '');
+        if (first) return first;
+      }
+    } catch (_) {}
+  }
+  // Versuch 2: Direkt-Regex (mit optionalen escape-Backslashes)
+  const m = /Unknown field name[s]?:\s*\\?"([^"\\]+)\\?"/i.exec(s);
+  return m ? m[1].trim() : null;
+}
+
 /* Wrapper für airtableWrite/Update der bei UNKNOWN_FIELD_NAME-Fehlern automatisch das Feld
    anlegt und den Schreibvorgang einmal wiederholt. */
 async function airtableWriteWithAutoField(tableName, fields, defaultTypes) {
   try {
     return await airtableWrite(tableName, fields);
   } catch (e) {
-    const m = /UNKNOWN_FIELD_NAME[^"]*"[^"]*"([^"\\]+)"/.exec(e.message || '');
-    const missingField = m && m[1];
+    const missingField = _extractMissingFieldName(e.message);
     if (missingField && fields[missingField] !== undefined) {
-      try {
-        await ensureAirtableField(tableName, missingField, (defaultTypes && defaultTypes[missingField]) || 'singleLineText');
-        return await airtableWrite(tableName, fields);
-      } catch (e2) { throw e2; }
+      console.log('Auto-Field anlegen: ' + tableName + '.' + missingField);
+      await ensureAirtableField(tableName, missingField, (defaultTypes && defaultTypes[missingField]) || 'singleLineText');
+      return await airtableWrite(tableName, fields);
     }
     throw e;
   }
@@ -568,13 +592,11 @@ async function airtableUpdateWithAutoField(tableName, id, fields, defaultTypes) 
   try {
     return await airtableUpdate(tableName, id, fields);
   } catch (e) {
-    const m = /UNKNOWN_FIELD_NAME[^"]*"[^"]*"([^"\\]+)"/.exec(e.message || '');
-    const missingField = m && m[1];
+    const missingField = _extractMissingFieldName(e.message);
     if (missingField && fields[missingField] !== undefined) {
-      try {
-        await ensureAirtableField(tableName, missingField, (defaultTypes && defaultTypes[missingField]) || 'singleLineText');
-        return await airtableUpdate(tableName, id, fields);
-      } catch (e2) { throw e2; }
+      console.log('Auto-Field anlegen: ' + tableName + '.' + missingField);
+      await ensureAirtableField(tableName, missingField, (defaultTypes && defaultTypes[missingField]) || 'singleLineText');
+      return await airtableUpdate(tableName, id, fields);
     }
     throw e;
   }
