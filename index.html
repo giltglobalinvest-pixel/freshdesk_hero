@@ -251,7 +251,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.19.0';
+const APP_VERSION = 'v2.20.0';
 // Read-Token absichtlich gesplittet, damit GitHub Secret-Scanning beim Push nicht blockt.
 // Der Token ist read-only und Base-scoped → bewusst eingebettet (Architektur-Entscheidung).
 const _RK = 'patu8KWM8aWB' + 'yxCGL.69fae5d9fa4b94c2' + '66b426dadd71a51f574945d840b33569058ab5e9d89ebef3';
@@ -980,6 +980,8 @@ async function ensureAppTables() {
     { name: 'name',                type: 'singleLineText' },
     { name: 'freshdesk_domain',    type: 'singleLineText' },
     { name: 'freshdesk_api_key',   type: 'singleLineText' },
+    { name: 'freshsales_domain',   type: 'singleLineText' },
+    { name: 'freshsales_api_key',  type: 'singleLineText' },
     { name: 'color',               type: 'singleLineText' },
     { name: 'api_key',             type: 'singleLineText' },
     { name: 'created',             type: 'singleLineText' },
@@ -1247,6 +1249,8 @@ async function loadAccounts() {
     id:       r.id,
     name:     r.fields.name || '–',
     domain:   (r.fields.freshdesk_domain || '').replace(/^https?:\/\//, '').replace(/\.freshdesk\.com\/?$/, '').replace(/\/+$/, ''),
+    freshsales_domain:  (r.fields.freshsales_domain || '').replace(/^https?:\/\//, '').replace(/\.myfreshworks\.com\/?$/, '').replace(/\/+$/, ''),
+    freshsales_api_key: r.fields.freshsales_api_key || '',
     color:    r.fields.color || ACCOUNT_COLORS[Math.floor(Math.random() * ACCOUNT_COLORS.length)],
     created:  r.fields.created || '',
   }));
@@ -1257,17 +1261,28 @@ async function loadAccounts() {
   else APP_STATE.currentAccount = 'all';
 }
 
-async function createAccount({ name, domain, apiKey, color }) {
+async function createAccount({ name, domain, apiKey, color, freshsalesDomain, freshsalesApiKey }) {
   domain = (domain || '').trim().replace(/^https?:\/\//i, '').replace(/\.freshdesk\.com\/?$/i, '').replace(/\/+$/, '');
+  freshsalesDomain = (freshsalesDomain || '').trim().replace(/^https?:\/\//i, '').replace(/\.myfreshworks\.com\/?$/i, '').replace(/\/+$/, '');
   if (!name) throw new Error('Name fehlt');
   if (!domain) throw new Error('Subdomain fehlt');
   if (!apiKey) throw new Error('API-Key fehlt');
-  return await airtableWrite(ACCOUNTS_TABLE, {
+  const fields = {
     name, freshdesk_domain: domain, freshdesk_api_key: apiKey,
     color: color || ACCOUNT_COLORS[APP_STATE.accounts.length % ACCOUNT_COLORS.length],
     api_key: APP_KEYS.user.api_key,
     created: nowIso(),
-  });
+  };
+  // Freshsales nur eintragen, wenn Domain UND Key gesetzt sind
+  if (freshsalesDomain && freshsalesApiKey) {
+    fields.freshsales_domain  = freshsalesDomain;
+    fields.freshsales_api_key = freshsalesApiKey;
+  }
+  return await airtableWrite(ACCOUNTS_TABLE, fields);
+}
+
+async function updateAccount(id, fields) {
+  return await airtableUpdate(ACCOUNTS_TABLE, id, fields);
 }
 
 async function deleteAccount(id) {
@@ -1465,6 +1480,250 @@ async function updateContact(accountId, contactId, fields) {
     method: 'PUT',
     body: JSON.stringify(fields)
   });
+}
+
+/* === Freshsales (CRM) — optional pro Account =================================
+   Wenn der Account die zusätzlichen Felder freshsales_domain + freshsales_api_key
+   in Airtable gepflegt hat, wird über die Proxy-Route /freshsales/<account_id>
+   eine Freshsales-CRM-API-Anbindung ermöglicht (Contact-Search + Update).
+   Der Val.town-Proxy ab v2.20 hat diese Route — bestehende Proxies müssen
+   einmalig im Profil → Setup → „Val aktualisieren" neu deployt werden. */
+function accountHasFreshsales(account) {
+  return !!(account?.freshsales_domain && account?.freshsales_api_key);
+}
+
+async function freshsalesLookupContact(accountId, email) {
+  if (!email) return null;
+  const path = '/freshsales/' + encodeURIComponent(accountId) +
+    '/api/lookup?q=' + encodeURIComponent(email) + '&f=email&entities=contact';
+  try {
+    const data = await proxyJson(path);
+    const list = data?.contacts?.contacts || data?.contacts || [];
+    return Array.isArray(list) && list.length ? list[0] : null;
+  } catch (e) {
+    console.warn('Freshsales lookup failed:', e.message);
+    throw e;
+  }
+}
+
+async function freshsalesUpdateContact(accountId, contactId, fields) {
+  const path = '/freshsales/' + encodeURIComponent(accountId) +
+    '/api/contacts/' + contactId;
+  return await proxyJson(path, {
+    method: 'PUT',
+    body: JSON.stringify({ contact: fields })
+  });
+}
+
+/* === Contact-Edit-Modal — bearbeitet Freshdesk-Contact + optional Freshsales-Contact */
+let CONTACT_EDIT_CTX = null;
+
+async function openContactEditModal(accountId, contactId) {
+  const acc = APP_STATE.accounts.find(a => a.id === accountId);
+  if (!acc) return toast('Account nicht gefunden', 'error');
+  CONTACT_EDIT_CTX = { accountId, contactId, fd: null, fs: null, hasFreshsales: accountHasFreshsales(acc) };
+
+  let host = document.getElementById('subModalHost');
+  if (!host) { host = document.createElement('div'); host.id = 'subModalHost'; document.body.appendChild(host); }
+  host.innerHTML = `
+    <div class="fixed inset-0 z-[60] bg-white flex flex-col">
+      <header class="sticky top-0 z-10 bg-white border-b border-ink-200 safe-top">
+        <div class="px-2 py-2.5 flex items-center gap-1.5">
+          <button onclick="closeContactEditModal()" class="w-9 h-9 rounded-lg hover:bg-ink-100 flex items-center justify-center" aria-label="Schließen">
+            <i data-lucide="arrow-left" class="w-5 h-5 text-ink-700"></i>
+          </button>
+          <div class="flex-1 min-w-0">
+            <h1 class="font-bold text-ink-900 leading-tight inline-flex items-center gap-1.5"><i data-lucide="user-cog" class="w-4 h-4 text-brand-600"></i> Kontakt bearbeiten</h1>
+            <p class="text-[11px] text-ink-500 truncate">Contact #${contactId} · ${escapeHtml(acc.name)}</p>
+          </div>
+        </div>
+      </header>
+      <div id="contactEditBody" class="flex-1 overflow-y-auto p-4">
+        <div class="text-center py-10">
+          <div class="spinner inline-block w-7 h-7 border-[3px] text-brand-500"></div>
+          <p class="text-sm text-ink-500 mt-3">Lade Kontaktdaten…</p>
+        </div>
+      </div>
+    </div>`;
+  if (window.lucide) lucide.createIcons();
+
+  try {
+    // Freshdesk-Contact laden (Pflicht)
+    CONTACT_EDIT_CTX.fd = await fetchContact(accountId, contactId);
+    // Wenn Freshsales konfiguriert: per Email parallel suchen
+    if (CONTACT_EDIT_CTX.hasFreshsales && CONTACT_EDIT_CTX.fd?.email) {
+      try {
+        CONTACT_EDIT_CTX.fs = await freshsalesLookupContact(accountId, CONTACT_EDIT_CTX.fd.email);
+      } catch (e) {
+        CONTACT_EDIT_CTX._fsError = e.message;
+      }
+    }
+    renderContactEditBody();
+  } catch (e) {
+    $('contactEditBody').innerHTML = `<div class="bg-red-50 border border-red-200 rounded-2xl p-4 text-sm text-red-800">${escapeHtml(e.message || 'Fehler beim Laden')}</div>`;
+  }
+}
+
+function closeContactEditModal() {
+  const host = document.getElementById('subModalHost');
+  if (host) host.innerHTML = '';
+  CONTACT_EDIT_CTX = null;
+}
+
+function renderContactEditBody() {
+  const ctx = CONTACT_EDIT_CTX;
+  if (!ctx) return;
+  const c  = ctx.fd  || {};
+  const fs = ctx.fs;
+  const acc = APP_STATE.accounts.find(a => a.id === ctx.accountId);
+
+  const fsBlock = ctx.hasFreshsales ? `
+    <div class="bg-gradient-to-br from-purple-50 to-brand-50 border-2 border-purple-200 rounded-2xl p-4">
+      <div class="flex items-center gap-2 mb-3">
+        <i data-lucide="briefcase" class="w-4 h-4 text-purple-700"></i>
+        <h3 class="font-semibold text-ink-900 text-sm">Freshsales-CRM</h3>
+        ${fs ? '<span class="ml-auto text-[10px] text-emerald-700 bg-emerald-100 px-1.5 py-0.5 rounded font-semibold uppercase tracking-wider">Gefunden #' + fs.id + '</span>' : (ctx._fsError ? '<span class="ml-auto text-[10px] text-red-700 bg-red-100 px-1.5 py-0.5 rounded font-semibold uppercase tracking-wider">Fehler</span>' : '<span class="ml-auto text-[10px] text-amber-700 bg-amber-100 px-1.5 py-0.5 rounded font-semibold uppercase tracking-wider">Nicht gefunden</span>')}
+      </div>
+      ${fs ? `
+        <div class="space-y-2 text-xs">
+          <div class="grid grid-cols-2 gap-2">
+            <div>
+              <label class="text-[10px] uppercase font-semibold text-purple-800 block">Vorname</label>
+              <input id="fsFirstName" type="text" value="${escapeAttr(fs.first_name || '')}" class="w-full mt-1 px-2 py-1.5 border border-purple-200 bg-white rounded text-sm">
+            </div>
+            <div>
+              <label class="text-[10px] uppercase font-semibold text-purple-800 block">Nachname</label>
+              <input id="fsLastName" type="text" value="${escapeAttr(fs.last_name || '')}" class="w-full mt-1 px-2 py-1.5 border border-purple-200 bg-white rounded text-sm">
+            </div>
+          </div>
+          <div>
+            <label class="text-[10px] uppercase font-semibold text-purple-800 block">Email</label>
+            <input id="fsEmail" type="email" value="${escapeAttr(fs.email || '')}" class="w-full mt-1 px-2 py-1.5 border border-purple-200 bg-white rounded text-sm">
+          </div>
+          <div class="grid grid-cols-2 gap-2">
+            <div>
+              <label class="text-[10px] uppercase font-semibold text-purple-800 block">Festnetz</label>
+              <input id="fsWorkPhone" type="tel" value="${escapeAttr(fs.work_number || '')}" class="w-full mt-1 px-2 py-1.5 border border-purple-200 bg-white rounded text-sm font-mono">
+            </div>
+            <div>
+              <label class="text-[10px] uppercase font-semibold text-purple-800 block">Mobil</label>
+              <input id="fsMobile" type="tel" value="${escapeAttr(fs.mobile_number || '')}" class="w-full mt-1 px-2 py-1.5 border border-purple-200 bg-white rounded text-sm font-mono">
+            </div>
+          </div>
+          <div>
+            <label class="text-[10px] uppercase font-semibold text-purple-800 block">Job-Titel</label>
+            <input id="fsJob" type="text" value="${escapeAttr(fs.job_title || '')}" class="w-full mt-1 px-2 py-1.5 border border-purple-200 bg-white rounded text-sm">
+          </div>
+          <button type="button" onclick="saveFreshsalesContact(this)" class="w-full mt-2 bg-purple-600 hover:bg-purple-700 text-white px-3 py-2 rounded-lg text-sm font-semibold inline-flex items-center justify-center gap-1.5">
+            <i data-lucide="save" class="w-4 h-4"></i> Im Freshsales speichern
+          </button>
+        </div>` : `
+        <p class="text-[11px] text-ink-600 italic">${ctx._fsError ? 'Freshsales-Lookup fehlgeschlagen: ' + escapeHtml(ctx._fsError) : 'Kein Freshsales-Contact mit der Email ' + escapeHtml(c.email || '?') + ' gefunden.'}</p>
+        ${ctx._fsError && /method.*not.*allowed|not found|404/i.test(ctx._fsError) ? '<p class="text-[10px] text-amber-700 mt-2"><i data-lucide="alert-triangle" class="w-3 h-3 inline"></i> Der Val.town-Proxy unterstützt vielleicht noch keine /freshsales/-Route. Im Profil → Setup → „Val aktualisieren" einmalig neu deployen.</p>' : ''}
+      `}
+    </div>` : `
+    <div class="bg-ink-50 border border-ink-200 rounded-2xl p-3">
+      <p class="text-[11px] text-ink-600"><i data-lucide="briefcase" class="w-3 h-3 inline text-ink-400"></i> Freshsales-CRM ist für diesen Account nicht verbunden. Im Account-Setup unter „Accounts" lassen sich Freshsales-Domain + API-Key hinterlegen.</p>
+    </div>`;
+
+  $('contactEditBody').innerHTML = `
+    <div class="space-y-3 max-w-2xl mx-auto">
+      <!-- Freshdesk-Block -->
+      <div class="bg-white border-2 border-brand-200 rounded-2xl p-4">
+        <div class="flex items-center gap-2 mb-3">
+          <i data-lucide="user" class="w-4 h-4 text-brand-700"></i>
+          <h3 class="font-semibold text-ink-900 text-sm">Freshdesk-Kontakt</h3>
+          <span class="ml-auto text-[10px] text-brand-700 bg-brand-100 px-1.5 py-0.5 rounded font-semibold uppercase tracking-wider">Contact #${c.id || '?'}</span>
+        </div>
+        <div class="space-y-2 text-xs">
+          <div>
+            <label class="text-[10px] uppercase font-semibold text-brand-800 block">Name</label>
+            <input id="fdName" type="text" value="${escapeAttr(c.name || '')}" class="w-full mt-1 px-2 py-1.5 border border-brand-200 bg-white rounded text-sm">
+          </div>
+          <div>
+            <label class="text-[10px] uppercase font-semibold text-brand-800 block">Email</label>
+            <input id="fdEmail" type="email" value="${escapeAttr(c.email || '')}" class="w-full mt-1 px-2 py-1.5 border border-brand-200 bg-white rounded text-sm">
+          </div>
+          <div class="grid grid-cols-2 gap-2">
+            <div>
+              <label class="text-[10px] uppercase font-semibold text-brand-800 block">Festnetz</label>
+              <input id="fdPhone" type="tel" value="${escapeAttr(c.phone || '')}" class="w-full mt-1 px-2 py-1.5 border border-brand-200 bg-white rounded text-sm font-mono">
+            </div>
+            <div>
+              <label class="text-[10px] uppercase font-semibold text-brand-800 block">Mobil</label>
+              <input id="fdMobile" type="tel" value="${escapeAttr(c.mobile || '')}" class="w-full mt-1 px-2 py-1.5 border border-brand-200 bg-white rounded text-sm font-mono">
+            </div>
+          </div>
+          <div>
+            <label class="text-[10px] uppercase font-semibold text-brand-800 block">Job-Titel</label>
+            <input id="fdJob" type="text" value="${escapeAttr(c.job_title || '')}" class="w-full mt-1 px-2 py-1.5 border border-brand-200 bg-white rounded text-sm">
+          </div>
+          <div>
+            <label class="text-[10px] uppercase font-semibold text-brand-800 block">Adresse</label>
+            <textarea id="fdAddress" rows="2" class="w-full mt-1 px-2 py-1.5 border border-brand-200 bg-white rounded text-sm resize-none">${escapeHtml(c.address || '')}</textarea>
+          </div>
+          <button type="button" onclick="saveFreshdeskContact(this)" class="w-full mt-2 bg-brand-600 hover:bg-brand-700 text-white px-3 py-2 rounded-lg text-sm font-semibold inline-flex items-center justify-center gap-1.5">
+            <i data-lucide="save" class="w-4 h-4"></i> Im Freshdesk speichern
+          </button>
+        </div>
+      </div>
+
+      ${fsBlock}
+    </div>`;
+  if (window.lucide) lucide.createIcons();
+}
+
+async function saveFreshdeskContact(btnEl) {
+  const ctx = CONTACT_EDIT_CTX;
+  if (!ctx?.fd) return;
+  const fields = {
+    name:      ($('fdName')?.value || '').trim(),
+    email:     ($('fdEmail')?.value || '').trim() || null,
+    phone:     ($('fdPhone')?.value || '').trim() || null,
+    mobile:    ($('fdMobile')?.value || '').trim() || null,
+    job_title: ($('fdJob')?.value || '').trim() || null,
+    address:   ($('fdAddress')?.value || '').trim() || null,
+  };
+  if (!fields.name) return toast('Name darf nicht leer sein', 'warn');
+  setBusy(btnEl, true, 'Speichere…');
+  try {
+    await updateContact(ctx.accountId, ctx.contactId, fields);
+    // Cache und ggf. CURRENT_TICKET.requester updaten
+    cacheRequester(ctx.accountId, { id: ctx.contactId, name: fields.name, email: fields.email, phone: fields.phone, mobile: fields.mobile });
+    if (CURRENT_TICKET && CURRENT_TICKET.requester_id === ctx.contactId) {
+      CURRENT_TICKET.requester = Object.assign({}, CURRENT_TICKET.requester || {}, fields);
+      renderTicketDetailBody(CURRENT_TICKET);
+    }
+    Object.assign(ctx.fd, fields);
+    setBusy(btnEl, false);
+    toast('Freshdesk-Kontakt gespeichert', 'success');
+  } catch (e) {
+    setBusy(btnEl, false);
+    toast('Speichern fehlgeschlagen: ' + e.message, 'error', 6000);
+  }
+}
+
+async function saveFreshsalesContact(btnEl) {
+  const ctx = CONTACT_EDIT_CTX;
+  if (!ctx?.fs?.id) return;
+  const fields = {
+    first_name:    ($('fsFirstName')?.value || '').trim() || null,
+    last_name:     ($('fsLastName')?.value || '').trim() || null,
+    email:         ($('fsEmail')?.value || '').trim() || null,
+    work_number:   ($('fsWorkPhone')?.value || '').trim() || null,
+    mobile_number: ($('fsMobile')?.value || '').trim() || null,
+    job_title:     ($('fsJob')?.value || '').trim() || null,
+  };
+  setBusy(btnEl, true, 'Speichere…');
+  try {
+    await freshsalesUpdateContact(ctx.accountId, ctx.fs.id, fields);
+    Object.assign(ctx.fs, fields);
+    setBusy(btnEl, false);
+    toast('Freshsales-Kontakt gespeichert', 'success');
+  } catch (e) {
+    setBusy(btnEl, false);
+    toast('Freshsales-Speichern fehlgeschlagen: ' + e.message, 'error', 8000);
+  }
 }
 
 /* === Agent-Cache (responder_id → name) === */
@@ -2045,6 +2304,24 @@ function renderTicketList(tickets) {
         const requester = getRequesterDisplay(t);
         const senderName  = requester.name  || null;
         const senderEmail = requester.email || null;
+        // Telefonnummern für die Card extrahieren (requester + Text)
+        const _phonesSeen = new Set();
+        const cardPhones = [];
+        const _addPhone = (n, fromReq) => {
+          if (!n) return;
+          const digits = String(n).replace(/\D/g, '');
+          if (digits.length < 7) return;
+          if (_phonesSeen.has(digits)) return;
+          _phonesSeen.add(digits);
+          cardPhones.push({ num: String(n).trim(), fromReq: !!fromReq });
+        };
+        // Aus dem Requester (cached)
+        const cachedReq = getCachedRequester(t._accountId, t.requester_id);
+        if (cachedReq) { _addPhone(cachedReq.phone, true); _addPhone(cachedReq.mobile, true); }
+        if (t.requester) { _addPhone(t.requester.phone, true); _addPhone(t.requester.mobile, true); }
+        // Aus dem Text (Subject + Description-Snippet)
+        const _phoneSearchText = (t.subject || '') + ' ' + (t.description_text || t.description || '').slice(0, 500);
+        try { extractPhoneNumbers(_phoneSearchText).forEach(n => _addPhone(n, false)); } catch (_) {}
         return `
           <div data-swipe-card class="shadow-sm">
             <div class="absolute inset-y-0 left-0 flex items-stretch">
@@ -2132,6 +2409,16 @@ function renderTicketList(tickets) {
                       <i data-lucide="user" class="w-3 h-3 shrink-0"></i> Absender wird geladen…
                     </p>` : '')}
                   ${desc ? `<p class="text-[12px] text-ink-500 mt-0.5 line-clamp-2">${escapeHtml(desc)}</p>` : ''}
+                  ${cardPhones.length ? `
+                    <div class="flex flex-wrap gap-1 mt-1">
+                      ${cardPhones.slice(0, 3).map(p => `
+                        <a href="tel:${escapeAttr(_cleanPhoneForTel(p.num))}" onclick="event.stopPropagation()"
+                           class="inline-flex items-center gap-1 px-2 py-0.5 ${p.fromReq ? 'bg-emerald-50 border-emerald-200 text-emerald-800' : 'bg-emerald-50/50 border-emerald-200/70 text-emerald-700'} border rounded-full text-[10px] font-mono active:bg-emerald-100"
+                           title="${escapeAttr(p.fromReq ? 'aus Kontakt' : 'aus Ticket-Text')}: ${escapeAttr(p.num)}">
+                          <i data-lucide="phone-call" class="w-2.5 h-2.5"></i>${escapeHtml(p.num)}
+                        </a>`).join('')}
+                      ${cardPhones.length > 3 ? `<span class="text-[10px] text-ink-400 self-center">+${cardPhones.length - 3}</span>` : ''}
+                    </div>` : ''}
                   ${recentlyBack ? `<div class="mt-1 inline-flex items-center gap-1 text-[10px] font-bold uppercase tracking-wider bg-gradient-to-r from-brand-100 to-emerald-100 text-brand-800 border border-brand-300 px-1.5 py-0.5 rounded"><i data-lucide="rotate-cw" class="w-2.5 h-2.5"></i> Heute fällig${wv && wv.grund && GRUND_LABEL[wv.grund] ? ' · ' + GRUND_LABEL[wv.grund] : ''}</div>` : ''}
                   <div class="flex items-center gap-1.5 mt-1.5 flex-wrap">
                     <button data-action="status" data-account-id="${escapeAttr(t._accountId)}" data-ticket-id="${t.id}" data-status="${t.status}" class="text-[10px] uppercase tracking-wider px-1.5 py-0.5 rounded font-semibold border ${st.cls} active:opacity-70 inline-flex items-center gap-1">${escapeHtml(st.label)} <i data-lucide="chevron-down" class="w-2.5 h-2.5"></i></button>
@@ -3202,6 +3489,23 @@ function renderTicketDetailBody(ticket) {
   const assigneeName = getAgentName(ticket._accountId, ticket.responder_id);
   const groupName    = getGroupName(ticket._accountId, ticket.group_id);
 
+  // Telefonnummern für die Detail-Ansicht — requester + im Text gefunden, dedupliziert
+  const _seenDigits = new Set();
+  const detailPhones = [];
+  const _addD = (label, num, fromContact) => {
+    if (!num) return;
+    const d = String(num).replace(/\D/g, '');
+    if (d.length < 7 || _seenDigits.has(d)) return;
+    _seenDigits.add(d);
+    detailPhones.push({ label, num: String(num).trim(), fromContact: !!fromContact });
+  };
+  _addD('Festnetz', req.phone,  true);
+  _addD('Mobil',    req.mobile, true);
+  const _detailText = (ticket.subject || '') + '\n' +
+    htmlToText(ticket.description_text || ticket.description || '') + '\n' +
+    (ticket.conversations || []).map(c => htmlToText(c.body_text || c.body || '')).join('\n');
+  try { extractPhoneNumbers(_detailText).forEach(n => _addD('gefunden', n, false)); } catch (_) {}
+
   $('ticketDetailBody').innerHTML = `
     <div class="space-y-3 max-w-2xl mx-auto">
 
@@ -3216,9 +3520,28 @@ function renderTicketDetailBody(ticket) {
         </div>
         <div class="mt-3 pt-3 border-t border-ink-100 space-y-3 text-xs">
           <div class="min-w-0">
-            <p class="text-ink-500 text-[10px] uppercase tracking-wider">Anfragender</p>
-            <p class="font-semibold text-ink-900 truncate mt-0.5">${escapeHtml(req.name || '–')}</p>
-            ${req.email ? `<p class="text-ink-500 truncate text-[11px]">${escapeHtml(req.email)}</p>` : ''}
+            <div class="flex items-start gap-2">
+              <div class="flex-1 min-w-0">
+                <p class="text-ink-500 text-[10px] uppercase tracking-wider">Anfragender</p>
+                <p class="font-semibold text-ink-900 truncate mt-0.5">${escapeHtml(req.name || '–')}</p>
+                ${req.email ? `<a href="mailto:${escapeAttr(req.email)}" class="text-brand-600 truncate text-[11px] inline-flex items-center gap-1 active:underline"><i data-lucide="mail" class="w-3 h-3"></i>${escapeHtml(req.email)}</a>` : ''}
+              </div>
+              ${ticket.requester_id ? `
+                <button onclick="openContactEditModal('${escapeAttr(ticket._accountId)}', ${ticket.requester_id})" class="shrink-0 inline-flex items-center gap-1 px-2 py-1 bg-brand-50 hover:bg-brand-100 active:bg-brand-200 border border-brand-200 text-brand-700 rounded-lg text-[11px] font-medium" title="Kontaktdaten bearbeiten">
+                  <i data-lucide="user-cog" class="w-3 h-3"></i> Kontakt bearbeiten
+                </button>` : ''}
+            </div>
+            ${detailPhones.length ? `
+              <div class="flex flex-wrap gap-1.5 mt-2">
+                ${detailPhones.map(p => {
+                  const tel = _cleanPhoneForTel(p.num);
+                  return `<a href="tel:${escapeAttr(tel)}" class="inline-flex items-center gap-1.5 px-2.5 py-1.5 ${p.fromContact ? 'bg-emerald-50 border-emerald-300 text-emerald-800' : 'bg-emerald-50/70 border-emerald-200 text-emerald-700'} border rounded-lg active:bg-emerald-100">
+                    <i data-lucide="phone-call" class="w-3.5 h-3.5"></i>
+                    <span class="font-mono text-[11px]">${escapeHtml(p.num)}</span>
+                    <span class="text-[9px] uppercase tracking-wider opacity-70">${p.label}</span>
+                  </a>`;
+                }).join('')}
+              </div>` : ''}
           </div>
           <div class="grid grid-cols-3 gap-2">
             <button onclick="openAssigneeModal()" class="min-w-0 text-left -m-1 p-1 rounded-lg active:bg-ink-50 hover:bg-ink-50 transition">
@@ -4307,14 +4630,17 @@ function renderSearchResults() {
 
   const ticketBlock = tickets.length ? `
     <div>
-      <p class="text-[10px] uppercase font-bold text-ink-500 tracking-wider mb-2">Tickets (${tickets.length})</p>
+      <p class="text-[10px] uppercase font-bold text-ink-500 tracking-wider mb-2">Tickets (${tickets.length}) <span class="text-ink-400 font-normal normal-case">— inkl. bei dir ausgeblendete</span></p>
       <div class="space-y-2">
         ${tickets.map(t => {
           const st = FD_STATUS[t.status] || { label: '?', cls: 'bg-ink-100 text-ink-600 border-ink-200' };
           const reqDisplay = getRequesterDisplay(t);
           const senderTxt = reqDisplay.name || reqDisplay.email || t.requester?.email || '?';
+          // Wiedervorlage-Status erkennen — markiert „bei dir ausgeblendet"
+          const wv = getWiedervorlage(t._accountId, t.id);
+          const onWv = wv && new Date(wv.frist_am).getTime() > Date.now();
           return `
-            <button onclick="closeSearchModal(); openTicketDetail('${escapeAttr(t._accountId)}', ${t.id})" class="w-full text-left bg-white border border-ink-200 rounded-xl p-3 active:bg-ink-50">
+            <button onclick="closeSearchModal(); openTicketDetail('${escapeAttr(t._accountId)}', ${t.id})" class="w-full text-left bg-white border ${onWv ? 'border-indigo-300 bg-indigo-50/40' : 'border-ink-200'} rounded-xl p-3 active:bg-ink-50">
               <div class="flex items-start gap-2">
                 <span class="shrink-0 mt-1.5 w-2 h-2 rounded-full" style="background:${escapeAttr(t._accountColor)}"></span>
                 <div class="flex-1 min-w-0">
@@ -4322,6 +4648,7 @@ function renderSearchResults() {
                   <p class="text-[11px] text-ink-600 mt-0.5 inline-flex items-center gap-1 truncate"><i data-lucide="user" class="w-3 h-3 text-brand-500 shrink-0"></i>${escapeHtml(senderTxt)}</p>
                   <div class="flex items-center gap-1.5 mt-1.5 flex-wrap">
                     <span class="text-[10px] uppercase tracking-wider px-1.5 py-0.5 rounded font-semibold border ${st.cls}">${escapeHtml(st.label)}</span>
+                    ${onWv ? `<span class="text-[10px] uppercase tracking-wider px-1.5 py-0.5 rounded font-semibold bg-indigo-100 text-indigo-700 border border-indigo-200 inline-flex items-center gap-1" title="Bei dir lokal ausgeblendet bis ${escapeAttr(_fmtFrist(wv.frist_am))}"><i data-lucide="eye-off" class="w-2.5 h-2.5"></i> ausgeblendet bis ${escapeHtml(_fmtFrist(wv.frist_am))}</span>` : ''}
                     <span class="text-[10px] text-ink-400">#${t.id}</span>
                     <span class="text-[10px] text-ink-500 ml-auto truncate">${escapeHtml(t._accountName)}</span>
                   </div>
@@ -5685,6 +6012,27 @@ function openAccountModal(account) {
             <input id="accApiKey" type="password" required placeholder="••••••••••••" class="mt-1 w-full px-3 py-2 border border-ink-200 rounded-lg text-sm font-mono focus:ring-2 focus:ring-brand-500/30 focus:border-brand-500">
             <p class="text-[10px] text-ink-500 mt-1">In Freshdesk: Profil-Avatar → "Profile settings" → Sektion "API Key" (Show).</p>
           </div>
+          <details class="border border-ink-200 rounded-lg">
+            <summary class="px-3 py-2 text-xs font-semibold text-ink-700 cursor-pointer flex items-center gap-1.5">
+              <i data-lucide="briefcase" class="w-3.5 h-3.5 text-purple-600"></i>
+              Freshsales-CRM verbinden (optional)
+            </summary>
+            <div class="px-3 pb-3 pt-1 space-y-2">
+              <p class="text-[10px] text-ink-500">Wenn verbunden: Kontaktdaten lassen sich direkt aus dem Ticket auch im Freshsales-CRM aktualisieren.</p>
+              <div>
+                <label class="text-[11px] font-semibold text-ink-700">Freshsales-Subdomain</label>
+                <div class="mt-1 flex items-center border border-ink-200 rounded-lg overflow-hidden focus-within:ring-2 focus-within:ring-purple-500/30">
+                  <input id="accFsDomain" type="text" value="${escapeAttr(account?.freshsales_domain || '')}" placeholder="meinefirma" class="flex-1 px-3 py-2 text-sm focus:outline-none">
+                  <span class="text-xs text-ink-500 pr-3">.myfreshworks.com</span>
+                </div>
+              </div>
+              <div>
+                <label class="text-[11px] font-semibold text-ink-700">Freshsales API-Key</label>
+                <input id="accFsApiKey" type="password" placeholder="${account?.freshsales_api_key ? '•••••••• (gespeichert)' : 'leer lassen = deaktiviert'}" class="mt-1 w-full px-3 py-2 border border-ink-200 rounded-lg text-sm font-mono focus:ring-2 focus:ring-purple-500/30 focus:border-purple-500">
+                <p class="text-[10px] text-ink-500 mt-1">In Freshsales: Profil → Settings → API-Settings.</p>
+              </div>
+            </div>
+          </details>
           <div>
             <label class="text-xs font-semibold text-ink-700">Farbe</label>
             <div class="flex gap-2 mt-1 flex-wrap">
@@ -5716,6 +6064,8 @@ function openAccountModal(account) {
         name:   $('accName').value.trim(),
         domain: $('accDomain').value.trim(),
         apiKey: $('accApiKey').value.trim(),
+        freshsalesDomain: $('accFsDomain')?.value.trim() || '',
+        freshsalesApiKey: $('accFsApiKey')?.value.trim() || '',
         color,
       });
       closeModal();
@@ -7215,6 +7565,9 @@ const VALTOWN_PROXY_CODE = `// Freshdesk Hero · API-Proxy mit Session-Token-Aut
 //                                      freshdesk_domain + freshdesk_api_key.
 //                                      Owner-Check: account.api_key == user.api_key
 //                                      (Nur eigene Accounts ansprechbar)
+//   ANY  /freshsales/<account_id>/api/...
+//                                  →  proxy zu <fs_domain>.myfreshworks.com/crm/sales/
+//                                      (Token-Auth statt Basic). Optional pro Account.
 //   GET  /health                   →  Auth-Check
 //
 // ENV VARS in Val.town:
@@ -7308,11 +7661,15 @@ async function lookupAccount(accountRecordId) {
   const rec = await res.json();
   let domain = (rec.fields.freshdesk_domain || "").trim();
   domain = domain.replace(/^https?:\\/\\//i, "").replace(/\\.freshdesk\\.com\\/?$/i, "").replace(/\\/+$/, "");
+  let fsDomain = (rec.fields.freshsales_domain || "").trim();
+  fsDomain = fsDomain.replace(/^https?:\\/\\//i, "").replace(/\\.myfreshworks\\.com\\/?$/i, "").replace(/\\/+$/, "");
   const acc = {
     id:        rec.id,
     name:      rec.fields.name || "",
     domain,
     api_key:   rec.fields.freshdesk_api_key || "",
+    fs_domain: fsDomain,
+    fs_api_key: rec.fields.freshsales_api_key || "",
     owner_key: rec.fields.api_key || "",
   };
   ACCOUNT_CACHE.set(accountRecordId, { acc, expires: Date.now() + CACHE_TTL_MS });
@@ -7483,6 +7840,49 @@ export default async function (req) {
     return new Response(text, {
       status: upstreamStatus,
       headers: { "content-type": upstream.headers.get("content-type") || "application/json", "access-control-allow-origin": "*" }
+    });
+  }
+
+  // ===== /freshsales/<account_id>/api/... =====
+  // Routet zu <fs_domain>.myfreshworks.com/crm/sales/ mit Token-Auth.
+  if (path.startsWith("freshsales/")) {
+    const rest = path.replace(/^freshsales\\//, "");
+    const slash = rest.indexOf("/");
+    if (slash < 0) return jsonResponse({ error: "Bad path. Erwartet: /freshsales/<account_id>/api/..." }, 400);
+    const accountId = decodeURIComponent(rest.slice(0, slash));
+    const fsPath = rest.slice(slash + 1);
+    let acc;
+    try { acc = await lookupAccount(accountId); }
+    catch (e) { return jsonResponse({ error: e.message }, 500); }
+    if (!acc) return jsonResponse({ error: "Account nicht gefunden" }, 404);
+    if (acc.owner_key && acc.owner_key !== user.api_key && !user.is_admin) {
+      return jsonResponse({ error: "Account gehört einem anderen User" }, 403);
+    }
+    if (!acc.fs_domain || !acc.fs_api_key) {
+      return jsonResponse({ error: "Freshsales nicht konfiguriert für diesen Account (Domain oder API-Key fehlt in Airtable)" }, 400);
+    }
+    const target = \`https://\${acc.fs_domain}.myfreshworks.com/crm/sales/\${fsPath}\${url.search}\`;
+    const fsInit: any = {
+      method: req.method,
+      headers: {
+        "Authorization": \`Token token=\${acc.fs_api_key}\`,
+        "Accept": "application/json",
+      }
+    };
+    if (req.method !== "GET" && req.method !== "HEAD") {
+      const bodyText = await req.text();
+      if (bodyText && bodyText.length > 0) {
+        fsInit.body = bodyText;
+        fsInit.headers["Content-Type"] = "application/json";
+      }
+    }
+    const fsUpstream = await fetch(target, fsInit);
+    const fsStatus = fsUpstream.status;
+    const fsNoBody = fsStatus === 204 || fsStatus === 205 || fsStatus === 304;
+    const fsText = fsNoBody ? null : await fsUpstream.text();
+    return new Response(fsText, {
+      status: fsStatus,
+      headers: { "content-type": fsUpstream.headers.get("content-type") || "application/json", "access-control-allow-origin": "*" }
     });
   }
 
