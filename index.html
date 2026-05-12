@@ -267,7 +267,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.29.0';
+const APP_VERSION = 'v2.29.1';
 // Read-Token absichtlich gesplittet, damit GitHub Secret-Scanning beim Push nicht blockt.
 // Der Token ist read-only und Base-scoped → bewusst eingebettet (Architektur-Entscheidung).
 const _RK = 'patu8KWM8aWB' + 'yxCGL.69fae5d9fa4b94c2' + '66b426dadd71a51f574945d840b33569058ab5e9d89ebef3';
@@ -8550,6 +8550,9 @@ function renderAccountsList() {
           <button onclick="testAccount('${a.id}', this)" class="text-ink-500 hover:text-brand-600 p-2" title="Test">
             <i data-lucide="zap" class="w-4 h-4"></i>
           </button>
+          <button onclick="editAccount('${a.id}')" class="text-ink-500 hover:text-brand-600 p-2" title="Bearbeiten">
+            <i data-lucide="pencil" class="w-4 h-4"></i>
+          </button>
           <button onclick="confirmDeleteAccount('${a.id}', '${escapeAttr(a.name)}')" class="text-ink-500 hover:text-red-600 p-2" title="Löschen">
             <i data-lucide="trash-2" class="w-4 h-4"></i>
           </button>
@@ -8569,6 +8572,13 @@ async function testAccount(accountId, btnEl) {
   } finally {
     setBusy(btnEl, false);
   }
+}
+
+/* Öffnet das Account-Modal im Edit-Mode mit dem Account aus dem APP_STATE. */
+function editAccount(accountId) {
+  const account = APP_STATE.accounts.find(a => a.id === accountId);
+  if (!account) return toast('Account nicht gefunden', 'error');
+  openAccountModal(account);
 }
 
 async function confirmDeleteAccount(id, name) {
@@ -8606,13 +8616,14 @@ function openAccountModal(account) {
           </div>
           <div>
             <label class="text-xs font-semibold text-ink-700">API-Key</label>
-            <input id="accApiKey" type="password" required placeholder="••••••••••••" class="mt-1 w-full px-3 py-2 border border-ink-200 rounded-lg text-sm font-mono focus:ring-2 focus:ring-brand-500/30 focus:border-brand-500">
-            <p class="text-[10px] text-ink-500 mt-1">In Freshdesk: Profil-Avatar → "Profile settings" → Sektion "API Key" (Show).</p>
+            <input id="accApiKey" type="password" ${isEdit ? '' : 'required'} placeholder="${isEdit ? '•••••• gespeichert (zum Ändern überschreiben)' : '••••••••••••'}" class="mt-1 w-full px-3 py-2 border border-ink-200 rounded-lg text-sm font-mono focus:ring-2 focus:ring-brand-500/30 focus:border-brand-500">
+            <p class="text-[10px] text-ink-500 mt-1">In Freshdesk: Profil-Avatar → "Profile settings" → Sektion "API Key" (Show).${isEdit ? ' Leer lassen = aktuellen Key behalten.' : ''}</p>
           </div>
-          <details class="border border-ink-200 rounded-lg">
+          <details class="border border-ink-200 rounded-lg" ${(account?.freshsales_domain || account?.freshsales_api_key) ? 'open' : ''}>
             <summary class="px-3 py-2 text-xs font-semibold text-ink-700 cursor-pointer flex items-center gap-1.5">
               <i data-lucide="briefcase" class="w-3.5 h-3.5 text-purple-600"></i>
               Freshsales-CRM verbinden (optional)
+              ${(account?.freshsales_domain && account?.freshsales_api_key) ? '<span class="ml-auto text-[10px] text-emerald-700 bg-emerald-100 px-1.5 py-0.5 rounded font-semibold uppercase tracking-wider">verbunden</span>' : ''}
             </summary>
             <div class="px-3 pb-3 pt-1 space-y-2">
               <p class="text-[10px] text-ink-500">Wenn verbunden: Kontaktdaten lassen sich direkt aus dem Ticket auch im Freshsales-CRM aktualisieren.</p>
@@ -8622,11 +8633,12 @@ function openAccountModal(account) {
                   <input id="accFsDomain" type="text" value="${escapeAttr(account?.freshsales_domain || '')}" placeholder="meinefirma" class="flex-1 px-3 py-2 text-sm focus:outline-none">
                   <span class="text-xs text-ink-500 pr-3">.myfreshworks.com</span>
                 </div>
+                ${isEdit && account?.freshsales_domain ? '<p class="text-[10px] text-ink-500 mt-1">Subdomain leeren = Freshsales-Verknüpfung entfernen.</p>' : ''}
               </div>
               <div>
                 <label class="text-[11px] font-semibold text-ink-700">Freshsales API-Key</label>
-                <input id="accFsApiKey" type="password" placeholder="${account?.freshsales_api_key ? '•••••••• (gespeichert)' : 'leer lassen = deaktiviert'}" class="mt-1 w-full px-3 py-2 border border-ink-200 rounded-lg text-sm font-mono focus:ring-2 focus:ring-purple-500/30 focus:border-purple-500">
-                <p class="text-[10px] text-ink-500 mt-1">In Freshsales: Profil → Settings → API-Settings.</p>
+                <input id="accFsApiKey" type="password" placeholder="${account?.freshsales_api_key ? '•••••• gespeichert (zum Ändern überschreiben)' : 'leer lassen = deaktiviert'}" class="mt-1 w-full px-3 py-2 border border-ink-200 rounded-lg text-sm font-mono focus:ring-2 focus:ring-purple-500/30 focus:border-purple-500">
+                <p class="text-[10px] text-ink-500 mt-1">In Freshsales: Profil → Settings → API-Settings.${isEdit && account?.freshsales_api_key ? ' Leer lassen = aktuellen Key behalten.' : ''}</p>
               </div>
             </div>
           </details>
@@ -8657,18 +8669,59 @@ function openAccountModal(account) {
     setBusy(btn, true, 'Speichere…');
     try {
       const color = document.querySelector('input[name="accColor"]:checked')?.value || ACCOUNT_COLORS[0];
-      await createAccount({
-        name:   $('accName').value.trim(),
-        domain: $('accDomain').value.trim(),
-        apiKey: $('accApiKey').value.trim(),
-        freshsalesDomain: $('accFsDomain')?.value.trim() || '',
-        freshsalesApiKey: $('accFsApiKey')?.value.trim() || '',
-        color,
-      });
-      closeModal();
-      toast('Account angelegt', 'success');
-      await loadAccounts();
-      renderAccountsList();
+      const name   = $('accName').value.trim();
+      const domain = ($('accDomain').value || '').trim().replace(/^https?:\/\//i, '').replace(/\.freshdesk\.com\/?$/i, '').replace(/\/+$/, '');
+      const apiKey = $('accApiKey').value.trim();
+      const fsDomain = ($('accFsDomain')?.value || '').trim().replace(/^https?:\/\//i, '').replace(/\.myfreshworks\.com\/?$/i, '').replace(/\/+$/, '');
+      const fsApiKey = ($('accFsApiKey')?.value || '').trim();
+
+      if (isEdit) {
+        // EDIT: nur geänderte Felder ins Patch packen; leere API-Keys = Key behalten
+        if (!name)   throw new Error('Name fehlt');
+        if (!domain) throw new Error('Subdomain fehlt');
+        const patch = {
+          name,
+          freshdesk_domain: domain,
+          color,
+        };
+        if (apiKey) patch.freshdesk_api_key = apiKey;
+        // Freshsales-Logik:
+        //   neue Domain + neuer Key  → beide setzen
+        //   neue Domain ohne Key, aber bestehender Key existiert → nur Domain ändern
+        //   leere Domain → ALLES entkoppeln (Domain + Key leeren)
+        //   gleiche Domain, neuer Key → nur Key ändern
+        const hadFs = !!(account.freshsales_domain || account.freshsales_api_key);
+        if (!fsDomain) {
+          if (hadFs) {
+            patch.freshsales_domain  = '';
+            patch.freshsales_api_key = '';
+          }
+        } else {
+          patch.freshsales_domain = fsDomain;
+          if (fsApiKey) patch.freshsales_api_key = fsApiKey;
+          else if (!account.freshsales_api_key) {
+            // Domain ohne Key macht keinen Sinn — Warnung
+            throw new Error('Freshsales-Subdomain gesetzt, aber kein API-Key — bitte Key eintragen oder Domain leeren.');
+          }
+        }
+        await updateAccount(account.id, patch);
+        closeModal();
+        toast('Account aktualisiert', 'success');
+        await loadAccounts();
+        renderAccountsList();
+      } else {
+        // CREATE: bestehender Pfad
+        await createAccount({
+          name, domain, apiKey,
+          freshsalesDomain: fsDomain,
+          freshsalesApiKey: fsApiKey,
+          color,
+        });
+        closeModal();
+        toast('Account angelegt', 'success');
+        await loadAccounts();
+        renderAccountsList();
+      }
     } catch (err) {
       setBusy(btn, false);
       errEl.textContent = err.message;
