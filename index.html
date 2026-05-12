@@ -267,7 +267,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.29.1';
+const APP_VERSION = 'v2.30.0';
 // Read-Token absichtlich gesplittet, damit GitHub Secret-Scanning beim Push nicht blockt.
 // Der Token ist read-only und Base-scoped → bewusst eingebettet (Architektur-Entscheidung).
 const _RK = 'patu8KWM8aWB' + 'yxCGL.69fae5d9fa4b94c2' + '66b426dadd71a51f574945d840b33569058ab5e9d89ebef3';
@@ -1404,7 +1404,8 @@ async function loadAccounts() {
       id:       r.id,
       name:     r.fields.name || '–',
       domain:   (r.fields.freshdesk_domain || '').replace(/^https?:\/\//, '').replace(/\.freshdesk\.com\/?$/, '').replace(/\/+$/, ''),
-      freshsales_domain:  (r.fields.freshsales_domain || '').replace(/^https?:\/\//, '').replace(/\.myfreshworks\.com\/?$/, '').replace(/\/+$/, ''),
+      freshsales_domain:  (r.fields.freshsales_domain || '').replace(/^https?:\/\//, '').replace(/\.(myfreshworks|freshworks)\.com\/?$/i, '').replace(/\/+$/, ''),
+      freshsales_domain_suffix: (r.fields.freshsales_domain_suffix || 'myfreshworks.com').trim().toLowerCase(),
       freshsales_api_key: (access?.fields?.freshsales_api_key || r.fields.freshsales_api_key || ''),
       color:    r.fields.color || ACCOUNT_COLORS[Math.floor(Math.random() * ACCOUNT_COLORS.length)],
       created:  r.fields.created || '',
@@ -1520,9 +1521,11 @@ async function loadUsersWithAccessToAccount(accountId) {
     .filter(u => u.hasAccess);
 }
 
-async function createAccount({ name, domain, apiKey, color, freshsalesDomain, freshsalesApiKey }) {
+async function createAccount({ name, domain, apiKey, color, freshsalesDomain, freshsalesApiKey, freshsalesDomainSuffix }) {
   domain = (domain || '').trim().replace(/^https?:\/\//i, '').replace(/\.freshdesk\.com\/?$/i, '').replace(/\/+$/, '');
-  freshsalesDomain = (freshsalesDomain || '').trim().replace(/^https?:\/\//i, '').replace(/\.myfreshworks\.com\/?$/i, '').replace(/\/+$/, '');
+  freshsalesDomain = (freshsalesDomain || '').trim().replace(/^https?:\/\//i, '').replace(/\.(myfreshworks|freshworks)\.com\/?$/i, '').replace(/\/+$/, '');
+  freshsalesDomainSuffix = (freshsalesDomainSuffix || 'myfreshworks.com').trim().toLowerCase();
+  if (!['myfreshworks.com', 'freshworks.com'].includes(freshsalesDomainSuffix)) freshsalesDomainSuffix = 'myfreshworks.com';
   if (!name) throw new Error('Name fehlt');
   if (!domain) throw new Error('Subdomain fehlt');
   if (!apiKey) throw new Error('API-Key fehlt');
@@ -1534,19 +1537,22 @@ async function createAccount({ name, domain, apiKey, color, freshsalesDomain, fr
   };
   // Freshsales nur eintragen, wenn Domain UND Key gesetzt sind
   if (freshsalesDomain && freshsalesApiKey) {
-    fields.freshsales_domain  = freshsalesDomain;
-    fields.freshsales_api_key = freshsalesApiKey;
+    fields.freshsales_domain        = freshsalesDomain;
+    fields.freshsales_api_key       = freshsalesApiKey;
+    fields.freshsales_domain_suffix = freshsalesDomainSuffix;
   }
   return await airtableWriteWithAutoField(ACCOUNTS_TABLE, fields, {
-    freshsales_domain:  'singleLineText',
-    freshsales_api_key: 'singleLineText',
+    freshsales_domain:        'singleLineText',
+    freshsales_api_key:       'singleLineText',
+    freshsales_domain_suffix: 'singleLineText',
   });
 }
 
 async function updateAccount(id, fields) {
   return await airtableUpdateWithAutoField(ACCOUNTS_TABLE, id, fields, {
-    freshsales_domain:  'singleLineText',
-    freshsales_api_key: 'singleLineText',
+    freshsales_domain:        'singleLineText',
+    freshsales_api_key:       'singleLineText',
+    freshsales_domain_suffix: 'singleLineText',
   });
 }
 
@@ -8631,9 +8637,12 @@ function openAccountModal(account) {
                 <label class="text-[11px] font-semibold text-ink-700">Freshsales-Subdomain</label>
                 <div class="mt-1 flex items-center border border-ink-200 rounded-lg overflow-hidden focus-within:ring-2 focus-within:ring-purple-500/30">
                   <input id="accFsDomain" type="text" value="${escapeAttr(account?.freshsales_domain || '')}" placeholder="meinefirma" class="flex-1 px-3 py-2 text-sm focus:outline-none">
-                  <span class="text-xs text-ink-500 pr-3">.myfreshworks.com</span>
+                  <select id="accFsSuffix" class="text-xs text-ink-600 bg-ink-50 border-l border-ink-200 pl-2 pr-1 py-2 focus:outline-none">
+                    <option value="myfreshworks.com" ${(account?.freshsales_domain_suffix || 'myfreshworks.com') === 'myfreshworks.com' ? 'selected' : ''}>.myfreshworks.com</option>
+                    <option value="freshworks.com" ${account?.freshsales_domain_suffix === 'freshworks.com' ? 'selected' : ''}>.freshworks.com</option>
+                  </select>
                 </div>
-                ${isEdit && account?.freshsales_domain ? '<p class="text-[10px] text-ink-500 mt-1">Subdomain leeren = Freshsales-Verknüpfung entfernen.</p>' : ''}
+                <p class="text-[10px] text-ink-500 mt-1">Beide Domain-Varianten möglich — bei Unsicherheit die URL deines Freshsales-Logins prüfen.${isEdit && account?.freshsales_domain ? ' Subdomain leeren = Freshsales-Verknüpfung entfernen.' : ''}</p>
               </div>
               <div>
                 <label class="text-[11px] font-semibold text-ink-700">Freshsales API-Key</label>
@@ -8672,8 +8681,10 @@ function openAccountModal(account) {
       const name   = $('accName').value.trim();
       const domain = ($('accDomain').value || '').trim().replace(/^https?:\/\//i, '').replace(/\.freshdesk\.com\/?$/i, '').replace(/\/+$/, '');
       const apiKey = $('accApiKey').value.trim();
-      const fsDomain = ($('accFsDomain')?.value || '').trim().replace(/^https?:\/\//i, '').replace(/\.myfreshworks\.com\/?$/i, '').replace(/\/+$/, '');
+      const fsDomain = ($('accFsDomain')?.value || '').trim().replace(/^https?:\/\//i, '').replace(/\.(myfreshworks|freshworks)\.com\/?$/i, '').replace(/\/+$/, '');
       const fsApiKey = ($('accFsApiKey')?.value || '').trim();
+      let fsSuffix   = ($('accFsSuffix')?.value || 'myfreshworks.com').trim().toLowerCase();
+      if (!['myfreshworks.com', 'freshworks.com'].includes(fsSuffix)) fsSuffix = 'myfreshworks.com';
 
       if (isEdit) {
         // EDIT: nur geänderte Felder ins Patch packen; leere API-Keys = Key behalten
@@ -8688,16 +8699,19 @@ function openAccountModal(account) {
         // Freshsales-Logik:
         //   neue Domain + neuer Key  → beide setzen
         //   neue Domain ohne Key, aber bestehender Key existiert → nur Domain ändern
-        //   leere Domain → ALLES entkoppeln (Domain + Key leeren)
+        //   leere Domain → ALLES entkoppeln (Domain + Key + Suffix leeren)
         //   gleiche Domain, neuer Key → nur Key ändern
+        //   Suffix-Änderung → immer schreiben wenn Domain gesetzt
         const hadFs = !!(account.freshsales_domain || account.freshsales_api_key);
         if (!fsDomain) {
           if (hadFs) {
-            patch.freshsales_domain  = '';
-            patch.freshsales_api_key = '';
+            patch.freshsales_domain        = '';
+            patch.freshsales_api_key       = '';
+            patch.freshsales_domain_suffix = '';
           }
         } else {
-          patch.freshsales_domain = fsDomain;
+          patch.freshsales_domain        = fsDomain;
+          patch.freshsales_domain_suffix = fsSuffix;
           if (fsApiKey) patch.freshsales_api_key = fsApiKey;
           else if (!account.freshsales_api_key) {
             // Domain ohne Key macht keinen Sinn — Warnung
@@ -8715,6 +8729,7 @@ function openAccountModal(account) {
           name, domain, apiKey,
           freshsalesDomain: fsDomain,
           freshsalesApiKey: fsApiKey,
+          freshsalesDomainSuffix: fsSuffix,
           color,
         });
         closeModal();
@@ -10532,7 +10547,9 @@ const VALTOWN_PROXY_CODE = `// Freshdesk Hero · API-Proxy mit Session-Token-Aut
 //                                      Owner-Check: account.api_key == user.api_key
 //                                      (Nur eigene Accounts ansprechbar)
 //   ANY  /freshsales/<account_id>/api/...
-//                                  →  proxy zu <fs_domain>.myfreshworks.com/crm/sales/
+//                                  →  proxy zu <fs_domain>.<suffix>/crm/sales/
+//                                      Suffix kommt aus account.freshsales_domain_suffix
+//                                      (myfreshworks.com [default] oder freshworks.com).
 //                                      (Token-Auth statt Basic). Optional pro Account.
 //   GET  /health                   →  Auth-Check
 //
@@ -10632,13 +10649,16 @@ async function lookupAccount(accountRecordId) {
   let domain = (rec.fields.freshdesk_domain || "").trim();
   domain = domain.replace(/^https?:\\/\\//i, "").replace(/\\.freshdesk\\.com\\/?$/i, "").replace(/\\/+$/, "");
   let fsDomain = (rec.fields.freshsales_domain || "").trim();
-  fsDomain = fsDomain.replace(/^https?:\\/\\//i, "").replace(/\\.myfreshworks\\.com\\/?$/i, "").replace(/\\/+$/, "");
+  fsDomain = fsDomain.replace(/^https?:\\/\\//i, "").replace(/\\.(myfreshworks|freshworks)\\.com\\/?$/i, "").replace(/\\/+$/, "");
+  let fsSuffix = (rec.fields.freshsales_domain_suffix || "myfreshworks.com").trim().toLowerCase();
+  if (!["myfreshworks.com", "freshworks.com"].includes(fsSuffix)) fsSuffix = "myfreshworks.com";
   const acc = {
     id:        rec.id,
     name:      rec.fields.name || "",
     domain,
     api_key:   rec.fields.freshdesk_api_key || "",
     fs_domain: fsDomain,
+    fs_domain_suffix: fsSuffix,
     fs_api_key: rec.fields.freshsales_api_key || "",
     owner_key: rec.fields.api_key || "",
   };
@@ -10864,7 +10884,8 @@ export default async function (req) {
   }
 
   // ===== /freshsales/<account_id>/api/... =====
-  // Routet zu <fs_domain>.myfreshworks.com/crm/sales/ mit Token-Auth.
+  // Routet zu <fs_domain>.<fs_domain_suffix>/crm/sales/ mit Token-Auth.
+  // Suffix kann myfreshworks.com (default) oder freshworks.com sein.
   if (path.startsWith("freshsales/")) {
     const rest = path.replace(/^freshsales\\//, "");
     const slash = rest.indexOf("/");
@@ -10891,7 +10912,8 @@ export default async function (req) {
     let fsKey = ownFsKey;
     if (!fsKey && userAllowsFsDefault) fsKey = acc.fs_api_key;
     if (!fsKey) return jsonResponse({ error: "Kein Freshsales-API-Key. Bitte unter 'Accounts' eintragen." }, 400);
-    const target = \`https://\${acc.fs_domain}.myfreshworks.com/crm/sales/\${fsPath}\${url.search}\`;
+    const fsSuffix = acc.fs_domain_suffix || "myfreshworks.com";
+    const target = \`https://\${acc.fs_domain}.\${fsSuffix}/crm/sales/\${fsPath}\${url.search}\`;
     const fsInit: any = {
       method: req.method,
       headers: {
