@@ -259,7 +259,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.22.2';
+const APP_VERSION = 'v2.22.3';
 // Read-Token absichtlich gesplittet, damit GitHub Secret-Scanning beim Push nicht blockt.
 // Der Token ist read-only und Base-scoped → bewusst eingebettet (Architektur-Entscheidung).
 const _RK = 'patu8KWM8aWB' + 'yxCGL.69fae5d9fa4b94c2' + '66b426dadd71a51f574945d840b33569058ab5e9d89ebef3';
@@ -2223,14 +2223,43 @@ function setActiveNav(name) {
 function navTo(page) {
   APP_STATE.page = page;
   setActiveNav(['tickets','accounts','profile'].includes(page) ? page : '');
-  if (page === 'tickets')      renderTicketsPage();
-  else if (page === 'accounts') renderAccountsPage();
-  else if (page === 'profile')  renderProfilePage();
-  else if (page === 'settings') renderSettingsPage();
-  else if (page === 'users')    renderUsersPage();
-  else if (page === 'rules')    renderRulesPage();
-  else if (page === 'automated') renderAutomatedPage();
-  else                          renderTicketsPage();
+  // Page-Render in einem Try-Catch ausführen, damit ein Fehler in der Render-Funktion
+  // nicht den ganzen Stack-Trace in pageContent leakt.
+  let renderFn = renderTicketsPage;
+  if (page === 'accounts')       renderFn = renderAccountsPage;
+  else if (page === 'profile')   renderFn = renderProfilePage;
+  else if (page === 'settings')  renderFn = renderSettingsPage;
+  else if (page === 'users')     renderFn = renderUsersPage;
+  else if (page === 'rules')     renderFn = renderRulesPage;
+  else if (page === 'automated') renderFn = renderAutomatedPage;
+  try {
+    const result = renderFn();
+    if (result && typeof result.catch === 'function') {
+      result.catch(e => _handlePageError(page, e));
+    }
+  } catch (e) {
+    _handlePageError(page, e);
+  }
+}
+
+function _handlePageError(page, e) {
+  console.error('navTo(' + page + ') failed:', e);
+  const short = String(e?.message || e || 'Unbekannter Fehler').slice(0, 250);
+  const host = $('pageContent');
+  if (host) {
+    host.innerHTML = `
+      <div class="bg-red-50 border border-red-200 rounded-2xl p-4">
+        <p class="font-semibold text-red-900 inline-flex items-center gap-1.5">
+          <i data-lucide="alert-triangle" class="w-4 h-4"></i> Seite „${escapeHtml(page)}" konnte nicht geladen werden
+        </p>
+        <p class="text-[12px] text-red-700 mt-1">${escapeHtml(short)}</p>
+        <div class="flex gap-2 mt-2">
+          <button onclick="navTo('${escapeAttr(page)}')" class="text-[11px] bg-red-600 hover:bg-red-700 text-white px-2.5 py-1 rounded inline-flex items-center gap-1"><i data-lucide="refresh-cw" class="w-3 h-3"></i> Neu versuchen</button>
+          <button onclick="navTo('tickets')" class="text-[11px] bg-white border border-red-300 text-red-700 px-2.5 py-1 rounded inline-flex items-center gap-1"><i data-lucide="home" class="w-3 h-3"></i> Zur Startseite</button>
+        </div>
+      </div>`;
+    if (window.lucide) lucide.createIcons();
+  }
 }
 
 /* === Hilfe / Anleitung ====================================================
@@ -7159,72 +7188,129 @@ async function deleteRule(id) {
 }
 
 async function renderRulesPage() {
-  setPageTitle('KI-Regeln', 'Automatische Bearbeitung neuer Tickets');
-  $('pageContent').innerHTML = `
-    <div class="space-y-3">
-      <div class="bg-gradient-to-br from-purple-50 to-brand-50 border border-purple-200 rounded-2xl p-4">
-        <p class="text-sm text-ink-700 leading-snug">Definiere Regeln in natürlicher Sprache. Claude analysiert, was zu tun ist, und kannst die Regel mit einem Klick auf ein Ticket anwenden (Phase C: automatisch beim ersten Öffnen).</p>
-      </div>
-      <button onclick="openRuleEditor()" class="w-full bg-gradient-to-br from-purple-500 to-brand-600 text-white rounded-xl py-3 font-semibold flex items-center justify-center gap-2 active:opacity-80">
-        <i data-lucide="plus" class="w-4 h-4"></i> Neue Regel anlegen
-      </button>
-      <div id="rulesList">
-        <div class="bg-white rounded-2xl border border-ink-200 p-6 text-center">
-          <div class="spinner inline-block text-brand-500 w-6 h-6 border-[3px]"></div>
+  try {
+    setPageTitle('KI-Regeln', 'Automatische Bearbeitung neuer Tickets');
+    $('pageContent').innerHTML = `
+      <div class="space-y-3">
+        <div class="bg-gradient-to-br from-purple-50 to-brand-50 border border-purple-200 rounded-2xl p-4">
+          <p class="text-sm text-ink-700 leading-snug">Definiere Regeln in natürlicher Sprache. Claude analysiert, was zu tun ist, und kannst die Regel mit einem Klick auf ein Ticket anwenden (Phase C: automatisch beim ersten Öffnen).</p>
         </div>
-      </div>
-    </div>`;
-  if (window.lucide) lucide.createIcons();
-  // Tabellen sicherstellen (Regeln-Tabelle wird beim ersten Aufruf angelegt)
-  if (APP_KEYS.airtableWriteKey) {
-    try { await ensureAppTables(); } catch (e) { console.warn('ensureAppTables:', e.message); }
+        <button onclick="openRuleEditor()" class="w-full bg-gradient-to-br from-purple-500 to-brand-600 text-white rounded-xl py-3 font-semibold flex items-center justify-center gap-2 active:opacity-80">
+          <i data-lucide="plus" class="w-4 h-4"></i> Neue Regel anlegen
+        </button>
+        <div id="rulesList">
+          <div class="bg-white rounded-2xl border border-ink-200 p-6 text-center">
+            <div class="spinner inline-block text-brand-500 w-6 h-6 border-[3px]"></div>
+          </div>
+        </div>
+      </div>`;
+    if (window.lucide) lucide.createIcons();
+    // Tabellen sicherstellen (Regeln-Tabelle wird beim ersten Aufruf angelegt)
+    if (APP_KEYS.airtableWriteKey) {
+      try { await ensureAppTables(); } catch (e) { console.warn('ensureAppTables:', e.message); }
+    }
+    try { await loadRules(); } catch (e) { console.warn('loadRules:', e.message); }
+    renderRulesList();
+  } catch (e) {
+    console.error('renderRulesPage failed:', e);
+    const short = String(e.message || e).slice(0, 250);
+    $('pageContent').innerHTML = `
+      <div class="bg-red-50 border border-red-200 rounded-2xl p-4">
+        <p class="font-semibold text-red-900 inline-flex items-center gap-1.5">
+          <i data-lucide="alert-triangle" class="w-4 h-4"></i> KI-Regeln konnten nicht geladen werden
+        </p>
+        <p class="text-[12px] text-red-700 mt-1">${escapeHtml(short)}</p>
+        <div class="flex gap-2 mt-2">
+          <button onclick="renderRulesPage()" class="text-[11px] bg-red-600 hover:bg-red-700 text-white px-2.5 py-1 rounded inline-flex items-center gap-1"><i data-lucide="refresh-cw" class="w-3 h-3"></i> Neu laden</button>
+          <button onclick="navTo('tickets')" class="text-[11px] bg-white border border-red-300 text-red-700 px-2.5 py-1 rounded inline-flex items-center gap-1"><i data-lucide="home" class="w-3 h-3"></i> Zur Startseite</button>
+        </div>
+      </div>`;
+    if (window.lucide) lucide.createIcons();
   }
-  await loadRules();
-  renderRulesList();
 }
 
 function renderRulesList() {
-  if (!RULES_CACHE.length) {
-    $('rulesList').innerHTML = `
-      <div class="bg-white rounded-2xl border border-ink-200 p-6 text-center">
-        <i data-lucide="sparkles" class="w-10 h-10 mx-auto text-purple-400"></i>
-        <p class="text-sm text-ink-500 mt-2">Noch keine Regeln</p>
-        <p class="text-[11px] text-ink-400 mt-1">Erstelle deine erste KI-Regel — z.B. per Sprache.</p>
+  const host = $('rulesList');
+  if (!host) return;
+  try {
+    if (!RULES_CACHE.length) {
+      host.innerHTML = `
+        <div class="bg-white rounded-2xl border border-ink-200 p-6 text-center">
+          <i data-lucide="sparkles" class="w-10 h-10 mx-auto text-purple-400"></i>
+          <p class="text-sm text-ink-500 mt-2">Noch keine Regeln</p>
+          <p class="text-[11px] text-ink-400 mt-1">Erstelle deine erste KI-Regel — z.B. per Sprache.</p>
+        </div>`;
+      if (window.lucide) lucide.createIcons();
+      return;
+    }
+    // Pro Regel ein eigener try/catch — eine kaputte Regel soll nicht die ganze Liste zerstören.
+    const rowsHtml = RULES_CACHE.map((r, idx) => {
+      try {
+        return _renderRuleRow(r);
+      } catch (e) {
+        console.warn('renderRulesList row failed for', r?.id, e);
+        const titel = String(r?.titel || r?.id || ('Regel ' + (idx + 1)));
+        return `
+          <div class="bg-red-50 border border-red-200 rounded-2xl p-3">
+            <p class="text-sm font-semibold text-red-900 inline-flex items-center gap-1.5">
+              <i data-lucide="alert-triangle" class="w-4 h-4"></i> „${escapeHtml(titel)}" konnte nicht angezeigt werden
+            </p>
+            <p class="text-[11px] text-red-700 mt-1">Daten sind beschädigt: ${escapeHtml(String(e.message || e).slice(0, 200))}</p>
+            ${r?.id ? `<div class="flex gap-2 mt-2">
+              <button onclick="openRuleEditor('${escapeAttr(String(r.id))}')" class="text-[11px] bg-white border border-red-300 text-red-700 px-2 py-1 rounded inline-flex items-center gap-1"><i data-lucide="edit-3" class="w-3 h-3"></i> Bearbeiten</button>
+              <button onclick="confirmDeleteRule('${escapeAttr(String(r.id))}', '${escapeAttr(titel)}')" class="text-[11px] bg-red-600 hover:bg-red-700 text-white px-2 py-1 rounded inline-flex items-center gap-1"><i data-lucide="trash-2" class="w-3 h-3"></i> Löschen</button>
+            </div>` : ''}
+          </div>`;
+      }
+    }).join('');
+    host.innerHTML = `<div class="space-y-2">${rowsHtml}</div>`;
+    if (window.lucide) lucide.createIcons();
+  } catch (e) {
+    console.error('renderRulesList top-level failed:', e);
+    host.innerHTML = `
+      <div class="bg-red-50 border border-red-200 rounded-2xl p-4">
+        <p class="text-sm font-semibold text-red-900 inline-flex items-center gap-1.5">
+          <i data-lucide="alert-triangle" class="w-4 h-4"></i> Regel-Liste konnte nicht gerendert werden
+        </p>
+        <p class="text-[12px] text-red-700 mt-1">${escapeHtml(String(e.message || e).slice(0, 250))}</p>
+        <button onclick="loadRules().then(renderRulesList)" class="mt-2 text-[11px] bg-red-600 hover:bg-red-700 text-white px-2.5 py-1 rounded inline-flex items-center gap-1"><i data-lucide="refresh-cw" class="w-3 h-3"></i> Neu laden</button>
       </div>`;
     if (window.lucide) lucide.createIcons();
-    return;
   }
-  $('rulesList').innerHTML = `
-    <div class="space-y-2">
-      ${RULES_CACHE.map(r => {
-        const actCount = (r.action?.actions || []).length;
-        return `
-          <div class="bg-white rounded-2xl border ${r.aktiv ? 'border-purple-200' : 'border-ink-200'} p-3">
-            <div class="flex items-start gap-2">
-              <div class="w-9 h-9 rounded-full ${r.aktiv ? 'bg-gradient-to-br from-purple-500 to-brand-600 text-white' : 'bg-ink-100 text-ink-400'} flex items-center justify-center shrink-0">
-                <i data-lucide="sparkles" class="w-4 h-4"></i>
-              </div>
-              <div class="flex-1 min-w-0">
-                <p class="font-semibold text-ink-900 text-sm leading-snug truncate">${escapeHtml(r.titel)}</p>
-                <p class="text-[11px] text-ink-500 mt-0.5 line-clamp-2">${escapeHtml(r.beschreibung)}</p>
-                <div class="flex gap-1 mt-1.5 flex-wrap items-center">
-                  <span class="text-[10px] uppercase tracking-wider px-1.5 py-0.5 rounded font-semibold ${r.aktiv ? 'bg-purple-100 text-purple-700' : 'bg-ink-100 text-ink-500'}">${r.aktiv ? 'Aktiv' : 'Inaktiv'}</span>
-                  <span class="text-[10px] text-ink-400">${actCount} Aktion${actCount === 1 ? '' : 'en'}</span>
-                </div>
-              </div>
-              <label class="shrink-0 inline-flex items-center cursor-pointer">
-                <input type="checkbox" ${r.aktiv ? 'checked' : ''} onchange="onToggleRule('${r.id}', this.checked)" class="sr-only peer">
-                <div class="relative w-10 h-6 bg-ink-200 peer-checked:bg-purple-500 rounded-full peer transition-colors after:content-[''] after:absolute after:top-0.5 after:left-0.5 after:bg-white after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:after:translate-x-4"></div>
-              </label>
-            </div>
-            <div class="flex gap-1.5 mt-2 pt-2 border-t border-ink-100">
-              <button onclick="openRuleEditor('${r.id}')" class="text-[11px] text-brand-600 hover:underline inline-flex items-center gap-1 px-1.5 py-0.5"><i data-lucide="edit-3" class="w-3 h-3"></i> Bearbeiten</button>
-              <button onclick="confirmDeleteRule('${r.id}', '${escapeAttr(r.titel)}')" class="text-[11px] text-red-600 hover:underline inline-flex items-center gap-1 px-1.5 py-0.5"><i data-lucide="trash-2" class="w-3 h-3"></i> Löschen</button>
-            </div>
-          </div>`;
-      }).join('')}
+}
+
+function _renderRuleRow(r) {
+  // Defensiv: alle Werte normalisieren bevor sie ins Template gehen
+  const id           = String(r?.id || '');
+  const titel        = String(r?.titel || '(ohne Titel)');
+  const beschreibung = String(r?.beschreibung || '');
+  const aktiv        = r?.aktiv !== false;
+  const actions      = Array.isArray(r?.action?.actions) ? r.action.actions : [];
+  const actCount     = actions.length;
+  return `
+    <div class="bg-white rounded-2xl border ${aktiv ? 'border-purple-200' : 'border-ink-200'} p-3">
+      <div class="flex items-start gap-2">
+        <div class="w-9 h-9 rounded-full ${aktiv ? 'bg-gradient-to-br from-purple-500 to-brand-600 text-white' : 'bg-ink-100 text-ink-400'} flex items-center justify-center shrink-0">
+          <i data-lucide="sparkles" class="w-4 h-4"></i>
+        </div>
+        <div class="flex-1 min-w-0">
+          <p class="font-semibold text-ink-900 text-sm leading-snug truncate">${escapeHtml(titel)}</p>
+          <p class="text-[11px] text-ink-500 mt-0.5 line-clamp-2">${escapeHtml(beschreibung)}</p>
+          <div class="flex gap-1 mt-1.5 flex-wrap items-center">
+            <span class="text-[10px] uppercase tracking-wider px-1.5 py-0.5 rounded font-semibold ${aktiv ? 'bg-purple-100 text-purple-700' : 'bg-ink-100 text-ink-500'}">${aktiv ? 'Aktiv' : 'Inaktiv'}</span>
+            <span class="text-[10px] text-ink-400">${actCount} Aktion${actCount === 1 ? '' : 'en'}</span>
+          </div>
+        </div>
+        <label class="shrink-0 inline-flex items-center cursor-pointer">
+          <input type="checkbox" ${aktiv ? 'checked' : ''} onchange="onToggleRule('${escapeAttr(id)}', this.checked)" class="sr-only peer">
+          <div class="relative w-10 h-6 bg-ink-200 peer-checked:bg-purple-500 rounded-full peer transition-colors after:content-[''] after:absolute after:top-0.5 after:left-0.5 after:bg-white after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:after:translate-x-4"></div>
+        </label>
+      </div>
+      <div class="flex gap-1.5 mt-2 pt-2 border-t border-ink-100">
+        <button onclick="openRuleEditor('${escapeAttr(id)}')" class="text-[11px] text-brand-600 hover:underline inline-flex items-center gap-1 px-1.5 py-0.5"><i data-lucide="edit-3" class="w-3 h-3"></i> Bearbeiten</button>
+        <button onclick="confirmDeleteRule('${escapeAttr(id)}', '${escapeAttr(titel)}')" class="text-[11px] text-red-600 hover:underline inline-flex items-center gap-1 px-1.5 py-0.5"><i data-lucide="trash-2" class="w-3 h-3"></i> Löschen</button>
+      </div>
     </div>`;
-  if (window.lucide) lucide.createIcons();
 }
 
 /* === Automatisierte Tickets — Übersicht aller Tickets bei denen KI-Regeln gegriffen haben === */
