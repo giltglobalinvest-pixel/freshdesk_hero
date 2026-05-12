@@ -259,7 +259,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.23.1';
+const APP_VERSION = 'v2.24.0';
 // Read-Token absichtlich gesplittet, damit GitHub Secret-Scanning beim Push nicht blockt.
 // Der Token ist read-only und Base-scoped → bewusst eingebettet (Architektur-Entscheidung).
 const _RK = 'patu8KWM8aWB' + 'yxCGL.69fae5d9fa4b94c2' + '66b426dadd71a51f574945d840b33569058ab5e9d89ebef3';
@@ -895,9 +895,18 @@ async function _bootstrapLogin(userKey) {
     name:    rec.fields.name || '',
     role:    rec.fields.role || '',
     is_admin: role === 'admin' || rec.fields.is_admin === true,
+    allow_default_keys: _truthyFieldValue(rec.fields.allow_default_keys),
+    phone:   rec.fields.phone || '',
   };
   localStorage.setItem(LEGACY_USER_KEY, userKey);
   return APP_KEYS.user;
+}
+
+/* Hilfsfunktion: 'ja' / true / 'true' / 1 → true, sonst false */
+function _truthyFieldValue(v) {
+  if (v === true || v === 1) return true;
+  const s = String(v || '').trim().toLowerCase();
+  return s === 'ja' || s === 'true' || s === 'yes' || s === '1';
 }
 
 async function loginWithUserKey(userKey, longLived = false) {
@@ -940,6 +949,8 @@ async function loginWithUserKey(userKey, longLived = false) {
     name:     data.user.name,
     role:     data.user.role,
     is_admin: !!data.user.is_admin,
+    allow_default_keys: !!data.user.allow_default_keys,
+    phone:    data.user.phone || '',
   };
   return APP_KEYS.user;
 }
@@ -960,6 +971,8 @@ async function tryAutoLogin() {
           name:     data.user.name,
           role:     data.user.role,
           is_admin: !!data.user.is_admin,
+          allow_default_keys: !!data.user.allow_default_keys,
+          phone:    data.user.phone || '',
         };
         APP_KEYS.sessionToken = token;
         return true;
@@ -1365,23 +1378,41 @@ async function loadAccounts() {
     recs = await airtableRead(ACCOUNTS_TABLE, opts);
   } catch (_) { recs = []; }
 
-  APP_STATE.accounts = recs.map(r => {
-    const access = accessByAccountId[r.id];
-    const ownAccount = (r.fields.api_key || '').trim() === userKey;
+  // Berechtigungs-Logik:
+  //   - User hat eigenen API-Key (in AccountAccess) → canAccess
+  //   - User darf Default-Keys nutzen (allow_default_keys=true) UND Account hat Default-Key → canAccess
+  //   - Legacy-Owner UND Account hat Default-Key → canAccess
+  //   - Admin: behandelt wie allow_default_keys=true
+  const userAllowsDefault = APP_KEYS.user?.allow_default_keys === true || APP_KEYS.user?.is_admin === true;
+
+  const allAccounts = recs.map(r => {
+    const access  = accessByAccountId[r.id];
+    const isOwner = (r.fields.api_key || '').trim() === userKey;
+    const hasOwnKey = !!(access?.fields?.freshdesk_api_key && String(access.fields.freshdesk_api_key).trim());
+    const hasAccountDefault = !!(r.fields.freshdesk_api_key && String(r.fields.freshdesk_api_key).trim());
+    const canUseDefault = (userAllowsDefault || isOwner) && hasAccountDefault;
+    const canAccess = hasOwnKey || canUseDefault;
     return {
       id:       r.id,
       name:     r.fields.name || '–',
       domain:   (r.fields.freshdesk_domain || '').replace(/^https?:\/\//, '').replace(/\.freshdesk\.com\/?$/, '').replace(/\/+$/, ''),
       freshsales_domain:  (r.fields.freshsales_domain || '').replace(/^https?:\/\//, '').replace(/\.myfreshworks\.com\/?$/, '').replace(/\/+$/, ''),
-      // Freshsales-Key: user-spezifisch falls hinterlegt, sonst Account-Default
       freshsales_api_key: (access?.fields?.freshsales_api_key || r.fields.freshsales_api_key || ''),
       color:    r.fields.color || ACCOUNT_COLORS[Math.floor(Math.random() * ACCOUNT_COLORS.length)],
       created:  r.fields.created || '',
       // Meta für UI/Debug
       _hasOwnAccess: !!access,
-      _isOwner:      ownAccount,
+      _hasOwnKey:    hasOwnKey,
+      _hasDefault:   hasAccountDefault,
+      _isOwner:      isOwner,
+      _canAccess:    canAccess,
     };
   });
+  // APP_STATE.accounts enthält NUR nutzbare Accounts (mit gültigem Zugriff) — alle anderen
+  // Stellen (Tickets-Übersicht, Search, Filter) sehen die Accounts also gar nicht erst.
+  APP_STATE.accounts    = allAccounts.filter(a => a._canAccess);
+  // Self-Service-Page braucht alle zugewiesenen Accounts (auch ohne Key) → separat
+  APP_STATE.allAssignedAccounts = allAccounts;
   // Restore last-selected account
   const last = localStorage.getItem(LAST_ACCOUNT_KEY);
   if (last && (last === 'all' || APP_STATE.accounts.find(a => a.id === last))) APP_STATE.currentAccount = last;
@@ -2299,15 +2330,22 @@ async function fetchTicketsAllAccounts(opts = {}) {
 async function fetchUsers() {
   return await airtableRead('User', { sort: [{ field: 'name', direction: 'asc' }] });
 }
-async function createUser({ api_key, name, role, status, phone }) {
+async function createUser({ api_key, name, role, status, phone, allow_default_keys }) {
   const fields = {
     api_key, name, role: role || 'user', status: status || 'aktiv', created: nowIso(),
   };
   if (phone) fields.phone = phone;
-  return await airtableWriteWithAutoField('User', fields, { phone: 'singleLineText' });
+  if (allow_default_keys) fields.allow_default_keys = allow_default_keys;
+  return await airtableWriteWithAutoField('User', fields, {
+    phone: 'singleLineText',
+    allow_default_keys: 'singleLineText',
+  });
 }
 async function updateUser(id, fields) {
-  return await airtableUpdateWithAutoField('User', id, fields, { phone: 'singleLineText' });
+  return await airtableUpdateWithAutoField('User', id, fields, {
+    phone: 'singleLineText',
+    allow_default_keys: 'singleLineText',
+  });
 }
 async function deleteUser(id)         { return await airtableDelete('User', id); }
 
@@ -2752,18 +2790,28 @@ async function renderTicketsPage() {
   }
   if (!APP_STATE.accounts.length) {
     const isAdmin = APP_KEYS.user?.is_admin;
+    // Hat der User Accounts zugewiesen aber keine Keys eingetragen?
+    const assigned = APP_STATE.allAssignedAccounts || [];
+    const needsKeys = assigned.length > 0 && !isAdmin;
     $('pageContent').innerHTML = `
       <div class="bg-white rounded-2xl border border-ink-200 p-6 text-center">
-        <div class="w-14 h-14 mx-auto rounded-2xl bg-brand-50 flex items-center justify-center mb-3">
-          <i data-lucide="building-2" class="w-7 h-7 text-brand-600"></i>
+        <div class="w-14 h-14 mx-auto rounded-2xl ${needsKeys ? 'bg-amber-50' : 'bg-brand-50'} flex items-center justify-center mb-3">
+          <i data-lucide="${needsKeys ? 'key-round' : 'building-2'}" class="w-7 h-7 ${needsKeys ? 'text-amber-600' : 'text-brand-600'}"></i>
         </div>
-        <h3 class="font-semibold text-ink-900">Noch keine Accounts</h3>
         ${isAdmin ? `
+          <h3 class="font-semibold text-ink-900">Noch keine Accounts</h3>
           <p class="text-sm text-ink-500 mt-1">Lege deinen ersten Freshdesk-Account an, um Tickets zu sehen.</p>
           <button onclick="navTo('accounts')" class="mt-4 inline-flex items-center gap-2 bg-brand-500 hover:bg-brand-600 text-white rounded-lg px-4 py-2 text-sm font-medium">
             <i data-lucide="plus" class="w-4 h-4"></i> Account anlegen
           </button>
+        ` : needsKeys ? `
+          <h3 class="font-semibold text-ink-900">API-Keys fehlen</h3>
+          <p class="text-sm text-ink-500 mt-1 leading-relaxed">Dir wurden ${assigned.length} Account${assigned.length===1?'':'s'} zugewiesen.<br>Trag jetzt deinen persönlichen Freshdesk-API-Key ein, um Tickets zu sehen.</p>
+          <button onclick="navTo('accounts')" class="mt-4 inline-flex items-center gap-2 bg-amber-500 hover:bg-amber-600 text-white rounded-lg px-4 py-2 text-sm font-medium">
+            <i data-lucide="key-round" class="w-4 h-4"></i> API-Keys eintragen
+          </button>
         ` : `
+          <h3 class="font-semibold text-ink-900">Noch keine Accounts</h3>
           <p class="text-sm text-ink-500 mt-1 leading-relaxed">Dir wurden noch keine Accounts zugewiesen.<br>Bitte den Admin, dir Zugriff zu geben.</p>
           <button onclick="loadAccounts().then(() => renderTicketsPage())" class="mt-4 inline-flex items-center gap-2 bg-white border border-ink-200 hover:bg-ink-50 text-ink-700 rounded-lg px-4 py-2 text-sm font-medium">
             <i data-lucide="refresh-cw" class="w-4 h-4"></i> Neu laden
@@ -6799,7 +6847,8 @@ async function renderAccountsSelfService() {
   const accessByAccountId = {};
   myAccess.forEach(a => { accessByAccountId[a.account_id] = a; });
 
-  const list = APP_STATE.accounts;
+  // Hier ALLE zugewiesenen Accounts anzeigen (auch ohne Key) — damit der User Keys nachtragen kann
+  const list = APP_STATE.allAssignedAccounts || APP_STATE.accounts || [];
   if (!list.length) {
     $('accountsList').innerHTML = `
       <div class="bg-white rounded-2xl border border-ink-200 p-6 text-center">
@@ -6814,7 +6863,8 @@ async function renderAccountsSelfService() {
     <div class="space-y-2">
       ${list.map(a => {
         const ac = accessByAccountId[a.id];
-        const hasKey = !!(ac?.freshdesk_api_key);
+        const hasKey = a._hasOwnKey;
+        const canViaDefault = a._canAccess && !hasKey; // Zugriff klappt nur via Account-Default-Key
         return `
           <div class="bg-white rounded-2xl border border-ink-200 p-3" data-self-row data-account-id="${escapeAttr(a.id)}">
             <div class="flex items-center gap-3">
@@ -6825,8 +6875,8 @@ async function renderAccountsSelfService() {
                 <p class="font-semibold text-ink-900 text-sm truncate">${escapeHtml(a.name)}</p>
                 <p class="text-[11px] text-ink-500 truncate">${escapeHtml(a.domain)}.freshdesk.com</p>
               </div>
-              <span class="shrink-0 text-[10px] uppercase tracking-wider px-1.5 py-0.5 rounded font-semibold ${hasKey ? 'bg-emerald-100 text-emerald-700' : 'bg-amber-100 text-amber-700'}">
-                ${hasKey ? 'verbunden' : 'Key fehlt'}
+              <span class="shrink-0 text-[10px] uppercase tracking-wider px-1.5 py-0.5 rounded font-semibold ${hasKey ? 'bg-emerald-100 text-emerald-700' : (canViaDefault ? 'bg-brand-100 text-brand-700' : 'bg-amber-100 text-amber-700')}" title="${hasKey ? 'Eigener API-Key hinterlegt' : (canViaDefault ? 'Du nutzt den Account-Default-Key (Admin-Erlaubnis)' : 'Kein API-Key — keine Tickets sichtbar')}">
+                ${hasKey ? 'verbunden' : (canViaDefault ? 'Standard-Key' : 'Key fehlt')}
               </span>
             </div>
             <div class="mt-2 space-y-1.5">
@@ -7206,6 +7256,17 @@ async function openUserModal(user) {
             <p class="text-[10px] text-ink-500 mt-1">Mit Ländervorwahl (+49…). Wird nur für WhatsApp-Einladung genutzt, optional.</p>
           </div>
 
+          <!-- Berechtigungs-Optionen -->
+          <div class="bg-ink-50 border border-ink-200 rounded-xl p-3">
+            <label class="flex items-start gap-2 cursor-pointer">
+              <input id="usrAllowDefault" type="checkbox" ${(user?.allow_default_keys === true || user?.allow_default_keys === 'ja') ? 'checked' : ''} class="mt-0.5 w-4 h-4 accent-brand-500">
+              <div class="flex-1 min-w-0">
+                <p class="text-xs font-semibold text-ink-900">Darf Account-Default-API-Keys nutzen</p>
+                <p class="text-[11px] text-ink-600 leading-snug mt-0.5">Wenn aktiv: User kann auf einen Account auch ohne eigenen Key zugreifen — der in „Accounts" hinterlegte Default-Key wird genutzt. Wenn aus: User muss zwingend seinen eigenen API-Key eintragen, sonst keine Tickets sichtbar.</p>
+              </div>
+            </label>
+          </div>
+
           <!-- Account-Zugriff-Block -->
           <details class="border border-purple-200 bg-purple-50/30 rounded-xl" ${allAccounts.length && (isEdit ? existingAccess.length : true) ? 'open' : ''}>
             <summary class="px-3 py-2.5 cursor-pointer text-sm font-semibold text-purple-900 inline-flex items-center gap-1.5">
@@ -7274,19 +7335,27 @@ async function submitUserForm() {
   const errEl = $('usrFormError'); errEl.classList.add('hidden');
   const btn = $('usrSubmitBtn'); setBusy(btn, true, 'Speichere…');
   try {
+    const allowDefault = !!$('usrAllowDefault')?.checked;
     const userFields = {
       name:    $('usrName').value.trim(),
       api_key: $('usrApiKey').value.trim(),
       role:    $('usrRole').value,
       status:  $('usrStatus').value,
       phone:   $('usrPhone')?.value.trim() || '',
+      allow_default_keys: allowDefault ? 'ja' : 'nein',
     };
     if (!userFields.name)    throw new Error('Name fehlt');
     if (!userFields.api_key) throw new Error('Login-Key fehlt');
 
     // 1. User selbst speichern (Edit oder Anlegen)
     if (isEdit) {
-      const upd = { name: userFields.name, role: userFields.role, status: userFields.status, phone: userFields.phone };
+      const upd = {
+        name:               userFields.name,
+        role:               userFields.role,
+        status:             userFields.status,
+        phone:              userFields.phone,
+        allow_default_keys: userFields.allow_default_keys,
+      };
       await updateUser(user.id, upd);
     } else {
       await createUser(userFields);
@@ -8876,12 +8945,16 @@ async function lookupUser(userKey) {
   const rec = (data.records || [])[0];
   if (!rec) return null;
   const role = (rec.fields.role || "").toLowerCase();
+  const allowDefRaw = String(rec.fields.allow_default_keys || "").trim().toLowerCase();
+  const allowDefault = (allowDefRaw === "ja" || allowDefRaw === "true" || allowDefRaw === "yes" || allowDefRaw === "1" || rec.fields.allow_default_keys === true);
   const user = {
     id:       rec.id,
     api_key:  rec.fields.api_key || "",
     name:     rec.fields.name || "",
     role:     rec.fields.role || "",
     is_admin: role === "admin" || rec.fields.is_admin === true,
+    allow_default_keys: allowDefault,
+    phone:    rec.fields.phone || "",
   };
   USER_CACHE.set(userKey, { user, expires: Date.now() + CACHE_TTL_MS });
   return user;
@@ -9012,7 +9085,10 @@ export default async function (req) {
       session_token: token,
       expires_in:    Math.floor(ttl / 1000),
       user: {
-        id: user.id, api_key: user.api_key, name: user.name, role: user.role, is_admin: user.is_admin
+        id: user.id, api_key: user.api_key, name: user.name, role: user.role,
+        is_admin: user.is_admin,
+        allow_default_keys: user.allow_default_keys,
+        phone: user.phone,
       }
     });
   }
@@ -9083,17 +9159,24 @@ export default async function (req) {
     try { acc = await lookupAccount(accountId); }
     catch (e) { return jsonResponse({ error: e.message }, 500); }
     if (!acc) return jsonResponse({ error: "Account nicht gefunden" }, 404);
-    // Per-User-Zugriff prüfen: hat dieser User einen AccountAccess-Eintrag für diesen Account?
+    // Per-User-Zugriff prüfen
     const access = await lookupAccountAccess(user.api_key, accountId);
-    // Berechtigung: AccountAccess vorhanden ODER Owner ODER Admin
     const isOwner = acc.owner_key && acc.owner_key === user.api_key;
     if (!access && !isOwner && !user.is_admin) {
-      return jsonResponse({ error: "Kein Zugriff auf diesen Account. Admin bitten, einen AccountAccess-Eintrag mit deinem eigenen Freshdesk-API-Key anzulegen." }, 403);
+      return jsonResponse({ error: "Kein Zugriff auf diesen Account. Admin bitten, dir Zugriff zu geben." }, 403);
     }
     if (!acc.domain) return jsonResponse({ error: "Account hat keine Subdomain" }, 500);
-    // User-spezifischer API-Key hat Vorrang vor Account-Default-Key
-    const fdKey = (access?.freshdesk_api_key && access.freshdesk_api_key.trim()) || acc.api_key;
-    if (!fdKey) return jsonResponse({ error: "Kein Freshdesk-API-Key hinterlegt (weder im Account noch im AccountAccess)" }, 500);
+    // Volle User-Details laden um allow_default_keys zu lesen (gecacht, billig)
+    let fullUser = null;
+    try { fullUser = await lookupUser(user.api_key); } catch (_) {}
+    const userAllowsDefault = !!(fullUser?.allow_default_keys) || !!user.is_admin || isOwner;
+    // Key-Auswahl: eigener Key bevorzugt; Default nur wenn explizit erlaubt
+    const ownKey = (access?.freshdesk_api_key && access.freshdesk_api_key.trim()) || "";
+    let fdKey = ownKey;
+    if (!fdKey && userAllowsDefault) fdKey = acc.api_key;
+    if (!fdKey) {
+      return jsonResponse({ error: "Kein API-Key. Bitte in der App unter „Accounts" deinen persönlichen Freshdesk-API-Key eintragen." }, 400);
+    }
     const target = \`https://\${acc.domain}.freshdesk.com/\${fdPath}\${url.search}\`;
     const basic = btoa(\`\${fdKey}:X\`);
     const init: any = {
@@ -9138,8 +9221,13 @@ export default async function (req) {
     if (!acc.fs_domain) {
       return jsonResponse({ error: "Freshsales nicht konfiguriert (Domain fehlt im Account)" }, 400);
     }
-    const fsKey = (fsAccess?.freshsales_api_key && fsAccess.freshsales_api_key.trim()) || acc.fs_api_key;
-    if (!fsKey) return jsonResponse({ error: "Kein Freshsales-API-Key hinterlegt" }, 400);
+    let fullUserFs = null;
+    try { fullUserFs = await lookupUser(user.api_key); } catch (_) {}
+    const userAllowsFsDefault = !!(fullUserFs?.allow_default_keys) || !!user.is_admin || isOwnerFs;
+    const ownFsKey = (fsAccess?.freshsales_api_key && fsAccess.freshsales_api_key.trim()) || "";
+    let fsKey = ownFsKey;
+    if (!fsKey && userAllowsFsDefault) fsKey = acc.fs_api_key;
+    if (!fsKey) return jsonResponse({ error: "Kein Freshsales-API-Key. Bitte unter „Accounts" eintragen." }, 400);
     const target = \`https://\${acc.fs_domain}.myfreshworks.com/crm/sales/\${fsPath}\${url.search}\`;
     const fsInit: any = {
       method: req.method,
