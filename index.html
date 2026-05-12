@@ -256,7 +256,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.21.0';
+const APP_VERSION = 'v2.21.1';
 // Read-Token absichtlich gesplittet, damit GitHub Secret-Scanning beim Push nicht blockt.
 // Der Token ist read-only und Base-scoped → bewusst eingebettet (Architektur-Entscheidung).
 const _RK = 'patu8KWM8aWB' + 'yxCGL.69fae5d9fa4b94c2' + '66b426dadd71a51f574945d840b33569058ab5e9d89ebef3';
@@ -1668,25 +1668,62 @@ function acceptContactSuggestion(field) {
   const ctx = CONTACT_EDIT_CTX;
   const s = ctx?.suggestions?.[field];
   if (!s) return;
-  const inputMap = { name:'fdName', email:'fdEmail', phone:'fdPhone', mobile:'fdMobile', job_title:'fdJob', address:'fdAddress' };
-  const el = $(inputMap[field]);
-  if (!el) return;
-  el.value = s.value;
+  // 1. Erst aktuelle DOM-Werte einsammeln, damit andere manuell editierte Felder
+  //    durch den Re-Render NICHT verloren gehen
+  _syncFreshdeskInputsToCtx();
+  // 2. Den übernommenen Wert in ctx.fd schreiben — beim Re-Render erscheint er im Input
+  ctx.fd = ctx.fd || {};
+  ctx.fd[field] = s.value;
   s.accepted = true;
-  // Sanftes visuelles Feedback statt voller Re-Render
-  el.classList.add('ring-2', 'ring-purple-400');
-  setTimeout(() => el.classList.remove('ring-2', 'ring-purple-400'), 1200);
+  // 3. Re-render zeigt jetzt den neuen Wert UND blendet das Banner aus
   renderContactEditBody();
+  // 4. Visual Feedback nach dem Re-Render
+  const inputMap = { name:'fdName', email:'fdEmail', phone:'fdPhone', mobile:'fdMobile', job_title:'fdJob', address:'fdAddress' };
+  setTimeout(() => {
+    const el = $(inputMap[field]);
+    if (el) {
+      el.classList.add('ring-2', 'ring-purple-400');
+      setTimeout(() => el.classList.remove('ring-2', 'ring-purple-400'), 1500);
+    }
+  }, 30);
+}
+
+/* Liest aktuelle Werte aus den Freshdesk-Input-Feldern und schreibt sie zurück
+   in ctx.fd, damit ein Re-Render keine manuellen Edits verschluckt. */
+function _syncFreshdeskInputsToCtx() {
+  const ctx = CONTACT_EDIT_CTX;
+  if (!ctx?.fd) return;
+  const map = {
+    name:      'fdName',
+    email:     'fdEmail',
+    phone:     'fdPhone',
+    mobile:    'fdMobile',
+    job_title: 'fdJob',
+    address:   'fdAddress',
+  };
+  Object.entries(map).forEach(([field, id]) => {
+    const el = $(id);
+    if (el) ctx.fd[field] = el.value;
+  });
 }
 
 function acceptAllContactSuggestions() {
   const ctx = CONTACT_EDIT_CTX;
   if (!ctx?.suggestions) return;
+  // Erst aktuelle DOM-Werte sichern (für nicht-akzeptierte manuelle Edits)
+  _syncFreshdeskInputsToCtx();
+  // Dann alle Vorschläge in ctx.fd übernehmen — ein einziger Re-Render am Ende
   let count = 0;
   Object.keys(ctx.suggestions).forEach(f => {
-    if (!ctx.suggestions[f].accepted) { acceptContactSuggestion(f); count++; }
+    const s = ctx.suggestions[f];
+    if (s && !s.accepted) {
+      ctx.fd[f] = s.value;
+      s.accepted = true;
+      count++;
+    }
   });
-  if (count) toast(count + ' Vorschläge übernommen — bitte noch speichern', 'success', 3000);
+  renderContactEditBody();
+  if (count) toast(count + ' Vorschlag' + (count===1?'':'e') + ' übernommen — jetzt noch „Im Freshdesk speichern"', 'success', 4000);
 }
 
 function closeContactEditModal() {
@@ -1772,9 +1809,12 @@ function renderContactEditBody() {
   };
 
   // Top-Block: KI-Status + Bulk-Aktionen
-  const suggCount = Object.values(sugg).filter(s => !s.accepted).length;
+  const suggList = Object.values(sugg);
+  const suggOpen     = suggList.filter(s => !s.accepted).length;
+  const suggAccepted = suggList.filter(s =>  s.accepted).length;
+  const suggTotal    = suggList.length;
   const aiTopBlock = ctx.ticket ? `
-    <div class="bg-gradient-to-br from-purple-50 via-brand-50 to-purple-50 border-2 ${suggCount ? 'border-purple-300' : 'border-purple-100'} rounded-2xl p-3">
+    <div class="bg-gradient-to-br from-purple-50 via-brand-50 to-purple-50 border-2 ${suggOpen ? 'border-purple-300' : 'border-purple-100'} rounded-2xl p-3">
       <div class="flex items-center gap-2">
         <div class="w-8 h-8 rounded-full bg-gradient-to-br from-purple-500 to-brand-600 flex items-center justify-center text-white shrink-0">
           <i data-lucide="sparkles" class="w-4 h-4"></i>
@@ -1786,14 +1826,16 @@ function renderContactEditBody() {
             : ctx.suggestionsError
               ? `<p class="text-[11px] text-red-700">Fehler: ${escapeHtml(ctx.suggestionsError)}</p>`
               : ctx.suggestions
-                ? (suggCount
-                  ? `<p class="text-[11px] text-purple-700">${suggCount} Vorschlag${suggCount===1?'':'e'} unter den Feldern — einzeln oder alle übernehmen.</p>`
-                  : `<p class="text-[11px] text-emerald-700">Alle Felder sehen bereits gut aus — keine Vervollständigung nötig.</p>`)
+                ? (suggOpen
+                  ? `<p class="text-[11px] text-purple-700">${suggOpen} Vorschlag${suggOpen===1?'':'e'} unter den Feldern — einzeln oder alle übernehmen.</p>`
+                  : (suggAccepted > 0
+                    ? `<p class="text-[11px] text-emerald-700"><i data-lucide="check-circle-2" class="w-3 h-3 inline"></i> ${suggAccepted} Vorschlag${suggAccepted===1?'':'e'} übernommen — jetzt unten „Im Freshdesk speichern" tippen.</p>`
+                    : `<p class="text-[11px] text-emerald-700">Alle Felder sehen bereits gut aus — keine Vervollständigung nötig.</p>`))
                 : `<p class="text-[11px] text-ink-500">Aus dem Ticket-Kontext werden Vorschläge generiert…</p>`}
         </div>
         ${!ctx.suggestionsLoading ? `
           <div class="flex flex-col gap-1 shrink-0">
-            ${suggCount ? `<button type="button" onclick="acceptAllContactSuggestions()" class="text-[11px] bg-purple-600 hover:bg-purple-700 text-white px-2.5 py-1.5 rounded inline-flex items-center gap-1 font-semibold"><i data-lucide="check-check" class="w-3 h-3"></i>Alle (${suggCount})</button>` : ''}
+            ${suggOpen ? `<button type="button" onclick="acceptAllContactSuggestions()" class="text-[11px] bg-purple-600 hover:bg-purple-700 text-white px-2.5 py-1.5 rounded inline-flex items-center gap-1 font-semibold"><i data-lucide="check-check" class="w-3 h-3"></i>Alle (${suggOpen})</button>` : ''}
             <button type="button" onclick="loadContactSuggestions()" class="text-[11px] bg-white border border-purple-300 text-purple-700 px-2.5 py-1.5 rounded inline-flex items-center gap-1"><i data-lucide="refresh-cw" class="w-3 h-3"></i>${ctx.suggestions ? 'Neu' : 'Analysieren'}</button>
           </div>` : ''}
       </div>
