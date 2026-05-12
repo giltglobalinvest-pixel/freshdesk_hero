@@ -259,7 +259,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.22.0';
+const APP_VERSION = 'v2.22.1';
 // Read-Token absichtlich gesplittet, damit GitHub Secret-Scanning beim Push nicht blockt.
 // Der Token ist read-only und Base-scoped → bewusst eingebettet (Architektur-Entscheidung).
 const _RK = 'patu8KWM8aWB' + 'yxCGL.69fae5d9fa4b94c2' + '66b426dadd71a51f574945d840b33569058ab5e9d89ebef3';
@@ -2973,7 +2973,23 @@ function renderTicketList(tickets) {
                     <button data-action="summarize" data-account-id="${escapeAttr(t._accountId)}" data-ticket-id="${t.id}" class="text-purple-500 active:text-purple-700 hover:bg-purple-50 -m-1 p-1 rounded shrink-0" title="KI-Zusammenfassung">
                       <i data-lucide="sparkles" class="w-4 h-4"></i>
                     </button>
-                    <button data-action="more" data-account-id="${escapeAttr(t._accountId)}" data-ticket-id="${t.id}" class="text-ink-500 active:text-ink-800 hover:bg-ink-100 -m-1 p-1 rounded shrink-0" title="Aktionen (Schließen, SPAM, Wiedervorlage, Link, …)">
+                    <!-- Desktop-Quick-Aktionen: auf Mobile (Swipes vorhanden) ausgeblendet, ab sm: sichtbar -->
+                    <button data-action="assistant" data-account-id="${escapeAttr(t._accountId)}" data-ticket-id="${t.id}" class="hidden sm:inline-flex text-purple-500 active:text-purple-700 hover:bg-purple-50 -m-1 p-1 rounded shrink-0" title="KI-Assistent (Sprache/Text)">
+                      <i data-lucide="mic" class="w-4 h-4"></i>
+                    </button>
+                    <button data-action="close" data-account-id="${escapeAttr(t._accountId)}" data-ticket-id="${t.id}" class="hidden sm:inline-flex text-emerald-600 active:text-emerald-800 hover:bg-emerald-50 -m-1 p-1 rounded shrink-0" title="Ticket schließen">
+                      <i data-lucide="check-circle-2" class="w-4 h-4"></i>
+                    </button>
+                    <button data-action="spam" data-account-id="${escapeAttr(t._accountId)}" data-ticket-id="${t.id}" class="hidden sm:inline-flex text-red-500 active:text-red-700 hover:bg-red-50 -m-1 p-1 rounded shrink-0" title="Als SPAM markieren">
+                      <i data-lucide="ban" class="w-4 h-4"></i>
+                    </button>
+                    <button data-action="snooze" data-account-id="${escapeAttr(t._accountId)}" data-ticket-id="${t.id}" class="hidden sm:inline-flex text-indigo-500 active:text-indigo-700 hover:bg-indigo-50 -m-1 p-1 rounded shrink-0" title="Auf Wiedervorlage (bei dir ausblenden)">
+                      <i data-lucide="clock" class="w-4 h-4"></i>
+                    </button>
+                    <button data-action="copyLink" data-account-id="${escapeAttr(t._accountId)}" data-ticket-id="${t.id}" class="hidden sm:inline-flex text-ink-500 active:text-ink-800 hover:bg-ink-100 -m-1 p-1 rounded shrink-0" title="Freshdesk-Link kopieren">
+                      <i data-lucide="link" class="w-4 h-4"></i>
+                    </button>
+                    <button data-action="more" data-account-id="${escapeAttr(t._accountId)}" data-ticket-id="${t.id}" class="text-ink-500 active:text-ink-800 hover:bg-ink-100 -m-1 p-1 rounded shrink-0" title="Alle Aktionen">
                       <i data-lucide="more-vertical" class="w-4 h-4"></i>
                     </button>
                     <span class="text-[10px] text-ink-400 shrink-0">${escapeHtml(relTime(t.updated_at))}</span>
@@ -3557,6 +3573,18 @@ function attachSwipeToCards() {
         else if (action === 'more') {
           if (_openSwipedContent) _resetSwipe();
           openCardActionsSheet(accId, tId);
+        }
+        else if (action === 'assistant') {
+          if (_openSwipedContent) _resetSwipe();
+          openAssistantModal(accId, tId);
+        }
+        else if (action === 'snooze') {
+          if (_openSwipedContent) _resetSwipe();
+          openWiedervorlagePicker(accId, tId, true);
+        }
+        else if (action === 'copyLink') {
+          if (_openSwipedContent) _resetSwipe();
+          copyTicketLink(accId, tId, btn);
         }
       });
     });
