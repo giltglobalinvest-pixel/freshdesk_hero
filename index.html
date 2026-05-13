@@ -267,7 +267,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.33.0';
+const APP_VERSION = 'v2.34.0';
 // Read-Token absichtlich gesplittet, damit GitHub Secret-Scanning beim Push nicht blockt.
 // Der Token ist read-only und Base-scoped → bewusst eingebettet (Architektur-Entscheidung).
 const _RK = 'patu8KWM8aWB' + 'yxCGL.69fae5d9fa4b94c2' + '66b426dadd71a51f574945d840b33569058ab5e9d89ebef3';
@@ -318,6 +318,10 @@ let APP_STATE = {
     exhausted: new Set(),        // Account-IDs deren letzte Seite < perPage war
     tickets:   [],               // akkumuliert (alle bisherigen Seiten, sortiert)
   },
+  // Master-Ticket-Cache: alle jemals geladenen Tickets, key = accountId+'|'+ticketId.
+  // Wird bei jedem fetch/search/detail befüllt und ist die Quelle für die lokale Suche —
+  // damit Filter (Status/Gruppe/Wiedervorlage) die Suche nicht künstlich einschränken.
+  ticketCache: new Map(),
 };
 const TICKETS_PER_PAGE = 30;
 
@@ -1664,6 +1668,23 @@ function buildSearchQuery(filters, opts = {}) {
   return parts.join(' AND ');
 }
 
+/* Cached ein Ticket im Master-Cache. Merged mit vorhandenen Daten (z.B. wenn Detail
+   später mehr Felder bringt als die List-View). Key = accountId+'|'+ticketId. */
+function _cacheTicket(t) {
+  if (!t?.id) return;
+  const accId = t._accountId || t.account_id;
+  if (!accId) return;
+  if (!APP_STATE.ticketCache) APP_STATE.ticketCache = new Map();
+  const key = accId + '|' + t.id;
+  const prev = APP_STATE.ticketCache.get(key) || {};
+  APP_STATE.ticketCache.set(key, { ...prev, ...t, _accountId: accId });
+}
+
+function _cacheTicketsBulk(list) {
+  if (!Array.isArray(list)) return;
+  list.forEach(_cacheTicket);
+}
+
 async function fetchTicketsForAccount(accountId, opts = {}) {
   const filters = opts.filters || APP_STATE.filters;
   const page = opts.page || 1;
@@ -1742,13 +1763,17 @@ async function fetchTicketsForAccount(accountId, opts = {}) {
   const annotated = list.map(t => ({ ...t, _accountId: accountId, _accountName: acc?.name || '?', _accountColor: acc?.color || '#64748b' }));
   // _rawCount = Anzahl direkt vom Server (vor Clientside-Filtern), für hasMore-Check bei Pagination
   Object.defineProperty(annotated, '_rawCount', { value: rawCount, enumerable: false });
+  // Master-Cache füllen — Tickets bleiben dort auch wenn sie aus pageState rausgefiltert werden
+  _cacheTicketsBulk(annotated);
   return annotated;
 }
 
 async function fetchTicketDetail(accountId, ticketId) {
   const path = '/freshdesk/' + encodeURIComponent(accountId) +
     '/api/v2/tickets/' + ticketId + '?include=conversations,requester';
-  return await proxyJson(path);
+  const t = await proxyJson(path);
+  if (t) _cacheTicket({ ...t, _accountId: accountId });
+  return t;
 }
 
 async function fetchContact(accountId, contactId) {
@@ -4035,8 +4060,8 @@ function _helpSections() {
       body: `
         <p>Lupen-Icon 🔍 oben im Header → Suchmodal mit zwei Modi:</p>
         <ul class="list-disc pl-5 text-[13px] space-y-1">
-          <li><b>„Suchen"</b> — Volltext-Match (schnell)</li>
-          <li><b>„Mit KI verstehen"</b> 💜 — Claude analysiert auch <b>freie Sätze</b>: „Frau Rommel anrufen" → erkennt Stichwort + Intent</li>
+          <li><b>„Suchen"</b> — Volltext-Match (schnell, ein Begriff)</li>
+          <li><b>„Mit KI verstehen"</b> 💜 — Claude analysiert <b>freie Sätze</b> („Frau Rommel anrufen") und generiert zusätzlich <b>Synonyme + Schreibvariationen</b> (z.B. „Müller" → „Mueller", „Reklamation" → „Complaint"). Bis zu 6 Begriffe werden parallel im Helpdesk + lokal gesucht — die Chip-Leiste zeigt, was tatsächlich gesucht wurde</li>
         </ul>
         <p>Bei Intent „anrufen" werden Telefonnummern <b>groß und grün</b> gerendert — ein Tap = Anruf.</p>
         <p>Findet auch <b>bei dir ausgeblendete Tickets</b> (Indigo-Badge im Ergebnis).</p>`,
@@ -7370,22 +7395,32 @@ function updateSearchMicUI(active) {
 /* Claude extrahiert aus dem User-Text das eigentliche Such-Keyword sowie Intent
    (anrufen/email/finden). Bei nicht-KI-Modus wird der Rohtext als Keyword genutzt. */
 async function aiInterpretSearchQuery(rawText) {
-  const sys = 'Du extrahierst aus einer natürlichsprachigen Helpdesk-Sucheingabe das eigentliche Suchstichwort und den Intent. Antworte AUSSCHLIESSLICH mit JSON, kein Markdown.\n\n' +
+  const sys = 'Du extrahierst aus einer natürlichsprachigen Helpdesk-Sucheingabe das eigentliche Suchstichwort, den Intent UND alternative Schreibweisen/Synonyme. Antworte AUSSCHLIESSLICH mit JSON, kein Markdown.\n\n' +
     'JSON-FORMAT:\n{\n' +
-    '  "keyword": "das eine wichtigste Stichwort/Begriff/Name zum Durchsuchen (max 3 Wörter, am besten 1)",\n' +
-    '  "keyword2": "optional ein zweites unabhängiges Stichwort, falls relevant",\n' +
+    '  "keyword": "das wichtigste Stichwort/Begriff/Name (max 3 Wörter, am besten 1)",\n' +
+    '  "keyword2": "optional ein zweites unabhängiges Stichwort",\n' +
+    '  "variations": ["alternative Schreibweise 1", "Synonym 2", ...],\n' +
     '  "intent": "call|email|find|status|note|other",\n' +
     '  "hint": "kurze deutsche Erklärung was die Suche tun soll, max 12 Wörter"\n}\n\n' +
+    'REGELN für `variations`:\n' +
+    '- Liefere 2-4 sinnvolle Variationen / alternative Schreibweisen / Synonyme / Tippfehler-Korrekturen.\n' +
+    '- Bei Personen-Namen: Vor- und Nachname separat, Anrede weg.\n' +
+    '- Bei Firmen: Rechtsform weg vs. mit (z.B. „KONE GmbH" → „KONE", „KONE GmbH").\n' +
+    '- Bei Ticketnummern: nur die Zahl extrahieren.\n' +
+    '- Bei deutschen Worten: gängige Synonyme (z.B. „Rechnung" → „Invoice", „Bestellung" → „Order", „Auftrag").\n' +
+    '- Variationen müssen vom keyword UNTERSCHIEDLICH sein, sonst weglassen.\n' +
+    '- Wenn keine sinnvollen Variationen existieren: leeres Array.\n\n' +
     'Beispiele:\n' +
-    '- "Frau Rommel anrufen" → {"keyword":"Rommel","intent":"call","hint":"Telefonnummer von Frau Rommel finden"}\n' +
-    '- "Letzte Bestellung von Dachser" → {"keyword":"Dachser","intent":"find","hint":"Tickets/Anfragen von Dachser zeigen"}\n' +
-    '- "Brauche Email von Müller wegen Auftrag 1344" → {"keyword":"Müller","keyword2":"1344","intent":"email","hint":"Email-Adresse von Müller + Auftrag 1344"}\n' +
-    '- "Status Kone Angebot" → {"keyword":"Kone","intent":"status","hint":"Status des Kone-Angebots"}';
+    '- "Frau Rommel anrufen" → {"keyword":"Rommel","variations":[],"intent":"call","hint":"Telefonnummer von Frau Rommel finden"}\n' +
+    '- "Letzte Bestellung von Dachser" → {"keyword":"Dachser","variations":["Order","Auftrag","Bestellung"],"intent":"find","hint":"Tickets/Anfragen von Dachser zeigen"}\n' +
+    '- "Brauche Email von Müller wegen Auftrag 1344" → {"keyword":"Müller","keyword2":"1344","variations":["Mueller"],"intent":"email","hint":"Email-Adresse von Müller + Auftrag 1344"}\n' +
+    '- "Status Kone Angebot" → {"keyword":"Kone","variations":["KONE","KONE GmbH","Quote","Angebot"],"intent":"status","hint":"Status des Kone-Angebots"}\n' +
+    '- "Reklamation Hydraulik" → {"keyword":"Hydraulik","variations":["Reklamation","Complaint","hydraulic"],"intent":"find","hint":"Reklamationen rund um Hydraulik"}';
   const data = await proxyJson('/anthropic/v1/messages', {
     method: 'POST',
     body: JSON.stringify({
       model: 'claude-haiku-4-5-20251001',
-      max_tokens: 400,
+      max_tokens: 600,
       system: sys,
       messages: [{ role: 'user', content: rawText }]
     })
@@ -7404,10 +7439,13 @@ async function searchTicketsByKeyword(accountId, keyword) {
       '/api/v2/search/tickets?query=' + encodeURIComponent('"' + query + '"');
     const data = await proxyJson(path);
     const list = Array.isArray(data) ? data : (data.results || []);
-    return list.filter(t => !t.deleted && !t.spam).slice(0, 20).map(t => {
-      const acc = APP_STATE.accounts.find(a => a.id === accountId);
-      return { ...t, _accountId: accountId, _accountName: acc?.name || '?', _accountColor: acc?.color || '#64748b' };
-    });
+    const acc = APP_STATE.accounts.find(a => a.id === accountId);
+    const annotated = list.filter(t => !t.deleted && !t.spam).slice(0, 20).map(t => (
+      { ...t, _accountId: accountId, _accountName: acc?.name || '?', _accountColor: acc?.color || '#64748b' }
+    ));
+    // Auch Such-Treffer in den Master-Cache → künftige lokale Suchen finden sie sofort
+    _cacheTicketsBulk(annotated);
+    return annotated;
   } catch (e) {
     console.warn('search tickets failed for', accountId, e.message);
     return [];
@@ -7464,46 +7502,69 @@ async function runSearch(useAI) {
       <p class="text-sm text-ink-500 mt-3">${useAI ? 'KI analysiert die Frage…' : 'Suche läuft…'}</p>
     </div>`;
 
-  let keyword = raw, keyword2 = null, intent = 'find', hint = '';
+  let keyword = raw, keyword2 = null, intent = 'find', hint = '', variations = [];
   if (useAI) {
     try {
       const parsed = await aiInterpretSearchQuery(raw);
-      keyword  = (parsed.keyword || raw).trim();
-      keyword2 = (parsed.keyword2 || '').trim() || null;
-      intent   = parsed.intent || 'find';
-      hint     = parsed.hint || '';
+      keyword    = (parsed.keyword || raw).trim();
+      keyword2   = (parsed.keyword2 || '').trim() || null;
+      intent     = parsed.intent || 'find';
+      hint       = parsed.hint || '';
+      variations = Array.isArray(parsed.variations) ? parsed.variations.map(v => String(v).trim()).filter(v => v.length >= 2) : [];
     } catch (e) {
       console.warn('AI-Search-Parse fehlgeschlagen:', e.message);
       // weiter mit Rohtext
     }
   }
 
+  // Alle zu suchenden Begriffe zusammenstellen — primary + secondary + variations.
+  // Dedupizieren case-insensitive, max 6 Begriffe (Latency-Limit).
+  const allTerms = [];
+  const seenLc = new Set();
+  const pushTerm = (t) => {
+    if (!t) return;
+    const clean = String(t).trim();
+    if (clean.length < 2) return;
+    const lc = clean.toLowerCase();
+    if (seenLc.has(lc)) return;
+    seenLc.add(lc);
+    allTerms.push(clean);
+  };
+  pushTerm(keyword);
+  pushTerm(keyword2);
+  variations.slice(0, 4).forEach(pushTerm);
+  const queryTerms = allTerms.slice(0, 6);
+
   $('searchResults').innerHTML = `
     <div class="text-center py-10">
       <div class="spinner inline-block w-7 h-7 border-[3px] text-brand-500"></div>
-      <p class="text-sm text-ink-500 mt-3">Suche „${escapeHtml(keyword)}"${keyword2 ? ' + „' + escapeHtml(keyword2) + '"' : ''}…</p>
+      <p class="text-sm text-ink-500 mt-3">Suche „${escapeHtml(queryTerms.join('", „'))}"…</p>
+      ${queryTerms.length > 1 ? `<p class="text-[11px] text-ink-400 mt-1">${queryTerms.length} Begriffe parallel</p>` : ''}
     </div>`;
 
-  // Lokale Suche im aktuellen Tickets-Cache (schnell, kein API-Call)
-  const localTickets = searchLocalTickets(keyword) || [];
-  if (keyword2) {
-    const more = searchLocalTickets(keyword2);
-    more.forEach(t => { if (!localTickets.some(lt => lt._accountId === t._accountId && lt.id === t.id)) localTickets.push(t); });
-  }
+  // Lokale Suche im Master-Cache für ALLE Begriffe (filter-unabhängig, schnell, kein API-Call)
+  const localMap = new Map();  // key=acc|id, value=ticket
+  queryTerms.forEach(term => {
+    searchLocalTickets(term).forEach(t => {
+      const k = t._accountId + '|' + t.id;
+      if (!localMap.has(k)) localMap.set(k, t);
+    });
+  });
 
-  // Server-Suche pro Account
+  // Server-Suche pro Account × Begriff
   const accs = APP_STATE.accounts;
-  const ticketPromises  = accs.flatMap(a => [searchTicketsByKeyword(a.id, keyword), ...(keyword2 ? [searchTicketsByKeyword(a.id, keyword2)] : [])]);
-  const contactPromises = accs.flatMap(a => [searchContactsByKeyword(a.id, keyword), ...(keyword2 ? [searchContactsByKeyword(a.id, keyword2)] : [])]);
+  const ticketPromises  = accs.flatMap(a => queryTerms.map(term => searchTicketsByKeyword(a.id, term)));
+  const contactPromises = accs.flatMap(a => queryTerms.map(term => searchContactsByKeyword(a.id, term)));
   const [tRes, cRes] = await Promise.all([Promise.all(ticketPromises), Promise.all(contactPromises)]);
 
-  // Mergen + Dedupen
-  const allTickets = [];
-  const seenTickets = new Set();
-  [...localTickets, ...tRes.flat()].forEach(t => {
+  // Mergen + Dedupen Tickets
+  const allTickets = Array.from(localMap.values());
+  const seenTickets = new Set(allTickets.map(t => t._accountId + '|' + t.id));
+  tRes.flat().forEach(t => {
     const k = t._accountId + '|' + t.id;
     if (!seenTickets.has(k)) { seenTickets.add(k); allTickets.push(t); }
   });
+  // Mergen + Dedupen Contacts
   const allContacts = [];
   const seenContacts = new Set();
   cRes.flat().forEach(c => {
@@ -7515,14 +7576,19 @@ async function runSearch(useAI) {
   await hydrateContactDetails(allContacts);
 
   SEARCH_CTX.busy = false;
-  SEARCH_CTX.results = { tickets: allTickets, contacts: allContacts, keyword, keyword2, intent, hint, aiUsed: useAI };
+  SEARCH_CTX.results = { tickets: allTickets, contacts: allContacts, keyword, keyword2, intent, hint, variations, queryTerms, aiUsed: useAI };
   renderSearchResults();
 }
 
+/* Lokale Suche über den filter-UNABHÄNGIGEN Master-Cache. Auch ausgeblendete Tickets
+   (durch Status-Filter, Gruppen-Filter oder Wiedervorlage) sind hier durchsuchbar,
+   solange sie irgendwann mal geladen wurden. */
 function searchLocalTickets(keyword) {
   const kw = keyword.toLowerCase();
-  const list = APP_STATE.pageState?.tickets || [];
-  return list.filter(t => {
+  const cache = APP_STATE.ticketCache;
+  const all = cache instanceof Map ? Array.from(cache.values()) : (APP_STATE.pageState?.tickets || []);
+  return all.filter(t => {
+    if (t.deleted || t.spam) return false;
     const subj = (t.subject || '').toLowerCase();
     const desc = (t.description_text || t.description || '').toLowerCase();
     const reqName  = (t.requester?.name  || '').toLowerCase();
@@ -7534,11 +7600,22 @@ function searchLocalTickets(keyword) {
 function renderSearchResults() {
   const r = SEARCH_CTX?.results;
   if (!r) return;
-  const { tickets, contacts, keyword, keyword2, intent, hint, aiUsed } = r;
+  const { tickets, contacts, keyword, keyword2, intent, hint, aiUsed, variations, queryTerms } = r;
   const total = tickets.length + contacts.length;
 
+  // Liste der tatsächlich verwendeten Begriffe (für Header-Anzeige unten in beiden Pfaden)
+  const usedTerms = Array.isArray(queryTerms) ? queryTerms : [keyword, keyword2].filter(Boolean);
+
   if (!total) {
+    const emptyHeader = aiUsed && usedTerms.length > 1 ? `
+      <div class="bg-purple-50 border border-purple-200 rounded-xl p-2 mb-3">
+        <p class="text-[10px] uppercase font-semibold text-purple-700 tracking-wider mb-1">KI suchte ${usedTerms.length} Begriffe parallel:</p>
+        <div class="flex flex-wrap gap-1">
+          ${usedTerms.map((t, i) => `<span class="text-[11px] px-2 py-0.5 rounded font-mono ${i === 0 ? 'bg-purple-600 text-white' : 'bg-white border border-purple-200 text-purple-700'}">${escapeHtml(t)}</span>`).join('')}
+        </div>
+      </div>` : '';
     $('searchResults').innerHTML = `
+      ${emptyHeader}
       <div class="text-center py-10">
         <i data-lucide="search-x" class="w-10 h-10 mx-auto text-ink-300"></i>
         <p class="text-sm text-ink-500 mt-3">Keine Treffer für „${escapeHtml(keyword)}"${keyword2 ? ' / „' + escapeHtml(keyword2) + '"' : ''}</p>
@@ -7622,11 +7699,13 @@ function renderSearchResults() {
       </div>
     </div>` : '';
 
-  const headerSummary = aiUsed && hint ? `
+  const headerSummary = aiUsed ? `
     <div class="bg-gradient-to-br from-purple-50 to-brand-50 border border-brand-200 rounded-xl p-3 mb-3">
-      <p class="text-[10px] uppercase tracking-wider text-brand-800 font-bold inline-flex items-center gap-1"><i data-lucide="sparkles" class="w-3 h-3"></i> KI-Interpretation</p>
-      <p class="text-sm text-ink-800 mt-0.5">${escapeHtml(hint)}</p>
-      <p class="text-[11px] text-ink-600 mt-1">Stichwort: <span class="font-mono bg-white border border-brand-200 px-1.5 py-0.5 rounded">${escapeHtml(keyword)}</span>${keyword2 ? ' · <span class="font-mono bg-white border border-brand-200 px-1.5 py-0.5 rounded">' + escapeHtml(keyword2) + '</span>' : ''}</p>
+      <p class="text-[10px] uppercase tracking-wider text-brand-800 font-bold inline-flex items-center gap-1"><i data-lucide="sparkles" class="w-3 h-3"></i> KI-Interpretation${usedTerms.length > 1 ? ' · ' + usedTerms.length + ' Begriffe' : ''}</p>
+      ${hint ? `<p class="text-sm text-ink-800 mt-0.5">${escapeHtml(hint)}</p>` : ''}
+      <div class="flex flex-wrap gap-1 mt-1.5">
+        ${usedTerms.map((t, i) => `<span class="text-[11px] px-2 py-0.5 rounded font-mono ${i === 0 ? 'bg-purple-600 text-white' : 'bg-white border border-purple-200 text-purple-700'}" title="${i === 0 ? 'Primärer Suchbegriff' : 'KI-Variation'}">${escapeHtml(t)}</span>`).join('')}
+      </div>
     </div>` : '';
 
   $('searchResults').innerHTML = headerSummary + contactBlock + ticketBlock;
