@@ -267,7 +267,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.37.5';
+const APP_VERSION = 'v2.38.0';
 // Read-Token absichtlich gesplittet, damit GitHub Secret-Scanning beim Push nicht blockt.
 // Der Token ist read-only und Base-scoped → bewusst eingebettet (Architektur-Entscheidung).
 const _RK = 'patu8KWM8aWB' + 'yxCGL.69fae5d9fa4b94c2' + '66b426dadd71a51f574945d840b33569058ab5e9d89ebef3';
@@ -4250,13 +4250,18 @@ function getCachedRequester(accountId, requesterId) {
   return APP_STATE.requestersCache?.[accountId]?.[requesterId] || null;
 }
 
-/* Lazy-Load: holt einen Contact und schreibt ihn in den Cache. Mehrfach-Calls werden gebündelt. */
+/* Lazy-Load: holt einen Contact und schreibt ihn in den Cache. Mehrfach-Calls werden gebündelt.
+   - opts.requirePhones = true: lädt auch wenn name+email schon da, aber phone+mobile fehlen.
+     Wird vom Tickets-List-/Detail-View genutzt um Telefonnummern als anklickbare Pills zu rendern. */
 const _pendingRequesterLoads = new Map();
-async function ensureRequesterLoaded(accountId, requesterId) {
+async function ensureRequesterLoaded(accountId, requesterId, opts) {
   if (!accountId || !requesterId) return null;
+  const requirePhones = !!opts?.requirePhones;
   const cached = getCachedRequester(accountId, requesterId);
-  if (cached && (cached.name || cached.email)) return cached;
-  const key = accountId + '|' + requesterId;
+  const hasName  = !!(cached && (cached.name || cached.email));
+  const hasPhone = !!(cached && (cached.phone || cached.mobile));
+  if (hasName && (!requirePhones || hasPhone)) return cached;
+  const key = accountId + '|' + requesterId + (requirePhones ? '|p' : '');
   if (_pendingRequesterLoads.has(key)) return _pendingRequesterLoads.get(key);
   const p = (async () => {
     try {
@@ -5497,24 +5502,34 @@ function renderTicketList(tickets) {
    patche die jeweilige Card-Zeile direkt — kein voller Re-Render. */
 async function hydrateMissingRequesters(tickets) {
   if (!Array.isArray(tickets) || !tickets.length) return;
-  const needed = [];
+  // Phase 1: Tickets ohne Name/Email — schneller initial-Load (max 8 parallel)
+  const neededName = [];
+  // Phase 2: Tickets mit Name aber ohne Phone/Mobile — für anklickbare Telefon-Pills auf der Card
+  const neededPhone = [];
   for (const t of tickets) {
     if (!t.requester_id) continue;
     const cached = getCachedRequester(t._accountId, t.requester_id);
-    const hasName = (t.requester && (t.requester.name || t.requester.email)) || (cached && (cached.name || cached.email));
-    if (!hasName) needed.push(t);
+    const hasName  = (t.requester && (t.requester.name || t.requester.email)) || (cached && (cached.name || cached.email));
+    const hasPhone = (t.requester && (t.requester.phone || t.requester.mobile)) || (cached && (cached.phone || cached.mobile));
+    if (!hasName) neededName.push(t);
+    else if (!hasPhone) neededPhone.push(t);
   }
-  if (!needed.length) return;
-  // Sanft batchen — max 8 parallel, damit der Account-API nicht zu viel auf einmal abbekommt
-  const queue = needed.slice();
-  const workers = Array.from({ length: Math.min(8, queue.length) }, async () => {
-    while (queue.length) {
-      const t = queue.shift();
-      const c = await ensureRequesterLoaded(t._accountId, t.requester_id);
-      if (c && (c.name || c.email)) updateRequesterRowInDom(t, c);
-    }
-  });
-  await Promise.all(workers);
+
+  const runWorkers = async (queue, requirePhones, parallel) => {
+    const workers = Array.from({ length: Math.min(parallel, queue.length) }, async () => {
+      while (queue.length) {
+        const t = queue.shift();
+        const c = await ensureRequesterLoaded(t._accountId, t.requester_id, { requirePhones });
+        if (c) updateRequesterRowInDom(t, c);
+      }
+    });
+    await Promise.all(workers);
+  };
+
+  // Phase 1 zuerst — Name/Email-Anzeige hat Priorität
+  if (neededName.length) await runWorkers(neededName.slice(), false, 8);
+  // Phase 2 danach — Phone-Pills im Hintergrund (langsamer, weniger parallel um API nicht zu fluten)
+  if (neededPhone.length) await runWorkers(neededPhone.slice(), true, 6);
 }
 
 function updateRequesterRowInDom(ticket, contact) {
@@ -5522,36 +5537,84 @@ function updateRequesterRowInDom(ticket, contact) {
   if (!row) return;
   const name  = contact.name  || null;
   const email = contact.email || null;
-  if (!name && !email) return;
-  // Wenn die alte Row ein <p> war, ersetze sie durch einen <button> mit Contact-Action
-  if (row.tagName === 'P' && ticket.requester_id) {
-    const btn = document.createElement('button');
-    btn.type = 'button';
-    btn.setAttribute('data-action', 'contact');
-    btn.setAttribute('data-account-id', ticket._accountId);
-    btn.setAttribute('data-ticket-id',  ticket.id);
-    btn.setAttribute('data-contact-id', ticket.requester_id);
-    btn.setAttribute('data-requester-row', '');
-    btn.setAttribute('data-requester-id', ticket.requester_id);
-    btn.className = 'text-[11px] text-ink-700 mt-0.5 inline-flex items-center gap-1 max-w-full hover:bg-brand-50 active:bg-brand-100 -mx-1 px-1 py-0.5 rounded';
-    btn.setAttribute('title', 'Kontakt-Vorschau öffnen');
-    btn.innerHTML =
-      '<i data-lucide="user" class="w-3 h-3 text-brand-500 shrink-0"></i>' +
-      `<span class="font-medium text-ink-800 truncate">${escapeHtml(name || email)}</span>` +
-      (name && email ? `<span class="text-ink-400 shrink-0">·</span><span class="text-ink-500 truncate">${escapeHtml(email)}</span>` : '');
-    // Click-Handler: ruft openContactPreviewModal direkt (Card-Click-Handler verarbeitet kein 'contact' für dynamisch eingesetzte Buttons ohne neuen attach)
-    btn.addEventListener('click', (e) => {
-      e.stopPropagation(); e.preventDefault();
-      openContactPreviewModal(ticket._accountId, ticket.requester_id);
-    });
-    row.replaceWith(btn);
-  } else {
-    row.className = 'text-[11px] text-ink-700 mt-0.5 inline-flex items-center gap-1 max-w-full';
-    row.innerHTML =
-      '<i data-lucide="user" class="w-3 h-3 text-brand-500 shrink-0"></i>' +
-      `<span class="font-medium text-ink-800 truncate">${escapeHtml(name || email)}</span>` +
-      (name && email ? `<span class="text-ink-400 shrink-0">·</span><span class="text-ink-500 truncate">${escapeHtml(email)}</span>` : '');
+
+  // Namensrow aktualisieren (oder einfügen falls noch <p>)
+  let rowEl = row;
+  if (name || email) {
+    if (row.tagName === 'P' && ticket.requester_id) {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.setAttribute('data-action', 'contact');
+      btn.setAttribute('data-account-id', ticket._accountId);
+      btn.setAttribute('data-ticket-id',  ticket.id);
+      btn.setAttribute('data-contact-id', ticket.requester_id);
+      btn.setAttribute('data-requester-row', '');
+      btn.setAttribute('data-requester-id', ticket.requester_id);
+      btn.className = 'text-[11px] text-ink-700 mt-0.5 inline-flex items-center gap-1 max-w-full hover:bg-brand-50 active:bg-brand-100 -mx-1 px-1 py-0.5 rounded';
+      btn.setAttribute('title', 'Kontakt-Vorschau öffnen');
+      btn.innerHTML =
+        '<i data-lucide="user" class="w-3 h-3 text-brand-500 shrink-0"></i>' +
+        `<span class="font-medium text-ink-800 truncate">${escapeHtml(name || email)}</span>` +
+        (name && email ? `<span class="text-ink-400 shrink-0">·</span><span class="text-ink-500 truncate">${escapeHtml(email)}</span>` : '');
+      btn.addEventListener('click', (e) => {
+        e.stopPropagation(); e.preventDefault();
+        openContactPreviewModal(ticket._accountId, ticket.requester_id);
+      });
+      row.replaceWith(btn);
+      rowEl = btn;
+    } else {
+      row.className = 'text-[11px] text-ink-700 mt-0.5 inline-flex items-center gap-1 max-w-full';
+      row.innerHTML =
+        '<i data-lucide="user" class="w-3 h-3 text-brand-500 shrink-0"></i>' +
+        `<span class="font-medium text-ink-800 truncate">${escapeHtml(name || email)}</span>` +
+        (name && email ? `<span class="text-ink-400 shrink-0">·</span><span class="text-ink-500 truncate">${escapeHtml(email)}</span>` : '');
+    }
   }
+
+  // Phone-Pills hinzufügen wenn Phone/Mobile da sind und noch keine in der Card vorhanden
+  if (contact.phone || contact.mobile) {
+    // Existierende Phone-Container in der Card finden — Pfad: rowEl → Eltern → flex-1
+    const card = rowEl.closest('[data-swipe-content]') || rowEl.closest('div');
+    if (card) {
+      let phonesContainer = card.querySelector('[data-phone-pills]');
+      // Wenn noch nicht da: nach der Requester-Row einfügen
+      if (!phonesContainer) {
+        // Prüfen ob schon Phone-Pills vom Initial-Render da sind (alte tel:-Links nahe der Row)
+        const hadInitialPhones = card.querySelector('a[href^="tel:"]');
+        if (!hadInitialPhones) {
+          phonesContainer = document.createElement('div');
+          phonesContainer.setAttribute('data-phone-pills', '');
+          phonesContainer.className = 'flex flex-wrap gap-1 mt-1';
+          // Nach der Requester-Row einfügen
+          if (rowEl.parentNode) rowEl.parentNode.insertBefore(phonesContainer, rowEl.nextSibling);
+        }
+      }
+      if (phonesContainer && !phonesContainer.dataset.hydrated) {
+        phonesContainer.dataset.hydrated = '1';
+        const _seen = new Set();
+        const items = [];
+        const _add = (label, num) => {
+          if (!num) return;
+          const d = String(num).replace(/\D/g, '');
+          if (d.length < 7 || _seen.has(d)) return;
+          _seen.add(d);
+          items.push({ label, num: String(num).trim() });
+        };
+        _add('Festnetz', contact.phone);
+        _add('Mobil',    contact.mobile);
+        items.slice(0, 3).forEach(p => {
+          const a = document.createElement('a');
+          a.href = 'tel:' + _cleanPhoneForTel(p.num);
+          a.className = 'inline-flex items-center gap-1 px-2 py-0.5 bg-emerald-50 border-emerald-200 text-emerald-800 border rounded-full text-[10px] font-mono active:bg-emerald-100';
+          a.title = p.label + ': ' + p.num;
+          a.innerHTML = '<i data-lucide="phone-call" class="w-2.5 h-2.5"></i>' + escapeHtml(p.num);
+          a.addEventListener('click', (e) => e.stopPropagation());
+          phonesContainer.appendChild(a);
+        });
+      }
+    }
+  }
+
   if (window.lucide) lucide.createIcons();
 }
 
@@ -7009,6 +7072,26 @@ async function openTicketDetail(accountId, ticketId) {
     ticket._accountId = accountId;
     CURRENT_TICKET = ticket;
     renderTicketDetailBody(ticket);
+    // Telefonnummern lazy nachladen falls sie nicht im Ticket-Payload waren —
+    // re-rendert die Detail-View damit die anklickbaren Phone-Pills erscheinen
+    if (ticket.requester_id) {
+      const req = ticket.requester || {};
+      const hasPhone = !!(req.phone || req.mobile);
+      if (!hasPhone) {
+        ensureRequesterLoaded(accountId, ticket.requester_id, { requirePhones: true })
+          .then(c => {
+            if (!c) return;
+            if (!c.phone && !c.mobile) return;
+            // Mergen in ticket.requester + Re-Render
+            ticket.requester = Object.assign({}, ticket.requester || {}, {
+              phone:  c.phone  || ticket.requester?.phone,
+              mobile: c.mobile || ticket.requester?.mobile,
+            });
+            if (CURRENT_TICKET === ticket) renderTicketDetailBody(ticket);
+          })
+          .catch(() => {});
+      }
+    }
   } catch (e) {
     $('ticketDetailBody').innerHTML = `
       <div class="bg-red-50 border border-red-200 rounded-2xl p-4 text-sm text-red-800">
