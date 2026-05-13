@@ -267,7 +267,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.32.1';
+const APP_VERSION = 'v2.32.2';
 // Read-Token absichtlich gesplittet, damit GitHub Secret-Scanning beim Push nicht blockt.
 // Der Token ist read-only und Base-scoped → bewusst eingebettet (Architektur-Entscheidung).
 const _RK = 'patu8KWM8aWB' + 'yxCGL.69fae5d9fa4b94c2' + '66b426dadd71a51f574945d840b33569058ab5e9d89ebef3';
@@ -2649,6 +2649,7 @@ function renderContactEditBody() {
   // sBan ist jetzt module-level (siehe _renderSuggestionBanner), damit auch
   // _companyBlock und _freshsalesAccountBlock ihn nutzen können.
   const sBan = _renderSuggestionBanner;
+  const sugg = ctx.suggestions || {};
 
   // Top-Block: KI-Zauberbutton + Status — zählt jetzt Vorschläge über ALLE 4 Gruppen.
   // Funktioniert auch OHNE Ticket-Kontext: KI kann allein aus den 4 Objekten cross-syncen
