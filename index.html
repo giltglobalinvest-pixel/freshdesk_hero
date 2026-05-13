@@ -267,7 +267,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.35.1';
+const APP_VERSION = 'v2.36.0';
 // Read-Token absichtlich gesplittet, damit GitHub Secret-Scanning beim Push nicht blockt.
 // Der Token ist read-only und Base-scoped → bewusst eingebettet (Architektur-Entscheidung).
 const _RK = 'patu8KWM8aWB' + 'yxCGL.69fae5d9fa4b94c2' + '66b426dadd71a51f574945d840b33569058ab5e9d89ebef3';
@@ -2053,11 +2053,10 @@ async function updateFreshsalesSalesAccount(accountId, saId, fields) {
    (3) Ableitung aus Email-Domain.
    Output: { fd: {phone,mobile,...}, fdCompany: {domains,industry,...}, fs: {...}, fsAccount: {...} } */
 async function aiSuggestAllContactFields(ctx) {
-  const fd        = ctx.fd        || {};
-  const fdCompany = ctx.company   || null;
-  const fs        = ctx.fs        || null;
-  const fsAccount = ctx.fsAccount || null;
-  const ticket    = ctx.ticket    || null;
+  const m = ctx.master || {};
+  const co = m.company || {};
+  const cn = m.contact || {};
+  const ticket = ctx.ticket || null;
 
   let ticketCtx = '';
   if (ticket) {
@@ -2073,118 +2072,72 @@ async function aiSuggestAllContactFields(ctx) {
   }
 
   const sys =
-    'Du ergänzt unvollständige Kontaktdaten in einem Helpdesk- + CRM-System. Du siehst:\n' +
-    '- Freshdesk-Kontakt (Helpdesk)\n' +
-    '- Freshdesk-Firma (verknüpfter Kunde im Helpdesk)\n' +
-    '- Freshsales-Kontakt (CRM)\n' +
-    '- Freshsales-Sales-Account (CRM-Konto)\n' +
-    '- Optional: Ticket-Kontext mit Email-Signaturen\n\n' +
+    'Du ergänzt unvollständige Stammdaten eines Helpdesk- + CRM-Kontakts. Eingabe sind die konsolidierten Master-Felder (Firma + Anfragende Person), Ausgabe sind Vorschläge im selben flachen Schema.\n\n' +
     'AUFGABE: Schlage für JEDES LEERE oder UNVOLLSTÄNDIGE Feld einen Wert vor. Quellen in Reihenfolge:\n' +
-    '1. Cross-System-Sync — Daten aus den anderen drei Objekten (z.B. wenn FD-Kontakt eine Adresse hat aber FS-Kontakt nicht, schlage die FD-Adresse als Quelle für FS vor — aufgeteilt in address/city/zipcode/state/country)\n' +
-    '2. Email-Signaturen im Ticket-Verlauf (wenn Ticket-Kontext vorhanden)\n' +
-    '3. Ableitungen aus Email-Domain (z.B. @tkelevator.com → company „TK Elevator")\n' +
+    '1. Email-Signaturen im Ticket-Verlauf (wenn Ticket-Kontext vorhanden) — Name, Position, Firma, Telefon, Adresse\n' +
+    '2. Cross-Field-Inferenz innerhalb der Daten (z.B. fehlende PLZ aus Adress-String der Signatur extrahieren)\n' +
+    '3. Ableitungen aus Email-Domain (z.B. @tkelevator.com → company_name „TK Elevator", company_domains „tkelevator.com")\n' +
     '4. KEINE Spekulation bei Telefonnummern oder konkreten Adressen — lieber weglassen\n\n' +
-    'NAMENS-AUFTEILUNG FÜR FS:\n' +
-    '- FD-name „Grewe, Adrian" → fs.first_name=„Adrian", fs.last_name=„Grewe"\n' +
-    '- FD-name „Adrian Grewe" → fs.first_name=„Adrian", fs.last_name=„Grewe"\n' +
-    '- fs.display_name = vollständiger Name in lesbarer Form\n\n' +
-    'ADRESS-AUFTEILUNG FD→FS:\n' +
-    '- FD.address ist meist Mehrzeiler („Strohgäustraße 1\\n73765 Neuhausen a.d.F.\\nDeutschland")\n' +
-    '- → FS: address=„Strohgäustraße 1", city=„Neuhausen a.d.F.", zipcode=„73765", country=„Deutschland"\n' +
-    '- state nur wenn klar erkennbar (z.B. „NRW", „BY")\n\n' +
+    'NAMENS-AUFTEILUNG:\n' +
+    '- „Grewe, Adrian" → first_name=„Adrian", last_name=„Grewe"\n' +
+    '- „Adrian Grewe" → first_name=„Adrian", last_name=„Grewe"\n\n' +
+    'ADRESS-AUFTEILUNG:\n' +
+    '- Wenn in einer Signatur „Strohgäustraße 1\\n73765 Neuhausen\\nDeutschland" steht → company_street=„Strohgäustraße 1", company_zipcode=„73765", company_city=„Neuhausen", company_country=„Deutschland"\n\n' +
     'TELEFON-FORMATIERUNG:\n' +
     '- Internationales Format bevorzugen (+49 …)\n' +
     '- DE-Mobil = +491XX, 015X, 016X, 017X — sonst Festnetz\n\n' +
-    'FIRMA→KONTO (FS-Account.name):\n' +
-    '- Wenn FD-Firma einen Namen hat (z.B. „TK Aufzüge GmbH"), übernimm denselben für fsAccount.name\n' +
-    '- Domains: aus Email ableiten („tkelevator.com")\n\n' +
-    'FRESHDESK-INDUSTRY (fdCompany.industry) — STRENG begrenzt!\n' +
-    'Das Feld akzeptiert NUR diese Werte (alles andere → das Feld komplett WEGLASSEN, nicht raten):\n' +
+    'FRESHDESK-INDUSTRY (company_industry) — STRENG begrenzt!\n' +
+    'Das Feld akzeptiert NUR diese Werte (alles andere → das Feld komplett WEGLASSEN):\n' +
     FD_INDUSTRY_VALUES.map(v => '  - ' + v).join('\n') + '\n' +
-    'Wenn die echte Branche nicht passt: lieber „Other" verwenden ODER das Feld weglassen.\n' +
-    'Aufzugsbau / Maschinen → „Machinery". Bau-Service → „Construction & Engineering". Software-Firma → „Software".\n\n' +
-    'ANTWORTE AUSSCHLIESSLICH MIT JSON (kein Markdown, keine Fences). Felder weglassen wenn unsicher. Pro Feld: {"value":"...", "source":"woher, max 80 Zeichen"}.\n\n' +
-    'JSON-FORMAT:\n' +
+    'Aufzugsbau / Maschinen → „Machinery". Bau → „Construction & Engineering". Software → „Software". Sonst „Other" oder weglassen.\n\n' +
+    'ANTWORTE AUSSCHLIESSLICH MIT JSON (kein Markdown). Felder weglassen wenn unsicher. Pro Feld: {"value":"...", "source":"woher, max 80 Zeichen"}.\n\n' +
+    'JSON-FORMAT (genau diese Felder, alle optional):\n' +
     '{\n' +
-    '  "fd": {\n' +
-    '    "name":      {"value":"...", "source":"..."},\n' +
-    '    "email":     {"value":"...", "source":"..."},\n' +
-    '    "phone":     {"value":"...", "source":"..."},\n' +
-    '    "mobile":    {"value":"...", "source":"..."},\n' +
-    '    "job_title": {"value":"...", "source":"..."},\n' +
-    '    "address":   {"value":"...", "source":"..."}\n' +
-    '  },\n' +
-    '  "fdCompany": {\n' +
-    '    "name":        {"value":"...", "source":"..."},\n' +
-    '    "domains":     {"value":"example.com, example.org", "source":"..."},\n' +
-    '    "industry":    {"value":"...", "source":"..."},\n' +
-    '    "description": {"value":"...", "source":"..."}\n' +
-    '  },\n' +
-    '  "fs": {\n' +
-    '    "first_name":    {"value":"...", "source":"..."},\n' +
-    '    "last_name":     {"value":"...", "source":"..."},\n' +
-    '    "display_name":  {"value":"...", "source":"..."},\n' +
-    '    "email":         {"value":"...", "source":"..."},\n' +
-    '    "work_number":   {"value":"...", "source":"..."},\n' +
-    '    "mobile_number": {"value":"...", "source":"..."},\n' +
-    '    "job_title":     {"value":"...", "source":"..."},\n' +
-    '    "address":       {"value":"...", "source":"..."},\n' +
-    '    "city":          {"value":"...", "source":"..."},\n' +
-    '    "zipcode":       {"value":"...", "source":"..."},\n' +
-    '    "state":         {"value":"...", "source":"..."},\n' +
-    '    "country":       {"value":"...", "source":"..."}\n' +
-    '  },\n' +
-    '  "fsAccount": {\n' +
-    '    "name":    {"value":"...", "source":"..."},\n' +
-    '    "phone":   {"value":"...", "source":"..."},\n' +
-    '    "website": {"value":"...", "source":"..."},\n' +
-    '    "address": {"value":"...", "source":"..."},\n' +
-    '    "city":    {"value":"...", "source":"..."},\n' +
-    '    "zipcode": {"value":"...", "source":"..."},\n' +
-    '    "state":   {"value":"...", "source":"..."},\n' +
-    '    "country": {"value":"...", "source":"..."}\n' +
+    '  "master": {\n' +
+    '    "first_name":          {"value":"...", "source":"..."},\n' +
+    '    "last_name":           {"value":"...", "source":"..."},\n' +
+    '    "email":               {"value":"...", "source":"..."},\n' +
+    '    "phone":               {"value":"...", "source":"..."},\n' +
+    '    "mobile":              {"value":"...", "source":"..."},\n' +
+    '    "job_title":           {"value":"...", "source":"..."},\n' +
+    '    "company_name":        {"value":"...", "source":"..."},\n' +
+    '    "company_phone":       {"value":"...", "source":"..."},\n' +
+    '    "company_website":     {"value":"...", "source":"..."},\n' +
+    '    "company_email":       {"value":"...", "source":"..."},\n' +
+    '    "company_street":      {"value":"...", "source":"..."},\n' +
+    '    "company_zipcode":     {"value":"...", "source":"..."},\n' +
+    '    "company_city":        {"value":"...", "source":"..."},\n' +
+    '    "company_country":     {"value":"...", "source":"..."},\n' +
+    '    "company_domains":     {"value":"example.com, example.org", "source":"..."},\n' +
+    '    "company_industry":    {"value":"...", "source":"..."},\n' +
+    '    "company_description": {"value":"...", "source":"..."},\n' +
+    '    "company_note":        {"value":"...", "source":"..."}\n' +
     '  }\n' +
     '}';
 
-  const user = 'AKTUELLE DATEN (vorhanden = nicht überschreiben außer du hast eine PRÄZISERE Quelle):\n\n' +
-    'FD-KONTAKT:\n' + JSON.stringify({
-      name:      fd.name      || null,
-      email:     fd.email     || null,
-      phone:     fd.phone     || null,
-      mobile:    fd.mobile    || null,
-      job_title: fd.job_title || null,
-      address:   fd.address   || null,
+  const user = 'AKTUELLE STAMMDATEN (vorhanden = nicht überschreiben außer du hast eine PRÄZISERE Quelle):\n\n' +
+    'FIRMA:\n' + JSON.stringify({
+      name:        co.name        || null,
+      phone:       co.phone       || null,
+      website:     co.website     || null,
+      email:       co.email       || null,
+      street:      co.street      || null,
+      zipcode:     co.zipcode     || null,
+      city:        co.city        || null,
+      country:     co.country     || null,
+      domains:     co.domains     || null,
+      industry:    co.industry    || null,
+      description: co.description || null,
+      note:        co.note        || null,
     }, null, 2) + '\n\n' +
-    'FD-FIRMA:\n' + (fdCompany ? JSON.stringify({
-      name:        fdCompany.name        || null,
-      domains:     fdCompany.domains     || null,
-      industry:    fdCompany.industry    || null,
-      description: fdCompany.description || null,
-    }, null, 2) : '(keine Firma verknüpft)') + '\n\n' +
-    'FS-KONTAKT:\n' + (fs ? JSON.stringify({
-      first_name:    fs.first_name    || null,
-      last_name:     fs.last_name     || null,
-      display_name:  fs.display_name  || null,
-      email:         fs.email         || null,
-      work_number:   fs.work_number   || null,
-      mobile_number: fs.mobile_number || null,
-      job_title:     fs.job_title     || null,
-      address:       fs.address       || null,
-      city:          fs.city          || null,
-      zipcode:       fs.zipcode       || null,
-      state:         fs.state         || null,
-      country:       fs.country       || null,
-    }, null, 2) : '(kein FS-Contact verfügbar)') + '\n\n' +
-    'FS-KONTO:\n' + (fsAccount ? JSON.stringify({
-      name:    fsAccount.name    || null,
-      phone:   fsAccount.phone   || null,
-      website: fsAccount.website || null,
-      address: fsAccount.address || null,
-      city:    fsAccount.city    || null,
-      zipcode: fsAccount.zipcode || null,
-      state:   fsAccount.state   || null,
-      country: fsAccount.country || null,
-    }, null, 2) : '(kein FS-Konto verknüpft)') + '\n\n' +
+    'ANFRAGENDE PERSON:\n' + JSON.stringify({
+      first_name: cn.first_name || null,
+      last_name:  cn.last_name  || null,
+      email:      cn.email      || null,
+      phone:      cn.work_phone || null,
+      mobile:     cn.mobile     || null,
+      job_title:  cn.job_title  || null,
+    }, null, 2) + '\n\n' +
     (ticketCtx || '(kein Ticket-Kontext)') +
     '\n\nWelche Felder kannst du sinnvoll ergänzen oder verbessern?';
 
@@ -2374,6 +2327,194 @@ function renderContactPreviewBody() {
   if (window.lucide) lucide.createIcons();
 }
 
+/* === System-Status-Aktionen: Anlegen-Buttons in der Status-Box =============
+   Wird vom UI gerufen wenn ein Objekt noch nicht verknüpft ist. Nutzt ctx.master als Quelle. */
+async function _masterCreateFdCompany(btnEl) {
+  const ctx = CONTACT_EDIT_CTX;
+  if (!ctx?.master) return;
+  _syncContactMaster();
+  const name = (ctx.master.company?.name || '').trim();
+  if (!name) return toast('Bitte erst Firmennamen im Stammdaten-Block eintragen', 'warn');
+  setBusy(btnEl, true, 'Lege Firma an…');
+  try {
+    const created = await createCompany(ctx.accountId, name);
+    if (created?.id) {
+      // Direkt mit Kontakt verknüpfen
+      await linkContactToCompany(created.id);
+      ctx.company = created;
+      _consolidateContactMaster(ctx);
+      renderContactEditBody();
+      toast('FD-Firma „' + (created.name || name) + '" angelegt + verknüpft', 'success', 4000);
+    }
+  } catch (e) {
+    toast('FD-Firma anlegen fehlgeschlagen: ' + e.message, 'error', 8000);
+  } finally {
+    setBusy(btnEl, false);
+  }
+}
+
+async function _masterCreateFsContact(btnEl) {
+  const ctx = CONTACT_EDIT_CTX;
+  if (!ctx?.master) return;
+  _syncContactMaster();
+  const cn = ctx.master.contact;
+  if (!cn.email) return toast('Email der Person fehlt — ohne Email kein FS-Contact', 'warn');
+  // Auch FS-Konto gleich mit anlegen wenn keiner verknüpft und Firmenname da
+  setBusy(btnEl, true, 'Lege FS-Kontakt an…');
+  try {
+    let saId = ctx.fsAccount?.id;
+    const co = ctx.master.company;
+    if (!saId && co.name) {
+      try {
+        const sa = await createFreshsalesSalesAccount(ctx.accountId, co.name, {
+          phone:   co.phone || undefined,
+          website: co.website || undefined,
+          address: co.street || undefined,
+          city:    co.city || undefined,
+          zipcode: co.zipcode || undefined,
+          country: co.country || undefined,
+        });
+        if (sa?.id) { saId = sa.id; ctx.fsAccount = sa; }
+      } catch (_) {/* Konto-Anlegen ist optional */}
+    }
+    const fields = {
+      first_name: cn.first_name || null,
+      last_name:  cn.last_name || cn.email.split('@')[0] || 'Unbekannt',
+      display_name: ((cn.first_name || '') + ' ' + (cn.last_name || '')).trim() || null,
+      email:      cn.email,
+      work_number:   cn.work_phone || null,
+      mobile_number: cn.mobile || null,
+      job_title:     cn.job_title || null,
+      address:    co.street || null,
+      city:       co.city || null,
+      zipcode:    co.zipcode || null,
+      country:    co.country || null,
+    };
+    if (saId) fields.sales_accounts = [{ id: saId, is_primary: true }];
+    const created = await createFreshsalesContact(ctx.accountId, fields);
+    if (created?.id) {
+      ctx.fs = created;
+      ctx._fsError = null;
+      _consolidateContactMaster(ctx);
+      renderContactEditBody();
+      toast('FS-Kontakt #' + created.id + ' angelegt' + (saId ? ' + Konto verknüpft' : ''), 'success', 4000);
+    }
+  } catch (e) {
+    toast('FS-Kontakt anlegen fehlgeschlagen: ' + e.message, 'error', 8000);
+  } finally {
+    setBusy(btnEl, false);
+  }
+}
+
+/* === Master-Konsolidierung (Pattern aus ERP-Hero) =========================
+   Statt 4 getrennter Kacheln editiert der User EINE Stammdaten-Sektion (Firma + Person).
+   Beim Save wird das Master-Objekt in alle 4 Systeme verteilt:
+   - FD-Kontakt (Person: Name, Email, Telefone, Job, Adresse als Multi-Line)
+   - FD-Firma   (Firma: Name + Industry/Description/Note/Domains aus erweiterten Feldern)
+   - FS-Kontakt (Person: First/Last/Display, Email, Telefone, Job, Adresse zerlegt)
+   - FS-Konto   (Firma: Name, Phone, Website, Email, Adresse zerlegt)
+   Beim Laden wird der Master aus den vorhandenen Quellen konsolidiert (Prio: FS > FD).
+   ========================================================================== */
+function _consolidateContactMaster(ctx) {
+  if (!ctx) return;
+  const fd   = ctx.fd        || null;
+  const fdco = ctx.company   || null;
+  const fs   = ctx.fs        || null;
+  const fsa  = ctx.fsAccount || null;
+
+  const pick = (...vals) => { for (const v of vals) { const s = String(v ?? '').trim(); if (s) return s; } return ''; };
+  const parseFirst = (n) => {
+    const s = String(n||'').trim();
+    if (!s) return '';
+    if (s.includes(',')) { const [, f] = s.split(',').map(x => x.trim()); return f || ''; }
+    const p = s.split(/\s+/);
+    return p.length > 1 ? p.slice(0, -1).join(' ') : '';
+  };
+  const parseLast = (n) => {
+    const s = String(n||'').trim();
+    if (!s) return '';
+    if (s.includes(',')) { const [l] = s.split(',').map(x => x.trim()); return l || ''; }
+    const p = s.split(/\s+/);
+    return p.length > 1 ? p[p.length - 1] : (p[0] || '');
+  };
+
+  // FD-Address ist oft Multi-Liner: "Strohgäustr 1\n73765 Neuhausen\nDeutschland"
+  // Parse aus FD-Address als Fallback wenn FS keine zerlegten Felder hat
+  const fdAddrLines = String(fd?.address || '').split('\n').map(s => s.trim()).filter(Boolean);
+  const fdAddrCountry = fdAddrLines.find(l => /(deutschland|germany|österreich|austria|schweiz|switzerland|france|italy|italien|netherlands|niederlande)$/i.test(l)) || '';
+  const fdAddrZipCity = fdAddrLines.find(l => /^\d{4,5}\s/.test(l)) || '';
+  const fdAddrZipM = fdAddrZipCity.match(/^(\d{4,5})\s+(.+)$/);
+  const fdAddrStreet = fdAddrLines.find(l => l !== fdAddrZipCity && l !== fdAddrCountry) || '';
+
+  ctx.master = {
+    company: {
+      // FS-Konto ist primäre Quelle (genaueste Felder), dann FD-Company-Name als Fallback
+      name:     pick(fsa?.name, fdco?.name),
+      phone:    pick(fsa?.phone, fd?.phone),
+      website:  pick(fsa?.website),
+      // FD-Company hat keine email — wir nehmen FD-Contact-Email als „Firma-Email" Fallback
+      email:    pick(fd?.email),
+      street:   pick(fsa?.address, fdAddrStreet),
+      zipcode:  pick(fsa?.zipcode, fdAddrZipM?.[1]),
+      city:     pick(fsa?.city, fdAddrZipM?.[2]),
+      country:  pick(fsa?.country, fdAddrCountry) || 'Deutschland',
+      // Erweiterte FD-Firma-Felder
+      domains:     Array.isArray(fdco?.domains) ? fdco.domains.join(', ') : (fdco?.domains || ''),
+      industry:    fdco?.industry || '',
+      description: fdco?.description || '',
+      note:        fdco?.note || '',
+    },
+    contact: {
+      first_name: pick(fs?.first_name, parseFirst(fd?.name)),
+      last_name:  pick(fs?.last_name,  parseLast(fd?.name)),
+      email:      pick(fs?.email, fd?.email),
+      work_phone: pick(fs?.work_number, fd?.phone),
+      mobile:     pick(fs?.mobile_number, fd?.mobile),
+      job_title:  pick(fs?.job_title, fd?.job_title),
+    },
+  };
+}
+
+/* Synct die DOM-Inputs der Stammdaten-Sektion zurück in ctx.master.
+   Wird vor jedem Render (um Edits zu erhalten) UND vor dem Save (für persistente Werte) aufgerufen. */
+function _syncContactMaster() {
+  const ctx = CONTACT_EDIT_CTX;
+  if (!ctx?.master) return;
+  const get = (id) => ($(id)?.value || '').trim();
+  const co = ctx.master.company;
+  if ($('cmF_name'))    co.name    = get('cmF_name');
+  if ($('cmF_phone'))   co.phone   = get('cmF_phone');
+  if ($('cmF_website')) co.website = get('cmF_website');
+  if ($('cmF_email'))   co.email   = get('cmF_email');
+  if ($('cmF_street'))  co.street  = get('cmF_street');
+  if ($('cmF_zip'))     co.zipcode = get('cmF_zip');
+  if ($('cmF_city'))    co.city    = get('cmF_city');
+  if ($('cmF_country')) co.country = get('cmF_country');
+  if ($('cmF_industry'))    co.industry    = get('cmF_industry');
+  if ($('cmF_domains'))     co.domains     = get('cmF_domains');
+  if ($('cmF_description')) co.description = get('cmF_description');
+  if ($('cmF_note'))        co.note        = get('cmF_note');
+  const cn = ctx.master.contact;
+  if ($('cmP_first'))   cn.first_name = get('cmP_first');
+  if ($('cmP_last'))    cn.last_name  = get('cmP_last');
+  if ($('cmP_email'))   cn.email      = get('cmP_email');
+  if ($('cmP_workph'))  cn.work_phone = get('cmP_workph');
+  if ($('cmP_mobile'))  cn.mobile     = get('cmP_mobile');
+  if ($('cmP_job'))     cn.job_title  = get('cmP_job');
+}
+
+/* Stitcht Firmen-Adresse aus den Master-Feldern als Multi-Liner zusammen für FD-Contact.address.
+   Format: "Strasse\nPLZ Stadt\nLand" — matched die Erwartung der bisherigen FD-Address-Felder. */
+function _masterAddressMultiLiner(co) {
+  if (!co) return '';
+  const lines = [];
+  if (co.street) lines.push(co.street);
+  const zipCity = [co.zipcode, co.city].filter(Boolean).join(' ');
+  if (zipCity) lines.push(zipCity);
+  if (co.country) lines.push(co.country);
+  return lines.join('\n');
+}
+
 /* === Contact-Edit-Modal — bearbeitet Freshdesk-Contact + optional Freshsales-Contact ============
    Kann optional ein Ticket als Kontext bekommen → KI schlägt automatisch Vervollständigungen vor. */
 let CONTACT_EDIT_CTX = null;
@@ -2456,6 +2597,8 @@ async function openContactEditModal(accountId, contactId, opts) {
         CONTACT_EDIT_CTX._fsError = e.message;
       }
     }
+    // Master aus allen geladenen Quellen konsolidieren — eine zentrale Stammdaten-View
+    _consolidateContactMaster(CONTACT_EDIT_CTX);
     renderContactEditBody();
     // KI-Vorschläge im Hintergrund laden — nur wenn Ticket-Kontext da ist
     if (CONTACT_EDIT_CTX.ticket) {
@@ -2468,79 +2611,57 @@ async function openContactEditModal(accountId, contactId, opts) {
 
 /* Mapping Gruppe → Input-ID für jedes Feld. Wird vom Suggestions-System genutzt,
    um Werte sowohl in ctx zu schreiben als auch DOM-Inputs visuell zu highlighten. */
+/* SUGG_INPUT_MAP für die master-Gruppe — alle Felder im neuen Stammdaten-Layout.
+   Person-Felder gehen in ctx.master.contact, company-Felder in ctx.master.company. */
 const SUGG_INPUT_MAP = {
-  fd: {
-    name: 'fdName', email: 'fdEmail', phone: 'fdPhone', mobile: 'fdMobile',
-    job_title: 'fdJob', address: 'fdAddress',
-  },
-  fdCompany: {
-    name: 'fdCompanyName', domains: 'fdCompanyDomains', industry: 'fdCompanyIndustry',
-    description: 'fdCompanyDesc', note: 'fdCompanyNote',
-  },
-  fs: {
-    first_name: 'fsFirstName', last_name: 'fsLastName', display_name: 'fsDisplayName',
-    email: 'fsEmail', work_number: 'fsWorkPhone', mobile_number: 'fsMobile', job_title: 'fsJob',
-    address: 'fsAddress', city: 'fsCity', zipcode: 'fsZipcode', state: 'fsState', country: 'fsCountry',
-  },
-  fsAccount: {
-    name: 'fsAccountName', phone: 'fsAccountPhone', website: 'fsAccountWebsite',
-    address: 'fsAccountAddress', city: 'fsAccountCity', zipcode: 'fsAccountZipcode',
-    state: 'fsAccountState', country: 'fsAccountCountry',
+  master: {
+    // Anfragende Person
+    first_name: 'cmP_first', last_name: 'cmP_last',
+    email:      'cmP_email', phone: 'cmP_workph', mobile: 'cmP_mobile',
+    job_title:  'cmP_job',
+    // Firma
+    company_name:        'cmF_name',
+    company_phone:       'cmF_phone',
+    company_website:     'cmF_website',
+    company_email:       'cmF_email',
+    company_street:      'cmF_street',
+    company_zipcode:     'cmF_zip',
+    company_city:        'cmF_city',
+    company_country:     'cmF_country',
+    company_domains:     'cmF_domains',
+    company_industry:    'cmF_industry',
+    company_description: 'cmF_description',
+    company_note:        'cmF_note',
   },
 };
 
-/* Synct DOM-Inputs aller 4 Kacheln zurück in ctx, damit Re-Renders manuelle Edits
-   nicht verschlucken. */
-function _syncAllInputsToCtx() {
-  const ctx = CONTACT_EDIT_CTX;
-  if (!ctx) return;
-  const apply = (target, group) => {
-    if (!target) return;
-    Object.entries(SUGG_INPUT_MAP[group] || {}).forEach(([field, id]) => {
-      const el = $(id);
-      if (el) {
-        if (group === 'fdCompany' && field === 'domains') {
-          target[field] = String(el.value || '').split(/[\s,;]+/).map(s => s.trim()).filter(Boolean);
-        } else {
-          target[field] = el.value;
-        }
-      }
-    });
-  };
-  apply(ctx.fd,        'fd');
-  apply(ctx.company,   'fdCompany');
-  apply(ctx.fs,        'fs');
-  apply(ctx.fsAccount, 'fsAccount');
-}
-
-// Legacy-Aliase — die alten Helper rufen jetzt einfach den Master-Sync
-function _syncFreshdeskInputsToCtx()  { _syncAllInputsToCtx(); }
-function _syncFreshsalesInputsToCtx() { _syncAllInputsToCtx(); }
+// Synct DOM zurück in ctx.master — Aliase auf den Master-Sync-Helper
+function _syncAllInputsToCtx() { _syncContactMaster(); }
+function _syncFreshdeskInputsToCtx()  { _syncContactMaster(); }
+function _syncFreshsalesInputsToCtx() { _syncContactMaster(); }
 
 async function loadContactSuggestions() {
   const ctx = CONTACT_EDIT_CTX;
   if (!ctx?.fd) return;
+  _syncContactMaster();
   ctx.suggestionsLoading = true;
   ctx.suggestionsError = null;
   renderContactEditBody();
   try {
     const raw = await aiSuggestAllContactFields(ctx);
-    // Normalisieren: 4 Gruppen, jedes Feld mit value+source+accepted
-    const groups = ['fd', 'fdCompany', 'fs', 'fsAccount'];
-    const norm = { fd: {}, fdCompany: {}, fs: {}, fsAccount: {} };
-    groups.forEach(g => {
-      const groupData = raw?.[g] || {};
-      const validFields = Object.keys(SUGG_INPUT_MAP[g] || {});
-      validFields.forEach(field => {
-        const s = groupData[field];
-        if (s && s.value !== undefined && s.value !== null && String(s.value).trim()) {
-          norm[g][field] = {
-            value: String(s.value).trim(),
-            source: String(s.source || 'KI-Analyse').slice(0, 100),
-            accepted: false,
-          };
-        }
-      });
+    // Master-flach: alle Felder unter ctx.suggestions.master.{field}
+    const validFields = Object.keys(SUGG_INPUT_MAP.master);
+    const norm = { master: {} };
+    const flat = raw?.master || raw || {};
+    validFields.forEach(field => {
+      const s = flat[field];
+      if (s && s.value !== undefined && s.value !== null && String(s.value).trim()) {
+        norm.master[field] = {
+          value: String(s.value).trim(),
+          source: String(s.source || 'KI-Analyse').slice(0, 100),
+          accepted: false,
+        };
+      }
     });
     ctx.suggestions = norm;
   } catch (e) {
@@ -2551,39 +2672,43 @@ async function loadContactSuggestions() {
   }
 }
 
-/* Akzeptiert einen einzelnen Vorschlag. Schreibt den Wert in ctx + DOM + visuelles Highlight. */
+/* Schreibt einen master-Vorschlag-Wert in ctx.master.{company,contact}.X.
+   field-Names mit „company_"-Präfix → company-Sub-Objekt (ohne Präfix). Sonst → contact. */
+function _applyMasterSugg(ctx, field, value) {
+  if (!ctx?.master) return false;
+  if (field === 'company_industry') {
+    if (!FD_INDUSTRY_VALUES.includes(value)) {
+      toast('Branche „' + value + '" ist kein gültiger Freshdesk-Wert — bitte aus Dropdown wählen', 'warn', 5000);
+      return false;
+    }
+    ctx.master.company.industry = value;
+    return true;
+  }
+  if (field.startsWith('company_')) {
+    const k = field.slice('company_'.length);
+    // domains als String belassen (UI-Format) — beim Save wird gesplittet
+    ctx.master.company[k] = value;
+  } else {
+    // contact-Felder mappen
+    const cMap = { phone: 'work_phone' }; // schema-mismatch absorbieren
+    const k = cMap[field] || field;
+    ctx.master.contact[k] = value;
+  }
+  return true;
+}
+
+/* Akzeptiert einen einzelnen Vorschlag. Schreibt den Wert in ctx.master + DOM + visuelles Highlight. */
 function acceptSugg(group, field) {
   const ctx = CONTACT_EDIT_CTX;
-  const s = ctx?.suggestions?.[group]?.[field];
+  if (group !== 'master') return;
+  const s = ctx?.suggestions?.master?.[field];
   if (!s) return;
-  _syncAllInputsToCtx();
-  const target = group === 'fd' ? ctx.fd
-               : group === 'fdCompany' ? ctx.company
-               : group === 'fs' ? ctx.fs
-               : group === 'fsAccount' ? ctx.fsAccount
-               : null;
-  if (!target) {
-    toast('Erst das Objekt verknüpfen, dann KI-Vorschlag übernehmen', 'warn', 4000);
-    return;
-  }
-  // domains ist ein Array — wenn der Vorschlag ein String ist, splitten
-  if (group === 'fdCompany' && field === 'domains' && typeof s.value === 'string') {
-    target[field] = s.value.split(/[\s,;]+/).map(x => x.trim()).filter(Boolean);
-  } else if (group === 'fdCompany' && field === 'industry') {
-    // industry muss im FD-Enum sein — sonst Vorschlag ignorieren
-    if (FD_INDUSTRY_VALUES.includes(s.value)) {
-      target[field] = s.value;
-    } else {
-      toast('Branche „' + s.value + '" ist kein gültiger Freshdesk-Wert — bitte aus Dropdown wählen', 'warn', 5000);
-      return;
-    }
-  } else {
-    target[field] = s.value;
-  }
+  _syncContactMaster();
+  if (!_applyMasterSugg(ctx, field, s.value)) return;
   s.accepted = true;
   renderContactEditBody();
   // Visual Feedback nach Re-Render
-  const inputId = SUGG_INPUT_MAP[group]?.[field];
+  const inputId = SUGG_INPUT_MAP.master?.[field];
   if (inputId) {
     setTimeout(() => {
       const el = $(inputId);
@@ -2595,46 +2720,28 @@ function acceptSugg(group, field) {
   }
 }
 
-/* Akzeptiert ALLE noch nicht akzeptierten Vorschläge über alle 4 Gruppen. */
+/* Akzeptiert ALLE noch nicht akzeptierten Vorschläge im master-Schema. */
 function acceptAllSugg() {
   const ctx = CONTACT_EDIT_CTX;
-  if (!ctx?.suggestions) return;
-  _syncAllInputsToCtx();
+  if (!ctx?.suggestions?.master) return;
+  _syncContactMaster();
   let count = 0;
-  let skipped = 0;
-  ['fd', 'fdCompany', 'fs', 'fsAccount'].forEach(group => {
-    const target = group === 'fd' ? ctx.fd
-                 : group === 'fdCompany' ? ctx.company
-                 : group === 'fs' ? ctx.fs
-                 : group === 'fsAccount' ? ctx.fsAccount
-                 : null;
-    const sugs = ctx.suggestions[group] || {};
-    Object.keys(sugs).forEach(field => {
-      const s = sugs[field];
-      if (!s || s.accepted) return;
-      if (!target) { skipped++; return; }
-      if (group === 'fdCompany' && field === 'domains' && typeof s.value === 'string') {
-        target[field] = s.value.split(/[\s,;]+/).map(x => x.trim()).filter(Boolean);
-      } else {
-        target[field] = s.value;
-      }
+  Object.keys(ctx.suggestions.master).forEach(field => {
+    const s = ctx.suggestions.master[field];
+    if (!s || s.accepted) return;
+    if (_applyMasterSugg(ctx, field, s.value)) {
       s.accepted = true;
       count++;
-    });
+    }
   });
   renderContactEditBody();
   if (count) {
-    let msg = count + ' Vorschlag' + (count === 1 ? '' : 'e') + ' übernommen';
-    if (skipped) msg += ' · ' + skipped + ' übersprungen (Objekt noch nicht verknüpft)';
-    msg += ' — jetzt in den jeweiligen Kacheln „Speichern" tippen';
-    toast(msg, 'success', 5000);
-  } else if (skipped) {
-    toast('Alle Vorschläge betreffen noch nicht verknüpfte Objekte — erst Verknüpfung herstellen', 'warn', 5000);
+    toast(count + ' Vorschlag' + (count === 1 ? '' : 'e') + ' übernommen — jetzt „Alles speichern" klicken', 'success', 5000);
   }
 }
 
 // Legacy-Aliase für alte HTML-Onclicks die noch im Code stecken könnten
-function acceptContactSuggestion(field)    { acceptSugg('fd', field); }
+function acceptContactSuggestion(field)    { acceptSugg('master', field); }
 function acceptAllContactSuggestions()      { acceptAllSugg(); }
 
 /* Module-level Banner-Renderer für KI-Vorschläge.
@@ -2670,130 +2777,14 @@ function closeContactEditModal() {
 function renderContactEditBody() {
   const ctx = CONTACT_EDIT_CTX;
   if (!ctx) return;
-  const c  = ctx.fd  || {};
-  const fs = ctx.fs;
+  if (!ctx.master) _consolidateContactMaster(ctx);
+  const m = ctx.master || { company: {}, contact: {} };
+  const co = m.company, cn = m.contact;
   const acc = APP_STATE.accounts.find(a => a.id === ctx.accountId);
-
-  const fsBlock = ctx.hasFreshsales ? `
-    <div class="bg-gradient-to-br from-purple-50 to-brand-50 border-2 border-purple-200 rounded-2xl p-4">
-      <div class="flex items-center gap-2 mb-3">
-        <i data-lucide="briefcase" class="w-4 h-4 text-purple-700"></i>
-        <h3 class="font-semibold text-ink-900 text-sm">Freshsales-CRM</h3>
-        ${fs ? '<span class="ml-auto text-[10px] text-emerald-700 bg-emerald-100 px-1.5 py-0.5 rounded font-semibold uppercase tracking-wider">Gefunden #' + fs.id + '</span>' : (ctx._fsError ? '<span class="ml-auto text-[10px] text-red-700 bg-red-100 px-1.5 py-0.5 rounded font-semibold uppercase tracking-wider">Fehler</span>' : '<span class="ml-auto text-[10px] text-amber-700 bg-amber-100 px-1.5 py-0.5 rounded font-semibold uppercase tracking-wider">Nicht gefunden</span>')}
-      </div>
-      ${fs ? `
-        <div class="space-y-2 text-xs">
-          <div class="grid grid-cols-2 gap-2">
-            <div>
-              <label class="text-[10px] uppercase font-semibold text-purple-800 block">Vorname</label>
-              <input id="fsFirstName" type="text" value="${escapeAttr(fs.first_name || '')}" class="w-full mt-1 px-2 py-1.5 border border-purple-200 bg-white rounded text-sm">
-              ${_renderSuggestionBanner('fs', 'first_name', fs.first_name)}
-            </div>
-            <div>
-              <label class="text-[10px] uppercase font-semibold text-purple-800 block">Nachname</label>
-              <input id="fsLastName" type="text" value="${escapeAttr(fs.last_name || '')}" class="w-full mt-1 px-2 py-1.5 border border-purple-200 bg-white rounded text-sm">
-              ${_renderSuggestionBanner('fs', 'last_name', fs.last_name)}
-            </div>
-          </div>
-          <div>
-            <label class="text-[10px] uppercase font-semibold text-purple-800 block">Anzeigename</label>
-            <input id="fsDisplayName" type="text" value="${escapeAttr(fs.display_name || '')}" class="w-full mt-1 px-2 py-1.5 border border-purple-200 bg-white rounded text-sm" placeholder="Wird automatisch aus Vor- + Nachname gebildet, falls leer">
-            ${_renderSuggestionBanner('fs', 'display_name', fs.display_name)}
-          </div>
-          <div>
-            <label class="text-[10px] uppercase font-semibold text-purple-800 block">Email</label>
-            <input id="fsEmail" type="email" value="${escapeAttr(fs.email || '')}" class="w-full mt-1 px-2 py-1.5 border border-purple-200 bg-white rounded text-sm">
-            ${_renderSuggestionBanner('fs', 'email', fs.email)}
-          </div>
-          <div class="grid grid-cols-2 gap-2">
-            <div>
-              <label class="text-[10px] uppercase font-semibold text-purple-800 block">Festnetz</label>
-              <input id="fsWorkPhone" type="tel" value="${escapeAttr(fs.work_number || '')}" class="w-full mt-1 px-2 py-1.5 border border-purple-200 bg-white rounded text-sm font-mono">
-              ${_renderSuggestionBanner('fs', 'work_number', fs.work_number)}
-            </div>
-            <div>
-              <label class="text-[10px] uppercase font-semibold text-purple-800 block">Mobil</label>
-              <input id="fsMobile" type="tel" value="${escapeAttr(fs.mobile_number || '')}" class="w-full mt-1 px-2 py-1.5 border border-purple-200 bg-white rounded text-sm font-mono">
-              ${_renderSuggestionBanner('fs', 'mobile_number', fs.mobile_number)}
-            </div>
-          </div>
-          <div>
-            <label class="text-[10px] uppercase font-semibold text-purple-800 block">Job-Titel</label>
-            <input id="fsJob" type="text" value="${escapeAttr(fs.job_title || '')}" class="w-full mt-1 px-2 py-1.5 border border-purple-200 bg-white rounded text-sm">
-            ${_renderSuggestionBanner('fs', 'job_title', fs.job_title)}
-          </div>
-          <div>
-            <label class="text-[10px] uppercase font-semibold text-purple-800 block">Adresse (Straße + Nr.)</label>
-            <input id="fsAddress" type="text" value="${escapeAttr(fs.address || '')}" class="w-full mt-1 px-2 py-1.5 border border-purple-200 bg-white rounded text-sm">
-            ${_renderSuggestionBanner('fs', 'address', fs.address)}
-          </div>
-          <div class="grid grid-cols-3 gap-2">
-            <div class="col-span-1">
-              <label class="text-[10px] uppercase font-semibold text-purple-800 block">PLZ</label>
-              <input id="fsZipcode" type="text" value="${escapeAttr(fs.zipcode || '')}" class="w-full mt-1 px-2 py-1.5 border border-purple-200 bg-white rounded text-sm">
-              ${_renderSuggestionBanner('fs', 'zipcode', fs.zipcode)}
-            </div>
-            <div class="col-span-2">
-              <label class="text-[10px] uppercase font-semibold text-purple-800 block">Stadt</label>
-              <input id="fsCity" type="text" value="${escapeAttr(fs.city || '')}" class="w-full mt-1 px-2 py-1.5 border border-purple-200 bg-white rounded text-sm">
-              ${_renderSuggestionBanner('fs', 'city', fs.city)}
-            </div>
-          </div>
-          <div class="grid grid-cols-2 gap-2">
-            <div>
-              <label class="text-[10px] uppercase font-semibold text-purple-800 block">Bundesland</label>
-              <input id="fsState" type="text" value="${escapeAttr(fs.state || '')}" class="w-full mt-1 px-2 py-1.5 border border-purple-200 bg-white rounded text-sm">
-              ${_renderSuggestionBanner('fs', 'state', fs.state)}
-            </div>
-            <div>
-              <label class="text-[10px] uppercase font-semibold text-purple-800 block">Land</label>
-              <input id="fsCountry" type="text" value="${escapeAttr(fs.country || '')}" class="w-full mt-1 px-2 py-1.5 border border-purple-200 bg-white rounded text-sm">
-              ${_renderSuggestionBanner('fs', 'country', fs.country)}
-            </div>
-          </div>
-          ${ctx.fsAccount ? `
-            <div class="mt-1 px-2 py-1.5 bg-purple-50 border border-purple-200 rounded flex items-center gap-2 text-[11px]">
-              <i data-lucide="briefcase" class="w-3.5 h-3.5 text-purple-700 shrink-0"></i>
-              <span class="text-purple-900 truncate flex-1">Verknüpft mit Konto: <b>${escapeHtml(ctx.fsAccount.name || '(unbenannt)')}</b></span>
-              <span class="text-ink-500 shrink-0">#${ctx.fsAccount.id}</span>
-            </div>` : `
-            <p class="text-[10px] text-ink-500 italic mt-1"><i data-lucide="link-2-off" class="w-3 h-3 inline"></i> Kein Konto verknüpft — unten in der Konto-Kachel suchen oder anlegen.</p>
-          `}
-          <button type="button" onclick="saveFreshsalesContact(this)" class="w-full mt-2 bg-purple-600 hover:bg-purple-700 text-white px-3 py-2 rounded-lg text-sm font-semibold inline-flex items-center justify-center gap-1.5">
-            <i data-lucide="save" class="w-4 h-4"></i> Kontakt im Freshsales speichern
-          </button>
-        </div>` : `
-        <p class="text-[11px] text-ink-600 italic">${ctx._fsError ? 'Freshsales-Lookup fehlgeschlagen: ' + escapeHtml(ctx._fsError) : 'Kein Freshsales-Contact mit der Email ' + escapeHtml(c.email || '?') + ' gefunden.'}</p>
-        ${!ctx._fsError && c.email ? `
-          <button type="button" onclick="createFreshsalesContactFromFd(this)" class="w-full mt-3 bg-purple-600 hover:bg-purple-700 text-white px-3 py-2.5 rounded-lg text-sm font-semibold inline-flex items-center justify-center gap-1.5">
-            <i data-lucide="user-plus" class="w-4 h-4"></i> FS-Kontakt aus Freshdesk-Daten anlegen
-          </button>
-          <p class="text-[10px] text-ink-500 mt-1.5 leading-snug"><b>Übernimmt:</b> Name (Vor/Nach gesplittet), Email, Telefon, Mobil, Job-Titel, Adresse (Straße/PLZ/Stadt/Land aus FD-Adresse zerlegt). Wenn KI-Vorschläge offen sind, werden diese Werte verwendet.</p>
-        ` : ''}
-        ${ctx._fsError && /method.*not.*allowed|404/i.test(ctx._fsError) ? `
-          <div class="mt-2 bg-amber-50 border border-amber-200 rounded-lg p-2 text-[10px] text-amber-900 space-y-1.5">
-            <p class="font-semibold flex items-center gap-1"><i data-lucide="alert-triangle" class="w-3 h-3"></i> Mögliche Ursachen (in Reihenfolge der Wahrscheinlichkeit):</p>
-            <ol class="list-decimal pl-4 space-y-1">
-              <li><b>Freshsales-Subdomain falsch:</b> Im Account-Setup unter „Accounts" → Stift-Icon prüfen ob die Subdomain (vor <code>${escapeHtml(acc?.freshsales_domain_suffix || 'myfreshworks.com')}</code>) wirklich stimmt. Im Zweifel: die URL aus dem Freshsales-Login-Browserfenster kopieren.</li>
-              <li><b>Falsches Domain-Suffix:</b> Beim Bearbeiten des Accounts das Dropdown auf die andere Variante (<code>.myfreshworks.com</code> ↔ <code>.freshworks.com</code>) umstellen.</li>
-              <li><b>Val.town-Proxy ist alt:</b> Im <b>Profil → Setup → „Val aktualisieren"</b> den Proxy auf v2.30+ heben — der ältere Proxy ignoriert das Suffix-Feld und routet immer auf <code>.myfreshworks.com</code>.</li>
-              <li><b>Email existiert in Freshsales nicht:</b> Ist auch ein 404 — aber dann sollte das System „nicht gefunden" zeigen statt einen Fehler.</li>
-            </ol>
-          </div>` : ''}
-      `}
-    </div>` : `
-    <div class="bg-ink-50 border border-ink-200 rounded-2xl p-3">
-      <p class="text-[11px] text-ink-600"><i data-lucide="briefcase" class="w-3 h-3 inline text-ink-400"></i> Freshsales-CRM ist für diesen Account nicht verbunden. Im Account-Setup unter „Accounts" lassen sich Freshsales-Domain + API-Key hinterlegen.</p>
-    </div>`;
-
-  // sBan ist jetzt module-level (siehe _renderSuggestionBanner), damit auch
-  // _companyBlock und _freshsalesAccountBlock ihn nutzen können.
   const sBan = _renderSuggestionBanner;
   const sugg = ctx.suggestions || {};
 
-  // Top-Block: KI-Zauberbutton + Status — zählt jetzt Vorschläge über ALLE 4 Gruppen.
-  // Funktioniert auch OHNE Ticket-Kontext: KI kann allein aus den 4 Objekten cross-syncen
-  // (z.B. FD-Adresse → FS-Address/City/Zipcode/Country aufteilen).
+  // === Top KI-Block (KI-Zauberbutton) — zählt offene Vorschläge ===
   let suggOpen = 0, suggAccepted = 0;
   ['fd', 'fdCompany', 'fs', 'fsAccount'].forEach(g => {
     const groupSugs = sugg[g] || {};
@@ -2811,16 +2802,16 @@ function renderContactEditBody() {
         <div class="flex-1 min-w-0">
           <p class="text-sm font-semibold text-ink-900">KI-Zauberbutton</p>
           ${ctx.suggestionsLoading
-            ? `<p class="text-[11px] text-purple-700"><span class="spinner inline-block w-3 h-3 border-[2px] text-purple-500 mr-1"></span> Analysiere alle 4 Objekte${ctx.ticket ? ' + Ticket-Signaturen' : ''}…</p>`
+            ? `<p class="text-[11px] text-purple-700"><span class="spinner inline-block w-3 h-3 border-[2px] text-purple-500 mr-1"></span> Analysiere alle Daten${ctx.ticket ? ' + Ticket-Signaturen' : ''}…</p>`
             : ctx.suggestionsError
               ? `<p class="text-[11px] text-red-700">Fehler: ${escapeHtml(ctx.suggestionsError)}</p>`
               : ctx.suggestions
                 ? (suggOpen
-                  ? `<p class="text-[11px] text-purple-700">${suggOpen} Vorschlag${suggOpen===1?'':'e'} über alle Kacheln — Banner unter den Feldern einzeln übernehmen oder „Alle".</p>`
+                  ? `<p class="text-[11px] text-purple-700">${suggOpen} Vorschlag${suggOpen===1?'':'e'} unter den Feldern — übernehmen, dann „Alles speichern".</p>`
                   : (suggAccepted > 0
-                    ? `<p class="text-[11px] text-emerald-700"><i data-lucide="check-circle-2" class="w-3 h-3 inline"></i> ${suggAccepted} Vorschlag${suggAccepted===1?'':'e'} übernommen — jetzt in der jeweiligen Kachel „Speichern".</p>`
+                    ? `<p class="text-[11px] text-emerald-700"><i data-lucide="check-circle-2" class="w-3 h-3 inline"></i> ${suggAccepted} Vorschlag${suggAccepted===1?'':'e'} übernommen — jetzt „Alles speichern" klicken.</p>`
                     : `<p class="text-[11px] text-emerald-700">Alle Felder sehen gut aus — keine Ergänzung nötig.</p>`))
-                : `<p class="text-[11px] text-purple-700">Analysiert alle 4 Objekte + ${ctx.ticket ? 'Ticket-Signaturen ' : ''}und schlägt für fehlende Felder Werte vor (z.B. FD-Adresse → FS-Address/City/Zipcode aufteilen).</p>`}
+                : `<p class="text-[11px] text-purple-700">Analysiert vorhandene Daten + ${ctx.ticket ? 'Ticket-Signaturen + ' : ''}andere Tickets dieses Kontakts und ergänzt fehlende Felder.</p>`}
         </div>
         ${!ctx.suggestionsLoading ? `
           <div class="flex flex-col gap-1 shrink-0">
@@ -2831,119 +2822,198 @@ function renderContactEditBody() {
             </button>
           </div>` : ''}
       </div>
-      ${ctx.ticket ? `<p class="text-[10px] text-ink-500 mt-2 italic">Quelle: Ticket #${ctx.ticket.id} — „${escapeHtml((ctx.ticket.subject || '').slice(0, 60))}${(ctx.ticket.subject || '').length > 60 ? '…' : ''}"</p>` : `<p class="text-[10px] text-ink-500 mt-2 italic">Kein Ticket-Kontext — KI nutzt nur die 4 Objekt-Daten (cross-system sync).</p>`}
+      ${ctx.ticket ? `<p class="text-[10px] text-ink-500 mt-2 italic">Quelle: Ticket #${ctx.ticket.id} — „${escapeHtml((ctx.ticket.subject || '').slice(0, 60))}${(ctx.ticket.subject || '').length > 60 ? '…' : ''}"</p>` : ''}
     </div>`;
 
-  // Wenn kein Ticket-Kontext und KI noch nie gelaufen: kurzer Erläuterungs-Hinweis ENTFÄLLT
-  // (der Top-Block übernimmt die Erklärung selbst).
-  const noTicketHint = '';
-
-  // Verknüpfungs-Indikator zwischen Kontakt- und Kunden-Kachel (visueller Anker)
-  const linkIndicator = (color, fromLabel, toLabel, linked) => `
-    <div class="flex items-center gap-2 py-0.5 px-3 -my-1">
-      <div class="flex-1 h-px ${linked ? color === 'brand' ? 'bg-brand-300' : 'bg-purple-300' : 'bg-ink-200 border-dashed'}"></div>
-      <span class="text-[10px] font-semibold uppercase tracking-wider ${linked ? color === 'brand' ? 'text-brand-700' : 'text-purple-700' : 'text-ink-400'} flex items-center gap-1">
-        <i data-lucide="${linked ? 'link' : 'link-2-off'}" class="w-3 h-3"></i>
-        ${linked ? fromLabel + ' ↔ ' + toLabel : 'nicht verknüpft'}
-      </span>
-      <div class="flex-1 h-px ${linked ? color === 'brand' ? 'bg-brand-300' : 'bg-purple-300' : 'bg-ink-200 border-dashed'}"></div>
-    </div>`;
-
-  // Freshdesk-Kontakt-Kachel (ohne Firma-Sub-Block — die Firma hat eine eigene Kachel darunter)
-  const fdContactCard = `
-    <div class="bg-white border-2 border-brand-200 rounded-2xl p-4">
+  // === Stammdaten-Sektion: Firma + Anfragende Person (eine Quelle für alle Systeme) ===
+  const stammdatenBlock = `
+    <div class="bg-white border-2 border-brand-300 rounded-2xl p-4">
       <div class="flex items-center gap-2 mb-3">
-        <i data-lucide="user" class="w-4 h-4 text-brand-700"></i>
-        <h3 class="font-semibold text-ink-900 text-sm">Freshdesk-Kontakt</h3>
-        <span class="ml-auto text-[10px] text-brand-700 bg-brand-100 px-1.5 py-0.5 rounded font-semibold uppercase tracking-wider">Contact #${c.id || '?'}</span>
+        <i data-lucide="layers" class="w-4 h-4 text-brand-700"></i>
+        <h3 class="font-semibold text-ink-900 text-sm">Stammdaten</h3>
+        <span class="ml-auto text-[10px] text-brand-700 bg-brand-100 px-1.5 py-0.5 rounded font-semibold uppercase tracking-wider">→ alle Systeme</span>
       </div>
+
+      <!-- Firma -->
       <div class="space-y-2 text-xs">
         <div>
-          <label class="text-[10px] uppercase font-semibold text-brand-800 block">Name</label>
-          <input id="fdName" type="text" value="${escapeAttr(c.name || '')}" class="w-full mt-1 px-2 py-1.5 border border-brand-200 bg-white rounded text-sm">
-          ${sBan('fd', 'name', c.name)}
-        </div>
-        <div>
-          <label class="text-[10px] uppercase font-semibold text-brand-800 block">Email</label>
-          <input id="fdEmail" type="email" value="${escapeAttr(c.email || '')}" class="w-full mt-1 px-2 py-1.5 border border-brand-200 bg-white rounded text-sm">
-          ${sBan('fd', 'email', c.email)}
+          <label class="text-[10px] uppercase font-semibold text-brand-800 block">Firma</label>
+          <input id="cmF_name" type="text" value="${escapeAttr(co.name || '')}" class="w-full mt-1 px-2 py-1.5 border border-brand-200 bg-white rounded text-sm">
+          ${sBan('master', 'company_name', co.name)}
         </div>
         <div class="grid grid-cols-2 gap-2">
           <div>
-            <label class="text-[10px] uppercase font-semibold text-brand-800 block">Festnetz</label>
-            <input id="fdPhone" type="tel" value="${escapeAttr(c.phone || '')}" class="w-full mt-1 px-2 py-1.5 border border-brand-200 bg-white rounded text-sm font-mono">
-            ${sBan('fd', 'phone', c.phone)}
+            <label class="text-[10px] uppercase font-semibold text-brand-800 block">Telefon</label>
+            <input id="cmF_phone" type="tel" value="${escapeAttr(co.phone || '')}" class="w-full mt-1 px-2 py-1.5 border border-brand-200 bg-white rounded text-sm font-mono">
+            ${sBan('master', 'company_phone', co.phone)}
           </div>
           <div>
-            <label class="text-[10px] uppercase font-semibold text-brand-800 block">Mobil</label>
-            <input id="fdMobile" type="tel" value="${escapeAttr(c.mobile || '')}" class="w-full mt-1 px-2 py-1.5 border border-brand-200 bg-white rounded text-sm font-mono">
-            ${sBan('fd', 'mobile', c.mobile)}
+            <label class="text-[10px] uppercase font-semibold text-brand-800 block">Website</label>
+            <input id="cmF_website" type="url" value="${escapeAttr(co.website || '')}" placeholder="https://…" class="w-full mt-1 px-2 py-1.5 border border-brand-200 bg-white rounded text-sm">
+            ${sBan('master', 'company_website', co.website)}
           </div>
         </div>
         <div>
-          <label class="text-[10px] uppercase font-semibold text-brand-800 block">Job-Titel</label>
-          <input id="fdJob" type="text" value="${escapeAttr(c.job_title || '')}" class="w-full mt-1 px-2 py-1.5 border border-brand-200 bg-white rounded text-sm">
-          ${sBan('fd', 'job_title', c.job_title)}
+          <label class="text-[10px] uppercase font-semibold text-brand-800 block">Email (Firma)</label>
+          <input id="cmF_email" type="email" value="${escapeAttr(co.email || '')}" class="w-full mt-1 px-2 py-1.5 border border-brand-200 bg-white rounded text-sm">
         </div>
         <div>
-          <label class="text-[10px] uppercase font-semibold text-brand-800 block">Adresse</label>
-          <textarea id="fdAddress" rows="2" class="w-full mt-1 px-2 py-1.5 border border-brand-200 bg-white rounded text-sm resize-none">${escapeHtml(c.address || '')}</textarea>
-          ${sBan('fd', 'address', c.address)}
+          <label class="text-[10px] uppercase font-semibold text-brand-800 block">Straße + Hausnr.</label>
+          <input id="cmF_street" type="text" value="${escapeAttr(co.street || '')}" class="w-full mt-1 px-2 py-1.5 border border-brand-200 bg-white rounded text-sm">
+          ${sBan('master', 'company_street', co.street)}
         </div>
-        ${ctx.company ? `
-          <div class="mt-1 px-2 py-1.5 bg-brand-50 border border-brand-200 rounded flex items-center gap-2 text-[11px]">
-            <i data-lucide="building-2" class="w-3.5 h-3.5 text-brand-700 shrink-0"></i>
-            <span class="text-brand-900 truncate flex-1">Verknüpft mit Firma: <b>${escapeHtml(ctx.company.name || '(unbenannt)')}</b></span>
-            <span class="text-ink-500 shrink-0">#${ctx.company.id}</span>
-          </div>` : `
-          <p class="text-[10px] text-ink-500 italic mt-1"><i data-lucide="link-2-off" class="w-3 h-3 inline"></i> Keine Firma verknüpft — unten in der Kunden-Kachel suchen oder anlegen.</p>
-        `}
-        <button type="button" onclick="saveFreshdeskContact(this)" class="w-full mt-2 bg-brand-600 hover:bg-brand-700 text-white px-3 py-2 rounded-lg text-sm font-semibold inline-flex items-center justify-center gap-1.5">
-          <i data-lucide="save" class="w-4 h-4"></i> Kontakt im Freshdesk speichern
-        </button>
+        <div class="grid grid-cols-3 gap-2">
+          <div>
+            <label class="text-[10px] uppercase font-semibold text-brand-800 block">PLZ</label>
+            <input id="cmF_zip" type="text" value="${escapeAttr(co.zipcode || '')}" class="w-full mt-1 px-2 py-1.5 border border-brand-200 bg-white rounded text-sm font-mono">
+            ${sBan('master', 'company_zipcode', co.zipcode)}
+          </div>
+          <div>
+            <label class="text-[10px] uppercase font-semibold text-brand-800 block">Stadt</label>
+            <input id="cmF_city" type="text" value="${escapeAttr(co.city || '')}" class="w-full mt-1 px-2 py-1.5 border border-brand-200 bg-white rounded text-sm">
+            ${sBan('master', 'company_city', co.city)}
+          </div>
+          <div>
+            <label class="text-[10px] uppercase font-semibold text-brand-800 block">Land</label>
+            <input id="cmF_country" type="text" value="${escapeAttr(co.country || '')}" class="w-full mt-1 px-2 py-1.5 border border-brand-200 bg-white rounded text-sm">
+            ${sBan('master', 'company_country', co.country)}
+          </div>
+        </div>
+
+        <!-- Erweiterte FD-Firma-Felder (kollabierbar) -->
+        <details class="border-t border-brand-100 pt-2 mt-2">
+          <summary class="text-[11px] text-brand-700 cursor-pointer font-semibold inline-flex items-center gap-1">
+            <i data-lucide="chevron-right" class="w-3 h-3 details-marker"></i> Weitere Firma-Felder (Domains, Branche, Notiz)
+          </summary>
+          <div class="space-y-2 mt-2">
+            <div>
+              <label class="text-[10px] uppercase font-semibold text-brand-800 block">Domains <span class="text-ink-400 normal-case font-normal">(komma-getrennt)</span></label>
+              <input id="cmF_domains" type="text" value="${escapeAttr(co.domains || '')}" placeholder="example.com, example.org" class="w-full mt-1 px-2 py-1.5 border border-brand-200 bg-white rounded text-sm">
+              ${sBan('master', 'company_domains', co.domains)}
+            </div>
+            <div>
+              <label class="text-[10px] uppercase font-semibold text-brand-800 block">Branche</label>
+              <select id="cmF_industry" class="w-full mt-1 px-2 py-1.5 border border-brand-200 bg-white rounded text-sm">
+                <option value="">— keine Angabe —</option>
+                ${FD_INDUSTRY_VALUES.map(v => `<option value="${escapeAttr(v)}" ${(co.industry || '') === v ? 'selected' : ''}>${escapeHtml(v)}</option>`).join('')}
+              </select>
+              ${sBan('master', 'company_industry', co.industry)}
+            </div>
+            <div>
+              <label class="text-[10px] uppercase font-semibold text-brand-800 block">Beschreibung</label>
+              <textarea id="cmF_description" rows="2" class="w-full mt-1 px-2 py-1.5 border border-brand-200 bg-white rounded text-sm resize-none">${escapeHtml(co.description || '')}</textarea>
+              ${sBan('master', 'company_description', co.description)}
+            </div>
+            <div>
+              <label class="text-[10px] uppercase font-semibold text-brand-800 block">Notiz</label>
+              <textarea id="cmF_note" rows="2" class="w-full mt-1 px-2 py-1.5 border border-brand-200 bg-white rounded text-sm resize-none">${escapeHtml(co.note || '')}</textarea>
+            </div>
+          </div>
+        </details>
+      </div>
+
+      <!-- Anfragende Person -->
+      <div class="border-t border-brand-100 pt-3 mt-3">
+        <div class="flex items-center gap-2 mb-2">
+          <i data-lucide="user" class="w-3.5 h-3.5 text-brand-700"></i>
+          <h4 class="text-xs font-semibold text-brand-900">Anfragende Person</h4>
+        </div>
+        <div class="space-y-2 text-xs">
+          <div class="grid grid-cols-2 gap-2">
+            <div>
+              <label class="text-[10px] uppercase font-semibold text-brand-800 block">Vorname</label>
+              <input id="cmP_first" type="text" value="${escapeAttr(cn.first_name || '')}" class="w-full mt-1 px-2 py-1.5 border border-brand-200 bg-white rounded text-sm">
+              ${sBan('master', 'first_name', cn.first_name)}
+            </div>
+            <div>
+              <label class="text-[10px] uppercase font-semibold text-brand-800 block">Nachname</label>
+              <input id="cmP_last" type="text" value="${escapeAttr(cn.last_name || '')}" class="w-full mt-1 px-2 py-1.5 border border-brand-200 bg-white rounded text-sm">
+              ${sBan('master', 'last_name', cn.last_name)}
+            </div>
+          </div>
+          <div>
+            <label class="text-[10px] uppercase font-semibold text-brand-800 block">Email</label>
+            <input id="cmP_email" type="email" value="${escapeAttr(cn.email || '')}" class="w-full mt-1 px-2 py-1.5 border border-brand-200 bg-white rounded text-sm">
+            ${sBan('master', 'email', cn.email)}
+          </div>
+          <div class="grid grid-cols-2 gap-2">
+            <div>
+              <label class="text-[10px] uppercase font-semibold text-brand-800 block">Festnetz</label>
+              <input id="cmP_workph" type="tel" value="${escapeAttr(cn.work_phone || '')}" class="w-full mt-1 px-2 py-1.5 border border-brand-200 bg-white rounded text-sm font-mono">
+              ${sBan('master', 'phone', cn.work_phone)}
+            </div>
+            <div>
+              <label class="text-[10px] uppercase font-semibold text-brand-800 block">Mobil</label>
+              <input id="cmP_mobile" type="tel" value="${escapeAttr(cn.mobile || '')}" class="w-full mt-1 px-2 py-1.5 border border-brand-200 bg-white rounded text-sm font-mono">
+              ${sBan('master', 'mobile', cn.mobile)}
+            </div>
+          </div>
+          <div>
+            <label class="text-[10px] uppercase font-semibold text-brand-800 block">Position</label>
+            <input id="cmP_job" type="text" value="${escapeAttr(cn.job_title || '')}" class="w-full mt-1 px-2 py-1.5 border border-brand-200 bg-white rounded text-sm">
+            ${sBan('master', 'job_title', cn.job_title)}
+          </div>
+        </div>
       </div>
     </div>`;
 
-  // Großer Master-Save-Button: legt fehlende Objekte an + updatet bestehende in einem Schwung.
-  // Hilft besonders nach KI-Zauberbutton + „Alle übernehmen" — sonst müsste man 4× speichern.
-  const masterSaveBlock = `
-    <div class="bg-gradient-to-br from-emerald-50 to-brand-50 border-2 border-emerald-200 rounded-2xl p-3">
-      <div class="flex items-center gap-2">
-        <div class="w-9 h-9 rounded-full bg-gradient-to-br from-emerald-500 to-brand-600 flex items-center justify-center text-white shrink-0">
-          <i data-lucide="rocket" class="w-5 h-5"></i>
+  // === System-Status-Box: zeigt Verknüpfungen + Anlegen-Aktionen ===
+  const hasFsContact = !!ctx.fs?.id;
+  const hasFsAccount = !!ctx.fsAccount?.id;
+  const hasFdCompany = !!ctx.company?.id;
+  const fsTotal = (hasFsAccount ? 1 : 0) + (hasFsContact ? 1 : 0);
+  const fdTotal = 1 + (hasFdCompany ? 1 : 0);  // FD-Contact ist immer da
+
+  const systemStatusBlock = `
+    <div class="bg-ink-50 border border-ink-200 rounded-xl p-3 text-xs">
+      <p class="text-[10px] uppercase tracking-wider text-ink-500 font-semibold mb-2">System-Status — Verknüpfungen + Anlegen</p>
+      <div class="space-y-2">
+        <!-- Freshdesk -->
+        <div class="flex items-center gap-2 flex-wrap">
+          <i data-lucide="check-circle-2" class="w-3.5 h-3.5 text-emerald-600"></i>
+          <span class="text-ink-700 font-medium">Freshdesk</span>
+          <span class="text-[10px] text-brand-700 bg-brand-100 px-1.5 py-0.5 rounded font-mono">Contact #${ctx.contactId}</span>
+          ${hasFdCompany
+            ? `<span class="text-[10px] text-brand-700 bg-brand-100 px-1.5 py-0.5 rounded font-mono">Company #${ctx.company.id}</span>`
+            : (co.name ? `<button type="button" onclick="_masterCreateFdCompany(this)" class="ml-auto text-[10px] bg-brand-600 hover:bg-brand-700 text-white px-2 py-1 rounded font-semibold inline-flex items-center gap-1">
+                <i data-lucide="plus" class="w-3 h-3"></i> Firma in FD anlegen
+              </button>` : '<span class="text-[10px] text-ink-400 italic">keine Firma</span>')}
         </div>
-        <div class="flex-1 min-w-0">
-          <p class="text-sm font-semibold text-ink-900">Alles in einem Schwung speichern</p>
-          <p class="text-[11px] text-ink-600 leading-snug">Erstellt fehlende Objekte (Firma, FS-Kontakt, FS-Konto), updatet bestehende, verknüpft alles. Resilient gegen Duplikate.</p>
-        </div>
-        <button type="button" onclick="saveAllContactData(this)" class="shrink-0 bg-gradient-to-br from-emerald-600 to-brand-600 hover:from-emerald-700 hover:to-brand-700 text-white px-3 py-2 rounded-lg text-sm font-semibold inline-flex items-center gap-1.5 shadow-sm">
-          <i data-lucide="save-all" class="w-4 h-4"></i>
-          <span class="hidden sm:inline">Alles speichern</span>
-          <span class="sm:hidden">Alles</span>
-        </button>
+        <!-- Freshsales -->
+        ${ctx.hasFreshsales ? `
+          <div class="flex items-center gap-2 flex-wrap">
+            <i data-lucide="${fsTotal > 0 ? 'check-circle-2' : 'circle'}" class="w-3.5 h-3.5 ${fsTotal > 0 ? 'text-emerald-600' : 'text-ink-300'}"></i>
+            <span class="text-ink-700 font-medium">Freshsales</span>
+            ${hasFsContact ? `<span class="text-[10px] text-purple-700 bg-purple-100 px-1.5 py-0.5 rounded font-mono">Contact #${ctx.fs.id}</span>` : ''}
+            ${hasFsAccount ? `<span class="text-[10px] text-purple-700 bg-purple-100 px-1.5 py-0.5 rounded font-mono">Account #${ctx.fsAccount.id}</span>` : ''}
+            ${!hasFsContact && ctx.fd?.email ? `<button type="button" onclick="_masterCreateFsContact(this)" class="ml-auto text-[10px] bg-purple-600 hover:bg-purple-700 text-white px-2 py-1 rounded font-semibold inline-flex items-center gap-1">
+              <i data-lucide="plus" class="w-3 h-3"></i> FS-Contact anlegen
+            </button>` : ''}
+            ${ctx._fsError && !hasFsContact ? `<span class="text-[10px] text-red-600">Lookup-Fehler</span>` : ''}
+          </div>
+        ` : `
+          <div class="flex items-center gap-2 flex-wrap">
+            <i data-lucide="circle" class="w-3.5 h-3.5 text-ink-300"></i>
+            <span class="text-ink-700 font-medium">Freshsales</span>
+            <span class="text-[10px] text-ink-500 italic">nicht für diesen Account konfiguriert</span>
+          </div>
+        `}
       </div>
     </div>`;
+
+  // === Master-Save-Button (groß, unten) ===
+  const saveAllButton = `
+    <button id="cmSaveAllBtn" type="button" onclick="saveAllContactData(this)" class="w-full bg-gradient-to-r from-brand-600 to-emerald-600 hover:from-brand-700 hover:to-emerald-700 text-white px-3 py-3 rounded-xl text-sm font-bold inline-flex items-center justify-center gap-2 shadow">
+      <i data-lucide="zap" class="w-5 h-5"></i>
+      ⚡ Alles speichern + in ${ctx.hasFreshsales ? '2 Systeme' : 'Freshdesk'} verteilen
+    </button>`;
 
   $('contactEditBody').innerHTML = `
     <div class="space-y-3 max-w-2xl mx-auto">
-      ${aiTopBlock || noTicketHint}
-      ${masterSaveBlock}
-
-      <!-- 1. Freshdesk-Kontakt -->
-      ${fdContactCard}
-      <!-- Verknüpfungs-Indikator FD-Kontakt ↔ FD-Firma -->
-      ${linkIndicator('brand', 'Kontakt', 'Firma', !!ctx.company)}
-      <!-- 2. Freshdesk-Kunde (Firma) -->
-      ${_companyBlock(ctx)}
-
-      <!-- 3. Freshsales-Kontakt -->
-      ${fsBlock}
-      ${ctx.hasFreshsales && ctx.fs ? `
-        <!-- Verknüpfungs-Indikator FS-Kontakt ↔ FS-Konto -->
-        ${linkIndicator('purple', 'FS-Kontakt', 'FS-Konto', !!ctx.fsAccount)}
-        <!-- 4. Freshsales-Kunde (Sales Account) -->
-        ${_freshsalesAccountBlock(ctx)}
-      ` : ''}
+      ${aiTopBlock}
+      ${stammdatenBlock}
+      ${saveAllButton}
+      ${systemStatusBlock}
     </div>`;
   if (window.lucide) lucide.createIcons();
 }
@@ -3552,238 +3622,183 @@ async function saveFreshdeskContact(btnEl) {
 async function saveAllContactData(btnEl) {
   const ctx = CONTACT_EDIT_CTX;
   if (!ctx?.fd) return toast('Kein Kontakt geladen', 'warn');
-  _syncAllInputsToCtx();
+  _syncContactMaster();
+  const m = ctx.master;
+  if (!m) return toast('Master nicht initialisiert', 'error');
+  const co = m.company || {};
+  const cn = m.contact || {};
 
-  const log = [];   // {ok, label} pro Schritt
+  const log = [];
   const errs = [];
-  setBusy(btnEl, true, 'Speichere alles…');
+  setBusy(btnEl, true, 'Verteile…');
 
-  // ---------- Phase 1: Freshdesk-Firma (falls verknüpft oder Name-Feld ausgefüllt) ----------
-  let newCompanyId = null;
-  try {
-    if (ctx.company?.id) {
-      // existierende Firma updaten
-      const rawDomains = ($('fdCompanyDomains')?.value || '').trim();
-      const domains = rawDomains ? rawDomains.split(/[\s,;]+/).map(s => s.trim()).filter(Boolean) : [];
-      const industryRaw = ($('fdCompanyIndustry')?.value || '').trim();
-      const industry = industryRaw && FD_INDUSTRY_VALUES.includes(industryRaw) ? industryRaw : null;
-      if (industryRaw && !industry) {
-        console.warn('[saveAll] Branche „' + industryRaw + '" nicht in FD-Enum — wird weggelassen');
-      }
-      const fields = {
-        name:        ($('fdCompanyName')?.value || '').trim() || ctx.company.name,
-        description: ($('fdCompanyDesc')?.value || '').trim() || null,
-        note:        ($('fdCompanyNote')?.value || '').trim() || null,
+  // ---------- Phase 1: Freshdesk-Firma (Update oder Create + Verknüpfung) ----------
+  let resolvedCompanyId = ctx.company?.id || null;
+  if (co.name) {
+    try {
+      // Industry validieren — nur ins FD wenn im Enum
+      const industry = co.industry && FD_INDUSTRY_VALUES.includes(co.industry) ? co.industry : null;
+      if (co.industry && !industry) console.warn('[saveAll] Branche „' + co.industry + '" nicht in FD-Enum — wird weggelassen');
+      const domains = String(co.domains || '').split(/[\s,;]+/).map(s => s.trim()).filter(Boolean);
+      const fdCompanyFields = {
+        name:        co.name,
+        description: co.description || null,
+        note:        co.note || null,
         industry,
         domains,
       };
-      if (fields.name) {
-        const updated = await updateCompany(ctx.accountId, ctx.company.id, fields);
-        Object.assign(ctx.company, fields, { id: ctx.company.id }, updated || {});
-        newCompanyId = ctx.company.id;
-        log.push({ ok: true, label: 'FD-Firma „' + fields.name + '" gespeichert' });
-      }
-    } else {
-      // keine Firma verknüpft — aus dem Such-Feld oder KI-Vorschlag versuchen
-      const name = (ctx.companySearchQuery || ctx.suggestions?.fdCompany?.name?.value || '').trim();
-      if (name) {
-        const created = await createCompany(ctx.accountId, name);
+      if (resolvedCompanyId) {
+        await updateCompany(ctx.accountId, resolvedCompanyId, fdCompanyFields);
+        Object.assign(ctx.company, fdCompanyFields, { id: resolvedCompanyId });
+        log.push('FD-Firma ✓');
+      } else {
+        const created = await createCompany(ctx.accountId, co.name);
         if (created?.id) {
-          ctx.company = created;
-          newCompanyId = created.id;
-          log.push({ ok: true, label: 'FD-Firma „' + (created.name || name) + '" angelegt' });
+          resolvedCompanyId = created.id;
+          // Erweiterte Felder per separatem Update — createCompany akzeptiert nur Name
+          try {
+            await updateCompany(ctx.accountId, created.id, fdCompanyFields);
+          } catch (_) {}
+          ctx.company = Object.assign({}, created, fdCompanyFields);
+          log.push('FD-Firma angelegt');
         }
       }
+    } catch (e) {
+      errs.push('FD-Firma: ' + e.message);
+      log.push('FD-Firma ✗');
     }
-  } catch (e) {
-    errs.push('FD-Firma: ' + e.message);
-    log.push({ ok: false, label: 'FD-Firma fehlgeschlagen' });
   }
 
-  // ---------- Phase 2: Freshdesk-Kontakt ----------
+  // ---------- Phase 2: Freshdesk-Kontakt updaten ----------
   try {
-    const fields = {
-      name:      ($('fdName')?.value || '').trim(),
-      email:     ($('fdEmail')?.value || '').trim() || null,
-      phone:     ($('fdPhone')?.value || '').trim() || null,
-      mobile:    ($('fdMobile')?.value || '').trim() || null,
-      job_title: ($('fdJob')?.value || '').trim() || null,
-      address:   ($('fdAddress')?.value || '').trim() || null,
+    const fullName = ((cn.first_name || '') + ' ' + (cn.last_name || '')).trim();
+    const fdContactFields = {
+      name:      fullName || ctx.fd.name || cn.last_name || cn.first_name || null,
+      email:     cn.email || null,
+      phone:     cn.work_phone || null,
+      mobile:    cn.mobile || null,
+      job_title: cn.job_title || null,
+      address:   _masterAddressMultiLiner(co) || null,
     };
-    if (!fields.name) {
+    if (!fdContactFields.name) {
       errs.push('FD-Kontakt: Name fehlt');
-      log.push({ ok: false, label: 'FD-Kontakt: Name fehlt' });
+      log.push('FD-Kontakt ✗');
     } else {
-      const currentCompanyId = ctx.company?.id || null;
       const originalCompanyId = ctx.fd.company_id || null;
-      if (currentCompanyId !== originalCompanyId) {
-        fields.company_id = currentCompanyId;
+      if (resolvedCompanyId !== originalCompanyId) {
+        fdContactFields.company_id = resolvedCompanyId;
       }
-      await updateContact(ctx.accountId, ctx.contactId, fields);
-      cacheRequester(ctx.accountId, { id: ctx.contactId, name: fields.name, email: fields.email, phone: fields.phone, mobile: fields.mobile });
+      await updateContact(ctx.accountId, ctx.contactId, fdContactFields);
+      cacheRequester(ctx.accountId, { id: ctx.contactId, name: fdContactFields.name, email: fdContactFields.email, phone: fdContactFields.phone, mobile: fdContactFields.mobile });
       if (CURRENT_TICKET && CURRENT_TICKET.requester_id === ctx.contactId) {
-        CURRENT_TICKET.requester = Object.assign({}, CURRENT_TICKET.requester || {}, fields);
+        CURRENT_TICKET.requester = Object.assign({}, CURRENT_TICKET.requester || {}, fdContactFields);
       }
-      Object.assign(ctx.fd, fields);
-      if ('company_id' in fields) ctx.fd.company_id = fields.company_id;
-      log.push({ ok: true, label: 'FD-Kontakt gespeichert' });
+      Object.assign(ctx.fd, fdContactFields);
+      if ('company_id' in fdContactFields) ctx.fd.company_id = fdContactFields.company_id;
+      log.push('FD-Kontakt ✓');
     }
   } catch (e) {
     errs.push('FD-Kontakt: ' + e.message);
-    log.push({ ok: false, label: 'FD-Kontakt fehlgeschlagen' });
+    log.push('FD-Kontakt ✗');
   }
 
-  // ---------- Phase 3: Freshsales-Konto (nur wenn FS verbunden) ----------
-  let newFsAccountId = null;
+  // ---------- Phase 3+4: Freshsales (nur wenn verbunden) ----------
   if (ctx.hasFreshsales) {
-    try {
-      if (ctx.fsAccount?.id) {
-        // Update bestehendes Konto mit den Edit-Felder-Werten
-        const fields = {
-          name:    ($('fsAccountName')?.value    || '').trim() || ctx.fsAccount.name,
-          phone:   ($('fsAccountPhone')?.value   || '').trim() || null,
-          website: ($('fsAccountWebsite')?.value || '').trim() || null,
-          address: ($('fsAccountAddress')?.value || '').trim() || null,
-          city:    ($('fsAccountCity')?.value    || '').trim() || null,
-          zipcode: ($('fsAccountZipcode')?.value || '').trim() || null,
-          state:   ($('fsAccountState')?.value   || '').trim() || null,
-          country: ($('fsAccountCountry')?.value || '').trim() || null,
+    // 3. FS-Konto
+    let resolvedFsAccountId = ctx.fsAccount?.id || null;
+    if (co.name) {
+      try {
+        const fsAccountFields = {
+          name:    co.name,
+          phone:   co.phone || null,
+          website: co.website || null,
+          address: co.street || null,
+          city:    co.city || null,
+          zipcode: co.zipcode || null,
+          country: co.country || null,
         };
-        await updateFreshsalesSalesAccount(ctx.accountId, ctx.fsAccount.id, fields);
-        Object.assign(ctx.fsAccount, fields);
-        newFsAccountId = ctx.fsAccount.id;
-        log.push({ ok: true, label: 'FS-Konto gespeichert' });
-      } else {
-        // Anlegen — Name aus Such-Feld, KI-Vorschlag oder FD-Firma als Quelle
-        const name = (ctx.fsAccountSearchQuery
-                   || ctx.suggestions?.fsAccount?.name?.value
-                   || ctx.suggestions?.fdCompany?.name?.value
-                   || ctx.company?.name
-                   || '').trim();
-        if (name) {
-          // Adress-Splitting aus FD-Address (falls vorhanden)
-          const addrLines = String(ctx.fd?.address || '').split('\n').map(s => s.trim()).filter(Boolean);
-          const countryLine = addrLines.find(l => /(deutschland|germany|österreich|austria|schweiz|switzerland)$/i.test(l)) || '';
-          const zipCityLine = addrLines.find(l => /^\d{4,5}\s/.test(l)) || '';
-          const zipMatch = zipCityLine.match(/^(\d{4,5})\s+(.+)$/);
-          const extra = {};
-          if (ctx.fd?.phone) extra.phone = ctx.fd.phone;
-          if (zipMatch) { extra.zipcode = zipMatch[1]; extra.city = zipMatch[2]; }
-          const street = addrLines.find(l => l !== zipCityLine && l !== countryLine);
-          if (street) extra.address = street;
-          if (countryLine) extra.country = countryLine;
-          const created = await createFreshsalesSalesAccount(ctx.accountId, name, extra);
-          if (created?.id) {
-            ctx.fsAccount = created;
-            newFsAccountId = created.id;
-            log.push({ ok: true, label: 'FS-Konto „' + (created.name || name) + '" angelegt' });
-          }
-        }
-      }
-    } catch (e) {
-      errs.push('FS-Konto: ' + e.message);
-      log.push({ ok: false, label: 'FS-Konto fehlgeschlagen' });
-    }
-  }
-
-  // ---------- Phase 4: Freshsales-Kontakt ----------
-  if (ctx.hasFreshsales) {
-    try {
-      if (ctx.fs?.id) {
-        // Update bestehender FS-Contact
-        const fields = {
-          first_name:    ($('fsFirstName')?.value || '').trim() || null,
-          last_name:     ($('fsLastName')?.value || '').trim() || null,
-          display_name:  ($('fsDisplayName')?.value || '').trim() || null,
-          email:         ($('fsEmail')?.value || '').trim() || null,
-          work_number:   ($('fsWorkPhone')?.value || '').trim() || null,
-          mobile_number: ($('fsMobile')?.value || '').trim() || null,
-          job_title:     ($('fsJob')?.value || '').trim() || null,
-          address:       ($('fsAddress')?.value || '').trim() || null,
-          city:          ($('fsCity')?.value || '').trim() || null,
-          zipcode:       ($('fsZipcode')?.value || '').trim() || null,
-          state:         ($('fsState')?.value || '').trim() || null,
-          country:       ($('fsCountry')?.value || '').trim() || null,
-        };
-        // Verknüpfung zum Sales-Account (falls neu/geändert)
-        const currentSaId = newFsAccountId || ctx.fsAccount?.id || null;
-        const prev = ctx.fs.sales_accounts || [];
-        const prevPrimary = Array.isArray(prev) ? (prev.find(x => x.is_primary) || prev[0]) : null;
-        const prevSaId = prevPrimary?.id || null;
-        if (currentSaId !== prevSaId) {
-          fields.sales_accounts = currentSaId ? [{ id: currentSaId, is_primary: true }] : [];
-        }
-        await freshsalesUpdateContact(ctx.accountId, ctx.fs.id, fields);
-        Object.assign(ctx.fs, fields);
-        log.push({ ok: true, label: 'FS-Kontakt gespeichert' });
-      } else if (ctx.fd?.email) {
-        // Anlegen — aus FD-Kontakt + ggf. KI-Vorschlägen (Name-Split + Adresse)
-        // Wir reusen die bestehende Logik in createFreshsalesContactFromFd-style INLINE,
-        // damit auch der frische sales_account-Link gleich mit reingeht.
-        const rawName = (ctx.fd.name || '').trim();
-        let firstName = '', lastName = '';
-        if (rawName.includes(',')) {
-          const [l, f] = rawName.split(',').map(s => s.trim());
-          lastName = l || ''; firstName = f || '';
+        if (resolvedFsAccountId) {
+          await updateFreshsalesSalesAccount(ctx.accountId, resolvedFsAccountId, fsAccountFields);
+          Object.assign(ctx.fsAccount, fsAccountFields);
+          log.push('FS-Konto ✓');
         } else {
-          const parts = rawName.split(/\s+/);
-          if (parts.length > 1) { lastName = parts.pop(); firstName = parts.join(' '); }
-          else lastName = rawName;
-        }
-        if (!lastName) lastName = ctx.fd.email.split('@')[0];
-        const addrLines = String(ctx.fd.address || '').split('\n').map(s => s.trim()).filter(Boolean);
-        const countryLine = addrLines.find(l => /(deutschland|germany|österreich|austria|schweiz|switzerland)$/i.test(l)) || '';
-        const zipCityLine = addrLines.find(l => /^\d{4,5}\s/.test(l)) || '';
-        const zipMatch = zipCityLine.match(/^(\d{4,5})\s+(.+)$/);
-        const zipcode = zipMatch?.[1] || '';
-        const city    = zipMatch?.[2] || '';
-        const street  = addrLines.find(l => l !== zipCityLine && l !== countryLine) || '';
-        const fields = {
-          first_name:    firstName || null,
-          last_name:     lastName,
-          display_name:  rawName || (firstName + ' ' + lastName).trim(),
-          email:         ctx.fd.email,
-          work_number:   ctx.fd.phone || null,
-          mobile_number: ctx.fd.mobile || null,
-          job_title:     ctx.fd.job_title || null,
-          address:       street || null,
-          city:          city || null,
-          zipcode:       zipcode || null,
-          country:       countryLine || null,
-        };
-        const saId = newFsAccountId || ctx.fsAccount?.id;
-        if (saId) fields.sales_accounts = [{ id: saId, is_primary: true }];
-        const created = await createFreshsalesContact(ctx.accountId, fields);
-        if (created?.id) {
-          ctx.fs = created;
-          // Wenn FS-Konto im POST mit sales_accounts gesetzt wurde, lade Account-Details
-          if (saId && !ctx.fsAccount) {
-            try {
-              const acc = await fetchFreshsalesSalesAccountById(ctx.accountId, saId);
-              if (acc) ctx.fsAccount = acc;
-            } catch (_) {}
+          const created = await createFreshsalesSalesAccount(ctx.accountId, co.name, {
+            phone:   co.phone || undefined,
+            website: co.website || undefined,
+            address: co.street || undefined,
+            city:    co.city || undefined,
+            zipcode: co.zipcode || undefined,
+            country: co.country || undefined,
+          });
+          if (created?.id) {
+            resolvedFsAccountId = created.id;
+            ctx.fsAccount = created;
+            log.push('FS-Konto angelegt');
           }
-          log.push({ ok: true, label: 'FS-Kontakt #' + created.id + ' angelegt' });
         }
+      } catch (e) {
+        errs.push('FS-Konto: ' + e.message);
+        log.push('FS-Konto ✗');
       }
-    } catch (e) {
-      errs.push('FS-Kontakt: ' + e.message);
-      log.push({ ok: false, label: 'FS-Kontakt fehlgeschlagen' });
+    }
+
+    // 4. FS-Kontakt
+    if (cn.email || cn.last_name || cn.first_name) {
+      try {
+        const fsContactFields = {
+          first_name:    cn.first_name || null,
+          last_name:     cn.last_name || cn.email?.split('@')[0] || 'Unbekannt',
+          display_name:  ((cn.first_name || '') + ' ' + (cn.last_name || '')).trim() || null,
+          email:         cn.email || null,
+          work_number:   cn.work_phone || null,
+          mobile_number: cn.mobile || null,
+          job_title:     cn.job_title || null,
+          address:       co.street || null,
+          city:          co.city || null,
+          zipcode:       co.zipcode || null,
+          country:       co.country || null,
+        };
+        if (ctx.fs?.id) {
+          // Update mit ggf. neuer Konto-Verknüpfung
+          const prevSa = (ctx.fs.sales_accounts || [])[0];
+          const prevSaId = prevSa?.id || null;
+          if (resolvedFsAccountId !== prevSaId) {
+            fsContactFields.sales_accounts = resolvedFsAccountId ? [{ id: resolvedFsAccountId, is_primary: true }] : [];
+          }
+          await freshsalesUpdateContact(ctx.accountId, ctx.fs.id, fsContactFields);
+          Object.assign(ctx.fs, fsContactFields);
+          log.push('FS-Kontakt ✓');
+        } else if (cn.email) {
+          // Anlegen — direkt mit Sales-Account-Verknüpfung
+          if (resolvedFsAccountId) {
+            fsContactFields.sales_accounts = [{ id: resolvedFsAccountId, is_primary: true }];
+          }
+          const created = await createFreshsalesContact(ctx.accountId, fsContactFields);
+          if (created?.id) {
+            ctx.fs = created;
+            ctx._fsError = null;
+            log.push('FS-Kontakt angelegt');
+          }
+        }
+      } catch (e) {
+        errs.push('FS-Kontakt: ' + e.message);
+        log.push('FS-Kontakt ✗');
+      }
     }
   }
 
   setBusy(btnEl, false);
+
+  // Master refreshen mit den jetzt aktuellen Daten
+  _consolidateContactMaster(ctx);
   renderContactEditBody();
 
-  // UI-Feedback
-  const okCount = log.filter(l => l.ok).length;
-  const errCount = log.filter(l => !l.ok).length;
   if (errs.length) {
-    toast('✅ ' + okCount + ' OK · ❌ ' + errCount + ' Fehler: ' + errs.slice(0, 2).join(' | '), 'error', 12000);
-  } else if (okCount) {
-    toast('✅ ' + okCount + ' Objekt' + (okCount === 1 ? '' : 'e') + ' gespeichert: ' + log.map(l => l.label).join(' · '), 'success', 6000);
+    toast(log.join(' · ') + ' — Details: ' + errs.slice(0, 2).join(' | '), 'warn', 10000);
+  } else if (log.length) {
+    toast('✅ ' + log.join(' · '), 'success', 5000);
   } else {
-    toast('Nichts zu speichern — alle Felder unverändert oder leer', 'warn', 3500);
+    toast('Nichts zu speichern — alle Felder leer', 'warn', 3500);
   }
   if (CURRENT_TICKET && CURRENT_TICKET.requester_id === ctx.contactId) {
     renderTicketDetailBody(CURRENT_TICKET);
@@ -4405,16 +4420,11 @@ function _helpSections() {
       title: 'Kontakt-Daten bearbeiten',
       subtitle: 'KI + manuell',
       body: `
-        <p>Im Ticket-Detail: <b>„Kontakt bearbeiten"</b> beim Anfragenden. Modal zeigt <b>vier eigenständige Kacheln</b> untereinander:</p>
-        <ol class="list-decimal pl-5 text-[13px] space-y-1">
-          <li><b>Freshdesk-Kontakt</b> — Name, Email, Telefone, Job, Adresse</li>
-          <li><b>Freshdesk-Kunde</b> — Firma (Name, Domains, Branche, Beschreibung, Notiz)</li>
-          <li><b>Freshsales-Kontakt</b> — CRM-Kontakt-Felder (nur wenn FS verbunden)</li>
-          <li><b>Freshsales-Kunde</b> — Sales Account (Name, Adresse, Telefon, Website)</li>
-        </ol>
-        <p>Jede Kachel hat <b>eigene Suche, eigene Edit-Felder und eigenen Speichern-Button</b>. Die Verknüpfung Kontakt ↔ Kunde wird <b>sofort beim Auswählen/Anlegen</b> persistiert (kein extra Speichern nötig).</p>
-        <p><b>KI-Vervollständigung:</b> Beim Öffnen analysiert Claude das Ticket (Subject + Anfragen + <b>Email-Signaturen</b>) und schlägt Werte vor — pro Feld lila Banner mit Quelle und „Übernehmen"-Button. „Alle (X)" für Bulk-Übernahme.</p>
-        <p><b>Verknüpfungs-Indikator</b> (dünne Linie zwischen Kontakt und Kunde) zeigt auf einen Blick, ob beide gepaart sind.</p>`,
+        <p>Im Ticket-Detail: <b>„Kontakt bearbeiten"</b> beim Anfragenden. Modal zeigt <b>eine Stammdaten-Sektion</b> (Firma + Anfragende Person) als zentrale Single Source of Truth — keine 4 verschachtelten Kacheln mehr.</p>
+        <p><b>KI-Zauberbutton</b> oben: analysiert Ticket-Verlauf + Email-Signaturen + alle bestehenden Daten, schlägt für leere Felder Werte vor (pro-Feld lila Banner mit Quelle + „Übernehmen"). „Alle (X)" für Bulk.</p>
+        <p><b>⚡ Alles speichern + verteilen:</b> EIN Button verteilt die Stammdaten in alle Systeme parallel — FD-Firma, FD-Kontakt, FS-Konto (CRM), FS-Kontakt (CRM). Resilient gegen Duplikate, mit Lookup-Fallback.</p>
+        <p><b>System-Status-Box</b> unten zeigt Verknüpfungen mit IDs + bietet „Anlegen"-Buttons wenn z.B. FS-Kontakt noch nicht existiert.</p>
+        <p><b>Branche</b> ist ein Dropdown mit den 26 Freshdesk-Standard-Werten (kein Freitext, sonst HTTP 400).</p>`,
     },
     {
       icon: 'search', color: 'brand',
