@@ -267,7 +267,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.37.4';
+const APP_VERSION = 'v2.37.5';
 // Read-Token absichtlich gesplittet, damit GitHub Secret-Scanning beim Push nicht blockt.
 // Der Token ist read-only und Base-scoped → bewusst eingebettet (Architektur-Entscheidung).
 const _RK = 'patu8KWM8aWB' + 'yxCGL.69fae5d9fa4b94c2' + '66b426dadd71a51f574945d840b33569058ab5e9d89ebef3';
@@ -1957,23 +1957,35 @@ async function freshsalesUpdateContact(accountId, contactId, fields) {
    zurückgeliefert, damit der Aufrufer keinen separaten Retry braucht. */
 /* Extrahiert aus einer Freshsales-Validation-Fehlermeldung die fehlenden Pflicht-Custom-Field-
    Namen. Beispiel-Input: '{"code":400,"message":["Zum Abschicken des Formulars müssen Sie
-   dieses Kontakt-ID ausfüllen.","Zum Abschicken müssen Sie Branche ausfüllen."]}'
-   Output: Array von normalisierten cf-Field-Namen: ['cf_kontakt_id', 'cf_branche'] */
+   dieses Kontakt-ID ausfüllen."]}'
+   Output: Array von {label, names: [...]} — names sind MEHRERE plausible cf-Varianten
+   weil Freshsales die Field-Namen nach unterschiedlichen Mustern erzeugt:
+   „Kontakt-ID" könnte cf_kontakt_id, cf_kontaktid, cf_kontaktidcf_contact_id usw. heißen. */
 function _extractRequiredCfNames(errMsg) {
   const s = String(errMsg || '');
   const matches = [];
-  // Deutsche + englische Variante
   const re = /müssen Sie dieses ([^"]+?) ausfüllen|must fill in this ([^"]+)/gi;
   let m;
   while ((m = re.exec(s)) !== null) {
     const label = (m[1] || m[2] || '').trim();
     if (!label) continue;
-    // „Kontakt-ID" → „cf_kontakt_id", „Branche" → „cf_branche"
-    const norm = 'cf_' + label.toLowerCase()
-      .replace(/[äöüÄÖÜß]/g, c => ({ä:'ae',ö:'oe',ü:'ue',Ä:'ae',Ö:'oe',Ü:'ue',ß:'ss'}[c] || c))
-      .replace(/[^a-z0-9]+/g, '_')
-      .replace(/^_+|_+$/g, '');
-    matches.push({ label, name: norm });
+    const lower = label.toLowerCase()
+      .replace(/[äöüÄÖÜß]/g, c => ({ä:'ae',ö:'oe',ü:'ue',Ä:'ae',Ö:'oe',Ü:'ue',ß:'ss'}[c] || c));
+    const variants = new Set();
+    // Variante A: alle Sonderzeichen → Underscore (cf_kontakt_id)
+    variants.add('cf_' + lower.replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, ''));
+    // Variante B: Sonderzeichen weg, kein Separator (cf_kontaktid)
+    variants.add('cf_' + lower.replace(/[^a-z0-9]/g, ''));
+    // Variante C: Bindestriche bleiben (cf_kontakt-id) — selten, aber möglich
+    variants.add('cf_' + lower.replace(/[^a-z0-9-]/g, '_').replace(/^_+|_+$/g, ''));
+    // Spezial-Aliase für häufige Labels
+    if (/kontakt.?id/i.test(label)) {
+      variants.add('cf_kontaktid');
+      variants.add('cf_kontakt_id');
+      variants.add('cf_contact_id');
+      variants.add('cf_contactid');
+    }
+    matches.push({ label, names: Array.from(variants) });
   }
   return matches;
 }
@@ -2015,16 +2027,17 @@ async function createFreshsalesContact(accountId, fields) {
     // 400 mit „müssen Sie X ausfüllen" → Pflicht-Custom-Fields auto-befüllen + Retry
     const required = _extractRequiredCfNames(errMsg);
     if (required.length) {
-      console.warn('FS-Contact: Pflicht-Custom-Fields erkannt, befülle mit Platzhalter:', required.map(r => r.name).join(', '));
+      const allNames = required.flatMap(r => r.names);
+      console.warn('FS-Contact: Pflicht-Custom-Fields erkannt, befülle ALLE Varianten mit Platzhalter:', allNames.join(', '));
       const cfPlaceholder = Object.assign({}, cleaned.custom_field || {});
-      // Standard-Platzhalter: Email für ID-artige Felder, „—" sonst
+      // Für jeden erkannten Pflicht-Custom-Field: setze ALLE plausible Field-Namen-Varianten
+      // — Freshsales akzeptiert das passende und ignoriert die anderen (graceful)
       required.forEach(r => {
-        if (cfPlaceholder[r.name]) return;
-        if (/id|nummer|number/i.test(r.label)) {
-          cfPlaceholder[r.name] = cleaned.email || cleaned.last_name || 'TBD';
-        } else {
-          cfPlaceholder[r.name] = '—';
-        }
+        const isIdField = /id|nummer|number/i.test(r.label);
+        const placeholder = isIdField
+          ? (cleaned.email || cleaned.last_name || 'TBD')
+          : '—';
+        r.names.forEach(n => { if (!cfPlaceholder[n]) cfPlaceholder[n] = placeholder; });
       });
       const retryFields = Object.assign({}, cleaned, { custom_field: cfPlaceholder });
       try {
@@ -2041,6 +2054,14 @@ async function createFreshsalesContact(accountId, fields) {
             const existing = await freshsalesLookupContact(accountId, cleaned.email);
             if (existing) return existing;
           } catch (_) {}
+        }
+        // Wenn der Retry NOCH IMMER mit demselben „ausfüllen"-Fehler scheitert: heißt der Field-Name
+        // ist anders als unsere Varianten. User-freundliche Meldung mit dem Label, damit der User weiß
+        // welches Feld in Freshsales angepasst werden muss.
+        const msg2 = String(e2?.message || '');
+        if (_extractRequiredCfNames(msg2).length) {
+          const labels = required.map(r => '„' + r.label + '"').join(', ');
+          throw new Error('Freshsales fordert Pflicht-Felder ' + labels + ' aber unsere automatischen Platzhalter werden nicht akzeptiert. Bitte das Custom-Field in Freshsales auf „optional" stellen ODER manuell anlegen mit ID-Wert. Original: ' + msg2.slice(0, 200));
         }
         throw e2;
       }
