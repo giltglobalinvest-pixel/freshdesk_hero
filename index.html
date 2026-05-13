@@ -267,7 +267,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.30.2';
+const APP_VERSION = 'v2.31.0';
 // Read-Token absichtlich gesplittet, damit GitHub Secret-Scanning beim Push nicht blockt.
 // Der Token ist read-only und Base-scoped → bewusst eingebettet (Architektur-Entscheidung).
 const _RK = 'patu8KWM8aWB' + 'yxCGL.69fae5d9fa4b94c2' + '66b426dadd71a51f574945d840b33569058ab5e9d89ebef3';
@@ -2210,11 +2210,11 @@ async function openContactEditModal(accountId, contactId, opts) {
   try {
     // Freshdesk-Contact laden (Pflicht)
     CONTACT_EDIT_CTX.fd = await fetchContact(accountId, contactId);
-    // Falls Contact eine company_id hat: Firma-Details laden (für Anzeige)
+    // Falls Contact eine company_id hat: vollständige Firma-Details laden (für Edit-Kachel)
     if (CONTACT_EDIT_CTX.fd?.company_id) {
       try {
         const c = await fetchCompanyById(accountId, CONTACT_EDIT_CTX.fd.company_id);
-        if (c) CONTACT_EDIT_CTX.company = { id: c.id, name: c.name || '(unbenannt)' };
+        if (c) CONTACT_EDIT_CTX.company = c;
       } catch (_) {}
     }
     CONTACT_EDIT_CTX.companySearchResults = [];
@@ -2229,7 +2229,7 @@ async function openContactEditModal(accountId, contactId, opts) {
         if (primary?.id) {
           try {
             const det = await fetchFreshsalesSalesAccountById(accountId, primary.id);
-            if (det) CONTACT_EDIT_CTX.fsAccount = { id: det.id, name: det.name || '(unbenannt)' };
+            if (det) CONTACT_EDIT_CTX.fsAccount = det;
           } catch (_) {}
         }
       } catch (e) {
@@ -2330,7 +2330,7 @@ function acceptAllContactSuggestions() {
     }
   });
   renderContactEditBody();
-  if (count) toast(count + ' Vorschlag' + (count===1?'':'e') + ' übernommen — jetzt noch „Im Freshdesk speichern"', 'success', 4000);
+  if (count) toast(count + ' Vorschlag' + (count===1?'':'e') + ' übernommen — jetzt „Kontakt im Freshdesk speichern" (bzw. „Firma im Freshdesk speichern") tippen', 'success', 4500);
 }
 
 function closeContactEditModal() {
@@ -2411,9 +2411,16 @@ function renderContactEditBody() {
               <input id="fsCountry" type="text" value="${escapeAttr(fs.country || '')}" class="w-full mt-1 px-2 py-1.5 border border-purple-200 bg-white rounded text-sm">
             </div>
           </div>
-          ${_freshsalesAccountBlock(ctx)}
+          ${ctx.fsAccount ? `
+            <div class="mt-1 px-2 py-1.5 bg-purple-50 border border-purple-200 rounded flex items-center gap-2 text-[11px]">
+              <i data-lucide="briefcase" class="w-3.5 h-3.5 text-purple-700 shrink-0"></i>
+              <span class="text-purple-900 truncate flex-1">Verknüpft mit Konto: <b>${escapeHtml(ctx.fsAccount.name || '(unbenannt)')}</b></span>
+              <span class="text-ink-500 shrink-0">#${ctx.fsAccount.id}</span>
+            </div>` : `
+            <p class="text-[10px] text-ink-500 italic mt-1"><i data-lucide="link-2-off" class="w-3 h-3 inline"></i> Kein Konto verknüpft — unten in der Konto-Kachel suchen oder anlegen.</p>
+          `}
           <button type="button" onclick="saveFreshsalesContact(this)" class="w-full mt-2 bg-purple-600 hover:bg-purple-700 text-white px-3 py-2 rounded-lg text-sm font-semibold inline-flex items-center justify-center gap-1.5">
-            <i data-lucide="save" class="w-4 h-4"></i> Im Freshsales speichern
+            <i data-lucide="save" class="w-4 h-4"></i> Kontakt im Freshsales speichern
           </button>
         </div>` : `
         <p class="text-[11px] text-ink-600 italic">${ctx._fsError ? 'Freshsales-Lookup fehlgeschlagen: ' + escapeHtml(ctx._fsError) : 'Kein Freshsales-Contact mit der Email ' + escapeHtml(c.email || '?') + ' gefunden.'}</p>
@@ -2474,7 +2481,7 @@ function renderContactEditBody() {
                 ? (suggOpen
                   ? `<p class="text-[11px] text-purple-700">${suggOpen} Vorschlag${suggOpen===1?'':'e'} unter den Feldern — einzeln oder alle übernehmen.</p>`
                   : (suggAccepted > 0
-                    ? `<p class="text-[11px] text-emerald-700"><i data-lucide="check-circle-2" class="w-3 h-3 inline"></i> ${suggAccepted} Vorschlag${suggAccepted===1?'':'e'} übernommen — jetzt unten „Im Freshdesk speichern" tippen.</p>`
+                    ? `<p class="text-[11px] text-emerald-700"><i data-lucide="check-circle-2" class="w-3 h-3 inline"></i> ${suggAccepted} Vorschlag${suggAccepted===1?'':'e'} übernommen — jetzt in der jeweiligen Kachel den Speichern-Button tippen.</p>`
                     : `<p class="text-[11px] text-emerald-700">Alle Felder sehen bereits gut aus — keine Vervollständigung nötig.</p>`))
                 : `<p class="text-[11px] text-ink-500">Aus dem Ticket-Kontext werden Vorschläge generiert…</p>`}
         </div>
@@ -2493,67 +2500,101 @@ function renderContactEditBody() {
       <p class="text-[11px] text-ink-600"><i data-lucide="info" class="w-3 h-3 inline text-ink-400"></i> Für KI-Vervollständigung den Kontakt aus einem Ticket heraus öffnen — dann analysiert die KI Subject, Anfragen und Email-Signaturen.</p>
     </div>` : '';
 
+  // Verknüpfungs-Indikator zwischen Kontakt- und Kunden-Kachel (visueller Anker)
+  const linkIndicator = (color, fromLabel, toLabel, linked) => `
+    <div class="flex items-center gap-2 py-0.5 px-3 -my-1">
+      <div class="flex-1 h-px ${linked ? color === 'brand' ? 'bg-brand-300' : 'bg-purple-300' : 'bg-ink-200 border-dashed'}"></div>
+      <span class="text-[10px] font-semibold uppercase tracking-wider ${linked ? color === 'brand' ? 'text-brand-700' : 'text-purple-700' : 'text-ink-400'} flex items-center gap-1">
+        <i data-lucide="${linked ? 'link' : 'link-2-off'}" class="w-3 h-3"></i>
+        ${linked ? fromLabel + ' ↔ ' + toLabel : 'nicht verknüpft'}
+      </span>
+      <div class="flex-1 h-px ${linked ? color === 'brand' ? 'bg-brand-300' : 'bg-purple-300' : 'bg-ink-200 border-dashed'}"></div>
+    </div>`;
+
+  // Freshdesk-Kontakt-Kachel (ohne Firma-Sub-Block — die Firma hat eine eigene Kachel darunter)
+  const fdContactCard = `
+    <div class="bg-white border-2 border-brand-200 rounded-2xl p-4">
+      <div class="flex items-center gap-2 mb-3">
+        <i data-lucide="user" class="w-4 h-4 text-brand-700"></i>
+        <h3 class="font-semibold text-ink-900 text-sm">Freshdesk-Kontakt</h3>
+        <span class="ml-auto text-[10px] text-brand-700 bg-brand-100 px-1.5 py-0.5 rounded font-semibold uppercase tracking-wider">Contact #${c.id || '?'}</span>
+      </div>
+      <div class="space-y-2 text-xs">
+        <div>
+          <label class="text-[10px] uppercase font-semibold text-brand-800 block">Name</label>
+          <input id="fdName" type="text" value="${escapeAttr(c.name || '')}" class="w-full mt-1 px-2 py-1.5 border border-brand-200 bg-white rounded text-sm">
+          ${sBan('name', c.name)}
+        </div>
+        <div>
+          <label class="text-[10px] uppercase font-semibold text-brand-800 block">Email</label>
+          <input id="fdEmail" type="email" value="${escapeAttr(c.email || '')}" class="w-full mt-1 px-2 py-1.5 border border-brand-200 bg-white rounded text-sm">
+          ${sBan('email', c.email)}
+        </div>
+        <div class="grid grid-cols-2 gap-2">
+          <div>
+            <label class="text-[10px] uppercase font-semibold text-brand-800 block">Festnetz</label>
+            <input id="fdPhone" type="tel" value="${escapeAttr(c.phone || '')}" class="w-full mt-1 px-2 py-1.5 border border-brand-200 bg-white rounded text-sm font-mono">
+            ${sBan('phone', c.phone)}
+          </div>
+          <div>
+            <label class="text-[10px] uppercase font-semibold text-brand-800 block">Mobil</label>
+            <input id="fdMobile" type="tel" value="${escapeAttr(c.mobile || '')}" class="w-full mt-1 px-2 py-1.5 border border-brand-200 bg-white rounded text-sm font-mono">
+            ${sBan('mobile', c.mobile)}
+          </div>
+        </div>
+        <div>
+          <label class="text-[10px] uppercase font-semibold text-brand-800 block">Job-Titel</label>
+          <input id="fdJob" type="text" value="${escapeAttr(c.job_title || '')}" class="w-full mt-1 px-2 py-1.5 border border-brand-200 bg-white rounded text-sm">
+          ${sBan('job_title', c.job_title)}
+        </div>
+        <div>
+          <label class="text-[10px] uppercase font-semibold text-brand-800 block">Adresse</label>
+          <textarea id="fdAddress" rows="2" class="w-full mt-1 px-2 py-1.5 border border-brand-200 bg-white rounded text-sm resize-none">${escapeHtml(c.address || '')}</textarea>
+          ${sBan('address', c.address)}
+        </div>
+        ${ctx.company ? `
+          <div class="mt-1 px-2 py-1.5 bg-brand-50 border border-brand-200 rounded flex items-center gap-2 text-[11px]">
+            <i data-lucide="building-2" class="w-3.5 h-3.5 text-brand-700 shrink-0"></i>
+            <span class="text-brand-900 truncate flex-1">Verknüpft mit Firma: <b>${escapeHtml(ctx.company.name || '(unbenannt)')}</b></span>
+            <span class="text-ink-500 shrink-0">#${ctx.company.id}</span>
+          </div>` : `
+          <p class="text-[10px] text-ink-500 italic mt-1"><i data-lucide="link-2-off" class="w-3 h-3 inline"></i> Keine Firma verknüpft — unten in der Kunden-Kachel suchen oder anlegen.</p>
+        `}
+        <button type="button" onclick="saveFreshdeskContact(this)" class="w-full mt-2 bg-brand-600 hover:bg-brand-700 text-white px-3 py-2 rounded-lg text-sm font-semibold inline-flex items-center justify-center gap-1.5">
+          <i data-lucide="save" class="w-4 h-4"></i> Kontakt im Freshdesk speichern
+        </button>
+      </div>
+    </div>`;
+
   $('contactEditBody').innerHTML = `
     <div class="space-y-3 max-w-2xl mx-auto">
       ${aiTopBlock || noTicketHint}
 
-      <!-- Freshdesk-Block -->
-      <div class="bg-white border-2 border-brand-200 rounded-2xl p-4">
-        <div class="flex items-center gap-2 mb-3">
-          <i data-lucide="user" class="w-4 h-4 text-brand-700"></i>
-          <h3 class="font-semibold text-ink-900 text-sm">Freshdesk-Kontakt</h3>
-          <span class="ml-auto text-[10px] text-brand-700 bg-brand-100 px-1.5 py-0.5 rounded font-semibold uppercase tracking-wider">Contact #${c.id || '?'}</span>
-        </div>
-        <div class="space-y-2 text-xs">
-          <div>
-            <label class="text-[10px] uppercase font-semibold text-brand-800 block">Name</label>
-            <input id="fdName" type="text" value="${escapeAttr(c.name || '')}" class="w-full mt-1 px-2 py-1.5 border border-brand-200 bg-white rounded text-sm">
-            ${sBan('name', c.name)}
-          </div>
-          <div>
-            <label class="text-[10px] uppercase font-semibold text-brand-800 block">Email</label>
-            <input id="fdEmail" type="email" value="${escapeAttr(c.email || '')}" class="w-full mt-1 px-2 py-1.5 border border-brand-200 bg-white rounded text-sm">
-            ${sBan('email', c.email)}
-          </div>
-          <div class="grid grid-cols-2 gap-2">
-            <div>
-              <label class="text-[10px] uppercase font-semibold text-brand-800 block">Festnetz</label>
-              <input id="fdPhone" type="tel" value="${escapeAttr(c.phone || '')}" class="w-full mt-1 px-2 py-1.5 border border-brand-200 bg-white rounded text-sm font-mono">
-              ${sBan('phone', c.phone)}
-            </div>
-            <div>
-              <label class="text-[10px] uppercase font-semibold text-brand-800 block">Mobil</label>
-              <input id="fdMobile" type="tel" value="${escapeAttr(c.mobile || '')}" class="w-full mt-1 px-2 py-1.5 border border-brand-200 bg-white rounded text-sm font-mono">
-              ${sBan('mobile', c.mobile)}
-            </div>
-          </div>
-          <div>
-            <label class="text-[10px] uppercase font-semibold text-brand-800 block">Job-Titel</label>
-            <input id="fdJob" type="text" value="${escapeAttr(c.job_title || '')}" class="w-full mt-1 px-2 py-1.5 border border-brand-200 bg-white rounded text-sm">
-            ${sBan('job_title', c.job_title)}
-          </div>
-          <div>
-            <label class="text-[10px] uppercase font-semibold text-brand-800 block">Adresse</label>
-            <textarea id="fdAddress" rows="2" class="w-full mt-1 px-2 py-1.5 border border-brand-200 bg-white rounded text-sm resize-none">${escapeHtml(c.address || '')}</textarea>
-            ${sBan('address', c.address)}
-          </div>
-          ${_companyBlock(ctx)}
-          <button type="button" onclick="saveFreshdeskContact(this)" class="w-full mt-2 bg-brand-600 hover:bg-brand-700 text-white px-3 py-2 rounded-lg text-sm font-semibold inline-flex items-center justify-center gap-1.5">
-            <i data-lucide="save" class="w-4 h-4"></i> Im Freshdesk speichern
-          </button>
-        </div>
-      </div>
+      <!-- 1. Freshdesk-Kontakt -->
+      ${fdContactCard}
+      <!-- Verknüpfungs-Indikator FD-Kontakt ↔ FD-Firma -->
+      ${linkIndicator('brand', 'Kontakt', 'Firma', !!ctx.company)}
+      <!-- 2. Freshdesk-Kunde (Firma) -->
+      ${_companyBlock(ctx)}
 
+      <!-- 3. Freshsales-Kontakt -->
       ${fsBlock}
+      ${ctx.hasFreshsales && ctx.fs ? `
+        <!-- Verknüpfungs-Indikator FS-Kontakt ↔ FS-Konto -->
+        ${linkIndicator('purple', 'FS-Kontakt', 'FS-Konto', !!ctx.fsAccount)}
+        <!-- 4. Freshsales-Kunde (Sales Account) -->
+        ${_freshsalesAccountBlock(ctx)}
+      ` : ''}
     </div>`;
   if (window.lucide) lucide.createIcons();
 }
 
-/* === Firma-Block im Contact-Edit-Modal ====================================
-   Zeigt aktuelle Firma + Search-Feld mit Autocomplete + Optionen:
-   - bestehende Firma auswählen
-   - neue Firma anlegen (wenn Search keine passenden Treffer hat)
-   - Verknüpfung entfernen */
+/* === Freshdesk-Firma-Kachel im Contact-Edit-Modal ==========================
+   Eigenständige Kachel mit:
+   - Verknüpfungs-Anzeige zur aktuellen Firma (oder Hinweis „keine Verknüpfung")
+   - Live-Suche + „Neu anlegen" (Pick/Create persistiert sofort die Verknüpfung)
+   - Edit-Felder für die verknüpfte Firma (Name, Domains, Industry, Description, Note)
+   - eigener „Firma speichern"-Button (PUT auf Firma) */
 function _companyBlock(ctx) {
   const current = ctx.company;
   const sugg = ctx.suggestions?.company;
@@ -2564,53 +2605,95 @@ function _companyBlock(ctx) {
   const trimmedQuery = query.trim();
   const exactMatch = results.find(r => r.name.toLowerCase() === trimmedQuery.toLowerCase());
   const canCreate = trimmedQuery.length >= 2 && !exactMatch && (!current || current.name.toLowerCase() !== trimmedQuery.toLowerCase());
+  const domains = Array.isArray(current?.domains) ? current.domains.join(', ') : '';
 
   return `
-    <div class="mt-1">
-      <label class="text-[10px] uppercase font-semibold text-brand-800 block">Firma</label>
-      ${current ? `
-        <div class="mt-1 px-2 py-1.5 bg-brand-50 border border-brand-200 rounded flex items-center gap-2">
-          <i data-lucide="building-2" class="w-3.5 h-3.5 text-brand-700 shrink-0"></i>
-          <span class="text-sm text-ink-900 font-medium flex-1 truncate">${escapeHtml(current.name)}</span>
-          <span class="text-[10px] text-ink-500 shrink-0">#${current.id}</span>
-          <button type="button" onclick="contactCompanyUnlink()" class="text-[11px] text-red-600 hover:underline shrink-0" title="Firma-Verknüpfung entfernen">×</button>
-        </div>
-      ` : `
-        <p class="text-[11px] text-ink-500 italic mt-1">Keine Firma verknüpft</p>
-      `}
-      <div class="mt-2">
-        <div class="relative">
-          <input type="search" id="fdCompanyQuery" value="${escapeAttr(query)}" oninput="contactCompanySearch(this.value)" placeholder="Firma suchen oder neuen Namen eingeben…" class="w-full px-2 py-1.5 pr-7 border border-ink-200 bg-white rounded text-sm focus:ring-2 focus:ring-brand-500/30 focus:border-brand-500">
-          ${busy ? '<span class="absolute right-2 top-1/2 -translate-y-1/2 spinner w-3 h-3 border-[2px] text-brand-500"></span>' : ''}
-        </div>
-        ${trimmedQuery.length >= 2 ? `
-          <div class="mt-1 max-h-44 overflow-y-auto bg-white border border-ink-200 rounded text-sm divide-y divide-ink-100">
-            ${results.length ? results.map(r => `
-              <button type="button" onclick="contactCompanyPick(${r.id}, '${escapeAttr(r.name)}')" class="w-full text-left px-2 py-1.5 active:bg-ink-100 hover:bg-ink-50 flex items-center gap-2">
-                <i data-lucide="building" class="w-3.5 h-3.5 text-ink-500 shrink-0"></i>
-                <span class="text-ink-900 truncate flex-1">${escapeHtml(r.name)}</span>
-                <span class="text-[10px] text-ink-400 shrink-0">#${r.id}</span>
+    <div class="bg-white border-2 border-brand-200 rounded-2xl p-4">
+      <div class="flex items-center gap-2 mb-3">
+        <i data-lucide="building-2" class="w-4 h-4 text-brand-700"></i>
+        <h3 class="font-semibold text-ink-900 text-sm">Freshdesk-Kunde</h3>
+        ${current
+          ? `<span class="ml-auto text-[10px] text-brand-700 bg-brand-100 px-1.5 py-0.5 rounded font-semibold uppercase tracking-wider">Company #${current.id}</span>`
+          : '<span class="ml-auto text-[10px] text-amber-700 bg-amber-100 px-1.5 py-0.5 rounded font-semibold uppercase tracking-wider">Keine Verknüpfung</span>'}
+      </div>
+
+      <div class="space-y-2 text-xs">
+        <!-- Verknüpfungs-Anzeige + Unlink -->
+        ${current ? `
+          <div class="px-2 py-1.5 bg-brand-50 border border-brand-200 rounded flex items-center gap-2">
+            <i data-lucide="link" class="w-3.5 h-3.5 text-brand-700 shrink-0"></i>
+            <span class="text-[11px] text-brand-900 font-medium flex-1 truncate">Verknüpft mit Kontakt <span class="font-mono">#${ctx.contactId}</span></span>
+            <button type="button" onclick="contactCompanyUnlink()" class="text-[11px] text-red-600 hover:underline shrink-0" title="Verknüpfung lösen">Verknüpfung lösen</button>
+          </div>
+        ` : `
+          <p class="text-[11px] text-ink-600 italic">Der Kontakt hat aktuell keine Firma. Unten suchen oder anlegen — die Verknüpfung wird sofort persistiert.</p>
+        `}
+
+        <!-- Suche -->
+        <div>
+          <label class="text-[10px] uppercase font-semibold text-brand-800 block">${current ? 'Andere Firma verknüpfen' : 'Firma suchen / anlegen'}</label>
+          <div class="relative mt-1">
+            <input type="search" id="fdCompanyQuery" value="${escapeAttr(query)}" oninput="contactCompanySearch(this.value)" placeholder="Firma suchen oder neuen Namen eingeben…" class="w-full px-2 py-1.5 pr-7 border border-ink-200 bg-white rounded text-sm focus:ring-2 focus:ring-brand-500/30 focus:border-brand-500">
+            ${busy ? '<span class="absolute right-2 top-1/2 -translate-y-1/2 spinner w-3 h-3 border-[2px] text-brand-500"></span>' : ''}
+          </div>
+          ${trimmedQuery.length >= 2 ? `
+            <div class="mt-1 max-h-44 overflow-y-auto bg-white border border-ink-200 rounded text-sm divide-y divide-ink-100">
+              ${results.length ? results.map(r => `
+                <button type="button" onclick="contactCompanyPick(${r.id}, '${escapeAttr(r.name)}')" class="w-full text-left px-2 py-1.5 active:bg-ink-100 hover:bg-ink-50 flex items-center gap-2">
+                  <i data-lucide="building" class="w-3.5 h-3.5 text-ink-500 shrink-0"></i>
+                  <span class="text-ink-900 truncate flex-1">${escapeHtml(r.name)}</span>
+                  <span class="text-[10px] text-ink-400 shrink-0">#${r.id}</span>
+                </button>
+              `).join('') : (!busy ? '<p class="px-2 py-1.5 text-[11px] text-ink-500 italic">Kein Treffer</p>' : '')}
+              ${canCreate ? `
+                <button type="button" onclick="contactCompanyCreate(this)" class="w-full text-left px-2 py-1.5 bg-emerald-50 hover:bg-emerald-100 active:bg-emerald-200 flex items-center gap-2">
+                  <i data-lucide="plus-circle" class="w-3.5 h-3.5 text-emerald-700 shrink-0"></i>
+                  <span class="text-emerald-800 font-semibold truncate flex-1">Neue Firma „${escapeHtml(trimmedQuery)}" anlegen + verknüpfen</span>
+                </button>` : ''}
+            </div>
+          ` : ''}
+          ${showSuggestion ? `
+            <div class="bg-purple-50 border border-purple-200 rounded-lg p-2 mt-1 flex items-start gap-2">
+              <i data-lucide="sparkles" class="w-3 h-3 text-purple-600 shrink-0 mt-0.5"></i>
+              <div class="flex-1 min-w-0">
+                <p class="text-[11px] text-purple-900 font-medium">KI-Vorschlag: <span class="font-semibold">${escapeHtml(sugg.value)}</span></p>
+                <p class="text-[10px] text-purple-700 italic mt-0.5">aus: ${escapeHtml(sugg.source)}</p>
+              </div>
+              <button type="button" onclick="contactCompanyAcceptSuggestion()" class="shrink-0 inline-flex items-center gap-1 px-2 py-1 bg-purple-600 hover:bg-purple-700 text-white rounded text-[10px] font-semibold">
+                <i data-lucide="arrow-down" class="w-3 h-3"></i> Suchen
               </button>
-            `).join('') : (!busy ? '<p class="px-2 py-1.5 text-[11px] text-ink-500 italic">Kein Treffer</p>' : '')}
-            ${canCreate ? `
-              <button type="button" onclick="contactCompanyCreate(this)" class="w-full text-left px-2 py-1.5 bg-emerald-50 hover:bg-emerald-100 active:bg-emerald-200 flex items-center gap-2">
-                <i data-lucide="plus-circle" class="w-3.5 h-3.5 text-emerald-700 shrink-0"></i>
-                <span class="text-emerald-800 font-semibold truncate flex-1">Neue Firma „${escapeHtml(trimmedQuery)}" anlegen</span>
-              </button>` : ''}
+            </div>` : ''}
+        </div>
+
+        <!-- Edit-Felder (nur wenn verknüpft) -->
+        ${current ? `
+          <div class="pt-2 border-t border-brand-100 space-y-2">
+            <div>
+              <label class="text-[10px] uppercase font-semibold text-brand-800 block">Firmenname</label>
+              <input id="fdCompanyName" type="text" value="${escapeAttr(current.name || '')}" class="w-full mt-1 px-2 py-1.5 border border-brand-200 bg-white rounded text-sm">
+            </div>
+            <div>
+              <label class="text-[10px] uppercase font-semibold text-brand-800 block">Domains <span class="text-ink-400 normal-case font-normal">(komma-getrennt)</span></label>
+              <input id="fdCompanyDomains" type="text" value="${escapeAttr(domains)}" placeholder="example.com, example.org" class="w-full mt-1 px-2 py-1.5 border border-brand-200 bg-white rounded text-sm">
+            </div>
+            <div>
+              <label class="text-[10px] uppercase font-semibold text-brand-800 block">Branche</label>
+              <input id="fdCompanyIndustry" type="text" value="${escapeAttr(current.industry || '')}" class="w-full mt-1 px-2 py-1.5 border border-brand-200 bg-white rounded text-sm">
+            </div>
+            <div>
+              <label class="text-[10px] uppercase font-semibold text-brand-800 block">Beschreibung</label>
+              <textarea id="fdCompanyDesc" rows="2" class="w-full mt-1 px-2 py-1.5 border border-brand-200 bg-white rounded text-sm resize-none">${escapeHtml(current.description || '')}</textarea>
+            </div>
+            <div>
+              <label class="text-[10px] uppercase font-semibold text-brand-800 block">Notiz</label>
+              <textarea id="fdCompanyNote" rows="2" class="w-full mt-1 px-2 py-1.5 border border-brand-200 bg-white rounded text-sm resize-none">${escapeHtml(current.note || '')}</textarea>
+            </div>
+            <button type="button" onclick="saveFreshdeskCompany(this)" class="w-full mt-1 bg-brand-600 hover:bg-brand-700 text-white px-3 py-2 rounded-lg text-sm font-semibold inline-flex items-center justify-center gap-1.5">
+              <i data-lucide="save" class="w-4 h-4"></i> Firma im Freshdesk speichern
+            </button>
           </div>
         ` : ''}
       </div>
-      ${showSuggestion ? `
-        <div class="bg-purple-50 border border-purple-200 rounded-lg p-2 mt-1 flex items-start gap-2">
-          <i data-lucide="sparkles" class="w-3 h-3 text-purple-600 shrink-0 mt-0.5"></i>
-          <div class="flex-1 min-w-0">
-            <p class="text-[11px] text-purple-900 font-medium">KI-Vorschlag: <span class="font-semibold">${escapeHtml(sugg.value)}</span></p>
-            <p class="text-[10px] text-purple-700 italic mt-0.5">aus: ${escapeHtml(sugg.source)}</p>
-          </div>
-          <button type="button" onclick="contactCompanyAcceptSuggestion()" class="shrink-0 inline-flex items-center gap-1 px-2 py-1 bg-purple-600 hover:bg-purple-700 text-white rounded text-[10px] font-semibold">
-            <i data-lucide="arrow-down" class="w-3 h-3"></i> Suchen
-          </button>
-        </div>` : ''}
     </div>`;
 }
 
@@ -2642,23 +2725,39 @@ function contactCompanySearch(value) {
   }, 300);
 }
 
-function contactCompanyPick(id, name) {
+/* contactCompanyPick: ausgewählte Firma direkt am Kontakt verknüpfen (PUT). */
+async function contactCompanyPick(id, name) {
   const ctx = CONTACT_EDIT_CTX;
   if (!ctx) return;
   _syncFreshdeskInputsToCtx(); // andere Inputs nicht verlieren
-  ctx.company = { id, name };
-  ctx.companySearchQuery = '';
-  ctx.companySearchResults = [];
-  renderContactEditBody();
-  toast('Firma „' + name + '" ausgewählt — jetzt unten speichern', 'success', 3000);
+  try {
+    await linkContactToCompany(id);
+    // Volle Firma-Daten nachladen (wegen Edit-Felder unten in der Kachel)
+    try {
+      const full = await fetchCompanyById(ctx.accountId, id);
+      ctx.company = full || { id, name };
+    } catch (_) { ctx.company = { id, name }; }
+    ctx.companySearchQuery = '';
+    ctx.companySearchResults = [];
+    renderContactEditBody();
+    toast('Firma „' + name + '" verknüpft', 'success', 3000);
+  } catch (e) {
+    toast('Verknüpfen fehlgeschlagen: ' + e.message, 'error', 8000);
+  }
 }
 
-function contactCompanyUnlink() {
+async function contactCompanyUnlink() {
   const ctx = CONTACT_EDIT_CTX;
   if (!ctx) return;
   _syncFreshdeskInputsToCtx();
-  ctx.company = null;
-  renderContactEditBody();
+  try {
+    await linkContactToCompany(null);
+    ctx.company = null;
+    renderContactEditBody();
+    toast('Firma entkoppelt', 'success', 2500);
+  } catch (e) {
+    toast('Entkoppeln fehlgeschlagen: ' + e.message, 'error', 8000);
+  }
 }
 
 async function contactCompanyCreate(btnEl) {
@@ -2667,15 +2766,16 @@ async function contactCompanyCreate(btnEl) {
   const name = (ctx.companySearchQuery || '').trim();
   if (!name) return toast('Firmenname fehlt', 'warn');
   _syncFreshdeskInputsToCtx();
-  setBusy(btnEl, true, 'Lege Firma an…');
+  setBusy(btnEl, true, 'Lege Firma an + verknüpfe…');
   try {
     const created = await createCompany(ctx.accountId, name);
-    ctx.company = { id: created.id, name: created.name || name };
+    await linkContactToCompany(created.id);
+    ctx.company = created;
     ctx.companySearchQuery = '';
     ctx.companySearchResults = [];
     setBusy(btnEl, false);
     renderContactEditBody();
-    toast('Firma „' + (created.name || name) + '" angelegt — jetzt unten speichern', 'success', 4000);
+    toast('Firma „' + (created.name || name) + '" angelegt + verknüpft', 'success', 4000);
   } catch (e) {
     setBusy(btnEl, false);
     toast('Firma anlegen fehlgeschlagen: ' + e.message, 'error', 8000);
@@ -2692,9 +2792,97 @@ function contactCompanyAcceptSuggestion() {
   contactCompanySearch(s.value);
 }
 
-/* === Freshsales-Sales-Account-Block im Contact-Edit-Modal ==================
-   Analog zu _companyBlock — zeigt aktuelle Sales-Account-Verknüpfung des FS-Contacts
-   + Autocomplete-Suche + „Neu anlegen". Klick auf KI-Vorschlag triggert die Suche. */
+/* === Verknüpfungs- und Edit-Save-Helper ====================================
+   Verknüpfung Kontakt ↔ Firma / Sales-Account wird SOFORT persistiert (PUT),
+   nicht erst beim großen Speichern-Button. Damit hat jede Kachel ihre eigene,
+   in-sich-geschlossene Save-Logik. */
+async function linkContactToCompany(companyId) {
+  const ctx = CONTACT_EDIT_CTX;
+  if (!ctx?.fd) return;
+  // PUT auf Contact mit company_id (null entkoppelt)
+  await updateContact(ctx.accountId, ctx.contactId, { company_id: companyId });
+  ctx.fd.company_id = companyId;
+  // CURRENT_TICKET.requester ggf. auch aktualisieren
+  if (CURRENT_TICKET && CURRENT_TICKET.requester_id === ctx.contactId) {
+    CURRENT_TICKET.requester = Object.assign({}, CURRENT_TICKET.requester || {}, { company_id: companyId });
+  }
+}
+
+async function linkContactToSalesAccount(saId) {
+  const ctx = CONTACT_EDIT_CTX;
+  if (!ctx?.fs?.id) return;
+  const body = saId
+    ? { sales_accounts: [{ id: saId, is_primary: true }] }
+    : { sales_accounts: [] };
+  await freshsalesUpdateContact(ctx.accountId, ctx.fs.id, body);
+  ctx.fs.sales_accounts = body.sales_accounts;
+}
+
+/* Speichert die Edit-Felder der aktuell verknüpften Freshdesk-Firma (PUT). */
+async function saveFreshdeskCompany(btnEl) {
+  const ctx = CONTACT_EDIT_CTX;
+  if (!ctx?.company?.id) return toast('Keine Firma verknüpft', 'warn');
+  // Domains als Array (comma- oder newline-separated)
+  const rawDomains = ($('fdCompanyDomains')?.value || '').trim();
+  const domains = rawDomains
+    ? rawDomains.split(/[\s,;]+/).map(s => s.trim()).filter(Boolean)
+    : [];
+  const fields = {
+    name:        ($('fdCompanyName')?.value || '').trim(),
+    description: ($('fdCompanyDesc')?.value || '').trim() || null,
+    note:        ($('fdCompanyNote')?.value || '').trim() || null,
+    industry:    ($('fdCompanyIndustry')?.value || '').trim() || null,
+    domains,
+  };
+  if (!fields.name) return toast('Firmenname darf nicht leer sein', 'warn');
+  setBusy(btnEl, true, 'Speichere…');
+  try {
+    const updated = await updateCompany(ctx.accountId, ctx.company.id, fields);
+    Object.assign(ctx.company, fields, { id: ctx.company.id });
+    if (updated && typeof updated === 'object') Object.assign(ctx.company, updated);
+    setBusy(btnEl, false);
+    renderContactEditBody();
+    toast('Freshdesk-Firma gespeichert', 'success', 3000);
+  } catch (e) {
+    setBusy(btnEl, false);
+    toast('Firma speichern fehlgeschlagen: ' + e.message, 'error', 8000);
+  }
+}
+
+/* Speichert die Edit-Felder des aktuell verknüpften Freshsales-Sales-Accounts (PUT). */
+async function saveFreshsalesSalesAccount(btnEl) {
+  const ctx = CONTACT_EDIT_CTX;
+  if (!ctx?.fsAccount?.id) return toast('Kein Konto verknüpft', 'warn');
+  const fields = {
+    name:    ($('fsAccountName')?.value    || '').trim(),
+    website: ($('fsAccountWebsite')?.value || '').trim() || null,
+    phone:   ($('fsAccountPhone')?.value   || '').trim() || null,
+    address: ($('fsAccountAddress')?.value || '').trim() || null,
+    city:    ($('fsAccountCity')?.value    || '').trim() || null,
+    zipcode: ($('fsAccountZipcode')?.value || '').trim() || null,
+    state:   ($('fsAccountState')?.value   || '').trim() || null,
+    country: ($('fsAccountCountry')?.value || '').trim() || null,
+  };
+  if (!fields.name) return toast('Kontoname darf nicht leer sein', 'warn');
+  setBusy(btnEl, true, 'Speichere…');
+  try {
+    await updateFreshsalesSalesAccount(ctx.accountId, ctx.fsAccount.id, fields);
+    Object.assign(ctx.fsAccount, fields);
+    setBusy(btnEl, false);
+    renderContactEditBody();
+    toast('Freshsales-Konto gespeichert', 'success', 3000);
+  } catch (e) {
+    setBusy(btnEl, false);
+    toast('Konto speichern fehlgeschlagen: ' + e.message, 'error', 8000);
+  }
+}
+
+/* === Freshsales-Konto-Kachel im Contact-Edit-Modal =========================
+   Eigenständige Kachel — Pendant zur Freshdesk-Firma-Kachel:
+   - Verknüpfungs-Anzeige zum aktuellen Sales-Account des FS-Contacts
+   - Live-Suche + „Neu anlegen" (Pick/Create persistiert sofort die Verknüpfung)
+   - Edit-Felder für das verknüpfte Konto (Name, Website, Telefon, Adresse)
+   - eigener „Konto speichern"-Button (PUT auf Sales Account) */
 function _freshsalesAccountBlock(ctx) {
   const current = ctx.fsAccount;
   const sugg = ctx.suggestions?.company;  // gleicher KI-Vorschlag wie für Freshdesk-Firma
@@ -2705,53 +2893,117 @@ function _freshsalesAccountBlock(ctx) {
   const trimmedQuery = query.trim();
   const exactMatch = results.find(r => r.name.toLowerCase() === trimmedQuery.toLowerCase());
   const canCreate = trimmedQuery.length >= 2 && !exactMatch && (!current || current.name.toLowerCase() !== trimmedQuery.toLowerCase());
+  const fsContactId = ctx.fs?.id;
 
   return `
-    <div class="mt-1 pt-2 border-t border-purple-200">
-      <label class="text-[10px] uppercase font-semibold text-purple-800 block">Konto / Firma im CRM</label>
-      ${current ? `
-        <div class="mt-1 px-2 py-1.5 bg-purple-50 border border-purple-200 rounded flex items-center gap-2">
-          <i data-lucide="briefcase" class="w-3.5 h-3.5 text-purple-700 shrink-0"></i>
-          <span class="text-sm text-ink-900 font-medium flex-1 truncate">${escapeHtml(current.name)}</span>
-          <span class="text-[10px] text-ink-500 shrink-0">#${current.id}</span>
-          <button type="button" onclick="freshsalesAccountUnlink()" class="text-[11px] text-red-600 hover:underline shrink-0" title="Konto-Verknüpfung entfernen">×</button>
-        </div>
-      ` : `
-        <p class="text-[11px] text-ink-500 italic mt-1">Kein Konto verknüpft</p>
-      `}
-      <div class="mt-2">
-        <div class="relative">
-          <input type="search" id="fsAccountQuery" value="${escapeAttr(query)}" oninput="freshsalesAccountSearch(this.value)" placeholder="Konto suchen oder neuen Namen eingeben…" class="w-full px-2 py-1.5 pr-7 border border-purple-200 bg-white rounded text-sm focus:ring-2 focus:ring-purple-500/30 focus:border-purple-500">
-          ${busy ? '<span class="absolute right-2 top-1/2 -translate-y-1/2 spinner w-3 h-3 border-[2px] text-purple-500"></span>' : ''}
-        </div>
-        ${trimmedQuery.length >= 2 ? `
-          <div class="mt-1 max-h-44 overflow-y-auto bg-white border border-purple-200 rounded text-sm divide-y divide-purple-100">
-            ${results.length ? results.map(r => `
-              <button type="button" onclick="freshsalesAccountPick(${r.id}, '${escapeAttr(r.name)}')" class="w-full text-left px-2 py-1.5 active:bg-purple-100 hover:bg-purple-50 flex items-center gap-2">
-                <i data-lucide="building" class="w-3.5 h-3.5 text-purple-500 shrink-0"></i>
-                <span class="text-ink-900 truncate flex-1">${escapeHtml(r.name)}${r.city ? '<span class="text-[10px] text-ink-500 ml-1">· ' + escapeHtml(r.city) + '</span>' : ''}</span>
-                <span class="text-[10px] text-ink-400 shrink-0">#${r.id}</span>
-              </button>
-            `).join('') : (!busy ? '<p class="px-2 py-1.5 text-[11px] text-ink-500 italic">Kein Treffer</p>' : '')}
-            ${canCreate ? `
-              <button type="button" onclick="freshsalesAccountCreate(this)" class="w-full text-left px-2 py-1.5 bg-emerald-50 hover:bg-emerald-100 active:bg-emerald-200 flex items-center gap-2">
-                <i data-lucide="plus-circle" class="w-3.5 h-3.5 text-emerald-700 shrink-0"></i>
-                <span class="text-emerald-800 font-semibold truncate flex-1">Neues Konto „${escapeHtml(trimmedQuery)}" im CRM anlegen</span>
-              </button>` : ''}
-          </div>
-        ` : ''}
+    <div class="bg-gradient-to-br from-purple-50 to-brand-50 border-2 border-purple-200 rounded-2xl p-4">
+      <div class="flex items-center gap-2 mb-3">
+        <i data-lucide="briefcase" class="w-4 h-4 text-purple-700"></i>
+        <h3 class="font-semibold text-ink-900 text-sm">Freshsales-Kunde</h3>
+        ${current
+          ? `<span class="ml-auto text-[10px] text-purple-700 bg-purple-100 px-1.5 py-0.5 rounded font-semibold uppercase tracking-wider">Sales Account #${current.id}</span>`
+          : '<span class="ml-auto text-[10px] text-amber-700 bg-amber-100 px-1.5 py-0.5 rounded font-semibold uppercase tracking-wider">Keine Verknüpfung</span>'}
       </div>
-      ${showSuggestion ? `
-        <div class="bg-purple-50 border border-purple-200 rounded-lg p-2 mt-1 flex items-start gap-2">
-          <i data-lucide="sparkles" class="w-3 h-3 text-purple-600 shrink-0 mt-0.5"></i>
-          <div class="flex-1 min-w-0">
-            <p class="text-[11px] text-purple-900 font-medium">KI-Vorschlag: <span class="font-semibold">${escapeHtml(sugg.value)}</span></p>
-            <p class="text-[10px] text-purple-700 italic mt-0.5">aus: ${escapeHtml(sugg.source)}</p>
+
+      ${!fsContactId ? `
+        <p class="text-[11px] text-ink-600 italic">Erst muss der Freshsales-Kontakt darüber gefunden/angelegt sein — dann kann ein Konto verknüpft werden.</p>
+      ` : `
+        <div class="space-y-2 text-xs">
+          <!-- Verknüpfungs-Anzeige + Unlink -->
+          ${current ? `
+            <div class="px-2 py-1.5 bg-purple-50 border border-purple-200 rounded flex items-center gap-2">
+              <i data-lucide="link" class="w-3.5 h-3.5 text-purple-700 shrink-0"></i>
+              <span class="text-[11px] text-purple-900 font-medium flex-1 truncate">Verknüpft mit FS-Contact <span class="font-mono">#${fsContactId}</span></span>
+              <button type="button" onclick="freshsalesAccountUnlink()" class="text-[11px] text-red-600 hover:underline shrink-0" title="Verknüpfung lösen">Verknüpfung lösen</button>
+            </div>
+          ` : `
+            <p class="text-[11px] text-ink-600 italic">Der FS-Contact hat aktuell kein Konto. Unten suchen oder anlegen — die Verknüpfung wird sofort persistiert.</p>
+          `}
+
+          <!-- Suche -->
+          <div>
+            <label class="text-[10px] uppercase font-semibold text-purple-800 block">${current ? 'Anderes Konto verknüpfen' : 'Konto suchen / anlegen'}</label>
+            <div class="relative mt-1">
+              <input type="search" id="fsAccountQuery" value="${escapeAttr(query)}" oninput="freshsalesAccountSearch(this.value)" placeholder="Konto suchen oder neuen Namen eingeben…" class="w-full px-2 py-1.5 pr-7 border border-purple-200 bg-white rounded text-sm focus:ring-2 focus:ring-purple-500/30 focus:border-purple-500">
+              ${busy ? '<span class="absolute right-2 top-1/2 -translate-y-1/2 spinner w-3 h-3 border-[2px] text-purple-500"></span>' : ''}
+            </div>
+            ${trimmedQuery.length >= 2 ? `
+              <div class="mt-1 max-h-44 overflow-y-auto bg-white border border-purple-200 rounded text-sm divide-y divide-purple-100">
+                ${results.length ? results.map(r => `
+                  <button type="button" onclick="freshsalesAccountPick(${r.id}, '${escapeAttr(r.name)}')" class="w-full text-left px-2 py-1.5 active:bg-purple-100 hover:bg-purple-50 flex items-center gap-2">
+                    <i data-lucide="building" class="w-3.5 h-3.5 text-purple-500 shrink-0"></i>
+                    <span class="text-ink-900 truncate flex-1">${escapeHtml(r.name)}${r.city ? '<span class="text-[10px] text-ink-500 ml-1">· ' + escapeHtml(r.city) + '</span>' : ''}</span>
+                    <span class="text-[10px] text-ink-400 shrink-0">#${r.id}</span>
+                  </button>
+                `).join('') : (!busy ? '<p class="px-2 py-1.5 text-[11px] text-ink-500 italic">Kein Treffer</p>' : '')}
+                ${canCreate ? `
+                  <button type="button" onclick="freshsalesAccountCreate(this)" class="w-full text-left px-2 py-1.5 bg-emerald-50 hover:bg-emerald-100 active:bg-emerald-200 flex items-center gap-2">
+                    <i data-lucide="plus-circle" class="w-3.5 h-3.5 text-emerald-700 shrink-0"></i>
+                    <span class="text-emerald-800 font-semibold truncate flex-1">Neues Konto „${escapeHtml(trimmedQuery)}" anlegen + verknüpfen</span>
+                  </button>` : ''}
+              </div>
+            ` : ''}
+            ${showSuggestion ? `
+              <div class="bg-purple-50 border border-purple-200 rounded-lg p-2 mt-1 flex items-start gap-2">
+                <i data-lucide="sparkles" class="w-3 h-3 text-purple-600 shrink-0 mt-0.5"></i>
+                <div class="flex-1 min-w-0">
+                  <p class="text-[11px] text-purple-900 font-medium">KI-Vorschlag: <span class="font-semibold">${escapeHtml(sugg.value)}</span></p>
+                  <p class="text-[10px] text-purple-700 italic mt-0.5">aus: ${escapeHtml(sugg.source)}</p>
+                </div>
+                <button type="button" onclick="freshsalesAccountAcceptSuggestion()" class="shrink-0 inline-flex items-center gap-1 px-2 py-1 bg-purple-600 hover:bg-purple-700 text-white rounded text-[10px] font-semibold">
+                  <i data-lucide="arrow-down" class="w-3 h-3"></i> Suchen
+                </button>
+              </div>` : ''}
           </div>
-          <button type="button" onclick="freshsalesAccountAcceptSuggestion()" class="shrink-0 inline-flex items-center gap-1 px-2 py-1 bg-purple-600 hover:bg-purple-700 text-white rounded text-[10px] font-semibold">
-            <i data-lucide="arrow-down" class="w-3 h-3"></i> Suchen
-          </button>
-        </div>` : ''}
+
+          <!-- Edit-Felder (nur wenn verknüpft) -->
+          ${current ? `
+            <div class="pt-2 border-t border-purple-200 space-y-2">
+              <div>
+                <label class="text-[10px] uppercase font-semibold text-purple-800 block">Kontoname</label>
+                <input id="fsAccountName" type="text" value="${escapeAttr(current.name || '')}" class="w-full mt-1 px-2 py-1.5 border border-purple-200 bg-white rounded text-sm">
+              </div>
+              <div class="grid grid-cols-2 gap-2">
+                <div>
+                  <label class="text-[10px] uppercase font-semibold text-purple-800 block">Telefon</label>
+                  <input id="fsAccountPhone" type="tel" value="${escapeAttr(current.phone || '')}" class="w-full mt-1 px-2 py-1.5 border border-purple-200 bg-white rounded text-sm font-mono">
+                </div>
+                <div>
+                  <label class="text-[10px] uppercase font-semibold text-purple-800 block">Website</label>
+                  <input id="fsAccountWebsite" type="text" value="${escapeAttr(current.website || '')}" class="w-full mt-1 px-2 py-1.5 border border-purple-200 bg-white rounded text-sm">
+                </div>
+              </div>
+              <div>
+                <label class="text-[10px] uppercase font-semibold text-purple-800 block">Adresse</label>
+                <input id="fsAccountAddress" type="text" value="${escapeAttr(current.address || '')}" class="w-full mt-1 px-2 py-1.5 border border-purple-200 bg-white rounded text-sm">
+              </div>
+              <div class="grid grid-cols-3 gap-2">
+                <div class="col-span-1">
+                  <label class="text-[10px] uppercase font-semibold text-purple-800 block">PLZ</label>
+                  <input id="fsAccountZipcode" type="text" value="${escapeAttr(current.zipcode || '')}" class="w-full mt-1 px-2 py-1.5 border border-purple-200 bg-white rounded text-sm">
+                </div>
+                <div class="col-span-2">
+                  <label class="text-[10px] uppercase font-semibold text-purple-800 block">Stadt</label>
+                  <input id="fsAccountCity" type="text" value="${escapeAttr(current.city || '')}" class="w-full mt-1 px-2 py-1.5 border border-purple-200 bg-white rounded text-sm">
+                </div>
+              </div>
+              <div class="grid grid-cols-2 gap-2">
+                <div>
+                  <label class="text-[10px] uppercase font-semibold text-purple-800 block">Bundesland</label>
+                  <input id="fsAccountState" type="text" value="${escapeAttr(current.state || '')}" class="w-full mt-1 px-2 py-1.5 border border-purple-200 bg-white rounded text-sm">
+                </div>
+                <div>
+                  <label class="text-[10px] uppercase font-semibold text-purple-800 block">Land</label>
+                  <input id="fsAccountCountry" type="text" value="${escapeAttr(current.country || '')}" class="w-full mt-1 px-2 py-1.5 border border-purple-200 bg-white rounded text-sm">
+                </div>
+              </div>
+              <button type="button" onclick="saveFreshsalesSalesAccount(this)" class="w-full mt-1 bg-purple-600 hover:bg-purple-700 text-white px-3 py-2 rounded-lg text-sm font-semibold inline-flex items-center justify-center gap-1.5">
+                <i data-lucide="save" class="w-4 h-4"></i> Konto im Freshsales speichern
+              </button>
+            </div>
+          ` : ''}
+        </div>
+      `}
     </div>`;
 }
 
@@ -2806,25 +3058,40 @@ function freshsalesAccountSearch(value) {
   }, 300);
 }
 
-function freshsalesAccountPick(id, name) {
+async function freshsalesAccountPick(id, name) {
   const ctx = CONTACT_EDIT_CTX;
   if (!ctx) return;
   _syncFreshdeskInputsToCtx();
   _syncFreshsalesInputsToCtx();
-  ctx.fsAccount = { id, name };
-  ctx.fsAccountSearchQuery = '';
-  ctx.fsAccountSearchResults = [];
-  renderContactEditBody();
-  toast('Konto „' + name + '" ausgewählt — jetzt unten speichern', 'success', 3000);
+  try {
+    await linkContactToSalesAccount(id);
+    // Volle Sales-Account-Daten nachladen
+    try {
+      const full = await fetchFreshsalesSalesAccountById(ctx.accountId, id);
+      ctx.fsAccount = full || { id, name };
+    } catch (_) { ctx.fsAccount = { id, name }; }
+    ctx.fsAccountSearchQuery = '';
+    ctx.fsAccountSearchResults = [];
+    renderContactEditBody();
+    toast('Konto „' + name + '" verknüpft', 'success', 3000);
+  } catch (e) {
+    toast('Verknüpfen fehlgeschlagen: ' + e.message, 'error', 8000);
+  }
 }
 
-function freshsalesAccountUnlink() {
+async function freshsalesAccountUnlink() {
   const ctx = CONTACT_EDIT_CTX;
   if (!ctx) return;
   _syncFreshdeskInputsToCtx();
   _syncFreshsalesInputsToCtx();
-  ctx.fsAccount = null;
-  renderContactEditBody();
+  try {
+    await linkContactToSalesAccount(null);
+    ctx.fsAccount = null;
+    renderContactEditBody();
+    toast('Konto entkoppelt', 'success', 2500);
+  } catch (e) {
+    toast('Entkoppeln fehlgeschlagen: ' + e.message, 'error', 8000);
+  }
 }
 
 async function freshsalesAccountCreate(btnEl) {
@@ -2834,15 +3101,16 @@ async function freshsalesAccountCreate(btnEl) {
   if (!name) return toast('Kontoname fehlt', 'warn');
   _syncFreshdeskInputsToCtx();
   _syncFreshsalesInputsToCtx();
-  setBusy(btnEl, true, 'Lege Konto an…');
+  setBusy(btnEl, true, 'Lege Konto an + verknüpfe…');
   try {
     const created = await createFreshsalesSalesAccount(ctx.accountId, name);
-    ctx.fsAccount = { id: created.id, name: created.name || name };
+    await linkContactToSalesAccount(created.id);
+    ctx.fsAccount = created;
     ctx.fsAccountSearchQuery = '';
     ctx.fsAccountSearchResults = [];
     setBusy(btnEl, false);
     renderContactEditBody();
-    toast('Konto „' + (created.name || name) + '" angelegt — jetzt unten speichern', 'success', 4000);
+    toast('Konto „' + (created.name || name) + '" angelegt + verknüpft', 'success', 4000);
   } catch (e) {
     setBusy(btnEl, false);
     toast('Konto anlegen fehlgeschlagen: ' + e.message, 'error', 8000);
@@ -2871,30 +3139,20 @@ async function saveFreshdeskContact(btnEl) {
     address:   ($('fdAddress')?.value || '').trim() || null,
   };
   if (!fields.name) return toast('Name darf nicht leer sein', 'warn');
-  // Firma-Link: aktuelle company_id oder null (Entkopplung)
-  // Nur ins PUT übernehmen wenn sich was geändert hat — sonst lassen wir's weg
-  const currentCompanyId = ctx.company?.id || null;
-  const originalCompanyId = ctx.fd.company_id || null;
-  if (currentCompanyId !== originalCompanyId) {
-    fields.company_id = currentCompanyId;
-  }
+  // company_id wird NICHT mehr hier mit-gespeichert — die Verknüpfung läuft in der
+  // separaten „Freshdesk-Kunde"-Kachel über contactCompanyPick/Unlink/Create und
+  // wird dort direkt persistiert.
   setBusy(btnEl, true, 'Speichere…');
   try {
     await updateContact(ctx.accountId, ctx.contactId, fields);
-    // Cache und ggf. CURRENT_TICKET.requester updaten
     cacheRequester(ctx.accountId, { id: ctx.contactId, name: fields.name, email: fields.email, phone: fields.phone, mobile: fields.mobile });
     if (CURRENT_TICKET && CURRENT_TICKET.requester_id === ctx.contactId) {
       CURRENT_TICKET.requester = Object.assign({}, CURRENT_TICKET.requester || {}, fields);
       renderTicketDetailBody(CURRENT_TICKET);
     }
     Object.assign(ctx.fd, fields);
-    if ('company_id' in fields) ctx.fd.company_id = fields.company_id;
     setBusy(btnEl, false);
-    let msg = 'Freshdesk-Kontakt gespeichert';
-    if ('company_id' in fields) {
-      msg += currentCompanyId ? ' · Firma: ' + (ctx.company?.name || '') : ' · Firma entfernt';
-    }
-    toast(msg, 'success', 4000);
+    toast('Freshdesk-Kontakt gespeichert', 'success', 3000);
   } catch (e) {
     setBusy(btnEl, false);
     toast('Speichern fehlgeschlagen: ' + e.message, 'error', 6000);
@@ -2921,29 +3179,14 @@ async function saveFreshsalesContact(btnEl) {
   if (!fields.first_name && !fields.last_name && !fields.display_name) {
     return toast('Mindestens Vor-/Nachname oder Anzeigename muss ausgefüllt sein', 'warn');
   }
-  // Konto-Verknüpfung: aktuelle vs. bisherige primary-Verknüpfung vergleichen
-  const currentSaId = ctx.fsAccount?.id || null;
-  const prev = ctx.fs.sales_accounts || [];
-  const prevPrimary = Array.isArray(prev) ? (prev.find(x => x.is_primary) || prev[0]) : null;
-  const prevSaId = prevPrimary?.id || null;
-  if (currentSaId !== prevSaId) {
-    if (currentSaId) {
-      fields.sales_accounts = [{ id: currentSaId, is_primary: true }];
-    } else {
-      // Entkopplung: leeres Array sendet Unlink
-      fields.sales_accounts = [];
-    }
-  }
+  // sales_accounts wird NICHT mehr hier mit-gespeichert — die Verknüpfung läuft
+  // in der separaten „Freshsales-Kunde"-Kachel über freshsalesAccountPick/Unlink/Create.
   setBusy(btnEl, true, 'Speichere…');
   try {
     await freshsalesUpdateContact(ctx.accountId, ctx.fs.id, fields);
     Object.assign(ctx.fs, fields);
     setBusy(btnEl, false);
-    let msg = 'Freshsales-Kontakt gespeichert';
-    if ('sales_accounts' in fields) {
-      msg += currentSaId ? ' · Konto: ' + (ctx.fsAccount?.name || '') : ' · Konto entfernt';
-    }
-    toast(msg, 'success', 4000);
+    toast('Freshsales-Kontakt gespeichert', 'success', 3000);
   } catch (e) {
     setBusy(btnEl, false);
     toast('Freshsales-Speichern fehlgeschlagen: ' + e.message, 'error', 8000);
@@ -3444,10 +3687,16 @@ function _helpSections() {
       title: 'Kontakt-Daten bearbeiten',
       subtitle: 'KI + manuell',
       body: `
-        <p>Im Ticket-Detail: <b>„Kontakt bearbeiten"</b> beim Anfragenden. Modal zeigt alle Felder (Name, Email, Telefon, Mobil, Job-Titel, Adresse, Firma) — direkt änderbar.</p>
-        <p><b>KI-Vervollständigung:</b> Beim Öffnen analysiert Claude automatisch das Ticket (Subject + Anfragen + <b>Email-Signaturen</b>) und schlägt Werte für fehlende Felder vor. Pro Feld lila Banner mit Quelle und „Übernehmen"-Button. „Alle (X)" für Bulk-Übernahme.</p>
-        <p><b>Firma:</b> Live-Autocomplete der Freshdesk-Companies — Treffer auswählen oder „Neue Firma anlegen". KI-Vorschlag triggert direkt die Suche.</p>
-        <p>Wenn dein Account zusätzlich mit <b>Freshsales-CRM</b> verbunden ist (Account-Setup), erscheint ein zweiter Block für CRM-Updates: alle Kontaktfelder (inkl. Adresse + Bundesland + Land), <b>Konto-Verknüpfung</b> (Sales Account) mit Autocomplete + „Neu anlegen", analog zur Freshdesk-Firma.</p>`,
+        <p>Im Ticket-Detail: <b>„Kontakt bearbeiten"</b> beim Anfragenden. Modal zeigt <b>vier eigenständige Kacheln</b> untereinander:</p>
+        <ol class="list-decimal pl-5 text-[13px] space-y-1">
+          <li><b>Freshdesk-Kontakt</b> — Name, Email, Telefone, Job, Adresse</li>
+          <li><b>Freshdesk-Kunde</b> — Firma (Name, Domains, Branche, Beschreibung, Notiz)</li>
+          <li><b>Freshsales-Kontakt</b> — CRM-Kontakt-Felder (nur wenn FS verbunden)</li>
+          <li><b>Freshsales-Kunde</b> — Sales Account (Name, Adresse, Telefon, Website)</li>
+        </ol>
+        <p>Jede Kachel hat <b>eigene Suche, eigene Edit-Felder und eigenen Speichern-Button</b>. Die Verknüpfung Kontakt ↔ Kunde wird <b>sofort beim Auswählen/Anlegen</b> persistiert (kein extra Speichern nötig).</p>
+        <p><b>KI-Vervollständigung:</b> Beim Öffnen analysiert Claude das Ticket (Subject + Anfragen + <b>Email-Signaturen</b>) und schlägt Werte vor — pro Feld lila Banner mit Quelle und „Übernehmen"-Button. „Alle (X)" für Bulk-Übernahme.</p>
+        <p><b>Verknüpfungs-Indikator</b> (dünne Linie zwischen Kontakt und Kunde) zeigt auf einen Blick, ob beide gepaart sind.</p>`,
     },
     {
       icon: 'search', color: 'brand',
