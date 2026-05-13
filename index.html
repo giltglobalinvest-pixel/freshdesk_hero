@@ -267,7 +267,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.37.1';
+const APP_VERSION = 'v2.37.2';
 // Read-Token absichtlich gesplittet, damit GitHub Secret-Scanning beim Push nicht blockt.
 // Der Token ist read-only und Base-scoped → bewusst eingebettet (Architektur-Entscheidung).
 const _RK = 'patu8KWM8aWB' + 'yxCGL.69fae5d9fa4b94c2' + '66b426dadd71a51f574945d840b33569058ab5e9d89ebef3';
@@ -2406,6 +2406,90 @@ async function _masterCreateFsContact(btnEl) {
   }
 }
 
+/* Parse Firmen-Notiz/-Beschreibung nach strukturierten Feldern.
+   Häufige Muster in Freshdesk-Companies (note/description Free-Text):
+     „Adresse: Strasse 1 · 12345 Stadt · Deutschland"   (mit · oder , oder \n als Separator)
+     „Telefon: +49 711 …"
+     „Website: https://…"  /  „Web: …"
+     „Email: info@…"
+     „Kunden-Nr: K-1234"  (wird ignoriert — Custom-Field)
+   Liefert {street, zipcode, city, country, phone, website, email} — leere Felder weggelassen. */
+function _parseCompanyNoteForMaster(noteText) {
+  const out = {};
+  if (!noteText) return out;
+  const text = String(noteText);
+
+  // === Adresse ==================================================================
+  // Match „Adresse: ..." bis zum nächsten bekannten Label oder Zeilenende
+  const addrLabel = text.match(/(?:Adresse|Anschrift|Address)\s*[:=]\s*([^\n]+)/i);
+  if (addrLabel) {
+    // Parts splitten auf · , ; oder zwei+ Spaces, ODER auf newlines wenn mehrzeilig
+    const raw = addrLabel[1].trim();
+    const parts = raw.split(/\s*[·•,;]\s*|\s{2,}/).map(s => s.trim()).filter(Boolean);
+    const countryRe = /^(deutschland|germany|österreich|austria|schweiz|switzerland|france|italy|italien|netherlands|niederlande)$/i;
+    const zipCityRe = /^(\d{4,5})\s+(.+)$/;
+    let country = '';
+    let street = '';
+    let zipcode = '';
+    let city = '';
+    for (const p of parts) {
+      if (countryRe.test(p)) { country = p; continue; }
+      const z = p.match(zipCityRe);
+      if (z) { zipcode = z[1]; city = z[2]; continue; }
+      if (!street) { street = p; continue; }
+    }
+    // Fallback: wenn nur 1 part war und es ist nicht ZIP+City → das ist die Straße
+    if (!street && !zipcode && parts.length) street = parts[0];
+    if (street)  out.street  = street;
+    if (zipcode) out.zipcode = zipcode;
+    if (city)    out.city    = city;
+    if (country) out.country = country;
+  } else {
+    // Kein „Adresse:"-Label, aber vielleicht klassischer Multi-Liner irgendwo im Text
+    const lines = text.split(/\n/).map(l => l.trim()).filter(Boolean);
+    const zipIdx = lines.findIndex(l => /^\d{4,5}\s/.test(l));
+    if (zipIdx > 0) {
+      const z = lines[zipIdx].match(/^(\d{4,5})\s+(.+)$/);
+      if (z) { out.zipcode = z[1]; out.city = z[2]; }
+      // Zeile davor = Straße (wenn nicht „Kunden-Nr" o.ä.)
+      const prev = lines[zipIdx - 1];
+      if (prev && !/^(Kunden|Customer|Tel|Phone|Fax|Email|Web|Site|URL|VAT|USt)/i.test(prev)) {
+        out.street = prev.replace(/^[A-Za-zäöüß]+\s*[:=]\s*/, '');
+      }
+      // Zeile danach: Land
+      const next = lines[zipIdx + 1];
+      if (next && /^(deutschland|germany|österreich|austria|schweiz|switzerland)$/i.test(next)) {
+        out.country = next;
+      }
+    }
+  }
+
+  // === Telefon ================================================================
+  const phoneLabel = text.match(/(?:Telefon|Tel|Phone|Fon|Tel\.\:?)\s*[:=]\s*([+0-9\s()\-\/]+)/i);
+  if (phoneLabel) {
+    const ph = phoneLabel[1].trim().replace(/[^\d+\s\-\/()]/g, '').trim();
+    if (ph.length >= 6) out.phone = ph;
+  }
+
+  // === Website ================================================================
+  const webLabel = text.match(/(?:Website|Webseite|Web|URL|Site|Homepage)\s*[:=]\s*([^\s\n]+)/i);
+  if (webLabel) {
+    let w = webLabel[1].trim().replace(/[.,;]+$/, '');
+    if (!/^https?:\/\//i.test(w)) w = 'https://' + w;
+    out.website = w;
+  } else {
+    // Fallback: erste rohe https?://… URL im Text
+    const urlMatch = text.match(/https?:\/\/[^\s\n,;]+/i);
+    if (urlMatch) out.website = urlMatch[0].replace(/[.,;]+$/, '');
+  }
+
+  // === Email ==================================================================
+  const emailLabel = text.match(/(?:Email|E-?Mail)\s*[:=]\s*([^\s\n,;]+@[^\s\n,;]+)/i);
+  if (emailLabel) out.email = emailLabel[1].trim();
+
+  return out;
+}
+
 /* === Master-Konsolidierung (Pattern aus ERP-Hero) =========================
    Statt 4 getrennter Kacheln editiert der User EINE Stammdaten-Sektion (Firma + Person).
    Beim Save wird das Master-Objekt in alle 4 Systeme verteilt:
@@ -2446,19 +2530,24 @@ function _consolidateContactMaster(ctx) {
   const fdAddrZipM = fdAddrZipCity.match(/^(\d{4,5})\s+(.+)$/);
   const fdAddrStreet = fdAddrLines.find(l => l !== fdAddrZipCity && l !== fdAddrCountry) || '';
 
+  // Firma-Notiz + Beschreibung parsen — Freshdesk-Companies haben dort oft
+  // strukturierte Felder wie „Adresse: ...", „Telefon: ...", „Website: ..."
+  // Pattern: Note hat häufig präzisere Daten als die FD-Contact-Address (Anschrift Firma)
+  const noteParsed  = _parseCompanyNoteForMaster(fdco?.note || '');
+  const descParsed  = _parseCompanyNoteForMaster(fdco?.description || '');
+
   ctx.master = {
     company: {
-      // FS-Konto ist primäre Quelle (genaueste Felder), dann FD-Company-Name als Fallback
+      // Prio: FS-Konto > FD-Company-Note (parsed) > FD-Company-Description (parsed) > FD-Contact-Address
       name:     pick(fsa?.name, fdco?.name),
-      phone:    pick(fsa?.phone, fd?.phone),
-      website:  pick(fsa?.website),
-      // FD-Company hat keine email — wir nehmen FD-Contact-Email als „Firma-Email" Fallback
-      email:    pick(fd?.email),
-      street:   pick(fsa?.address, fdAddrStreet),
-      zipcode:  pick(fsa?.zipcode, fdAddrZipM?.[1]),
-      city:     pick(fsa?.city, fdAddrZipM?.[2]),
-      country:  pick(fsa?.country, fdAddrCountry) || 'Deutschland',
-      // Erweiterte FD-Firma-Felder
+      phone:    pick(fsa?.phone, noteParsed.phone, descParsed.phone, fd?.phone),
+      website:  pick(fsa?.website, noteParsed.website, descParsed.website),
+      email:    pick(noteParsed.email, descParsed.email, fd?.email),
+      street:   pick(fsa?.address, noteParsed.street,  descParsed.street,  fdAddrStreet),
+      zipcode:  pick(fsa?.zipcode, noteParsed.zipcode, descParsed.zipcode, fdAddrZipM?.[1]),
+      city:     pick(fsa?.city,    noteParsed.city,    descParsed.city,    fdAddrZipM?.[2]),
+      country:  pick(fsa?.country, noteParsed.country, descParsed.country, fdAddrCountry) || 'Deutschland',
+      // Erweiterte FD-Firma-Felder (raw)
       domains:     Array.isArray(fdco?.domains) ? fdco.domains.join(', ') : (fdco?.domains || ''),
       industry:    fdco?.industry || '',
       description: fdco?.description || '',
@@ -2597,13 +2686,12 @@ async function openContactEditModal(accountId, contactId, opts) {
         CONTACT_EDIT_CTX._fsError = e.message;
       }
     }
-    // Master aus allen geladenen Quellen konsolidieren — eine zentrale Stammdaten-View
+    // Master aus allen geladenen Quellen konsolidieren — eine zentrale Stammdaten-View.
+    // Inkludiert Parsing von company.note + company.description (häufig Adresse/Telefon dort).
     _consolidateContactMaster(CONTACT_EDIT_CTX);
     renderContactEditBody();
-    // KI-Vorschläge im Hintergrund laden — nur wenn Ticket-Kontext da ist
-    if (CONTACT_EDIT_CTX.ticket) {
-      loadContactSuggestions().catch(e => console.warn('Contact-Suggestions failed:', e.message));
-    }
+    // KI-Vorschläge NICHT mehr automatisch starten — User klickt „KI-Zauber" manuell.
+    // (Vorher: bei Ticket-Kontext lief sie automatisch im Hintergrund, was störend war.)
   } catch (e) {
     $('contactEditBody').innerHTML = `<div class="bg-red-50 border border-red-200 rounded-2xl p-4 text-sm text-red-800">${escapeHtml(e.message || 'Fehler beim Laden')}</div>`;
   }
