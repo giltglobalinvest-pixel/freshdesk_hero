@@ -267,7 +267,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.39.0';
+const APP_VERSION = 'v2.39.1';
 // Read-Token absichtlich gesplittet, damit GitHub Secret-Scanning beim Push nicht blockt.
 // Der Token ist read-only und Base-scoped → bewusst eingebettet (Architektur-Entscheidung).
 const _RK = 'patu8KWM8aWB' + 'yxCGL.69fae5d9fa4b94c2' + '66b426dadd71a51f574945d840b33569058ab5e9d89ebef3';
@@ -2263,10 +2263,14 @@ async function createFreshsalesSalesAccount(accountId, name, extraFields) {
 }
 
 async function updateFreshsalesSalesAccount(accountId, saId, fields) {
+  // null/leere Felder rausfiltern — analog zum Create-Pfad. Freshsales bevorzugt
+  // fehlende Schlüssel statt null-Werte, sonst kann das Update mit Validation-Fehler
+  // auf optionalen Feldern wie email/website komplett scheitern.
+  const cleaned = _stripEmptyFields(fields || {});
   return await proxyJson('/freshsales/' + encodeURIComponent(accountId) +
     '/api/sales_accounts/' + saId, {
     method: 'PUT',
-    body: JSON.stringify({ sales_account: fields })
+    body: JSON.stringify({ sales_account: cleaned })
   });
 }
 
@@ -4031,14 +4035,18 @@ async function saveAllContactData(btnEl) {
     let resolvedFsAccountId = ctx.fsAccount?.id || null;
     if (co.name) {
       try {
+        // Freshsales-Sales-Account-Felder: name + Adress-Block + erweiterte Stammdaten
+        // Description bevorzugt aus der FD-Firma-Note/Description (was der User da pflegt)
         const fsAccountFields = {
-          name:    co.name,
-          phone:   co.phone || null,
-          website: co.website || null,
-          address: co.street || null,
-          city:    co.city || null,
-          zipcode: co.zipcode || null,
-          country: co.country || null,
+          name:        co.name,
+          phone:       co.phone || null,
+          website:     co.website || null,
+          email:       co.email || null,
+          address:     co.street || null,
+          city:        co.city || null,
+          zipcode:     co.zipcode || null,
+          country:     co.country || null,
+          description: co.description || co.note || null,
         };
         if (resolvedFsAccountId) {
           await updateFreshsalesSalesAccount(ctx.accountId, resolvedFsAccountId, fsAccountFields);
@@ -4046,12 +4054,14 @@ async function saveAllContactData(btnEl) {
           log.push('FS-Konto ✓');
         } else {
           const created = await createFreshsalesSalesAccount(ctx.accountId, co.name, {
-            phone:   co.phone || undefined,
-            website: co.website || undefined,
-            address: co.street || undefined,
-            city:    co.city || undefined,
-            zipcode: co.zipcode || undefined,
-            country: co.country || undefined,
+            phone:       co.phone || undefined,
+            website:     co.website || undefined,
+            email:       co.email || undefined,
+            address:     co.street || undefined,
+            city:        co.city || undefined,
+            zipcode:     co.zipcode || undefined,
+            country:     co.country || undefined,
+            description: co.description || co.note || undefined,
           });
           if (created?.id) {
             resolvedFsAccountId = created.id;
@@ -4062,6 +4072,7 @@ async function saveAllContactData(btnEl) {
       } catch (e) {
         errs.push('FS-Konto: ' + e.message);
         log.push('FS-Konto ✗');
+        console.warn('[saveAll] FS-Konto-Sync Fehler:', e.message, '· fields=', { name: co.name, phone: co.phone, email: co.email, website: co.website });
       }
     }
 
@@ -5692,8 +5703,10 @@ async function hydrateMissingRequesters(tickets) {
             ' (conv parts=' + (full.conversations || []).length + ') phones found=' + found.length, found);
           if (!found.length) continue;
           // KI-Validierung: prüfen ob jede Nummer zum Anfragenden gehört oder z.B.
-          // aus einer Signatur einer dritten Person bei WG/Fwd stammt.
+          // aus einer Signatur einer dritten Person bei WG/Fwd stammt — ODER zu einem
+          // unserer eigenen Agents (deren Signatur in einer Antwort/internen Notiz).
           const cachedReq = getCachedRequester(t._accountId, t.requester_id) || {};
+          const agentsForVal = (APP_STATE.agentsCache?.[t._accountId]?.agents || []).map(a => a.name);
           const validated = await validatePhonesForRequester({
             accountId: t._accountId,
             ticketId: t.id,
@@ -5701,6 +5714,7 @@ async function hydrateMissingRequesters(tickets) {
             requesterEmail: full.requester?.email || cachedReq.email || '',
             fullText: text,
             phones: found,
+            agentNames: agentsForVal,
           });
           const accepted = validated.filter(v => v.belongs).map(v => v.num);
           const rejected = validated.filter(v => !v.belongs);
@@ -7499,7 +7513,13 @@ function renderTicketDetailBody(ticket) {
                     <span class="text-[9px] uppercase tracking-wider opacity-70">${p.label}</span>
                   </a>`;
                 }).join('')}
-              </div>` : ''}
+              </div>` : `
+              <div class="mt-2" data-detail-no-phone>
+                <span class="inline-flex items-center gap-1.5 px-2.5 py-1.5 bg-amber-50 border border-amber-200 text-amber-700 rounded-lg text-[11px]">
+                  <i data-lucide="phone-off" class="w-3.5 h-3.5"></i>
+                  <span>Keine Telefonnummer hinterlegt</span>
+                </span>
+              </div>`}
           </div>
           <div class="grid grid-cols-3 gap-2">
             ${_detailFieldDropdown('Zugewiesen', assigneeName || 'niemand', assigneeName ? 'text-ink-900' : 'text-amber-700', _detailAssigneeSelectInner(ticket), 'detailAssignee')}
@@ -7598,6 +7618,7 @@ function renderTicketDetailBody(ticket) {
       requesterEmail: req.email || '',
       fullText: _detailText,
       phones: _extractedPhones,
+      agentNames: (APP_STATE.agentsCache?.[ticket._accountId]?.agents || []).map(a => a.name),
     }).then(validated => {
       const container = document.querySelector('[data-detail-phones]');
       if (!container) return;
@@ -7618,8 +7639,18 @@ function renderTicketDetailBody(ticket) {
           pill.remove();
         }
       });
-      // Container weg wenn keine Pills mehr drin sind
-      if (!container.querySelector('a')) container.remove();
+      // Wenn keine Pills mehr übrig → durch „Keine Nummer hinterlegt"-Hinweis ersetzen
+      if (!container.querySelector('a')) {
+        const noPhone = document.createElement('div');
+        noPhone.setAttribute('data-detail-no-phone', '');
+        noPhone.className = 'mt-2';
+        noPhone.innerHTML = `
+          <span class="inline-flex items-center gap-1.5 px-2.5 py-1.5 bg-amber-50 border border-amber-200 text-amber-700 rounded-lg text-[11px]">
+            <i data-lucide="phone-off" class="w-3.5 h-3.5"></i>
+            <span>Keine Telefonnummer hinterlegt</span>
+          </span>`;
+        container.replaceWith(noPhone);
+      }
       if (window.lucide) lucide.createIcons();
     }).catch(e => {
       console.warn('[detail-phones] Validate-Fehler — pending Pills werden als bestätigt markiert:', e.message);
@@ -9128,42 +9159,64 @@ async function saveSummaryAsNote(accountId, ticketId, summary) {
    (fail-open), damit User nicht plötzlich keine Tel-Nummern mehr sieht. */
 const _PHONE_VALIDATE_CACHE = new Map();
 
-async function validatePhonesForRequester({ accountId, ticketId, requesterName, requesterEmail, fullText, phones }) {
+async function validatePhonesForRequester({ accountId, ticketId, requesterName, requesterEmail, fullText, phones, agentNames }) {
   if (!phones || !phones.length) return [];
   const cacheKey = (accountId || '') + ':' + (ticketId || '') + ':' + phones.join('|');
   if (_PHONE_VALIDATE_CACHE.has(cacheKey)) {
     return _PHONE_VALIDATE_CACHE.get(cacheKey);
   }
-  // Fail-open Default: alle akzeptiert. Wird unten überschrieben wenn KI antwortet.
-  const failOpen = phones.map(num => ({ num, belongs: true, reason: 'nicht validiert' }));
+  // Fail-CLOSED Default für „belongs": wenn KI nicht antwortet, lieber nicht anzeigen
+  // (User-Feedback: falsche Nummer ist schlimmer als gar keine Nummer).
+  // ABER: bei kompletten API-Ausfällen ist das zu strikt. Kompromiss:
+  // - Bei „kein Requester-Name" → fail-open (kann eh nicht prüfen)
+  // - Bei API-Fehler → fail-open mit Warnlabel
+  // - Bei erfolgreich aber leere/kaputte Antwort → fail-closed (lieber nichts)
+  const failOpenUnknown = phones.map(num => ({ num, belongs: true, reason: 'nicht validiert' }));
 
-  // Kein API-Key oder kein Requester-Name → Validierung überspringen (fail-open)
+  // Kein Requester-Name → Validierung überspringen (fail-open)
   if (!requesterName && !requesterEmail) {
-    _PHONE_VALIDATE_CACHE.set(cacheKey, failOpen);
-    return failOpen;
+    _PHONE_VALIDATE_CACHE.set(cacheKey, failOpenUnknown);
+    return failOpenUnknown;
   }
 
-  // Text auf 6000 Zeichen begrenzen (Tokens sparen, Haiku Kontext)
-  const textSnippet = String(fullText || '').slice(0, 6000);
+  // Text auf 6000 Zeichen begrenzen (Tokens sparen, Haiku Kontext).
+  // WICHTIG: wir slicen NICHT die letzten 6000 sondern erste UND letzte 3000 —
+  // die Original-Mail-Signatur (oft am Ende) muss mit drin sein.
+  const rawText = String(fullText || '');
+  let textSnippet = rawText;
+  if (rawText.length > 6000) {
+    textSnippet = rawText.slice(0, 3000) + '\n\n[…gekürzt…]\n\n' + rawText.slice(-3000);
+  }
 
-  const sys = 'Du prüfst ob extrahierte Telefonnummern zu einer bestimmten Person gehören. ' +
-    'Antworte AUSSCHLIESSLICH mit JSON. Kein Markdown, keine Erklärung außerhalb des JSON.';
-  const user = 'ANFRAGENDER:\n' +
+  // Agent-Liste vorbereiten — die KI muss wissen welche Namen Bearbeiter sind
+  const agentList = (agentNames || []).filter(Boolean).slice(0, 30);
+
+  const sys = 'Du prüfst streng ob extrahierte Telefonnummern zum jetzigen Anfragenden eines Support-Tickets gehören. ' +
+    'Eine Nummer gehört nur dann zum Anfragenden, wenn ein klarer Beleg im Mail-Verlauf vorliegt (eigene Signatur, eindeutige Zuordnung). ' +
+    'Im Zweifel: belongs=false. Antworte AUSSCHLIESSLICH mit JSON. Kein Markdown, keine Erklärung außerhalb des JSON.';
+  const user = 'ANFRAGENDER (Kunde, dessen Tel-Nummer wir suchen):\n' +
     'Name: ' + (requesterName || '(unbekannt)') + '\n' +
     'Email: ' + (requesterEmail || '(unbekannt)') + '\n\n' +
-    'AUS DEM MAIL-VERLAUF EXTRAHIERTE TELEFONNUMMERN:\n' +
+    (agentList.length ? ('BEARBEITER/AGENTS in unserem System (NICHT der Anfragende — deren Nummern dürfen NICHT akzeptiert werden):\n' +
+      agentList.map(n => '- ' + n).join('\n') + '\n\n') : '') +
+    'AUS DEM TICKET-VERLAUF EXTRAHIERTE TELEFONNUMMERN:\n' +
     phones.map((p, i) => (i + 1) + '. ' + p).join('\n') + '\n\n' +
     'MAIL-VERLAUF (Auszug):\n' +
     textSnippet + '\n\n' +
-    'AUFGABE: Entscheide für jede Nummer einzeln ob sie zum oben genannten Anfragenden gehört.\n' +
-    'Berücksichtige typische Indikatoren:\n' +
-    '- Steht der Name des Anfragenden in der Nähe der Nummer (eigene Signatur)?\n' +
-    '- Oder steht ein anderer Name in der Signatur (z.B. bei WG:/Fwd: weitergeleiteten Mails — die Signatur am Ende gehört dann zum Original-Absender, NICHT zum jetzigen Anfragenden)?\n' +
-    '- Passt die Email-Domain des Anfragenden zur Firma in der Signatur?\n' +
-    '- Bei Unsicherheit lieber "false" — wir wollen keine falschen Nummern als Kontakt-Tel anzeigen.\n\n' +
+    'AUFGABE: Entscheide für jede Nummer einzeln ob sie zum oben genannten Anfragenden gehört.\n\n' +
+    'WICHTIGE REGELN (alle "false" wenn auch nur eine zutrifft):\n' +
+    '1. Steht die Nummer in der Signatur eines AGENTS aus der Liste oben? → false (das ist unsere eigene Mitarbeiter-Nummer, nicht die des Kunden).\n' +
+    '2. Steht die Nummer in einer Signatur einer DRITTEN Person (anderer Name als der Anfragende, kein Agent)? → false (z.B. bei WG:/Fwd: weitergeleitete Mails — die Signatur am Ende gehört zum Original-Absender, NICHT zum jetzigen Anfragenden).\n' +
+    '3. Steht die Nummer in einer internen Notiz/Antwort eines Agents an einen anderen Agent? → false.\n' +
+    '4. Steht die Nummer eindeutig in der Signatur des Anfragenden selbst (sein Name + Firma + Tel zusammenhängend)? → true.\n' +
+    '5. Ist es nicht eindeutig zuzuordnen? → false (lieber gar keine Nummer als die falsche).\n\n' +
+    'POSITIVE INDIKATOREN für belongs=true:\n' +
+    '- Email-Domain des Anfragenden taucht in der Signatur als Firma/Website auf\n' +
+    '- Vor- ODER Nachname des Anfragenden steht direkt vor/neben der Nummer\n' +
+    '- Die Nummer steht im Original-Mail-Header ("Von: <Anfragender>" Bereich)\n\n' +
     'Antworte als JSON-Array:\n' +
     '[{"num":"...","belongs":true,"reason":"kurz"}, ...]\n' +
-    'Genau ' + phones.length + ' Einträge in derselben Reihenfolge wie oben. "reason" maximal 60 Zeichen.';
+    'Genau ' + phones.length + ' Einträge in derselben Reihenfolge wie oben. "reason" maximal 80 Zeichen, MUSS bei false angeben WEM die Nummer gehört (z.B. "gehört zu Agent Mergim", "Signatur Original-Absender Riemer").';
 
   try {
     const data = await proxyJson('/anthropic/v1/messages', {
@@ -9183,9 +9236,11 @@ async function validatePhonesForRequester({ accountId, ticketId, requesterName, 
       if (jsonMatch) parsed = JSON.parse(jsonMatch[0]);
     } catch (_) {}
     if (!Array.isArray(parsed) || !parsed.length) {
-      console.warn('[validatePhones] KI-Response unbrauchbar:', text.slice(0, 200));
-      _PHONE_VALIDATE_CACHE.set(cacheKey, failOpen);
-      return failOpen;
+      console.warn('[validatePhones] KI-Response unbrauchbar — alle Nummern verworfen:', text.slice(0, 200));
+      // Fail-CLOSED bei kaputtem KI-Output: lieber keine Nummern als falsche
+      const failClosed = phones.map(num => ({ num, belongs: false, reason: 'KI-Antwort unklar' }));
+      _PHONE_VALIDATE_CACHE.set(cacheKey, failClosed);
+      return failClosed;
     }
     // Mappe zurück auf die Phone-Reihenfolge. Wenn die KI weniger Items liefert
     // als Phones, fülle mit fail-open auf.
@@ -9203,9 +9258,9 @@ async function validatePhonesForRequester({ accountId, ticketId, requesterName, 
     _PHONE_VALIDATE_CACHE.set(cacheKey, result);
     return result;
   } catch (e) {
-    console.warn('[validatePhones] API-Fehler — fail-open:', e.message);
-    _PHONE_VALIDATE_CACHE.set(cacheKey, failOpen);
-    return failOpen;
+    console.warn('[validatePhones] API-Fehler — fail-open (KI nicht erreichbar):', e.message);
+    _PHONE_VALIDATE_CACHE.set(cacheKey, failOpenUnknown);
+    return failOpenUnknown;
   }
 }
 
