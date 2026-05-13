@@ -267,7 +267,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.38.6';
+const APP_VERSION = 'v2.38.7';
 // Read-Token absichtlich gesplittet, damit GitHub Secret-Scanning beim Push nicht blockt.
 // Der Token ist read-only und Base-scoped → bewusst eingebettet (Architektur-Entscheidung).
 const _RK = 'patu8KWM8aWB' + 'yxCGL.69fae5d9fa4b94c2' + '66b426dadd71a51f574945d840b33569058ab5e9d89ebef3';
@@ -2050,6 +2050,7 @@ async function createFreshsalesContact(accountId, fields) {
     createdContact = data?.contact || data;
   } catch (e) {
     const errMsg = String(e?.message || '');
+    console.warn('[createFsContact] Error:', errMsg.slice(0, 200), '· e.data=', e?.data);
     // 409 / „already exists" → Email-Lookup-Fallback
     if (cleaned.email && /already.?exist|409|duplicate|not.?unique|3163/i.test(errMsg)) {
       console.warn('FS-Contact existiert bereits — versuche Email-Lookup:', errMsg.slice(0, 100));
@@ -2060,31 +2061,71 @@ async function createFreshsalesContact(accountId, fields) {
       throw e;
     }
     // 400 mit „müssen Sie X ausfüllen" → Pflicht-Custom-Fields auto-befüllen + Retry.
-    // Wir geben das ganze Error-Object rein damit auch e.data und ggf. doppelt-encodierte
-    // JSON-Strings durchsucht werden — nicht nur die ohnehin schon clippte Message.
-    const required = _extractRequiredCfNames(e);
+    let required = _extractRequiredCfNames(e);
+    console.log('[createFsContact] _extractRequiredCfNames found:', required.length, 'fields:',
+      required.map(r => r.label + ' → ' + r.names.join('/')).join(' | '));
+    // Fallback: wenn Pattern nicht erkannt, aber Body „Kontakt-ID"/„Branche"/„ausfüllen" enthält →
+    // versuche trotzdem mit bekannten Field-Namen einen Retry
+    if (!required.length && /ausfüllen|fill in|must fill|fülle|required/i.test(errMsg)) {
+      const knownPatterns = [
+        { test: /kontakt.?id/i,  label: 'Kontakt-ID',  names: ['cf_kontaktid', 'cf_kontakt_id', 'cf_contact_id', 'cf_contactid'] },
+        { test: /branche/i,      label: 'Branche',    names: ['cf_branche', 'cf_industry'] },
+        { test: /kundennr|kunden.nummer|customer.no/i, label: 'Kundennummer', names: ['cf_kundennummer', 'cf_kunden_nummer', 'cf_customer_no'] },
+        { test: /ust.?id|vat.?id|umsatzsteuer/i, label: 'USt-IdNr', names: ['cf_ust_id', 'cf_ustid', 'cf_vat_id'] },
+      ];
+      required = knownPatterns.filter(p => p.test.test(errMsg)).map(p => ({ label: p.label, names: p.names }));
+      if (required.length) {
+        console.warn('[createFsContact] Pattern-Regex matched nicht, aber Substring-Fallback fand:',
+          required.map(r => r.label).join(', '));
+      }
+    }
     if (required.length) {
       const allNames = required.flatMap(r => r.names);
       console.warn('FS-Contact: Pflicht-Custom-Fields erkannt, befülle ALLE Varianten mit Platzhalter:', allNames.join(', '));
-      const cfPlaceholder = Object.assign({}, cleaned.custom_field || {});
-      // Für jeden erkannten Pflicht-Custom-Field: setze ALLE plausible Field-Namen-Varianten
-      // — Freshsales akzeptiert das passende und ignoriert die anderen (graceful)
-      required.forEach(r => {
-        const isIdField = /id|nummer|number/i.test(r.label);
-        const placeholder = isIdField
-          ? (cleaned.email || cleaned.last_name || 'TBD')
-          : '—';
-        r.names.forEach(n => { if (!cfPlaceholder[n]) cfPlaceholder[n] = placeholder; });
-      });
-      const retryFields = Object.assign({}, cleaned, { custom_field: cfPlaceholder });
-      try {
-        const data2 = await proxyJson(path, {
-          method: 'POST',
-          body: JSON.stringify({ contact: retryFields })
+      // Wir probieren mehrere Platzhalter-Werte hintereinander, weil Custom-Fields in Freshsales
+      // unterschiedliche Typen haben können (Text, Number, Datum). Liste in Probe-Reihenfolge:
+      const placeholderCandidates = [
+        cleaned.email || cleaned.last_name || 'TBD',  // Text — funktioniert für die meisten
+        String(Date.now()),                            // Number-as-String — wenn Field Number ist
+        cleaned.last_name || 'Kontakt',                // Reiner Text — wenn Email Format abgelehnt
+      ];
+      let retrySucceeded = false;
+      let lastRetryError = null;
+      for (const placeholder of placeholderCandidates) {
+        const cfPlaceholder = Object.assign({}, cleaned.custom_field || {});
+        required.forEach(r => {
+          r.names.forEach(n => { cfPlaceholder[n] = placeholder; });
         });
-        createdContact = data2?.contact || data2;
-        console.log('FS-Contact-Retry mit Custom-Field-Platzhaltern erfolgreich:', createdContact?.id);
-      } catch (e2) {
+        const retryFields = Object.assign({}, cleaned, { custom_field: cfPlaceholder });
+        console.log('[createFsContact] Retry mit Platzhalter „' + placeholder + '" für Custom-Fields:', allNames.join(', '));
+        try {
+          const data2 = await proxyJson(path, {
+            method: 'POST',
+            body: JSON.stringify({ contact: retryFields })
+          });
+          createdContact = data2?.contact || data2;
+          console.log('✅ FS-Contact-Retry erfolgreich mit „' + placeholder + '":', createdContact?.id);
+          retrySucceeded = true;
+          break;
+        } catch (eRetry) {
+          lastRetryError = eRetry;
+          const errRetryMsg = String(eRetry?.message || '');
+          // Bei „already exists" während Retry → Email-Lookup
+          if (cleaned.email && /already.?exist|409|duplicate|3163/i.test(errRetryMsg)) {
+            try {
+              const existing = await freshsalesLookupContact(accountId, cleaned.email);
+              if (existing) return existing;
+            } catch (_) {}
+          }
+          console.warn('[createFsContact] Retry mit „' + placeholder + '" fehlgeschlagen:', errRetryMsg.slice(0, 150));
+          // Wenn der Fehler NICHT mehr „ausfüllen" ist, ist's ein anderer Bug — abbrechen
+          if (!_extractRequiredCfNames(eRetry).length && !/ausfüllen|fill in/i.test(errRetryMsg)) {
+            throw eRetry;
+          }
+        }
+      }
+      if (!retrySucceeded) {
+        const e2 = lastRetryError || e;
         // Retry auch fehlgeschlagen — auch hier Email-Lookup als letzte Rettung
         if (cleaned.email && /already.?exist|409|duplicate|3163/i.test(String(e2?.message || ''))) {
           try {
