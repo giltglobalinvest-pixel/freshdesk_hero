@@ -267,7 +267,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.35.0';
+const APP_VERSION = 'v2.35.1';
 // Read-Token absichtlich gesplittet, damit GitHub Secret-Scanning beim Push nicht blockt.
 // Der Token ist read-only und Base-scoped → bewusst eingebettet (Architektur-Entscheidung).
 const _RK = 'patu8KWM8aWB' + 'yxCGL.69fae5d9fa4b94c2' + '66b426dadd71a51f574945d840b33569058ab5e9d89ebef3';
@@ -1842,6 +1842,19 @@ async function updateContact(accountId, contactId, fields) {
   });
 }
 
+/* Freshdesk-Industry-Enum: Werte die das Feld `industry` einer Company annehmen darf.
+   Aus dem Freshdesk-Default-Schema. Alles andere → HTTP 400 Validation. */
+const FD_INDUSTRY_VALUES = [
+  'Automotive', 'Consumer Durables and Apparel', 'Diversified Consumer Services',
+  'Hotels, Restaurant and Leisure', 'Media', 'Retailing', 'Banks', 'Capital Markets',
+  'Diversified Financial Services', 'Insurance', 'Healthcare Equipment & Supplies',
+  'Healthcare Providers & Services', 'Pharmaceuticals & Biotechnology',
+  'Aerospace & Defense', 'Building Products', 'Construction & Engineering',
+  'Industrial Conglomerates', 'Machinery', 'Internet Software & Services',
+  'IT Services', 'Software', 'Oil, Gas & Consumable Fuels', 'Chemicals',
+  'Real Estate', 'Telecommunications', 'Other'
+];
+
 /* === Freshdesk-Company-API ================================================
    Companies sind eigene Records in Freshdesk. Contacts haben company_id als
    Verweis. Helper für Lookup/Create/Search nach Name. */
@@ -2085,6 +2098,11 @@ async function aiSuggestAllContactFields(ctx) {
     'FIRMA→KONTO (FS-Account.name):\n' +
     '- Wenn FD-Firma einen Namen hat (z.B. „TK Aufzüge GmbH"), übernimm denselben für fsAccount.name\n' +
     '- Domains: aus Email ableiten („tkelevator.com")\n\n' +
+    'FRESHDESK-INDUSTRY (fdCompany.industry) — STRENG begrenzt!\n' +
+    'Das Feld akzeptiert NUR diese Werte (alles andere → das Feld komplett WEGLASSEN, nicht raten):\n' +
+    FD_INDUSTRY_VALUES.map(v => '  - ' + v).join('\n') + '\n' +
+    'Wenn die echte Branche nicht passt: lieber „Other" verwenden ODER das Feld weglassen.\n' +
+    'Aufzugsbau / Maschinen → „Machinery". Bau-Service → „Construction & Engineering". Software-Firma → „Software".\n\n' +
     'ANTWORTE AUSSCHLIESSLICH MIT JSON (kein Markdown, keine Fences). Felder weglassen wenn unsicher. Pro Feld: {"value":"...", "source":"woher, max 80 Zeichen"}.\n\n' +
     'JSON-FORMAT:\n' +
     '{\n' +
@@ -2551,6 +2569,14 @@ function acceptSugg(group, field) {
   // domains ist ein Array — wenn der Vorschlag ein String ist, splitten
   if (group === 'fdCompany' && field === 'domains' && typeof s.value === 'string') {
     target[field] = s.value.split(/[\s,;]+/).map(x => x.trim()).filter(Boolean);
+  } else if (group === 'fdCompany' && field === 'industry') {
+    // industry muss im FD-Enum sein — sonst Vorschlag ignorieren
+    if (FD_INDUSTRY_VALUES.includes(s.value)) {
+      target[field] = s.value;
+    } else {
+      toast('Branche „' + s.value + '" ist kein gültiger Freshdesk-Wert — bitte aus Dropdown wählen', 'warn', 5000);
+      return;
+    }
   } else {
     target[field] = s.value;
   }
@@ -3014,8 +3040,12 @@ function _companyBlock(ctx) {
             </div>
             <div>
               <label class="text-[10px] uppercase font-semibold text-brand-800 block">Branche</label>
-              <input id="fdCompanyIndustry" type="text" value="${escapeAttr(current.industry || '')}" class="w-full mt-1 px-2 py-1.5 border border-brand-200 bg-white rounded text-sm">
+              <select id="fdCompanyIndustry" class="w-full mt-1 px-2 py-1.5 border border-brand-200 bg-white rounded text-sm">
+                <option value="">— keine Angabe —</option>
+                ${FD_INDUSTRY_VALUES.map(v => `<option value="${escapeAttr(v)}" ${(current.industry || '') === v ? 'selected' : ''}>${escapeHtml(v)}</option>`).join('')}
+              </select>
               ${_renderSuggestionBanner('fdCompany', 'industry', current.industry)}
+              <p class="text-[10px] text-ink-500 mt-0.5">Freshdesk akzeptiert nur diese ${FD_INDUSTRY_VALUES.length} Standard-Werte — andere Branchen → bitte „Other".</p>
             </div>
             <div>
               <label class="text-[10px] uppercase font-semibold text-brand-800 block">Beschreibung</label>
@@ -3165,11 +3195,17 @@ async function saveFreshdeskCompany(btnEl) {
   const domains = rawDomains
     ? rawDomains.split(/[\s,;]+/).map(s => s.trim()).filter(Boolean)
     : [];
+  const industryRaw = ($('fdCompanyIndustry')?.value || '').trim();
+  // industry muss im FD-Enum sein, sonst weglassen (führt sonst zu HTTP 400 Validation)
+  const industry = industryRaw && FD_INDUSTRY_VALUES.includes(industryRaw) ? industryRaw : null;
+  if (industryRaw && !industry) {
+    console.warn('Branche „' + industryRaw + '" nicht in FD-Enum — wird beim Save weggelassen');
+  }
   const fields = {
     name:        ($('fdCompanyName')?.value || '').trim(),
     description: ($('fdCompanyDesc')?.value || '').trim() || null,
     note:        ($('fdCompanyNote')?.value || '').trim() || null,
-    industry:    ($('fdCompanyIndustry')?.value || '').trim() || null,
+    industry,
     domains,
   };
   if (!fields.name) return toast('Firmenname darf nicht leer sein', 'warn');
@@ -3529,11 +3565,16 @@ async function saveAllContactData(btnEl) {
       // existierende Firma updaten
       const rawDomains = ($('fdCompanyDomains')?.value || '').trim();
       const domains = rawDomains ? rawDomains.split(/[\s,;]+/).map(s => s.trim()).filter(Boolean) : [];
+      const industryRaw = ($('fdCompanyIndustry')?.value || '').trim();
+      const industry = industryRaw && FD_INDUSTRY_VALUES.includes(industryRaw) ? industryRaw : null;
+      if (industryRaw && !industry) {
+        console.warn('[saveAll] Branche „' + industryRaw + '" nicht in FD-Enum — wird weggelassen');
+      }
       const fields = {
         name:        ($('fdCompanyName')?.value || '').trim() || ctx.company.name,
         description: ($('fdCompanyDesc')?.value || '').trim() || null,
         note:        ($('fdCompanyNote')?.value || '').trim() || null,
-        industry:    ($('fdCompanyIndustry')?.value || '').trim() || null,
+        industry,
         domains,
       };
       if (fields.name) {
