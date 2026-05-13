@@ -267,7 +267,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.37.0';
+const APP_VERSION = 'v2.37.1';
 // Read-Token absichtlich gesplittet, damit GitHub Secret-Scanning beim Push nicht blockt.
 // Der Token ist read-only und Base-scoped → bewusst eingebettet (Architektur-Entscheidung).
 const _RK = 'patu8KWM8aWB' + 'yxCGL.69fae5d9fa4b94c2' + '66b426dadd71a51f574945d840b33569058ab5e9d89ebef3';
@@ -9274,18 +9274,54 @@ async function aiInterpretCommand(ticket, command, accountId) {
     '  „wegmachen", „wegtun", „aus meiner Sicht weg", „blende aus".\n\n' +
     'NIEMALS „ausblenden" o.ä. zu „status: pending/wartet" umdeuten! Auch nicht im Zweifelsfall. Wenn der User „ausblenden" sagt → type="hide". Punkt.\n\n' +
     'Dauer für "hide": Wenn der User eine Dauer nennt („für 3 Tage", „1 Woche", „2 Wochen ausblenden", „1 Monat weg", „für immer"), in das Feld "days" als ZAHL schreiben. Umrechnung: 1 Tag=1, 1 Woche=7, 2 Wochen=14, 1 Monat=30, 1 Jahr=365, „für immer"=365. Wenn nichts gesagt: days=3.\n\n' +
+    '############### KRITISCH: „[KOLLEGE] soll [AKTION]" = DELEGATION, NICHT REPLY ###############\n' +
+    'Wenn der User sagt „Sandra soll dem Kunden antworten", „Michalis soll prüfen", „Mosem soll anrufen", „Lisa soll erledigen", „weise an Tom" — ist das eine Aufgabe AN EINEN INTERNEN KOLLEGEN, NICHT eine Anweisung an dich (die KI). Korrekte Handhabung:\n' +
+    '  → type="note" mit body = Anweisung an den Kollegen in zweiter Person/Imperativ (z.B. „Bitte schicke dem Kunden die Auftragsbestätigung mit Lieferzeit ca. 10 Tage.")\n' +
+    '  → type="assign" mit agent_id der Person\n' +
+    '  → NIEMALS type="reply" — der Kollege schickt die Antwort später selbst (oft über andere Tools wie ERP)\n\n' +
+    'Die KI darf den Kunden NUR dann direkt anschreiben (type="reply"), wenn der User EXPLIZIT sagt:\n' +
+    '  • „Antworte dem Kunden: ..." / „antworte direkt"\n' +
+    '  • „Schreibe an den Kunden..."\n' +
+    '  • „Sag dem Kunden..."\n' +
+    '  • „Bestätige dem Kunden..."\n' +
+    'WENN ein Kollege als Subjekt genannt wird („X soll antworten"), IMMER note+assign, niemals reply.\n\n' +
+    '############### KRITISCH: GESCHÄFTSPROZESSE SIND INTERN, NICHT KI-GENERIERT ###############\n' +
+    'Begriffe wie „Auftragsbestätigung erstellen/schicken", „Werkstattbestellung", „Rechnung schreiben", „Angebot erstellen", „Lieferschein", „Gutschrift", „Bestellung im ERP anlegen", „im SAP erfassen" sind INTERNE GESCHÄFTSPROZESSE die in einem separaten System (ERP/SAP) ablaufen. Die KI kann diese NICHT als reply-Text generieren — der eigentliche Beleg wird im ERP erzeugt.\n\n' +
+    'Wenn der User „Auftragsbestätigung schicken" o.ä. sagt:\n' +
+    '  → type="note": interne Anweisung an den Kollegen mit allen Details (Lieferzeit, Auftragsnummer, Sonderkonditionen) — KEINE Auftragsbestätigung als Antworttext\n' +
+    '  → type="assign" wenn ein Kollege benannt ist\n' +
+    '  → NIEMALS einen ausformulierten „Sehr geehrter Herr X, hiermit bestätigen wir..."-Text als reply generieren — die Auftragsbestätigung kommt aus dem ERP\n\n' +
+    'EBENSO interne Aufgaben:\n' +
+    '  • „Mosem fragen was defekt war" / „Lieferant kontaktieren" → note für Kollegen, KEINE reply\n' +
+    '  • „Ersatzgerät bestellen / besorgen" → note, KEINE reply\n' +
+    '  • „Parametrierung prüfen" / „Anleitung beschaffen" → note für den zuständigen Techniker\n\n' +
     '############### WEITERE REGELN ###############\n' +
-    'MEHRERE SCHRITTE: Ein User-Befehl kann mehrere Aktionen umfassen (z.B. „antworte… und weise Sandra zu und Gruppe Vertrieb und auf Gelöst setzen" = vier Aktionen). Liste sie in der logischen Reihenfolge auf (typisch: reply/note vor assign/group vor status).\n' +
+    'MEHRERE SCHRITTE: Ein User-Befehl kann mehrere Aktionen umfassen. Liste sie in der logischen Reihenfolge auf (typisch: note/reply vor assign/group vor status/hide).\n' +
+    'Bei Delegation an MEHRERE Kollegen mit unterschiedlichen Aufgaben: EIN note-Eintrag pro Kollege (oder ein zusammengefasster note + assign an den Haupt-Verantwortlichen).\n' +
     'Jede Aktion bekommt einen eigenen Eintrag in der "actions"-Liste.\n\n' +
     'REGELN PRO AKTION:\n' +
     '- Bei reply/note/forward: Verfasse einen fertigen, professionellen body-Text in der Sprache des Tickets (meist Deutsch). Mit Anrede (Name aus Ticket), klarer Aussage. Verwende Zeilenumbrüche \\n für Absätze.\n' +
-    '- WICHTIG — KEINE GRUSSFORMEL UND KEINE SIGNATUR AM ENDE: Die Freshdesk-Signatur des Users enthält bereits eine Grußformel (z.B. „Mit freundlichen Grüßen") sowie Name, Firma, Telefon, Position. Die Signatur wird automatisch angehängt. Schreibe deshalb NIEMALS „Mit freundlichen Grüßen", „Viele Grüße", „Beste Grüße", „Liebe Grüße", einen Namen, eine Firma, eine Telefonnummer oder eine Position. Beende den Text mit dem letzten inhaltlichen Satz — sonst nichts. (Bei Notizen reicht ebenfalls der Inhalt — keine Grußformel.)\n' +
+    '- Bei NOTE für einen Kollegen: Schreibe als Imperativ-Anweisung (z.B. „Bitte schicke...", „Bitte prüfe...", „Anfrage an Mosem stellen wegen..."). Strukturiere mit Bullet-Points wenn mehrere Punkte. KEINE Anrede an den Kollegen nötig.\n' +
+    '- WICHTIG — KEINE GRUSSFORMEL UND KEINE SIGNATUR AM ENDE: Die Freshdesk-Signatur des Users enthält bereits eine Grußformel sowie Name, Firma, Telefon, Position. Die Signatur wird automatisch angehängt. Schreibe deshalb NIEMALS „Mit freundlichen Grüßen", „Viele Grüße", „Beste Grüße", „Liebe Grüße", einen Namen, eine Firma, eine Telefonnummer oder eine Position. Beende den Text mit dem letzten inhaltlichen Satz — sonst nichts. (Bei Notizen reicht ebenfalls der Inhalt.)\n' +
     '- Bei assign: nur EINE eindeutige agent_id verwenden. Bei mehrdeutigen Vornamen (mehrere passen) ODER wenn KEINE passende ID im Pool ist → trotzdem type="assign", aber agent_id=null setzen. Im "summary" kurz erklären welche Auswahl der User treffen muss. Die App zeigt dann ein Dropdown.\n' +
     '- Bei group: GENAU dieselbe Regel. Wenn Gruppen-Bezeichnung mehrdeutig oder unklar ist → type="group" mit group_id=null. Niemals raten.\n' +
     '- Bei forward: forward_to als Array von E-Mail-Adressen.\n' +
     '- Pro Aktion ein kurzes "summary"-Feld auf Deutsch, das knapp beschreibt was die Aktion bewirkt — der User sieht das als Kachel-Untertitel.\n' +
     '- "unknown" nur als ALLERLETZTER Ausweg, wenn überhaupt nicht klar ist was der User will. Lieber type="assign"/"group" mit ID=null setzen, damit der User per Dropdown selber wählt.\n' +
     '- Antworte AUSSCHLIESSLICH mit dem JSON-Objekt, kein Markdown, keine Erklärung drumherum.\n\n' +
+    '############### BEISPIELE ###############\n' +
+    'BEFEHL: „Sandra soll dem Kunden die Auftragsbestätigung schicken mit Lieferzeit 10 Tagen. Ticket danach 3 Tage ausblenden."\n' +
+    'KORREKT:\n' +
+    '{"overall_summary":"Aufgabe an Sandra delegieren, danach Ticket bei mir ausblenden","actions":[\n' +
+    '  {"type":"note","body":"Sandra, bitte erstelle die Auftragsbestätigung im ERP und schicke sie dem Kunden mit einer Lieferzeit von ca. 10 Tagen.","summary":"Notiz an Sandra: Auftragsbestätigung erstellen + senden"},\n' +
+    '  {"type":"assign","agent_id":<Sandra-ID>,"summary":"Zuweisung an Sandra"},\n' +
+    '  {"type":"hide","days":3,"summary":"3 Tage bei mir ausblenden"}\n' +
+    ']}\n' +
+    'FALSCH wäre: type="reply" mit „Sehr geehrter Herr X, hiermit bestätigen wir Ihren Auftrag..." — denn die Auftragsbestätigung kommt aus dem ERP, Sandra macht das, nicht die KI.\n\n' +
+    'BEFEHL: „Michalis prüft Parametrierung wenn wir ein Ersatzgerät kaufen. Mosem fragen was defekt war. Ersatzgerät von Halona besorgen."\n' +
+    'KORREKT: drei note-Aktionen (eine pro Kollegen-Aufgabe) ODER eine zusammengefasste note mit Bullet-Liste + assign an den primären Verantwortlichen. NIEMALS reply an den Kunden — das sind alles interne Arbeitsanweisungen.\n\n' +
+    'BEFEHL: „Antworte dem Kunden dass wir bis Freitag liefern können"\n' +
+    'KORREKT: type="reply" mit „...wir können bis Freitag liefern...". HIER ist reply richtig, weil der User EXPLIZIT sagt „antworte dem Kunden".\n\n' +
     'JSON-FORMAT:\n' +
     '{"overall_summary":"Kurz auf Deutsch was insgesamt passieren soll","actions":[\n' +
     '  {"type":"reply|note|forward|assign|group|status|hide|unknown","body":"...","forward_to":["..."],"agent_id":12345,"group_id":67,"status":4,"days":3,"summary":"Kurze deutsche Beschreibung dieses Schritts"}\n' +
