@@ -267,7 +267,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.36.1';
+const APP_VERSION = 'v2.36.2';
 // Read-Token absichtlich gesplittet, damit GitHub Secret-Scanning beim Push nicht blockt.
 // Der Token ist read-only und Base-scoped → bewusst eingebettet (Architektur-Entscheidung).
 const _RK = 'patu8KWM8aWB' + 'yxCGL.69fae5d9fa4b94c2' + '66b426dadd71a51f574945d840b33569058ab5e9d89ebef3';
@@ -5911,18 +5911,34 @@ async function ticketActionSpam(accountId, ticketId, btn) {
     try {
       await proxyJson(base, { method: 'DELETE' });
       _resetSwipe();
+      removeTicketFromList(accountId, ticketId);
+      refreshTicketsListFromCache();
       toast('Ticket #' + ticketId + ' in Papierkorb verschoben', 'success');
+      return;
     } catch (e1) {
-      // Häufig: alter Proxy-Code blockiert DELETE mit 405. Fallback auf Schließen.
-      if (e1.status === 405 || /method is not allowed/i.test(e1.message || '')) {
-        await proxyJson(base, { method: 'PUT', body: JSON.stringify({ status: 5 }) });
-        _resetSwipe();
-        toast('Ticket #' + ticketId + ' geschlossen (Papierkorb blockiert — Admin → Einstellungen → Proxy-Code aktualisieren)', 'warn', 8000);
+      const is405 = e1.status === 405 || /method is not allowed/i.test(e1.message || '');
+      if (is405) {
+        // Erst prüfen: ist das Ticket vielleicht schon extern gelöscht/SPAM?
+        const handled = await _handleTicketGoneError(accountId, ticketId, e1);
+        if (handled) { _resetSwipe(); if (btn) setBusy(btn, false); return; }
+        // Sonst: Val-Proxy blockiert DELETE → Fallback auf PUT status=5 (Schließen statt Löschen)
+        try {
+          await proxyJson(base, { method: 'PUT', body: JSON.stringify({ status: 5 }) });
+          _resetSwipe();
+          patchTicketInList(accountId, ticketId, { status: 5 });
+          refreshTicketsListFromCache();
+          toast('Ticket #' + ticketId + ' geschlossen (Papierkorb blockiert — Admin → Einstellungen → Proxy-Code aktualisieren)', 'warn', 8000);
+          return;
+        } catch (e2) {
+          // Auch PUT 405 → Ticket ist definitiv extern gelöscht
+          const handled2 = await _handleTicketGoneError(accountId, ticketId, e2);
+          if (handled2) { _resetSwipe(); if (btn) setBusy(btn, false); return; }
+          throw e2;
+        }
       } else {
         throw e1;
       }
     }
-    renderTicketsPage();
   } catch (e) {
     if (btn) setBusy(btn, false);
     toast('Aktion fehlgeschlagen: ' + e.message, 'error', 8000);
@@ -7075,6 +7091,49 @@ function patchTicketInList(accountId, ticketId, patch) {
   }
 }
 
+/* Entfernt ein Ticket aus dem lokalen pageState.tickets-Cache UND dem Master-Cache.
+   Aufruf wenn das Ticket extern gelöscht/SPAM-markiert wurde und Freshdesk uns das
+   per 405 oder „Ticket has been deleted" mitteilt. */
+function removeTicketFromList(accountId, ticketId) {
+  const tid = typeof ticketId === 'string' ? parseInt(ticketId, 10) : ticketId;
+  if (APP_STATE.pageState?.tickets) {
+    APP_STATE.pageState.tickets = APP_STATE.pageState.tickets.filter(t => !(t._accountId === accountId && t.id === tid));
+  }
+  if (APP_STATE.ticketCache instanceof Map) {
+    APP_STATE.ticketCache.delete(accountId + '|' + tid);
+  }
+}
+
+/* Behandelt 405-Fehler bei Ticket-Update-Calls. Freshdesk liefert „PUT method is not allowed.
+   It should be one of these method(s): GET" wenn das Ticket bereits im Papierkorb / SPAM ist
+   (nur noch lesbar, nicht mehr änderbar).
+   - Bei 405: GET das Ticket, check deleted/spam-Flags
+   - Wenn ja: aus Cache entfernen + Toast „bereits archiviert"
+   - Wenn nein: original-Fehler weiterwerfen
+   Returns true wenn Ticket erkannt + entfernt wurde, sonst false. */
+async function _handleTicketGoneError(accountId, ticketId, err) {
+  const msg = String(err?.message || '');
+  const is405 = err?.status === 405 || /method is not allowed/i.test(msg);
+  if (!is405) return false;
+  try {
+    const path = '/freshdesk/' + encodeURIComponent(accountId) + '/api/v2/tickets/' + ticketId;
+    const t = await proxyJson(path);
+    if (t && (t.deleted || t.spam)) {
+      removeTicketFromList(accountId, ticketId);
+      refreshTicketsListFromCache();
+      toast('Ticket #' + ticketId + ' ist bereits ' + (t.spam ? 'als SPAM' : 'im Papierkorb') + ' — aus Übersicht entfernt', 'warn', 6000);
+      return true;
+    }
+  } catch (_) {
+    // Wenn auch GET fehlschlägt → wahrscheinlich Permission-Problem
+    removeTicketFromList(accountId, ticketId);
+    refreshTicketsListFromCache();
+    toast('Ticket #' + ticketId + ' nicht mehr erreichbar — aus Übersicht entfernt', 'warn', 6000);
+    return true;
+  }
+  return false;
+}
+
 /* Re-rendert die Tickets-Liste mit dem aktuellen lokalen Cache — OHNE API-Call.
    Wird nach Card-Aktionen (Bearbeiter/Gruppe/Typ/Status ändern) gerufen, damit der User
    keinen Page-Reload mit Loading-Spinner sieht. Falls die Tickets-Page gerade nicht
@@ -7425,7 +7484,9 @@ async function assignStatusAndClose(statusValue) {
     if (fromList) refreshTicketsListFromCache();
   } catch (e) {
     closeStatusModal();
-    toast('Status-Änderung fehlgeschlagen: ' + e.message, 'error', 6000);
+    // 405 = Ticket ist serverseitig schon archiviert/im Papierkorb — Cache aufräumen + freundlicher Toast
+    const handled = await _handleTicketGoneError(accountId, ticketId, e);
+    if (!handled) toast('Status-Änderung fehlgeschlagen: ' + e.message, 'error', 6000);
   }
 }
 
@@ -9569,9 +9630,16 @@ async function confirmAssistantStep(idx, btnEl) {
     a._state = 'done';
     a._error = null;
   } catch (e) {
-    a._state = 'failed';
-    a._error = e?.message || String(e);
-    toast('Schritt ' + (idx + 1) + ' fehlgeschlagen: ' + a._error, 'error', 6000);
+    // 405 = Ticket bereits archiviert/Papierkorb → Cache aufräumen + verständlicher Toast
+    const handled = await _handleTicketGoneError(ctx.accountId, ctx.ticketId, e);
+    if (handled) {
+      a._state = 'failed';
+      a._error = 'Ticket nicht mehr erreichbar (siehe Toast)';
+    } else {
+      a._state = 'failed';
+      a._error = e?.message || String(e);
+      toast('Schritt ' + (idx + 1) + ' fehlgeschlagen: ' + a._error, 'error', 6000);
+    }
   }
   renderAssistantPreview();
 }
