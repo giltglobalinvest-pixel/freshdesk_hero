@@ -267,7 +267,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.34.5';
+const APP_VERSION = 'v2.34.6';
 // Read-Token absichtlich gesplittet, damit GitHub Secret-Scanning beim Push nicht blockt.
 // Der Token ist read-only und Base-scoped → bewusst eingebettet (Architektur-Entscheidung).
 const _RK = 'patu8KWM8aWB' + 'yxCGL.69fae5d9fa4b94c2' + '66b426dadd71a51f574945d840b33569058ab5e9d89ebef3';
@@ -7503,10 +7503,21 @@ async function aiInterpretSearchQuery(rawText) {
   return parseAIJson(text);
 }
 
-/* Sucht Tickets per Freshdesk Search-API für ein Keyword. Robuster Fallback auf null. */
+/* Sanitiert ein Keyword für die Freshdesk-Search-API. Die Query-Sprache verträgt sich nicht
+   mit Apostrophen, Kommas, Doppelpunkten und Backticks INNERHALB der gequoteten Werte —
+   sie liefern HTTP 400 Validation-Fehler. Sicherer: alle Sonderzeichen → Space, dann trimmen. */
+function _sanitizeForFreshdeskQuery(s) {
+  return String(s || '')
+    .replace(/["'`]/g, '')           // alle Quote-Varianten weg
+    .replace(/[,;:()[\]{}\\]/g, ' ') // problematische Operatoren/Klammern → Space
+    .replace(/\s+/g, ' ')             // mehrfache Spaces → einer
+    .trim();
+}
+
+/* Sucht Tickets per Freshdesk Search-API für ein Keyword. Robuster Fallback auf []. */
 async function searchTicketsByKeyword(accountId, keyword) {
-  if (!keyword || keyword.length < 2) return [];
-  const safeKw = keyword.replace(/"/g, '');
+  const safeKw = _sanitizeForFreshdeskQuery(keyword);
+  if (safeKw.length < 2) return [];
   const query = `subject:'${safeKw}' OR description:'${safeKw}' OR fr_email:'${safeKw}'`;
   try {
     const path = '/freshdesk/' + encodeURIComponent(accountId) +
@@ -7521,17 +7532,18 @@ async function searchTicketsByKeyword(accountId, keyword) {
     _cacheTicketsBulk(annotated);
     return annotated;
   } catch (e) {
-    console.warn('search tickets failed for', accountId, e.message);
+    console.warn('search tickets failed for', accountId, '("' + safeKw + '"):', e.message);
     return [];
   }
 }
 
 /* Contacts-Autocomplete liefert max 10 Treffer pro Account. */
 async function searchContactsByKeyword(accountId, keyword) {
-  if (!keyword || keyword.length < 2) return [];
+  const safeKw = _sanitizeForFreshdeskQuery(keyword);
+  if (safeKw.length < 2) return [];
   try {
     const path = '/freshdesk/' + encodeURIComponent(accountId) +
-      '/api/v2/contacts/autocomplete?term=' + encodeURIComponent(keyword);
+      '/api/v2/contacts/autocomplete?term=' + encodeURIComponent(safeKw);
     const data = await proxyJson(path);
     // Autocomplete liefert {results:[...]} mit name/email/id; manche Pläne nur Array
     const list = Array.isArray(data) ? data : (data.results || data.contacts || []);
@@ -7607,7 +7619,8 @@ async function runSearch(useAI) {
   }
 
   // Alle zu suchenden Begriffe zusammenstellen — primary + secondary + variations.
-  // Dedupizieren case-insensitive, max 6 Begriffe (Latency-Limit).
+  // Dedupizieren case-insensitive UND nach sanitisierter Form (damit „Maukel" und „Maukel,"
+  // nicht zwei verschiedene Server-Queries werden, die beide zu „maukel" werden).
   const allTerms = [];
   const seenLc = new Set();
   const pushTerm = (t) => {
@@ -7616,7 +7629,12 @@ async function runSearch(useAI) {
     if (clean.length < 2) return;
     const lc = clean.toLowerCase();
     if (seenLc.has(lc)) return;
+    // Auch nach sanitisierter Form dedupizieren — verhindert mehrfache identische Server-Queries
+    const sanitizedLc = _sanitizeForFreshdeskQuery(clean).toLowerCase();
+    if (sanitizedLc.length < 2) return;
+    if (seenLc.has('s:' + sanitizedLc)) return;
     seenLc.add(lc);
+    seenLc.add('s:' + sanitizedLc);
     allTerms.push(clean);
   };
   pushTerm(keyword);
