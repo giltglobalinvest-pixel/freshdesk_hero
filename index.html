@@ -267,7 +267,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.38.7';
+const APP_VERSION = 'v2.38.8';
 // Read-Token absichtlich gesplittet, damit GitHub Secret-Scanning beim Push nicht blockt.
 // Der Token ist read-only und Base-scoped → bewusst eingebettet (Architektur-Entscheidung).
 const _RK = 'patu8KWM8aWB' + 'yxCGL.69fae5d9fa4b94c2' + '66b426dadd71a51f574945d840b33569058ab5e9d89ebef3';
@@ -9059,7 +9059,28 @@ function extractPhoneNumbers(text) {
     matches.forEach(m => {
       const trimmed = m.trim().replace(/[\s.\-/]+$/, ''); // trailing junk weg
       const digits = trimmed.replace(/\D/g, '');
-      if (digits.length >= 7 && digits.length <= 15) found.add(trimmed);
+      // Min-Gesamtdigits: 9 (verhindert dass "+49 (0) 41 81" = 7 Digits als „gefunden" durchgeht;
+      // deutsche Mobilnummern haben 11, kürzeste sinnvolle Festnetznummer hat 9 Digits)
+      if (digits.length < 9 || digits.length > 15) return;
+      // Plausibilitäts-Check: nach Country+Area-Code muss eine zusammenhängende
+      // Local-Number von ≥ 5 Digits folgen. Sonst ist es wahrscheinlich ein abgebrochener
+      // Treffer wie "+49 (0) 711 968" wo die echte Local-Number auf einer Folgezeile steht
+      // (z.B. in einer Email-Signatur die wir nicht komplett gecaptured haben).
+      const groups = trimmed.split(/[\s().\-/]+/).filter(s => /^\d+$/.test(s));
+      // Trunk-Prefix "(0)" raus — bei intl-Format steht häufig "+49 (0) 711..."
+      const meaningful = (trimmed.startsWith('+'))
+        ? groups.filter((g, i) => !(i === 1 && g === '0'))
+        : groups;
+      if (meaningful.length < 2) return;
+      // localPart = alles ab dem dritten Element (nach Country + Area) bzw. ab dem zweiten
+      // bei Local-Format (0-Prefix). Mindestens 5 Digits sollten zusammenkommen.
+      const skipPrefix = trimmed.startsWith('+') ? 2 : 1; // intl: country+area, local: area
+      const localDigits = meaningful.slice(skipPrefix).reduce((sum, g) => sum + g.length, 0);
+      // Falls die Area-Gruppe selbst lang ist (zB Mobile-Block "157" + Local "92388693"),
+      // reicht auch wenn schon der „area"-Slot eine echte Local-Number enthält.
+      const lastGroup = meaningful[meaningful.length - 1] || '';
+      if (localDigits < 5 && lastGroup.length < 5) return;
+      found.add(trimmed);
     });
   });
   return Array.from(found);
