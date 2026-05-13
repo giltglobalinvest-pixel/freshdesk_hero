@@ -267,7 +267,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.30.1';
+const APP_VERSION = 'v2.30.2';
 // Read-Token absichtlich gesplittet, damit GitHub Secret-Scanning beim Push nicht blockt.
 // Der Token ist read-only und Base-scoped → bewusst eingebettet (Architektur-Entscheidung).
 const _RK = 'patu8KWM8aWB' + 'yxCGL.69fae5d9fa4b94c2' + '66b426dadd71a51f574945d840b33569058ab5e9d89ebef3';
@@ -2417,7 +2417,16 @@ function renderContactEditBody() {
           </button>
         </div>` : `
         <p class="text-[11px] text-ink-600 italic">${ctx._fsError ? 'Freshsales-Lookup fehlgeschlagen: ' + escapeHtml(ctx._fsError) : 'Kein Freshsales-Contact mit der Email ' + escapeHtml(c.email || '?') + ' gefunden.'}</p>
-        ${ctx._fsError && /method.*not.*allowed|not found|404/i.test(ctx._fsError) ? '<p class="text-[10px] text-amber-700 mt-2"><i data-lucide="alert-triangle" class="w-3 h-3 inline"></i> Der Val.town-Proxy unterstützt vielleicht noch keine /freshsales/-Route. Im Profil → Setup → „Val aktualisieren" einmalig neu deployen.</p>' : ''}
+        ${ctx._fsError && /method.*not.*allowed|404/i.test(ctx._fsError) ? `
+          <div class="mt-2 bg-amber-50 border border-amber-200 rounded-lg p-2 text-[10px] text-amber-900 space-y-1.5">
+            <p class="font-semibold flex items-center gap-1"><i data-lucide="alert-triangle" class="w-3 h-3"></i> Mögliche Ursachen (in Reihenfolge der Wahrscheinlichkeit):</p>
+            <ol class="list-decimal pl-4 space-y-1">
+              <li><b>Freshsales-Subdomain falsch:</b> Im Account-Setup unter „Accounts" → Stift-Icon prüfen ob die Subdomain (vor <code>${escapeHtml(acc?.freshsales_domain_suffix || 'myfreshworks.com')}</code>) wirklich stimmt. Im Zweifel: die URL aus dem Freshsales-Login-Browserfenster kopieren.</li>
+              <li><b>Falsches Domain-Suffix:</b> Beim Bearbeiten des Accounts das Dropdown auf die andere Variante (<code>.myfreshworks.com</code> ↔ <code>.freshworks.com</code>) umstellen.</li>
+              <li><b>Val.town-Proxy ist alt:</b> Im <b>Profil → Setup → „Val aktualisieren"</b> den Proxy auf v2.30+ heben — der ältere Proxy ignoriert das Suffix-Feld und routet immer auf <code>.myfreshworks.com</code>.</li>
+              <li><b>Email existiert in Freshsales nicht:</b> Ist auch ein 404 — aber dann sollte das System „nicht gefunden" zeigen statt einen Fehler.</li>
+            </ol>
+          </div>` : ''}
       `}
     </div>` : `
     <div class="bg-ink-50 border border-ink-200 rounded-2xl p-3">
@@ -8602,6 +8611,33 @@ function editAccount(accountId) {
   openAccountModal(account);
 }
 
+/* Testet die Freshsales-API-Verbindung — fragt /selector/owners ab (kleine Endpoint,
+   schnell, benötigt keinen spezifischen Datensatz). Bei Erfolg: Toast mit Anzahl Owner.
+   Bei Fehler: Toast mit der konkreten Antwort vom Proxy/Upstream. */
+async function testFreshsalesConnection(accountId, btnEl) {
+  setBusy(btnEl, true, 'Teste…');
+  try {
+    // /api/selector/owners liefert alle CRM-User des Tenants — robuster Health-Check
+    const data = await proxyJson('/freshsales/' + encodeURIComponent(accountId) + '/api/selector/owners');
+    const owners = data?.users || data?.owners || [];
+    const count = Array.isArray(owners) ? owners.length : 0;
+    toast('OK · Freshsales antwortet (' + count + ' Owner gefunden)', 'success', 4000);
+  } catch (e) {
+    const msg = e.message || String(e);
+    let hint = '';
+    if (/404/.test(msg)) {
+      hint = ' · Subdomain falsch ODER falsches Suffix gewählt ODER Val-Proxy ist alt';
+    } else if (/401|403/.test(msg)) {
+      hint = ' · API-Key falsch oder ohne Rechte';
+    } else if (/Domain fehlt/i.test(msg)) {
+      hint = ' · Erst speichern, dann testen';
+    }
+    toast('Fehler: ' + msg + hint, 'error', 10000);
+  } finally {
+    setBusy(btnEl, false);
+  }
+}
+
 async function confirmDeleteAccount(id, name) {
   const ok = await confirmDialog('Account löschen', 'Soll der Account "' + name + '" wirklich entfernt werden?\nDer Freshdesk-Workspace selbst bleibt unberührt — nur der Eintrag in der App wird gelöscht.', { danger: true, okText: 'Löschen' });
   if (!ok) return;
@@ -8664,6 +8700,12 @@ function openAccountModal(account) {
                 <input id="accFsApiKey" type="password" placeholder="${account?.freshsales_api_key ? '•••••• gespeichert (zum Ändern überschreiben)' : 'leer lassen = deaktiviert'}" class="mt-1 w-full px-3 py-2 border border-ink-200 rounded-lg text-sm font-mono focus:ring-2 focus:ring-purple-500/30 focus:border-purple-500">
                 <p class="text-[10px] text-ink-500 mt-1">In Freshsales: Profil → Settings → API-Settings.${isEdit && account?.freshsales_api_key ? ' Leer lassen = aktuellen Key behalten.' : ''}</p>
               </div>
+              ${isEdit && account?.freshsales_domain ? `
+                <button type="button" onclick="testFreshsalesConnection('${escapeAttr(account.id)}', this)" class="w-full mt-1 px-3 py-1.5 bg-white border border-purple-300 text-purple-700 hover:bg-purple-50 rounded-lg text-xs font-semibold inline-flex items-center justify-center gap-1.5">
+                  <i data-lucide="zap" class="w-3.5 h-3.5"></i> Verbindung testen (mit gespeicherten Daten)
+                </button>
+                <p class="text-[10px] text-ink-500">Ruft die Freshsales-API auf und zeigt das Ergebnis. Domain/Key-Änderungen erst speichern, dann testen.</p>
+              ` : ''}
             </div>
           </details>
           <div>
