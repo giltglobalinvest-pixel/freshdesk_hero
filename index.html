@@ -267,7 +267,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.38.2';
+const APP_VERSION = 'v2.38.3';
 // Read-Token absichtlich gesplittet, damit GitHub Secret-Scanning beim Push nicht blockt.
 // Der Token ist read-only und Base-scoped → bewusst eingebettet (Architektur-Entscheidung).
 const _RK = 'patu8KWM8aWB' + 'yxCGL.69fae5d9fa4b94c2' + '66b426dadd71a51f574945d840b33569058ab5e9d89ebef3';
@@ -4274,10 +4274,16 @@ function cacheRequester(accountId, requester) {
   const existing = APP_STATE.requestersCache[accountId][id] || {};
   APP_STATE.requestersCache[accountId][id] = {
     id,
-    name:   requester.name   || existing.name   || null,
-    email:  requester.email  || existing.email  || null,
-    phone:  requester.phone  || existing.phone  || null,
-    mobile: requester.mobile || existing.mobile || null,
+    name:        requester.name        || existing.name        || null,
+    email:       requester.email       || existing.email       || null,
+    phone:       requester.phone       || existing.phone       || null,
+    mobile:      requester.mobile      || existing.mobile      || null,
+    // Erweiterte Felder — Adresse und Notiz/Beschreibung können zusätzliche Telefonnummern
+    // enthalten (z.B. „Tel: +49 ..." am Ende). Wird in updateRequesterRowInDom extrahiert.
+    address:     requester.address     || existing.address     || null,
+    description: requester.description || existing.description || null,
+    job_title:   requester.job_title   || existing.job_title   || null,
+    company_id:  requester.company_id  || existing.company_id  || null,
   };
 }
 
@@ -4302,7 +4308,13 @@ async function ensureRequesterLoaded(accountId, requesterId, opts) {
   const p = (async () => {
     try {
       const c = await fetchContact(accountId, requesterId);
-      if (c) cacheRequester(accountId, { id: c.id, name: c.name, email: c.email, phone: c.phone, mobile: c.mobile });
+      if (c) cacheRequester(accountId, {
+        id: c.id, name: c.name, email: c.email,
+        phone: c.phone, mobile: c.mobile,
+        // zusätzliche Felder die für Phone-Fallback-Extraction wichtig sind
+        address: c.address, description: c.description,
+        job_title: c.job_title, company_id: c.company_id,
+      });
       return getCachedRequester(accountId, requesterId);
     } catch (_) { return null; }
     finally { _pendingRequesterLoads.delete(key); }
@@ -5392,9 +5404,16 @@ function renderTicketList(tickets) {
           _phonesSeen.add(digits);
           cardPhones.push({ num: String(n).trim(), fromReq: !!fromReq });
         };
-        // Aus dem Requester (cached)
+        // Aus dem Requester (cached) — inkl. address + description als Fallback-Quelle
         const cachedReq = getCachedRequester(t._accountId, t.requester_id);
-        if (cachedReq) { _addPhone(cachedReq.phone, true); _addPhone(cachedReq.mobile, true); }
+        if (cachedReq) {
+          _addPhone(cachedReq.phone, true);
+          _addPhone(cachedReq.mobile, true);
+          try {
+            const extraText = [cachedReq.address || '', cachedReq.description || ''].join('\n');
+            if (extraText.trim()) extractPhoneNumbers(extraText).forEach(n => _addPhone(n, true));
+          } catch (_) {}
+        }
         if (t.requester) { _addPhone(t.requester.phone, true); _addPhone(t.requester.mobile, true); }
         // Aus dem Text (Subject + Description-Snippet)
         const _phoneSearchText = (t.subject || '') + ' ' + (t.description_text || t.description || '').slice(0, 500);
@@ -5620,37 +5639,43 @@ function updateRequesterRowInDom(ticket, contact) {
     }
   }
 
-  // Phone-Pills hinzufügen wenn Phone/Mobile da sind und noch keine in der Card vorhanden
-  if (contact.phone || contact.mobile) {
-    // Existierende Phone-Container in der Card finden — Pfad: rowEl → Eltern → flex-1
+  // Phone-Pills hinzufügen: Quellen sind phone/mobile-Felder PLUS extrahierte Tel-Nummern
+  // aus Adresse und Beschreibung (Multi-Liner mit „Tel: ..." sind häufig in CRMs).
+  const _seen = new Set();
+  const items = [];
+  const _add = (label, num) => {
+    if (!num) return;
+    const d = String(num).replace(/\D/g, '');
+    if (d.length < 7 || _seen.has(d)) return;
+    _seen.add(d);
+    items.push({ label, num: String(num).trim() });
+  };
+  _add('Festnetz', contact.phone);
+  _add('Mobil',    contact.mobile);
+  // Fallback: extractPhoneNumbers aus address + description (oft hat ein Kontakt
+  // dort eine Tel-Nummer auch ohne dass das phone/mobile-Feld gepflegt wurde)
+  try {
+    const extraText = [contact.address || '', contact.description || ''].join('\n');
+    if (extraText.trim()) {
+      extractPhoneNumbers(extraText).forEach(n => _add('gefunden', n));
+    }
+  } catch (_) {}
+
+  if (items.length) {
     const card = rowEl.closest('[data-swipe-content]') || rowEl.closest('div');
     if (card) {
       let phonesContainer = card.querySelector('[data-phone-pills]');
-      // Wenn noch nicht da: nach der Requester-Row einfügen
       if (!phonesContainer) {
-        // Prüfen ob schon Phone-Pills vom Initial-Render da sind (alte tel:-Links nahe der Row)
         const hadInitialPhones = card.querySelector('a[href^="tel:"]');
         if (!hadInitialPhones) {
           phonesContainer = document.createElement('div');
           phonesContainer.setAttribute('data-phone-pills', '');
           phonesContainer.className = 'flex flex-wrap gap-1 mt-1';
-          // Nach der Requester-Row einfügen
           if (rowEl.parentNode) rowEl.parentNode.insertBefore(phonesContainer, rowEl.nextSibling);
         }
       }
       if (phonesContainer && !phonesContainer.dataset.hydrated) {
         phonesContainer.dataset.hydrated = '1';
-        const _seen = new Set();
-        const items = [];
-        const _add = (label, num) => {
-          if (!num) return;
-          const d = String(num).replace(/\D/g, '');
-          if (d.length < 7 || _seen.has(d)) return;
-          _seen.add(d);
-          items.push({ label, num: String(num).trim() });
-        };
-        _add('Festnetz', contact.phone);
-        _add('Mobil',    contact.mobile);
         items.slice(0, 3).forEach(p => {
           const a = document.createElement('a');
           a.href = 'tel:' + _cleanPhoneForTel(p.num);
