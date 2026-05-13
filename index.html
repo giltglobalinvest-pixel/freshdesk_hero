@@ -267,7 +267,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.36.2';
+const APP_VERSION = 'v2.37.0';
 // Read-Token absichtlich gesplittet, damit GitHub Secret-Scanning beim Push nicht blockt.
 // Der Token ist read-only und Base-scoped → bewusst eingebettet (Architektur-Entscheidung).
 const _RK = 'patu8KWM8aWB' + 'yxCGL.69fae5d9fa4b94c2' + '66b426dadd71a51f574945d840b33569058ab5e9d89ebef3';
@@ -5907,6 +5907,10 @@ async function ticketActionClose(accountId, ticketId, btn) {
 async function ticketActionSpam(accountId, ticketId, btn) {
   if (btn) setBusy(btn, true, '…');
   const base = '/freshdesk/' + encodeURIComponent(accountId) + '/api/v2/tickets/' + ticketId;
+  // Snapshot des Tickets BEVOR wir es aus dem Cache löschen — brauchen wir für das „Regel daraus lernen?"-Modal
+  const snapshot = APP_STATE.pageState?.tickets?.find(t => t._accountId === accountId && t.id === ticketId)
+                || APP_STATE.ticketCache?.get(accountId + '|' + ticketId)
+                || null;
   try {
     try {
       await proxyJson(base, { method: 'DELETE' });
@@ -5914,6 +5918,9 @@ async function ticketActionSpam(accountId, ticketId, btn) {
       removeTicketFromList(accountId, ticketId);
       refreshTicketsListFromCache();
       toast('Ticket #' + ticketId + ' in Papierkorb verschoben', 'success');
+      if (btn) setBusy(btn, false);
+      // Nach Erfolg: User fragen ob Regel daraus gelernt werden soll
+      _offerSpamRule(snapshot, accountId, ticketId);
       return;
     } catch (e1) {
       const is405 = e1.status === 405 || /method is not allowed/i.test(e1.message || '');
@@ -5928,6 +5935,8 @@ async function ticketActionSpam(accountId, ticketId, btn) {
           patchTicketInList(accountId, ticketId, { status: 5 });
           refreshTicketsListFromCache();
           toast('Ticket #' + ticketId + ' geschlossen (Papierkorb blockiert — Admin → Einstellungen → Proxy-Code aktualisieren)', 'warn', 8000);
+          if (btn) setBusy(btn, false);
+          _offerSpamRule(snapshot, accountId, ticketId);
           return;
         } catch (e2) {
           // Auch PUT 405 → Ticket ist definitiv extern gelöscht
@@ -5943,6 +5952,40 @@ async function ticketActionSpam(accountId, ticketId, btn) {
     if (btn) setBusy(btn, false);
     toast('Aktion fehlgeschlagen: ' + e.message, 'error', 8000);
   }
+}
+
+/* Nach erfolgreichem SPAM-Mark dem User anbieten, eine Regel zu lernen die ähnliche
+   Tickets in Zukunft automatisch als SPAM markiert. Per-Ticket-Snapshot wird als
+   Kontext an die KI gegeben, damit sie das Match-Pattern (Absender, Subject-Muster,
+   Email-Domain) ableiten kann. */
+async function _offerSpamRule(ticketSnapshot, accountId, ticketId) {
+  // Nur fragen wenn wir das Ticket-Object haben (sonst kann die KI nichts ableiten)
+  if (!ticketSnapshot) return;
+  // Damit der Toast erst sichtbar ist, vor dem Dialog kurz warten
+  await new Promise(r => setTimeout(r, 700));
+  const ok = await confirmDialog(
+    'Regel aus diesem SPAM lernen?',
+    'Soll Claude eine KI-Regel erstellen, die ähnliche Tickets in Zukunft automatisch als SPAM markiert? Du kannst Match-Kriterium und Aktion vor dem Speichern noch anpassen.',
+    { okText: '✨ Ja, Regel erstellen', cancelText: 'Nein, danke' }
+  );
+  if (!ok) return;
+  const desc = htmlToText(ticketSnapshot.description_text || ticketSnapshot.description || '');
+  const tctx = {
+    accountId,
+    ticketId,
+    subject:        ticketSnapshot.subject || '',
+    description:    desc.slice(0, 1500),
+    requesterName:  ticketSnapshot.requester?.name  || null,
+    requesterEmail: ticketSnapshot.requester?.email || null,
+  };
+  openRuleEditor(null, tctx, {
+    presetDescription: 'Solche Tickets sind SPAM — in Zukunft automatisch als SPAM markieren und in den Papierkorb verschieben.',
+  });
+  // Nach kurzer Verzögerung die KI-Analyse direkt auslösen (User soll nicht extra „Analysieren" klicken müssen)
+  setTimeout(() => {
+    const btn = document.querySelector('#ruleEditorContent button[onclick^="parseRuleWithAI"]');
+    if (btn) btn.click();
+  }, 250);
 }
 
 /* === Wiedervorlage-Picker (Bottom-Sheet) === */
@@ -10978,11 +11021,11 @@ async function confirmDeleteRule(id, titel) {
 let RULE_EDITOR_CTX = null;
 let RULE_REC = null;
 
-async function openRuleEditor(id, ticketContext) {
+async function openRuleEditor(id, ticketContext, options) {
   const existing = id ? RULES_CACHE.find(r => r.id === id) : null;
   RULE_EDITOR_CTX = {
     id: id || null,
-    beschreibung: existing?.beschreibung || '',
+    beschreibung: existing?.beschreibung || options?.presetDescription || '',
     parsed: existing?.action || null,
     aktiv: existing?.aktiv !== false,
     ticketContext: ticketContext || null,
@@ -11167,7 +11210,8 @@ async function aiParseRule(description, ticketContext) {
     '- {"type":"status", "status":"open|pending|resolved|closed"}\n' +
     '- {"type":"type", "typeHint":"Hinweis auf den Ticket-Typ"}\n' +
     '- {"type":"wiedervorlage", "days":N, "grund":"manuell|antwort|notiz|zuweisung"}\n' +
-    '- {"type":"hide", "days":N}  // NUR lokales Ausblenden in der App des Users (default 30 Tage Wiedervorlage). Optional eine andere Dauer in Tagen.\n\n' +
+    '- {"type":"hide", "days":N}  // NUR lokales Ausblenden in der App des Users (default 30 Tage Wiedervorlage). Optional eine andere Dauer in Tagen.\n' +
+    '- {"type":"spam"}  // Markiert das Ticket als SPAM (DELETE → Freshdesk-Papierkorb). Endgültig. Wenn der User „spam", „junk", „in den Papierkorb", „löschen", „blockieren", „werbung", „verschieben in papierkorb" oder ähnliches sagt → diese Aktion verwenden.\n\n' +
     'KRITISCHE UNTERSCHEIDUNG — status vs hide sind NICHT austauschbar:\n' +
     '• "status" ändert den Freshdesk-Ticket-Status FÜR ALLE (Kunde, andere Agents, Workflows). Nutze AUSSCHLIESSLICH wenn der User explizit einen Status nennt: "auf Wartet setzen", "schließe das Ticket", "Status gelöst", "öffne wieder".\n' +
     '• "hide" verändert den Ticket-Status NICHT. Es blendet das Ticket NUR aus der persönlichen App-Sicht des aktuellen Users aus (lokal). Andere sehen das Ticket weiterhin im normalen Status.\n\n' +
@@ -11228,6 +11272,7 @@ function renderRuleParsedPreview() {
     if (a.type === 'type')          return { icon:'tag',         color:'purple',  label:'Typ setzen',               detail: a.typeHint || '' };
     if (a.type === 'wiedervorlage') return { icon:'clock',       color:'indigo',  label:'Auf Wiedervorlage',        detail: (a.days || '?') + ' Tage' };
     if (a.type === 'hide')          return { icon:'eye-off',     color:'purple',  label:'Aus meiner Sicht ausblenden (lokal, ändert NICHT den Status)', detail: (a.days || 30) + ' Tage in deiner App' };
+    if (a.type === 'spam')          return { icon:'ban',         color:'red',     label:'Als SPAM markieren (in Papierkorb verschieben)', detail: 'endgültig — Freshdesk-DELETE, Cache wird bereinigt' };
     return { icon:'help-circle', color:'ink', label:'Unbekannte Aktion', detail: JSON.stringify(a).slice(0, 100) };
   });
   $('ruleParsedPreview').innerHTML = `
@@ -11466,6 +11511,32 @@ async function applyRuleActions(rule, ticket) {
         const days = Math.max(1, Math.min(365, a.days || 30));
         await addWiedervorlage(accountId, ticketId, _daysToFrist(days, { morning: true }), 'regel');
         performed.push('Ausgeblendet ' + days + 'd');
+      } else if (a.type === 'spam') {
+        // SPAM/in Papierkorb verschieben — DELETE-Request mit Fallback auf Status=5
+        try {
+          await proxyJson(base, { method: 'DELETE' });
+          removeTicketFromList(accountId, ticketId);
+          performed.push('SPAM');
+        } catch (e1) {
+          const is405 = e1.status === 405 || /method is not allowed/i.test(e1.message || '');
+          if (is405) {
+            // Möglicherweise schon gelöscht — prüfen
+            const handled = await _handleTicketGoneError(accountId, ticketId, e1);
+            if (handled) {
+              performed.push('SPAM (bereits archiviert)');
+            } else {
+              // DELETE wird geblockt — Fallback: status=5 (Schließen)
+              try {
+                await proxyJson(base, { method: 'PUT', body: JSON.stringify({ status: 5 }) });
+                performed.push('Geschlossen (DELETE blockiert)');
+              } catch (e2) {
+                failures.push({ what: 'SPAM', error: _short(e2.message) });
+              }
+            }
+          } else {
+            failures.push({ what: 'SPAM', error: _short(e1.message) });
+          }
+        }
       }
     } catch (e) {
       console.warn('Rule action failed:', a, e);
