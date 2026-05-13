@@ -267,7 +267,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.38.9';
+const APP_VERSION = 'v2.39.0';
 // Read-Token absichtlich gesplittet, damit GitHub Secret-Scanning beim Push nicht blockt.
 // Der Token ist read-only und Base-scoped → bewusst eingebettet (Architektur-Entscheidung).
 const _RK = 'patu8KWM8aWB' + 'yxCGL.69fae5d9fa4b94c2' + '66b426dadd71a51f574945d840b33569058ab5e9d89ebef3';
@@ -5690,7 +5690,25 @@ async function hydrateMissingRequesters(tickets) {
           const found = extractPhoneNumbers(text);
           console.log('[hydrate-body] Ticket #' + t.id + ' body+conv length=' + text.length +
             ' (conv parts=' + (full.conversations || []).length + ') phones found=' + found.length, found);
-          if (found.length) _insertPhonePillsIntoCardDom(t, found, 'aus Mail');
+          if (!found.length) continue;
+          // KI-Validierung: prüfen ob jede Nummer zum Anfragenden gehört oder z.B.
+          // aus einer Signatur einer dritten Person bei WG/Fwd stammt.
+          const cachedReq = getCachedRequester(t._accountId, t.requester_id) || {};
+          const validated = await validatePhonesForRequester({
+            accountId: t._accountId,
+            ticketId: t.id,
+            requesterName: full.requester?.name || cachedReq.name || '',
+            requesterEmail: full.requester?.email || cachedReq.email || '',
+            fullText: text,
+            phones: found,
+          });
+          const accepted = validated.filter(v => v.belongs).map(v => v.num);
+          const rejected = validated.filter(v => !v.belongs);
+          if (rejected.length) {
+            console.log('[hydrate-body] Ticket #' + t.id + ' KI hat ' + rejected.length + ' Nummer(n) verworfen:',
+              rejected.map(r => r.num + ' (' + r.reason + ')').join(' · '));
+          }
+          if (accepted.length) _insertPhonePillsIntoCardDom(t, accepted, 'aus Mail');
         } catch (e) { console.warn('[hydrate-body] Ticket #' + t.id + ' error:', e.message); }
       }
     });
@@ -7424,22 +7442,26 @@ function renderTicketDetailBody(ticket) {
   const assigneeName = getAgentName(ticket._accountId, ticket.responder_id);
   const groupName    = getGroupName(ticket._accountId, ticket.group_id);
 
-  // Telefonnummern für die Detail-Ansicht — requester + im Text gefunden, dedupliziert
+  // Telefonnummern für die Detail-Ansicht — requester + im Text gefunden, dedupliziert.
+  // Aus Contact gemeldete (phone/mobile) werden direkt gerendert.
+  // „Gefundene" werden erstmal mit data-tel-pending markiert und nach KI-Validierung
+  // entweder behalten oder entfernt (async, blockt das Rendering nicht).
   const _seenDigits = new Set();
   const detailPhones = [];
-  const _addD = (label, num, fromContact) => {
+  const _addD = (label, num, fromContact, pending) => {
     if (!num) return;
     const d = String(num).replace(/\D/g, '');
     if (d.length < 7 || _seenDigits.has(d)) return;
     _seenDigits.add(d);
-    detailPhones.push({ label, num: String(num).trim(), fromContact: !!fromContact });
+    detailPhones.push({ label, num: String(num).trim(), fromContact: !!fromContact, pending: !!pending });
   };
-  _addD('Festnetz', req.phone,  true);
-  _addD('Mobil',    req.mobile, true);
+  _addD('Festnetz', req.phone,  true, false);
+  _addD('Mobil',    req.mobile, true, false);
   const _detailText = (ticket.subject || '') + '\n' +
     htmlToText(ticket.description_text || ticket.description || '') + '\n' +
     (ticket.conversations || []).map(c => htmlToText(c.body_text || c.body || '')).join('\n');
-  try { extractPhoneNumbers(_detailText).forEach(n => _addD('gefunden', n, false)); } catch (_) {}
+  const _extractedPhones = [];
+  try { extractPhoneNumbers(_detailText).forEach(n => { _extractedPhones.push(n); _addD('gefunden', n, false, true); }); } catch (_) {}
 
   $('ticketDetailBody').innerHTML = `
     <div class="space-y-3 max-w-2xl mx-auto">
@@ -7467,11 +7489,12 @@ function renderTicketDetailBody(ticket) {
                 </button>` : ''}
             </div>
             ${detailPhones.length ? `
-              <div class="flex flex-wrap gap-1.5 mt-2">
+              <div class="flex flex-wrap gap-1.5 mt-2" data-detail-phones>
                 ${detailPhones.map(p => {
                   const tel = _cleanPhoneForTel(p.num);
-                  return `<a href="tel:${escapeAttr(tel)}" class="inline-flex items-center gap-1.5 px-2.5 py-1.5 ${p.fromContact ? 'bg-emerald-50 border-emerald-300 text-emerald-800' : 'bg-emerald-50/70 border-emerald-200 text-emerald-700'} border rounded-lg active:bg-emerald-100">
-                    <i data-lucide="phone-call" class="w-3.5 h-3.5"></i>
+                  const digits = p.num.replace(/\D/g, '');
+                  return `<a href="tel:${escapeAttr(tel)}" data-tel-digits="${escapeAttr(digits)}" ${p.pending ? 'data-tel-pending="1" title="Wird durch KI geprüft…"' : ''} class="inline-flex items-center gap-1.5 px-2.5 py-1.5 ${p.fromContact ? 'bg-emerald-50 border-emerald-300 text-emerald-800' : 'bg-emerald-50/70 border-emerald-200 text-emerald-700'} border rounded-lg active:bg-emerald-100 ${p.pending ? 'opacity-60' : ''}">
+                    <i data-lucide="${p.pending ? 'loader' : 'phone-call'}" class="w-3.5 h-3.5 ${p.pending ? 'animate-spin' : ''}"></i>
                     <span class="font-mono text-[11px]">${escapeHtml(p.num)}</span>
                     <span class="text-[9px] uppercase tracking-wider opacity-70">${p.label}</span>
                   </a>`;
@@ -7562,6 +7585,53 @@ function renderTicketDetailBody(ticket) {
 
     </div>`;
   if (window.lucide) lucide.createIcons();
+
+  // KI-Validierung der „gefundenen" Tel-Nummern: prüft ob sie zum Anfragenden gehören
+  // oder z.B. aus einer Signatur einer dritten Person in einer weitergeleiteten Mail
+  // stammen. Pills mit data-tel-pending werden nach Antwort entweder bestätigt
+  // (Pending-Spinner weg) oder komplett entfernt.
+  if (_extractedPhones.length && ticket.requester_id) {
+    validatePhonesForRequester({
+      accountId: ticket._accountId,
+      ticketId: ticket.id,
+      requesterName: req.name || '',
+      requesterEmail: req.email || '',
+      fullText: _detailText,
+      phones: _extractedPhones,
+    }).then(validated => {
+      const container = document.querySelector('[data-detail-phones]');
+      if (!container) return;
+      validated.forEach(v => {
+        const digits = v.num.replace(/\D/g, '');
+        const pill = container.querySelector(`[data-tel-digits="${CSS.escape(digits)}"][data-tel-pending]`);
+        if (!pill) return;
+        if (v.belongs) {
+          // Pending-Marker entfernen, Spinner durch Phone-Icon ersetzen
+          pill.removeAttribute('data-tel-pending');
+          pill.classList.remove('opacity-60');
+          pill.title = (v.reason || 'KI-validiert');
+          const icon = pill.querySelector('[data-lucide="loader"]');
+          if (icon) { icon.setAttribute('data-lucide', 'phone-call'); icon.classList.remove('animate-spin'); }
+        } else {
+          // Verworfen — Pill mit Begründung entfernen
+          console.log('[detail-phones] KI verwirft Nummer ' + v.num + ' (' + v.reason + ')');
+          pill.remove();
+        }
+      });
+      // Container weg wenn keine Pills mehr drin sind
+      if (!container.querySelector('a')) container.remove();
+      if (window.lucide) lucide.createIcons();
+    }).catch(e => {
+      console.warn('[detail-phones] Validate-Fehler — pending Pills werden als bestätigt markiert:', e.message);
+      document.querySelectorAll('[data-tel-pending]').forEach(p => {
+        p.removeAttribute('data-tel-pending');
+        p.classList.remove('opacity-60');
+        const icon = p.querySelector('[data-lucide="loader"]');
+        if (icon) { icon.setAttribute('data-lucide', 'phone-call'); icon.classList.remove('animate-spin'); }
+      });
+      if (window.lucide) lucide.createIcons();
+    });
+  }
 }
 
 /* === Assignee-Modal (Bottom-Sheet) === */
@@ -9047,6 +9117,98 @@ async function saveSummaryAsNote(accountId, ticketId, summary) {
 }
 
 // Telefonnummer-Extraktion: deutsche + internationale Formate
+/* KI-Validierung extrahierter Tel-Nummern: prüft ob jede Nummer plausibel
+   zum Anfragenden gehört oder z.B. aus einer Signatur einer dritten Person
+   in einer weitergeleiteten Mail stammt.
+
+   Cache pro (accountId+ticketId+phones-Hash) für Session-Dauer — re-renders
+   sollen nicht erneut die KI bemühen.
+
+   Bei API-Fehler oder fehlendem Key: alle Nummern als „belongs=true" zurück
+   (fail-open), damit User nicht plötzlich keine Tel-Nummern mehr sieht. */
+const _PHONE_VALIDATE_CACHE = new Map();
+
+async function validatePhonesForRequester({ accountId, ticketId, requesterName, requesterEmail, fullText, phones }) {
+  if (!phones || !phones.length) return [];
+  const cacheKey = (accountId || '') + ':' + (ticketId || '') + ':' + phones.join('|');
+  if (_PHONE_VALIDATE_CACHE.has(cacheKey)) {
+    return _PHONE_VALIDATE_CACHE.get(cacheKey);
+  }
+  // Fail-open Default: alle akzeptiert. Wird unten überschrieben wenn KI antwortet.
+  const failOpen = phones.map(num => ({ num, belongs: true, reason: 'nicht validiert' }));
+
+  // Kein API-Key oder kein Requester-Name → Validierung überspringen (fail-open)
+  if (!requesterName && !requesterEmail) {
+    _PHONE_VALIDATE_CACHE.set(cacheKey, failOpen);
+    return failOpen;
+  }
+
+  // Text auf 6000 Zeichen begrenzen (Tokens sparen, Haiku Kontext)
+  const textSnippet = String(fullText || '').slice(0, 6000);
+
+  const sys = 'Du prüfst ob extrahierte Telefonnummern zu einer bestimmten Person gehören. ' +
+    'Antworte AUSSCHLIESSLICH mit JSON. Kein Markdown, keine Erklärung außerhalb des JSON.';
+  const user = 'ANFRAGENDER:\n' +
+    'Name: ' + (requesterName || '(unbekannt)') + '\n' +
+    'Email: ' + (requesterEmail || '(unbekannt)') + '\n\n' +
+    'AUS DEM MAIL-VERLAUF EXTRAHIERTE TELEFONNUMMERN:\n' +
+    phones.map((p, i) => (i + 1) + '. ' + p).join('\n') + '\n\n' +
+    'MAIL-VERLAUF (Auszug):\n' +
+    textSnippet + '\n\n' +
+    'AUFGABE: Entscheide für jede Nummer einzeln ob sie zum oben genannten Anfragenden gehört.\n' +
+    'Berücksichtige typische Indikatoren:\n' +
+    '- Steht der Name des Anfragenden in der Nähe der Nummer (eigene Signatur)?\n' +
+    '- Oder steht ein anderer Name in der Signatur (z.B. bei WG:/Fwd: weitergeleiteten Mails — die Signatur am Ende gehört dann zum Original-Absender, NICHT zum jetzigen Anfragenden)?\n' +
+    '- Passt die Email-Domain des Anfragenden zur Firma in der Signatur?\n' +
+    '- Bei Unsicherheit lieber "false" — wir wollen keine falschen Nummern als Kontakt-Tel anzeigen.\n\n' +
+    'Antworte als JSON-Array:\n' +
+    '[{"num":"...","belongs":true,"reason":"kurz"}, ...]\n' +
+    'Genau ' + phones.length + ' Einträge in derselben Reihenfolge wie oben. "reason" maximal 60 Zeichen.';
+
+  try {
+    const data = await proxyJson('/anthropic/v1/messages', {
+      method: 'POST',
+      body: JSON.stringify({
+        model: 'claude-haiku-4-5-20251001',
+        max_tokens: 800,
+        system: sys,
+        messages: [{ role: 'user', content: user }],
+      }),
+    });
+    const text = (data.content && data.content[0] && data.content[0].text) || '';
+    // JSON aus Response extrahieren — Claude umrandet manchmal mit Backticks
+    let parsed = null;
+    try {
+      const jsonMatch = text.match(/\[[\s\S]*\]/);
+      if (jsonMatch) parsed = JSON.parse(jsonMatch[0]);
+    } catch (_) {}
+    if (!Array.isArray(parsed) || !parsed.length) {
+      console.warn('[validatePhones] KI-Response unbrauchbar:', text.slice(0, 200));
+      _PHONE_VALIDATE_CACHE.set(cacheKey, failOpen);
+      return failOpen;
+    }
+    // Mappe zurück auf die Phone-Reihenfolge. Wenn die KI weniger Items liefert
+    // als Phones, fülle mit fail-open auf.
+    const result = phones.map((num, i) => {
+      const item = parsed[i] || {};
+      // Matchen nach Nummer falls Reihenfolge gestört
+      const matched = parsed.find(p => String(p.num || '').replace(/\D/g, '') === num.replace(/\D/g, '')) || item;
+      return {
+        num,
+        belongs: matched.belongs !== false, // default true bei undefined
+        reason: String(matched.reason || '').slice(0, 80),
+      };
+    });
+    console.log('[validatePhones] Ticket #' + ticketId + ' Requester=' + (requesterName || requesterEmail) + ' Result:', result);
+    _PHONE_VALIDATE_CACHE.set(cacheKey, result);
+    return result;
+  } catch (e) {
+    console.warn('[validatePhones] API-Fehler — fail-open:', e.message);
+    _PHONE_VALIDATE_CACHE.set(cacheKey, failOpen);
+    return failOpen;
+  }
+}
+
 function extractPhoneNumbers(text) {
   if (!text) return [];
   const found = new Set();
