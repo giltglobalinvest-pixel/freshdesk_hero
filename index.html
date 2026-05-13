@@ -267,7 +267,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.36.0';
+const APP_VERSION = 'v2.36.1';
 // Read-Token absichtlich gesplittet, damit GitHub Secret-Scanning beim Push nicht blockt.
 // Der Token ist read-only und Base-scoped → bewusst eingebettet (Architektur-Entscheidung).
 const _RK = 'patu8KWM8aWB' + 'yxCGL.69fae5d9fa4b94c2' + '66b426dadd71a51f574945d840b33569058ab5e9d89ebef3';
@@ -7399,6 +7399,17 @@ function closeStatusModal() {
 async function assignStatusAndClose(statusValue) {
   if (!STATUS_CTX) return;
   const { accountId, ticketId, fromList } = STATUS_CTX;
+  // No-op-Schutz: Wenn der lokale Cache schon den Ziel-Status hat, gar nicht erst API rufen.
+  // (z.B. nach KI-Schließung ist das Ticket bereits status=5 — User sieht es trotzdem in der
+  // Übersicht und klickt nochmal "Geschlossen". Vorher: HTTP-Call → eventuell Validation-Fehler.)
+  const cached = APP_STATE.pageState?.tickets?.find(t => t._accountId === accountId && t.id === ticketId);
+  if (cached && cached.status === statusValue) {
+    closeStatusModal();
+    const lbl = (FD_STATUS[statusValue] || {}).label || ('Status ' + statusValue);
+    toast('Status ist bereits „' + lbl + '" — keine Änderung nötig', 'success', 3000);
+    refreshTicketsListFromCache();
+    return;
+  }
   try {
     await proxyJson('/freshdesk/' + encodeURIComponent(accountId) + '/api/v2/tickets/' + ticketId, {
       method: 'PUT',
@@ -9639,16 +9650,25 @@ async function executeSingleAssistantAction(ctx, a) {
   } else if (a.type === 'assign') {
     if (!a.agent_id) throw new Error('Kein Bearbeiter ausgewählt');
     await proxyJson(base, { method: 'PUT', body: JSON.stringify({ responder_id: a.agent_id }) });
+    // Lokalen Cache + Übersicht + CURRENT_TICKET sofort updaten (Freshdesk-Search-Index laggt sonst)
+    patchTicketInList(ctx.accountId, ctx.ticketId, { responder_id: a.agent_id });
+    refreshTicketsListFromCache();
   } else if (a.type === 'group') {
     if (!a.group_id) throw new Error('Keine Gruppe ausgewählt');
     await proxyJson(base, { method: 'PUT', body: JSON.stringify({ group_id: a.group_id }) });
+    patchTicketInList(ctx.accountId, ctx.ticketId, { group_id: a.group_id });
+    refreshTicketsListFromCache();
   } else if (a.type === 'status') {
     await proxyJson(base, { method: 'PUT', body: JSON.stringify({ status: a.status }) });
+    patchTicketInList(ctx.accountId, ctx.ticketId, { status: a.status });
+    refreshTicketsListFromCache();
   } else if (a.type === 'hide') {
     // Lokale Wiedervorlage — ändert keinen Freshdesk-Status!
     const days = Math.max(1, Math.min(365, parseInt(a.days, 10) || 3));
     const frist = _daysToFrist(days, { morning: true });
     await addWiedervorlage(ctx.accountId, ctx.ticketId, frist, 'manuell');
+    // Übersicht neu rendern — bei Filter „aktiv" verschwindet das Ticket jetzt
+    refreshTicketsListFromCache();
   } else {
     throw new Error('Unbekannter Aktionstyp: ' + a.type);
   }
