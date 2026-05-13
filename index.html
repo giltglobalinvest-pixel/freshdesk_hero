@@ -267,7 +267,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.38.8';
+const APP_VERSION = 'v2.38.9';
 // Read-Token absichtlich gesplittet, damit GitHub Secret-Scanning beim Push nicht blockt.
 // Der Token ist read-only und Base-scoped → bewusst eingebettet (Architektur-Entscheidung).
 const _RK = 'patu8KWM8aWB' + 'yxCGL.69fae5d9fa4b94c2' + '66b426dadd71a51f574945d840b33569058ab5e9d89ebef3';
@@ -9177,13 +9177,47 @@ function _renderInlineAttachment(a) {
     </a>`;
 }
 
-/* Image-Lightbox: Vollbild-Vorschau auf schwarzem Backdrop.
+/* Image-Lightbox: Vollbild-Vorschau auf schwarzem Backdrop mit Galerie-Navigation.
    - Backdrop-Click schließt
    - X-Button schließt
    - ESC schließt
-   - „Öffnen" + „Download" als Quick-Actions oben rechts */
+   - Pfeiltasten ←/→ blättern durch alle Bilder im aktuellen DOM-Kontext
+   - Touch-Swipe links/rechts blättert ebenfalls
+   - „Öffnen" + „Download" als Quick-Actions oben rechts
+   - Counter „3 / 13" zeigt Position in der Galerie */
+let _IMAGE_GALLERY = [];   // [{url, name}, ...] aktuell geöffnete Galerie
+let _IMAGE_GALLERY_IDX = 0; // aktueller Index in _IMAGE_GALLERY
+
+/* Sammelt alle sichtbaren Image-Preview-Trigger im DOM in DOM-Reihenfolge.
+   Dedupliziert per URL (manche Bilder erscheinen sowohl in der großen Anhänge-Liste
+   als auch als Inline-Thumbnail in einer Conversation-Bubble). */
+function _collectImageGallery() {
+  const seen = new Set();
+  const list = [];
+  document.querySelectorAll('[data-image-preview][data-url]').forEach(el => {
+    const url = el.dataset.url;
+    if (!url || seen.has(url)) return;
+    seen.add(url);
+    list.push({ url, name: el.dataset.name || 'Bild' });
+  });
+  return list;
+}
+
 function openImagePreview(url, name) {
   if (!url) return;
+  // Galerie zum Zeitpunkt des Öffnens snapshotten (DOM kann sich später ändern)
+  _IMAGE_GALLERY = _collectImageGallery();
+  if (!_IMAGE_GALLERY.length) _IMAGE_GALLERY = [{ url, name: name || 'Bild' }];
+  _IMAGE_GALLERY_IDX = Math.max(0, _IMAGE_GALLERY.findIndex(i => i.url === url));
+  _renderImagePreview();
+}
+
+function _renderImagePreview() {
+  const item = _IMAGE_GALLERY[_IMAGE_GALLERY_IDX];
+  if (!item) return;
+  const { url, name } = item;
+  const total = _IMAGE_GALLERY.length;
+  const hasNav = total > 1;
   let host = document.getElementById('imagePreviewHost');
   if (!host) {
     host = document.createElement('div');
@@ -9195,26 +9229,68 @@ function openImagePreview(url, name) {
       <div class="absolute top-0 left-0 right-0 flex items-center gap-2 p-3 bg-gradient-to-b from-black/70 to-transparent text-white text-sm safe-top z-10">
         <i data-lucide="image" class="w-4 h-4 shrink-0"></i>
         <span class="flex-1 truncate font-medium">${escapeHtml(name || 'Bild')}</span>
+        ${hasNav ? `<span data-stop-propagation class="text-[11px] text-white/70 font-mono shrink-0 px-2">${_IMAGE_GALLERY_IDX + 1} / ${total}</span>` : ''}
         <a href="${escapeAttr(url)}" target="_blank" rel="noopener" data-stop-propagation class="px-2 py-1.5 bg-white/10 hover:bg-white/20 rounded inline-flex items-center gap-1 text-xs" title="In neuem Tab öffnen">
           <i data-lucide="external-link" class="w-3.5 h-3.5"></i>
         </a>
         <a href="${escapeAttr(url)}" download="${escapeAttr(name || '')}" data-stop-propagation class="px-2 py-1.5 bg-white/10 hover:bg-white/20 rounded inline-flex items-center gap-1 text-xs" title="Download">
           <i data-lucide="download" class="w-3.5 h-3.5"></i>
         </a>
-        <button type="button" onclick="closeImagePreview()" class="w-9 h-9 rounded-lg hover:bg-white/20 flex items-center justify-center" aria-label="Schließen">
+        <button type="button" onclick="closeImagePreview()" data-stop-propagation class="w-9 h-9 rounded-lg hover:bg-white/20 flex items-center justify-center" aria-label="Schließen">
           <i data-lucide="x" class="w-5 h-5"></i>
         </button>
       </div>
-      <img src="${escapeAttr(url)}" alt="${escapeAttr(name || 'Bild')}" data-stop-propagation class="max-w-full max-h-full object-contain p-4 pt-16 cursor-default">
+      ${hasNav ? `
+        <button type="button" onclick="navImagePreview(-1)" data-stop-propagation class="absolute left-2 top-1/2 -translate-y-1/2 w-12 h-12 rounded-full bg-white/10 hover:bg-white/20 text-white flex items-center justify-center z-10" aria-label="Vorheriges Bild" title="Vorheriges Bild (←)">
+          <i data-lucide="chevron-left" class="w-6 h-6"></i>
+        </button>
+        <button type="button" onclick="navImagePreview(1)" data-stop-propagation class="absolute right-2 top-1/2 -translate-y-1/2 w-12 h-12 rounded-full bg-white/10 hover:bg-white/20 text-white flex items-center justify-center z-10" aria-label="Nächstes Bild" title="Nächstes Bild (→)">
+          <i data-lucide="chevron-right" class="w-6 h-6"></i>
+        </button>` : ''}
+      <img src="${escapeAttr(url)}" alt="${escapeAttr(name || 'Bild')}" data-stop-propagation data-image-preview-img class="max-w-full max-h-full object-contain p-4 pt-16 cursor-default select-none">
     </div>`;
   if (window.lucide) lucide.createIcons();
   document.body.style.overflow = 'hidden';
+  _bindImagePreviewSwipe();
+}
+
+/* Touch-Swipe-Handler: links→nächstes, rechts→vorheriges (Mobil). */
+function _bindImagePreviewSwipe() {
+  const img = document.querySelector('[data-image-preview-img]');
+  if (!img || _IMAGE_GALLERY.length <= 1) return;
+  let startX = 0, startY = 0, active = false;
+  img.addEventListener('touchstart', (e) => {
+    if (!e.touches[0]) return;
+    startX = e.touches[0].clientX;
+    startY = e.touches[0].clientY;
+    active = true;
+  }, { passive: true });
+  img.addEventListener('touchend', (e) => {
+    if (!active) return;
+    active = false;
+    const t = e.changedTouches[0]; if (!t) return;
+    const dx = t.clientX - startX;
+    const dy = t.clientY - startY;
+    // Nur horizontaler Swipe ab 50px, und horizontal > vertikal
+    if (Math.abs(dx) > 50 && Math.abs(dx) > Math.abs(dy)) {
+      navImagePreview(dx < 0 ? 1 : -1);
+    }
+  }, { passive: true });
+}
+
+/* Galerie-Navigation: dir=+1 nächstes, dir=-1 vorheriges. Wrap-around. */
+function navImagePreview(dir) {
+  if (_IMAGE_GALLERY.length <= 1) return;
+  _IMAGE_GALLERY_IDX = (_IMAGE_GALLERY_IDX + dir + _IMAGE_GALLERY.length) % _IMAGE_GALLERY.length;
+  _renderImagePreview();
 }
 
 function closeImagePreview() {
   const host = document.getElementById('imagePreviewHost');
   if (host) host.innerHTML = '';
   document.body.style.overflow = '';
+  _IMAGE_GALLERY = [];
+  _IMAGE_GALLERY_IDX = 0;
 }
 
 /* Globale Click-Delegation für [data-image-preview]-Buttons + Backdrop + Stop-Propagation.
@@ -9235,9 +9311,11 @@ function closeImagePreview() {
     }
   });
   document.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape' && document.getElementById('imagePreviewHost')?.children.length) {
-      closeImagePreview();
-    }
+    const open = document.getElementById('imagePreviewHost')?.children.length;
+    if (!open) return;
+    if (e.key === 'Escape') { closeImagePreview(); return; }
+    if (e.key === 'ArrowLeft')  { e.preventDefault(); navImagePreview(-1); return; }
+    if (e.key === 'ArrowRight') { e.preventDefault(); navImagePreview(1);  return; }
   });
 })();
 
