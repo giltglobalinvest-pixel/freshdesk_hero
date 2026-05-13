@@ -267,7 +267,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.39.1';
+const APP_VERSION = 'v2.39.2';
 // Read-Token absichtlich gesplittet, damit GitHub Secret-Scanning beim Push nicht blockt.
 // Der Token ist read-only und Base-scoped → bewusst eingebettet (Architektur-Entscheidung).
 const _RK = 'patu8KWM8aWB' + 'yxCGL.69fae5d9fa4b94c2' + '66b426dadd71a51f574945d840b33569058ab5e9d89ebef3';
@@ -1950,10 +1950,93 @@ async function freshsalesLookupContact(accountId, email) {
 async function freshsalesUpdateContact(accountId, contactId, fields) {
   const path = '/freshsales/' + encodeURIComponent(accountId) +
     '/api/contacts/' + contactId;
-  return await proxyJson(path, {
-    method: 'PUT',
-    body: JSON.stringify({ contact: fields })
-  });
+  // Sub-Arrays separat sichern + leere Felder rausfiltern (analog zum Create-Pfad)
+  const salesAccounts = Array.isArray(fields?.sales_accounts) ? fields.sales_accounts : null;
+  const customField   = (fields?.custom_field && typeof fields.custom_field === 'object') ? fields.custom_field : null;
+  const cleaned = _stripEmptyFields(fields || {});
+  if (salesAccounts) cleaned.sales_accounts = salesAccounts;  // auch leere Arrays beibehalten (= Verknüpfung löschen)
+  if (customField) cleaned.custom_field = customField;
+
+  // Erstversuch
+  try {
+    return await proxyJson(path, {
+      method: 'PUT',
+      body: JSON.stringify({ contact: cleaned })
+    });
+  } catch (e) {
+    const errMsg = String(e?.message || '');
+    console.warn('[updateFsContact] Error:', errMsg.slice(0, 200), '· e.data=', e?.data);
+
+    // 400 mit „müssen Sie X ausfüllen" → Pflicht-Custom-Fields auto-befüllen + Retry.
+    // Beim Update kennen wir die contactId schon — bei ID-artigen Custom-Fields nutzen wir
+    // direkt die echte Contact-ID statt eines Platzhalters (das ist meistens der Sinn
+    // der „Kontakt-ID"-Pflicht-Felder in Freshsales-Setups).
+    let required = _extractRequiredCfNames(e);
+    if (!required.length && /ausfüllen|fill in|must fill|fülle|required/i.test(errMsg)) {
+      const knownPatterns = [
+        { test: /kontakt.?id/i,  label: 'Kontakt-ID',  names: ['cf_kontaktid', 'cf_kontakt_id', 'cf_contact_id', 'cf_contactid'] },
+        { test: /branche/i,      label: 'Branche',    names: ['cf_branche', 'cf_industry'] },
+        { test: /kundennr|kunden.nummer|customer.no/i, label: 'Kundennummer', names: ['cf_kundennummer', 'cf_kunden_nummer', 'cf_customer_no'] },
+        { test: /ust.?id|vat.?id|umsatzsteuer/i, label: 'USt-IdNr', names: ['cf_ust_id', 'cf_ustid', 'cf_vat_id'] },
+      ];
+      required = knownPatterns.filter(p => p.test.test(errMsg)).map(p => ({ label: p.label, names: p.names }));
+      if (required.length) {
+        console.warn('[updateFsContact] Substring-Fallback fand Pflicht-Felder:', required.map(r => r.label).join(', '));
+      }
+    }
+    if (!required.length) throw e;
+
+    // Build retry custom_field map: ID-artige Felder bekommen die echte contactId,
+    // andere Felder kriegen Platzhalter-Kandidaten durchprobiert
+    const idLikeRe = /kontakt.?id|contact.?id/i;
+    const cfBase = Object.assign({}, cleaned.custom_field || {});
+    // ID-Felder direkt mit echter Contact-ID füllen
+    required.filter(r => idLikeRe.test(r.label)).forEach(r => {
+      r.names.forEach(n => { cfBase[n] = String(contactId); });
+    });
+    const nonIdRequired = required.filter(r => !idLikeRe.test(r.label));
+    const placeholderCandidates = [
+      cleaned.email || cleaned.last_name || 'TBD',
+      String(Date.now()),
+      cleaned.last_name || 'Kontakt',
+    ];
+    // Wenn nur ID-Felder fehlten: 1 Versuch reicht (kein Platzhalter-Loop)
+    const passes = nonIdRequired.length ? placeholderCandidates : [null];
+    let lastErr = null;
+    for (const ph of passes) {
+      const cfRetry = Object.assign({}, cfBase);
+      if (ph !== null) {
+        nonIdRequired.forEach(r => r.names.forEach(n => { cfRetry[n] = ph; }));
+      }
+      const retryFields = Object.assign({}, cleaned, { custom_field: cfRetry });
+      console.log('[updateFsContact] Retry mit cf-Map:', Object.keys(cfRetry).join(', '),
+        '· ID-Felder=', required.filter(r => idLikeRe.test(r.label)).map(r => r.label).join('/') || '–',
+        '· Platzhalter=', ph || '(keiner)');
+      try {
+        const data = await proxyJson(path, {
+          method: 'PUT',
+          body: JSON.stringify({ contact: retryFields })
+        });
+        console.log('✅ FS-Contact-Update Retry erfolgreich');
+        return data;
+      } catch (eRetry) {
+        lastErr = eRetry;
+        const errRetryMsg = String(eRetry?.message || '');
+        console.warn('[updateFsContact] Retry fehlgeschlagen:', errRetryMsg.slice(0, 150));
+        // Wenn nicht mehr „ausfüllen" → anderer Bug, abbrechen
+        if (!_extractRequiredCfNames(eRetry).length && !/ausfüllen|fill in/i.test(errRetryMsg)) {
+          throw eRetry;
+        }
+      }
+    }
+    // Alle Retries gescheitert
+    if (_extractRequiredCfNames(lastErr).length) {
+      const labels = required.map(r => '„' + r.label + '"').join(', ');
+      const detail = String(lastErr?.message || '').slice(0, 200);
+      throw new Error('Freshsales fordert Pflicht-Felder ' + labels + ' auch nach Auto-Retry. Bitte Custom-Field in FS prüfen. Original: ' + detail);
+    }
+    throw lastErr || e;
+  }
 }
 
 /* Legt einen neuen Freshsales-Contact an. Fields sollten mindestens last_name + email
