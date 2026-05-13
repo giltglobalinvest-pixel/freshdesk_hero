@@ -267,7 +267,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.34.1';
+const APP_VERSION = 'v2.34.2';
 // Read-Token absichtlich gesplittet, damit GitHub Secret-Scanning beim Push nicht blockt.
 // Der Token ist read-only und Base-scoped → bewusst eingebettet (Architektur-Entscheidung).
 const _RK = 'patu8KWM8aWB' + 'yxCGL.69fae5d9fa4b94c2' + '66b426dadd71a51f574945d840b33569058ab5e9d89ebef3';
@@ -1774,6 +1774,25 @@ async function fetchTicketDetail(accountId, ticketId) {
   const t = await proxyJson(path);
   if (t) _cacheTicket({ ...t, _accountId: accountId });
   return t;
+}
+
+/* Leichtere Variante von fetchTicketDetail — ohne conversations, nur Basisdaten + requester.
+   Verwendung: Bulk-Nachladen von Tickets für Suche/Cache, wenn nur Subject/Status/Sender gebraucht. */
+async function fetchTicketSummary(accountId, ticketId) {
+  if (!accountId || !ticketId) return null;
+  try {
+    const path = '/freshdesk/' + encodeURIComponent(accountId) +
+      '/api/v2/tickets/' + ticketId + '?include=requester';
+    const t = await proxyJson(path);
+    if (t) {
+      const acc = APP_STATE.accounts.find(a => a.id === accountId);
+      _cacheTicket({ ...t, _accountId: accountId, _accountName: acc?.name || '?', _accountColor: acc?.color || '#64748b' });
+    }
+    return t;
+  } catch (e) {
+    console.warn('Ticket-Summary-Fetch fehlgeschlagen #' + ticketId + ':', e.message);
+    return null;
+  }
 }
 
 async function fetchContact(accountId, contactId) {
@@ -7576,6 +7595,34 @@ async function runSearch(useAI) {
       <p class="text-sm text-ink-500 mt-3">${escapeHtml(spinnerText)}</p>
       ${queryTerms.length > 1 ? `<p class="text-[11px] text-ink-400 mt-1">${queryTerms.length} Begriffe parallel</p>` : ''}
     </div>`;
+
+  // Wenn Wiedervorlage-Filter aktiv: fehlende WV-Tickets vorab nachladen — die WV-Map enthält
+  // alle Einträge aus Airtable, aber die zugehörigen Tickets sind oft NICHT im Master-Cache,
+  // weil der Default-Filter „aktiv" sie in der Übersicht ausblendet. Ohne diese Nachlade-Phase
+  // findet die Suche keine WV-Tickets, obwohl welche existieren.
+  if (filters.wiedervorlage === 'only' && APP_STATE.wiedervorlageMap?.size) {
+    const now = Date.now();
+    const toFetch = [];
+    for (const wv of APP_STATE.wiedervorlageMap.values()) {
+      if (!wv?.account_id || !wv?.ticket_id) continue;
+      if (new Date(wv.frist_am).getTime() <= now) continue; // abgelaufene WV ignorieren
+      const key = wv.account_id + '|' + wv.ticket_id;
+      if (!APP_STATE.ticketCache?.has(key)) {
+        toFetch.push({ accountId: wv.account_id, ticketId: wv.ticket_id });
+      }
+    }
+    if (toFetch.length) {
+      $('searchResults').innerHTML = `
+        <div class="text-center py-10">
+          <div class="spinner inline-block w-7 h-7 border-[3px] text-brand-500"></div>
+          <p class="text-sm text-ink-500 mt-3">Lade ${toFetch.length} Wiedervorlage-Ticket${toFetch.length === 1 ? '' : 's'}…</p>
+          <p class="text-[11px] text-ink-400 mt-1">die waren noch nicht im Cache</p>
+        </div>`;
+      // Max 100 parallel, sonst Rate-Limit-Risiko (sollte selten erreicht werden)
+      const limit = toFetch.slice(0, 100);
+      await Promise.allSettled(limit.map(({ accountId, ticketId }) => fetchTicketSummary(accountId, ticketId)));
+    }
+  }
 
   // Lokale Suche im Master-Cache für ALLE Begriffe (filter-unabhängig, schnell, kein API-Call)
   const localMap = new Map();  // key=acc|id, value=ticket
