@@ -267,7 +267,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.37.2';
+const APP_VERSION = 'v2.37.3';
 // Read-Token absichtlich gesplittet, damit GitHub Secret-Scanning beim Push nicht blockt.
 // Der Token ist read-only und Base-scoped → bewusst eingebettet (Architektur-Entscheidung).
 const _RK = 'patu8KWM8aWB' + 'yxCGL.69fae5d9fa4b94c2' + '66b426dadd71a51f574945d840b33569058ab5e9d89ebef3';
@@ -1957,18 +1957,29 @@ async function freshsalesUpdateContact(accountId, contactId, fields) {
    zurückgeliefert, damit der Aufrufer keinen separaten Retry braucht. */
 async function createFreshsalesContact(accountId, fields) {
   const path = '/freshsales/' + encodeURIComponent(accountId) + '/api/contacts';
+  // Pflichtfelder explizit prüfen
+  if (!fields?.email && !fields?.last_name) {
+    throw new Error('Email oder Nachname erforderlich für FS-Contact');
+  }
+  // Sub-Arrays separat sichern (z.B. sales_accounts), dann null-Felder rausfiltern
+  const salesAccounts = Array.isArray(fields.sales_accounts) ? fields.sales_accounts : null;
+  const cleaned = _stripEmptyFields(fields);
+  // sales_accounts wieder hinzufügen (auch wenn es ein leeres Array war)
+  if (salesAccounts && salesAccounts.length) cleaned.sales_accounts = salesAccounts;
+  // last_name ist Pflicht — falls leer nach Cleanup, fallback aus Email
+  if (!cleaned.last_name && fields.email) cleaned.last_name = String(fields.email).split('@')[0];
   try {
     const data = await proxyJson(path, {
       method: 'POST',
-      body: JSON.stringify({ contact: fields })
+      body: JSON.stringify({ contact: cleaned })
     });
     return data?.contact || data;
   } catch (e) {
-    // 409 / „already exists" → existierenden Contact per Email-Lookup zurückliefern
-    if (fields?.email && /already.?exist|409|duplicate|not.?unique/i.test(String(e?.message || ''))) {
+    // 409 / „already exists" / duplicate → existierenden Contact per Email-Lookup zurückliefern
+    if (cleaned.email && /already.?exist|409|duplicate|not.?unique|3163|3102/i.test(String(e?.message || ''))) {
       console.warn('FS-Contact existiert bereits — versuche Email-Lookup:', e.message);
       try {
-        const existing = await freshsalesLookupContact(accountId, fields.email);
+        const existing = await freshsalesLookupContact(accountId, cleaned.email);
         if (existing) return existing;
       } catch (_) {}
     }
@@ -2008,10 +2019,23 @@ async function searchFreshsalesSalesAccounts(accountId, term) {
   }
 }
 
+/* Entfernt null/undefined/leere Felder aus einem Objekt — Freshsales-Validation reagiert
+   sensibel auf null-Werte für optionale Felder. */
+function _stripEmptyFields(obj) {
+  const out = {};
+  for (const [k, v] of Object.entries(obj || {})) {
+    if (v == null) continue;
+    if (typeof v === 'string' && v.trim() === '') continue;
+    out[k] = v;
+  }
+  return out;
+}
+
 async function createFreshsalesSalesAccount(accountId, name, extraFields) {
   if (!accountId || !name || !name.trim()) throw new Error('Firmenname fehlt');
   const cleanName = name.trim();
-  const sa = Object.assign({ name: cleanName }, extraFields || {});
+  // Null/leere Felder rausfiltern — Freshsales bevorzugt fehlende Schlüssel statt null-Werte
+  const sa = _stripEmptyFields(Object.assign({ name: cleanName }, extraFields || {}));
   try {
     const data = await proxyJson('/freshsales/' + encodeURIComponent(accountId) +
       '/api/sales_accounts', {
@@ -2024,15 +2048,35 @@ async function createFreshsalesSalesAccount(accountId, name, extraFields) {
     const msg = String(e?.message || '');
     if (/existiert bereits|not.?unique|already.?exist|3131|3102|409/i.test(msg)) {
       console.warn('FS-Sales-Account existiert bereits — versuche Lookup:', msg.slice(0, 100));
-      try {
-        const results = await searchFreshsalesSalesAccounts(accountId, cleanName);
-        const exact = results.find(r => String(r.name || '').toLowerCase() === cleanName.toLowerCase());
-        const pick = exact || results[0];
-        if (pick?.id) {
-          const full = await fetchFreshsalesSalesAccountById(accountId, pick.id);
-          if (full) return full;
-        }
-      } catch (_) {}
+      // Mehrere Such-Varianten probieren — Freshsales-Lookup hat manchmal Probleme mit
+      // Sonderzeichen (+, &, /). Wir probieren der Reihe nach:
+      //   1) Original-Name
+      //   2) Name ohne Sonderzeichen (+→Space, &→und)
+      //   3) Erstes signifikantes Wort (≥4 Zeichen)
+      const variants = [];
+      variants.push(cleanName);
+      const simplified = cleanName.replace(/\+/g, ' ').replace(/&/g, ' und ').replace(/\s+/g, ' ').trim();
+      if (simplified !== cleanName) variants.push(simplified);
+      const firstWord = cleanName.replace(/[^\w\säöüÄÖÜß]/g, ' ').split(/\s+/).find(w => w.length >= 4);
+      if (firstWord && firstWord !== cleanName) variants.push(firstWord);
+      for (const term of variants) {
+        try {
+          const results = await searchFreshsalesSalesAccounts(accountId, term);
+          if (!results.length) continue;
+          // Erst exact match versuchen (case-insensitive)
+          const exact = results.find(r => String(r.name || '').toLowerCase() === cleanName.toLowerCase());
+          // Sonst: erster Treffer der wenigstens den firstWord enthält
+          const fuzzy = !exact && firstWord
+            ? results.find(r => String(r.name || '').toLowerCase().includes(firstWord.toLowerCase()))
+            : null;
+          const pick = exact || fuzzy || results[0];
+          if (pick?.id) {
+            const full = await fetchFreshsalesSalesAccountById(accountId, pick.id);
+            if (full) return full;
+            return pick;
+          }
+        } catch (_) {}
+      }
     }
     throw e;
   }
@@ -2359,36 +2403,42 @@ async function _masterCreateFsContact(btnEl) {
   _syncContactMaster();
   const cn = ctx.master.contact;
   if (!cn.email) return toast('Email der Person fehlt — ohne Email kein FS-Contact', 'warn');
-  // Auch FS-Konto gleich mit anlegen wenn keiner verknüpft und Firmenname da
   setBusy(btnEl, true, 'Lege FS-Kontakt an…');
+  const warnings = [];
   try {
     let saId = ctx.fsAccount?.id;
     const co = ctx.master.company;
+    // Phase 1: FS-Konto anlegen oder bestehendes finden (optional aber bevorzugt)
     if (!saId && co.name) {
       try {
         const sa = await createFreshsalesSalesAccount(ctx.accountId, co.name, {
-          phone:   co.phone || undefined,
-          website: co.website || undefined,
-          address: co.street || undefined,
-          city:    co.city || undefined,
-          zipcode: co.zipcode || undefined,
-          country: co.country || undefined,
+          phone:   co.phone,
+          website: co.website,
+          address: co.street,
+          city:    co.city,
+          zipcode: co.zipcode,
+          country: co.country,
         });
         if (sa?.id) { saId = sa.id; ctx.fsAccount = sa; }
-      } catch (_) {/* Konto-Anlegen ist optional */}
+      } catch (e) {
+        // Konto-Anlegen ist optional — wir loggen die Warnung aber blocken nicht
+        console.warn('FS-Konto-Anlegen fehlgeschlagen (optional):', e.message);
+        warnings.push('FS-Konto: ' + String(e.message || '').slice(0, 120));
+      }
     }
+    // Phase 2: FS-Contact anlegen
     const fields = {
-      first_name: cn.first_name || null,
-      last_name:  cn.last_name || cn.email.split('@')[0] || 'Unbekannt',
-      display_name: ((cn.first_name || '') + ' ' + (cn.last_name || '')).trim() || null,
-      email:      cn.email,
-      work_number:   cn.work_phone || null,
-      mobile_number: cn.mobile || null,
-      job_title:     cn.job_title || null,
-      address:    co.street || null,
-      city:       co.city || null,
-      zipcode:    co.zipcode || null,
-      country:    co.country || null,
+      first_name:    cn.first_name,
+      last_name:     cn.last_name || cn.email.split('@')[0],
+      display_name:  ((cn.first_name || '') + ' ' + (cn.last_name || '')).trim() || undefined,
+      email:         cn.email,
+      work_number:   cn.work_phone,
+      mobile_number: cn.mobile,
+      job_title:     cn.job_title,
+      address:       co.street,
+      city:          co.city,
+      zipcode:       co.zipcode,
+      country:       co.country,
     };
     if (saId) fields.sales_accounts = [{ id: saId, is_primary: true }];
     const created = await createFreshsalesContact(ctx.accountId, fields);
@@ -2397,10 +2447,15 @@ async function _masterCreateFsContact(btnEl) {
       ctx._fsError = null;
       _consolidateContactMaster(ctx);
       renderContactEditBody();
-      toast('FS-Kontakt #' + created.id + ' angelegt' + (saId ? ' + Konto verknüpft' : ''), 'success', 4000);
+      let msg = '✅ FS-Kontakt #' + created.id + ' angelegt' + (saId ? ' + Konto verknüpft' : '');
+      if (warnings.length) msg += ' · ⚠ ' + warnings[0];
+      toast(msg, warnings.length ? 'warn' : 'success', warnings.length ? 8000 : 4000);
     }
   } catch (e) {
-    toast('FS-Kontakt anlegen fehlgeschlagen: ' + e.message, 'error', 8000);
+    // Detaillierten Fehler ausgeben — nicht nur „Object"
+    const msg = String(e?.message || e || 'Unbekannter Fehler');
+    console.error('FS-Contact anlegen fehlgeschlagen:', e);
+    toast('FS-Kontakt anlegen fehlgeschlagen: ' + msg.slice(0, 200), 'error', 12000);
   } finally {
     setBusy(btnEl, false);
   }
