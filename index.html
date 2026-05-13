@@ -267,7 +267,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.38.5';
+const APP_VERSION = 'v2.38.6';
 // Read-Token absichtlich gesplittet, damit GitHub Secret-Scanning beim Push nicht blockt.
 // Der Token ist read-only und Base-scoped → bewusst eingebettet (Architektur-Entscheidung).
 const _RK = 'patu8KWM8aWB' + 'yxCGL.69fae5d9fa4b94c2' + '66b426dadd71a51f574945d840b33569058ab5e9d89ebef3';
@@ -5606,33 +5606,49 @@ async function hydrateMissingRequesters(tickets) {
   // Phase 2 danach — Phone-Pills im Hintergrund (langsamer, weniger parallel um API nicht zu fluten)
   if (neededPhone.length) await runWorkers(neededPhone.slice(), true, 6);
 
-  // Phase 3: Wenn der Contact KEINE Phones hat UND das Ticket-Body noch nicht geladen war
-  // (Search-API liefert keine description) → Ticket-Detail laden + Phones aus body extrahieren.
-  // Begrenzt auf max 8 Tickets pro Page, max 3 parallel — sonst Rate-Limit-Risiko.
+  // Phase 3: Wenn der Contact KEINE Phones hat → Ticket-Detail (inkl. conversations) laden
+  // und alle Tel-Nummern aus Body + Antworten extrahieren. Tel-Nummern stecken oft in der
+  // Email-Signatur am Ende der Originalmail bei WG/Re-Tickets.
+  // Begrenzt auf max 12 Tickets pro Page, max 3 parallel.
   const neededBody = [];
   for (const t of tickets) {
     if (!t.requester_id) continue;
-    // Wenn Body schon vorhanden: skip (Initial-Render hat schon extrahiert)
-    if (t.description_text || t.description) continue;
     const cached = getCachedRequester(t._accountId, t.requester_id);
     const hasPhoneInContact = cached && (cached.phone || cached.mobile);
-    if (hasPhoneInContact) continue;  // Contact hat Phones — keine Body-Suche nötig
+    if (hasPhoneInContact) continue;  // Contact hat schon Phones — keine Body-Suche nötig
+    // Wenn description schon im Initial-Payload war: prüfen ob extractPhoneNumbers schon Treffer hatte
+    // (cardPhones-Suche im Initial-Render). Wenn ja: skip. Wenn nicht: nochmal tiefer suchen mit Conversations.
+    if (t.description_text || t.description) {
+      const initialText = (t.subject || '') + '\n' + htmlToText(t.description_text || t.description || '');
+      const initialPhones = extractPhoneNumbers(initialText);
+      if (initialPhones.length) {
+        // Phones aus description schon beim Initial-Render eingefügt — nicht doppelt
+        continue;
+      }
+      // description war da, aber leer an Tel-Nummern → fetcht conversations + sucht dort
+    }
     neededBody.push(t);
   }
-  console.log('[hydrate] Phase 3 (Ticket-Body):', neededBody.length, 'Tickets brauchen Body-Phone-Suche');
+  console.log('[hydrate] Phase 3 (Ticket-Body+Conversations):', neededBody.length, 'Tickets ohne Phones in Contact+initial-Body');
   if (neededBody.length) {
-    const limit = neededBody.slice(0, 8);
+    const limit = neededBody.slice(0, 12);
     const queue3 = limit.slice();
     const workers3 = Array.from({ length: Math.min(3, queue3.length) }, async () => {
       while (queue3.length) {
         const t = queue3.shift();
         try {
-          const full = await fetchTicketSummary(t._accountId, t.id);
+          // Lade FULL ticket (mit conversations) — Tel-Nummern stecken oft in Antwort-Signaturen
+          const full = await fetchTicketDetail(t._accountId, t.id);
           if (!full) { console.log('[hydrate-body] Ticket #' + t.id + ' fetch null'); continue; }
+          const conversationText = (full.conversations || [])
+            .map(c => htmlToText(c.body_text || c.body || ''))
+            .join('\n\n');
           const text = (full.subject || '') + '\n' +
-            htmlToText(full.description_text || full.description || '');
+            htmlToText(full.description_text || full.description || '') + '\n' +
+            conversationText;
           const found = extractPhoneNumbers(text);
-          console.log('[hydrate-body] Ticket #' + t.id + ' body length=' + text.length + ' phones found=' + found.length, found);
+          console.log('[hydrate-body] Ticket #' + t.id + ' body+conv length=' + text.length +
+            ' (conv parts=' + (full.conversations || []).length + ') phones found=' + found.length, found);
           if (found.length) _insertPhonePillsIntoCardDom(t, found, 'aus Mail');
         } catch (e) { console.warn('[hydrate-body] Ticket #' + t.id + ' error:', e.message); }
       }
