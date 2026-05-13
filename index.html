@@ -267,7 +267,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.38.4';
+const APP_VERSION = 'v2.38.5';
 // Read-Token absichtlich gesplittet, damit GitHub Secret-Scanning beim Push nicht blockt.
 // Der Token ist read-only und Base-scoped → bewusst eingebettet (Architektur-Entscheidung).
 const _RK = 'patu8KWM8aWB' + 'yxCGL.69fae5d9fa4b94c2' + '66b426dadd71a51f574945d840b33569058ab5e9d89ebef3';
@@ -5582,13 +5582,20 @@ async function hydrateMissingRequesters(tickets) {
     if (!hasName) neededName.push(t);
     else if (!hasPhone) neededPhone.push(t);
   }
+  console.log('[hydrate] Phase 1 (Name/Email):', neededName.length, '· Phase 2 (Phones via Contact):', neededPhone.length, 'Tickets');
 
   const runWorkers = async (queue, requirePhones, parallel) => {
     const workers = Array.from({ length: Math.min(parallel, queue.length) }, async () => {
       while (queue.length) {
         const t = queue.shift();
         const c = await ensureRequesterLoaded(t._accountId, t.requester_id, { requirePhones });
-        if (c) updateRequesterRowInDom(t, c);
+        if (c) {
+          if (requirePhones || !c.name) {
+            console.log('[hydrate] Contact', c.id, 'für Ticket #' + t.id + ':',
+              { phone: c.phone || null, mobile: c.mobile || null, address: c.address ? c.address.slice(0, 100) : null });
+          }
+          updateRequesterRowInDom(t, c);
+        }
       }
     });
     await Promise.all(workers);
@@ -5612,6 +5619,7 @@ async function hydrateMissingRequesters(tickets) {
     if (hasPhoneInContact) continue;  // Contact hat Phones — keine Body-Suche nötig
     neededBody.push(t);
   }
+  console.log('[hydrate] Phase 3 (Ticket-Body):', neededBody.length, 'Tickets brauchen Body-Phone-Suche');
   if (neededBody.length) {
     const limit = neededBody.slice(0, 8);
     const queue3 = limit.slice();
@@ -5620,12 +5628,13 @@ async function hydrateMissingRequesters(tickets) {
         const t = queue3.shift();
         try {
           const full = await fetchTicketSummary(t._accountId, t.id);
-          if (!full) continue;
+          if (!full) { console.log('[hydrate-body] Ticket #' + t.id + ' fetch null'); continue; }
           const text = (full.subject || '') + '\n' +
             htmlToText(full.description_text || full.description || '');
           const found = extractPhoneNumbers(text);
+          console.log('[hydrate-body] Ticket #' + t.id + ' body length=' + text.length + ' phones found=' + found.length, found);
           if (found.length) _insertPhonePillsIntoCardDom(t, found, 'aus Mail');
-        } catch (_) {}
+        } catch (e) { console.warn('[hydrate-body] Ticket #' + t.id + ' error:', e.message); }
       }
     });
     await Promise.all(workers3);
