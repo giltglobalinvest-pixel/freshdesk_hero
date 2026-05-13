@@ -267,7 +267,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.34.6';
+const APP_VERSION = 'v2.35.0';
 // Read-Token absichtlich gesplittet, damit GitHub Secret-Scanning beim Push nicht blockt.
 // Der Token ist read-only und Base-scoped → bewusst eingebettet (Architektur-Entscheidung).
 const _RK = 'patu8KWM8aWB' + 'yxCGL.69fae5d9fa4b94c2' + '66b426dadd71a51f574945d840b33569058ab5e9d89ebef3';
@@ -1872,11 +1872,30 @@ async function searchCompanies(accountId, term) {
 
 async function createCompany(accountId, name) {
   if (!accountId || !name || !name.trim()) throw new Error('Firmenname fehlt');
-  const data = await proxyJson('/freshdesk/' + encodeURIComponent(accountId) + '/api/v2/companies', {
-    method: 'POST',
-    body: JSON.stringify({ name: name.trim() })
-  });
-  return data; // enthält id, name etc.
+  const cleanName = name.trim();
+  try {
+    const data = await proxyJson('/freshdesk/' + encodeURIComponent(accountId) + '/api/v2/companies', {
+      method: 'POST',
+      body: JSON.stringify({ name: cleanName })
+    });
+    return data; // enthält id, name etc.
+  } catch (e) {
+    // Bei „has already been taken" / Duplicate-Validation: Lookup nach Name
+    const msg = String(e?.message || '');
+    if (/already been taken|duplicate|exists|not.?unique|409/i.test(msg)) {
+      console.warn('FD-Company existiert bereits — versuche Lookup:', msg.slice(0, 100));
+      try {
+        const results = await searchCompanies(accountId, cleanName);
+        const exact = results.find(r => String(r.name || '').toLowerCase() === cleanName.toLowerCase());
+        const pick = exact || results[0];
+        if (pick?.id) {
+          const full = await fetchCompanyById(accountId, pick.id);
+          if (full) return full;
+        }
+      } catch (_) {}
+    }
+    throw e;
+  }
 }
 
 async function updateCompany(accountId, companyId, fields) {
@@ -1976,14 +1995,34 @@ async function searchFreshsalesSalesAccounts(accountId, term) {
   }
 }
 
-async function createFreshsalesSalesAccount(accountId, name) {
+async function createFreshsalesSalesAccount(accountId, name, extraFields) {
   if (!accountId || !name || !name.trim()) throw new Error('Firmenname fehlt');
-  const data = await proxyJson('/freshsales/' + encodeURIComponent(accountId) +
-    '/api/sales_accounts', {
-    method: 'POST',
-    body: JSON.stringify({ sales_account: { name: name.trim() } })
-  });
-  return data?.sales_account || data;
+  const cleanName = name.trim();
+  const sa = Object.assign({ name: cleanName }, extraFields || {});
+  try {
+    const data = await proxyJson('/freshsales/' + encodeURIComponent(accountId) +
+      '/api/sales_accounts', {
+      method: 'POST',
+      body: JSON.stringify({ sales_account: sa })
+    });
+    return data?.sales_account || data;
+  } catch (e) {
+    // Bei „Name existiert bereits" / „not unique" / 3131 / 3102 / 409 → Lookup nach Name
+    const msg = String(e?.message || '');
+    if (/existiert bereits|not.?unique|already.?exist|3131|3102|409/i.test(msg)) {
+      console.warn('FS-Sales-Account existiert bereits — versuche Lookup:', msg.slice(0, 100));
+      try {
+        const results = await searchFreshsalesSalesAccounts(accountId, cleanName);
+        const exact = results.find(r => String(r.name || '').toLowerCase() === cleanName.toLowerCase());
+        const pick = exact || results[0];
+        if (pick?.id) {
+          const full = await fetchFreshsalesSalesAccountById(accountId, pick.id);
+          if (full) return full;
+        }
+      } catch (_) {}
+    }
+    throw e;
+  }
 }
 
 async function updateFreshsalesSalesAccount(accountId, saId, fields) {
@@ -2839,9 +2878,30 @@ function renderContactEditBody() {
       </div>
     </div>`;
 
+  // Großer Master-Save-Button: legt fehlende Objekte an + updatet bestehende in einem Schwung.
+  // Hilft besonders nach KI-Zauberbutton + „Alle übernehmen" — sonst müsste man 4× speichern.
+  const masterSaveBlock = `
+    <div class="bg-gradient-to-br from-emerald-50 to-brand-50 border-2 border-emerald-200 rounded-2xl p-3">
+      <div class="flex items-center gap-2">
+        <div class="w-9 h-9 rounded-full bg-gradient-to-br from-emerald-500 to-brand-600 flex items-center justify-center text-white shrink-0">
+          <i data-lucide="rocket" class="w-5 h-5"></i>
+        </div>
+        <div class="flex-1 min-w-0">
+          <p class="text-sm font-semibold text-ink-900">Alles in einem Schwung speichern</p>
+          <p class="text-[11px] text-ink-600 leading-snug">Erstellt fehlende Objekte (Firma, FS-Kontakt, FS-Konto), updatet bestehende, verknüpft alles. Resilient gegen Duplikate.</p>
+        </div>
+        <button type="button" onclick="saveAllContactData(this)" class="shrink-0 bg-gradient-to-br from-emerald-600 to-brand-600 hover:from-emerald-700 hover:to-brand-700 text-white px-3 py-2 rounded-lg text-sm font-semibold inline-flex items-center gap-1.5 shadow-sm">
+          <i data-lucide="save-all" class="w-4 h-4"></i>
+          <span class="hidden sm:inline">Alles speichern</span>
+          <span class="sm:hidden">Alles</span>
+        </button>
+      </div>
+    </div>`;
+
   $('contactEditBody').innerHTML = `
     <div class="space-y-3 max-w-2xl mx-auto">
       ${aiTopBlock || noTicketHint}
+      ${masterSaveBlock}
 
       <!-- 1. Freshdesk-Kontakt -->
       ${fdContactCard}
@@ -3443,6 +3503,249 @@ async function saveFreshdeskContact(btnEl) {
   } catch (e) {
     setBusy(btnEl, false);
     toast('Speichern fehlgeschlagen: ' + e.message, 'error', 6000);
+  }
+}
+
+/* === Master-Save: alle 4 Objekte (FD-Kontakt, FD-Firma, FS-Kontakt, FS-Konto) in einem
+   Schwung — ähnlich dem ERP-Hero-Push-Pattern. Reihenfolge:
+   1. FD-Firma (Update oder Create+Verknüpfen)
+   2. FD-Kontakt (Update mit ggf. neuer company_id)
+   3. FS-Konto  (Update oder Create — Name aus Eingabe)
+   4. FS-Kontakt (Update oder Create — verknüpft mit FS-Konto)
+   Resilient: Fehler in einem Schritt blockt nicht die anderen, am Ende Toast mit Zusammenfassung. */
+async function saveAllContactData(btnEl) {
+  const ctx = CONTACT_EDIT_CTX;
+  if (!ctx?.fd) return toast('Kein Kontakt geladen', 'warn');
+  _syncAllInputsToCtx();
+
+  const log = [];   // {ok, label} pro Schritt
+  const errs = [];
+  setBusy(btnEl, true, 'Speichere alles…');
+
+  // ---------- Phase 1: Freshdesk-Firma (falls verknüpft oder Name-Feld ausgefüllt) ----------
+  let newCompanyId = null;
+  try {
+    if (ctx.company?.id) {
+      // existierende Firma updaten
+      const rawDomains = ($('fdCompanyDomains')?.value || '').trim();
+      const domains = rawDomains ? rawDomains.split(/[\s,;]+/).map(s => s.trim()).filter(Boolean) : [];
+      const fields = {
+        name:        ($('fdCompanyName')?.value || '').trim() || ctx.company.name,
+        description: ($('fdCompanyDesc')?.value || '').trim() || null,
+        note:        ($('fdCompanyNote')?.value || '').trim() || null,
+        industry:    ($('fdCompanyIndustry')?.value || '').trim() || null,
+        domains,
+      };
+      if (fields.name) {
+        const updated = await updateCompany(ctx.accountId, ctx.company.id, fields);
+        Object.assign(ctx.company, fields, { id: ctx.company.id }, updated || {});
+        newCompanyId = ctx.company.id;
+        log.push({ ok: true, label: 'FD-Firma „' + fields.name + '" gespeichert' });
+      }
+    } else {
+      // keine Firma verknüpft — aus dem Such-Feld oder KI-Vorschlag versuchen
+      const name = (ctx.companySearchQuery || ctx.suggestions?.fdCompany?.name?.value || '').trim();
+      if (name) {
+        const created = await createCompany(ctx.accountId, name);
+        if (created?.id) {
+          ctx.company = created;
+          newCompanyId = created.id;
+          log.push({ ok: true, label: 'FD-Firma „' + (created.name || name) + '" angelegt' });
+        }
+      }
+    }
+  } catch (e) {
+    errs.push('FD-Firma: ' + e.message);
+    log.push({ ok: false, label: 'FD-Firma fehlgeschlagen' });
+  }
+
+  // ---------- Phase 2: Freshdesk-Kontakt ----------
+  try {
+    const fields = {
+      name:      ($('fdName')?.value || '').trim(),
+      email:     ($('fdEmail')?.value || '').trim() || null,
+      phone:     ($('fdPhone')?.value || '').trim() || null,
+      mobile:    ($('fdMobile')?.value || '').trim() || null,
+      job_title: ($('fdJob')?.value || '').trim() || null,
+      address:   ($('fdAddress')?.value || '').trim() || null,
+    };
+    if (!fields.name) {
+      errs.push('FD-Kontakt: Name fehlt');
+      log.push({ ok: false, label: 'FD-Kontakt: Name fehlt' });
+    } else {
+      const currentCompanyId = ctx.company?.id || null;
+      const originalCompanyId = ctx.fd.company_id || null;
+      if (currentCompanyId !== originalCompanyId) {
+        fields.company_id = currentCompanyId;
+      }
+      await updateContact(ctx.accountId, ctx.contactId, fields);
+      cacheRequester(ctx.accountId, { id: ctx.contactId, name: fields.name, email: fields.email, phone: fields.phone, mobile: fields.mobile });
+      if (CURRENT_TICKET && CURRENT_TICKET.requester_id === ctx.contactId) {
+        CURRENT_TICKET.requester = Object.assign({}, CURRENT_TICKET.requester || {}, fields);
+      }
+      Object.assign(ctx.fd, fields);
+      if ('company_id' in fields) ctx.fd.company_id = fields.company_id;
+      log.push({ ok: true, label: 'FD-Kontakt gespeichert' });
+    }
+  } catch (e) {
+    errs.push('FD-Kontakt: ' + e.message);
+    log.push({ ok: false, label: 'FD-Kontakt fehlgeschlagen' });
+  }
+
+  // ---------- Phase 3: Freshsales-Konto (nur wenn FS verbunden) ----------
+  let newFsAccountId = null;
+  if (ctx.hasFreshsales) {
+    try {
+      if (ctx.fsAccount?.id) {
+        // Update bestehendes Konto mit den Edit-Felder-Werten
+        const fields = {
+          name:    ($('fsAccountName')?.value    || '').trim() || ctx.fsAccount.name,
+          phone:   ($('fsAccountPhone')?.value   || '').trim() || null,
+          website: ($('fsAccountWebsite')?.value || '').trim() || null,
+          address: ($('fsAccountAddress')?.value || '').trim() || null,
+          city:    ($('fsAccountCity')?.value    || '').trim() || null,
+          zipcode: ($('fsAccountZipcode')?.value || '').trim() || null,
+          state:   ($('fsAccountState')?.value   || '').trim() || null,
+          country: ($('fsAccountCountry')?.value || '').trim() || null,
+        };
+        await updateFreshsalesSalesAccount(ctx.accountId, ctx.fsAccount.id, fields);
+        Object.assign(ctx.fsAccount, fields);
+        newFsAccountId = ctx.fsAccount.id;
+        log.push({ ok: true, label: 'FS-Konto gespeichert' });
+      } else {
+        // Anlegen — Name aus Such-Feld, KI-Vorschlag oder FD-Firma als Quelle
+        const name = (ctx.fsAccountSearchQuery
+                   || ctx.suggestions?.fsAccount?.name?.value
+                   || ctx.suggestions?.fdCompany?.name?.value
+                   || ctx.company?.name
+                   || '').trim();
+        if (name) {
+          // Adress-Splitting aus FD-Address (falls vorhanden)
+          const addrLines = String(ctx.fd?.address || '').split('\n').map(s => s.trim()).filter(Boolean);
+          const countryLine = addrLines.find(l => /(deutschland|germany|österreich|austria|schweiz|switzerland)$/i.test(l)) || '';
+          const zipCityLine = addrLines.find(l => /^\d{4,5}\s/.test(l)) || '';
+          const zipMatch = zipCityLine.match(/^(\d{4,5})\s+(.+)$/);
+          const extra = {};
+          if (ctx.fd?.phone) extra.phone = ctx.fd.phone;
+          if (zipMatch) { extra.zipcode = zipMatch[1]; extra.city = zipMatch[2]; }
+          const street = addrLines.find(l => l !== zipCityLine && l !== countryLine);
+          if (street) extra.address = street;
+          if (countryLine) extra.country = countryLine;
+          const created = await createFreshsalesSalesAccount(ctx.accountId, name, extra);
+          if (created?.id) {
+            ctx.fsAccount = created;
+            newFsAccountId = created.id;
+            log.push({ ok: true, label: 'FS-Konto „' + (created.name || name) + '" angelegt' });
+          }
+        }
+      }
+    } catch (e) {
+      errs.push('FS-Konto: ' + e.message);
+      log.push({ ok: false, label: 'FS-Konto fehlgeschlagen' });
+    }
+  }
+
+  // ---------- Phase 4: Freshsales-Kontakt ----------
+  if (ctx.hasFreshsales) {
+    try {
+      if (ctx.fs?.id) {
+        // Update bestehender FS-Contact
+        const fields = {
+          first_name:    ($('fsFirstName')?.value || '').trim() || null,
+          last_name:     ($('fsLastName')?.value || '').trim() || null,
+          display_name:  ($('fsDisplayName')?.value || '').trim() || null,
+          email:         ($('fsEmail')?.value || '').trim() || null,
+          work_number:   ($('fsWorkPhone')?.value || '').trim() || null,
+          mobile_number: ($('fsMobile')?.value || '').trim() || null,
+          job_title:     ($('fsJob')?.value || '').trim() || null,
+          address:       ($('fsAddress')?.value || '').trim() || null,
+          city:          ($('fsCity')?.value || '').trim() || null,
+          zipcode:       ($('fsZipcode')?.value || '').trim() || null,
+          state:         ($('fsState')?.value || '').trim() || null,
+          country:       ($('fsCountry')?.value || '').trim() || null,
+        };
+        // Verknüpfung zum Sales-Account (falls neu/geändert)
+        const currentSaId = newFsAccountId || ctx.fsAccount?.id || null;
+        const prev = ctx.fs.sales_accounts || [];
+        const prevPrimary = Array.isArray(prev) ? (prev.find(x => x.is_primary) || prev[0]) : null;
+        const prevSaId = prevPrimary?.id || null;
+        if (currentSaId !== prevSaId) {
+          fields.sales_accounts = currentSaId ? [{ id: currentSaId, is_primary: true }] : [];
+        }
+        await freshsalesUpdateContact(ctx.accountId, ctx.fs.id, fields);
+        Object.assign(ctx.fs, fields);
+        log.push({ ok: true, label: 'FS-Kontakt gespeichert' });
+      } else if (ctx.fd?.email) {
+        // Anlegen — aus FD-Kontakt + ggf. KI-Vorschlägen (Name-Split + Adresse)
+        // Wir reusen die bestehende Logik in createFreshsalesContactFromFd-style INLINE,
+        // damit auch der frische sales_account-Link gleich mit reingeht.
+        const rawName = (ctx.fd.name || '').trim();
+        let firstName = '', lastName = '';
+        if (rawName.includes(',')) {
+          const [l, f] = rawName.split(',').map(s => s.trim());
+          lastName = l || ''; firstName = f || '';
+        } else {
+          const parts = rawName.split(/\s+/);
+          if (parts.length > 1) { lastName = parts.pop(); firstName = parts.join(' '); }
+          else lastName = rawName;
+        }
+        if (!lastName) lastName = ctx.fd.email.split('@')[0];
+        const addrLines = String(ctx.fd.address || '').split('\n').map(s => s.trim()).filter(Boolean);
+        const countryLine = addrLines.find(l => /(deutschland|germany|österreich|austria|schweiz|switzerland)$/i.test(l)) || '';
+        const zipCityLine = addrLines.find(l => /^\d{4,5}\s/.test(l)) || '';
+        const zipMatch = zipCityLine.match(/^(\d{4,5})\s+(.+)$/);
+        const zipcode = zipMatch?.[1] || '';
+        const city    = zipMatch?.[2] || '';
+        const street  = addrLines.find(l => l !== zipCityLine && l !== countryLine) || '';
+        const fields = {
+          first_name:    firstName || null,
+          last_name:     lastName,
+          display_name:  rawName || (firstName + ' ' + lastName).trim(),
+          email:         ctx.fd.email,
+          work_number:   ctx.fd.phone || null,
+          mobile_number: ctx.fd.mobile || null,
+          job_title:     ctx.fd.job_title || null,
+          address:       street || null,
+          city:          city || null,
+          zipcode:       zipcode || null,
+          country:       countryLine || null,
+        };
+        const saId = newFsAccountId || ctx.fsAccount?.id;
+        if (saId) fields.sales_accounts = [{ id: saId, is_primary: true }];
+        const created = await createFreshsalesContact(ctx.accountId, fields);
+        if (created?.id) {
+          ctx.fs = created;
+          // Wenn FS-Konto im POST mit sales_accounts gesetzt wurde, lade Account-Details
+          if (saId && !ctx.fsAccount) {
+            try {
+              const acc = await fetchFreshsalesSalesAccountById(ctx.accountId, saId);
+              if (acc) ctx.fsAccount = acc;
+            } catch (_) {}
+          }
+          log.push({ ok: true, label: 'FS-Kontakt #' + created.id + ' angelegt' });
+        }
+      }
+    } catch (e) {
+      errs.push('FS-Kontakt: ' + e.message);
+      log.push({ ok: false, label: 'FS-Kontakt fehlgeschlagen' });
+    }
+  }
+
+  setBusy(btnEl, false);
+  renderContactEditBody();
+
+  // UI-Feedback
+  const okCount = log.filter(l => l.ok).length;
+  const errCount = log.filter(l => !l.ok).length;
+  if (errs.length) {
+    toast('✅ ' + okCount + ' OK · ❌ ' + errCount + ' Fehler: ' + errs.slice(0, 2).join(' | '), 'error', 12000);
+  } else if (okCount) {
+    toast('✅ ' + okCount + ' Objekt' + (okCount === 1 ? '' : 'e') + ' gespeichert: ' + log.map(l => l.label).join(' · '), 'success', 6000);
+  } else {
+    toast('Nichts zu speichern — alle Felder unverändert oder leer', 'warn', 3500);
+  }
+  if (CURRENT_TICKET && CURRENT_TICKET.requester_id === ctx.contactId) {
+    renderTicketDetailBody(CURRENT_TICKET);
   }
 }
 
