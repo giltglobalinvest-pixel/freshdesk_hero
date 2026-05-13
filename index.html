@@ -267,7 +267,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.34.4';
+const APP_VERSION = 'v2.34.5';
 // Read-Token absichtlich gesplittet, damit GitHub Secret-Scanning beim Push nicht blockt.
 // Der Token ist read-only und Base-scoped → bewusst eingebettet (Architektur-Entscheidung).
 const _RK = 'patu8KWM8aWB' + 'yxCGL.69fae5d9fa4b94c2' + '66b426dadd71a51f574945d840b33569058ab5e9d89ebef3';
@@ -7435,8 +7435,16 @@ async function aiInterpretSearchQuery(rawText) {
     '    "wiedervorlage": "only" | "exclude" | null,\n' +
     '    "status": "open" | "pending" | "resolved" | "closed" | null\n' +
     '  },\n' +
-    '  "intent": "call|email|find|status|note|other",\n' +
+    '  "intent": "call|email|contact|find|status|note|other",\n' +
     '  "hint": "kurze deutsche Erklärung was die Suche tun soll, max 14 Wörter"\n}\n\n' +
+    'INTENT-WERTE genau:\n' +
+    '  "call"    → User will telefonieren („Rommel anrufen", „Telefonnummer von …")\n' +
+    '  "email"   → User will Email-Adresse („Email von …", „mailen an …")\n' +
+    '  "contact" → User fragt explizit nach KONTAKT-Daten („zeig mir den Kontakt von …", „Kontaktdaten von …", „wer ist X", „Kontakt X öffnen")\n' +
+    '  "find"    → User sucht TICKETS / Anfragen / Geschichte („Tickets von …", „letzte Bestellung von …", „Anfrage von …")\n' +
+    '  "status"  → User fragt nach Ticket-Status („Status von …", „was ist los mit …")\n' +
+    '  "note"    → User will eine Notiz machen/finden\n' +
+    '  "other"   → unklare/sonstige Anfrage\n\n' +
     'WICHTIG — TICKET-ID DIREKT ERKENNEN:\n' +
     'Wenn die Eingabe eine reine Ticket-Nummer enthält („Ticket 176604", „#176604", „zeig mir 176604"),\n' +
     'setze `ticketId` als Zahl OHNE führendes #. Eine Ticket-ID ist eine 3-9stellige Zahl.\n' +
@@ -7471,6 +7479,8 @@ async function aiInterpretSearchQuery(rawText) {
     'Wenn nur EIN Name gegeben ist (z.B. „Müller", „Rommel"): keyword = dieser Name, variations = Umlaut-Varianten.\n\n' +
     'Beispiele:\n' +
     '- "Frau Rommel anrufen" → {"keyword":"Rommel","ticketId":null,"variations":[],"filters":{"wiedervorlage":null,"status":null},"intent":"call","hint":"Telefonnummer von Frau Rommel finden"}\n' +
+    '- "Zeige mir den Kontakt von Isabell Hermann" → {"keyword":"Hermann","ticketId":null,"variations":["Isabell Hermann","Hermann, Isabell","Isabel Hermann"],"filters":{"wiedervorlage":null,"status":null},"intent":"contact","hint":"Kontakt Isabell Hermann öffnen/bearbeiten"}\n' +
+    '- "Kontaktdaten von Müller" → {"keyword":"Müller","ticketId":null,"variations":["Mueller"],"filters":{"wiedervorlage":null,"status":null},"intent":"contact","hint":"Kontakt Müller anzeigen/bearbeiten"}\n' +
     '- "Zeige mir Tickets von Maukel, Jörg" → {"keyword":"Maukel","ticketId":null,"variations":["Jörg Maukel","Maukel, Jörg","Joerg Maukel","Maukel Jörg"],"filters":{"wiedervorlage":null,"status":null},"intent":"find","hint":"Alle Tickets von Jörg Maukel"}\n' +
     '- "Tickets von Hans Schmidt" → {"keyword":"Schmidt","ticketId":null,"variations":["Hans Schmidt","Schmidt, Hans","Schmidt Hans"],"filters":{"wiedervorlage":null,"status":null},"intent":"find","hint":"Alle Tickets von Hans Schmidt"}\n' +
     '- "zeige mir ticket 176604" → {"keyword":"","ticketId":176604,"variations":[],"filters":{"wiedervorlage":null,"status":null},"intent":"find","hint":"Ticket #176604 direkt öffnen"}\n' +
@@ -7843,23 +7853,24 @@ function renderSearchResults() {
 
   const contactBlock = contacts.length ? `
     <div class="mb-4">
-      <p class="text-[10px] uppercase font-bold text-ink-500 tracking-wider mb-2">Kontakte (${contacts.length})</p>
+      <p class="text-[10px] uppercase font-bold text-ink-500 tracking-wider mb-2">Kontakte (${contacts.length}) <span class="text-ink-400 font-normal normal-case">— tippen zum Bearbeiten</span></p>
       <div class="space-y-2">
         ${contacts.map(c => {
           const phones = [];
           if (c.phone)  phones.push({ label: 'Festnetz', num: c.phone });
           if (c.mobile) phones.push({ label: 'Mobil',    num: c.mobile });
           return `
-            <div class="bg-white border border-ink-200 rounded-xl p-3">
-              <div class="flex items-start gap-2">
+            <div class="bg-white border border-ink-200 rounded-xl p-3 hover:border-brand-300 transition">
+              <button type="button" onclick="closeSearchModal(); openContactEditModal('${escapeAttr(c._accountId)}', ${c.id})" class="w-full flex items-start gap-2 text-left active:opacity-70" title="Kontakt bearbeiten (KI-Vervollständigung im Modal verfügbar)">
                 <div class="w-9 h-9 rounded-full bg-gradient-to-br from-brand-400 to-brand-600 flex items-center justify-center text-white shrink-0 font-bold text-sm">${escapeHtml((c.name||'?').charAt(0).toUpperCase())}</div>
                 <div class="flex-1 min-w-0">
-                  <p class="font-semibold text-ink-900 text-sm truncate">${escapeHtml(c.name || '(ohne Name)')}</p>
+                  <p class="font-semibold text-ink-900 text-sm truncate inline-flex items-center gap-1.5">${escapeHtml(c.name || '(ohne Name)')}<i data-lucide="user-cog" class="w-3 h-3 text-brand-500"></i></p>
                   ${c.job_title ? `<p class="text-[11px] text-ink-500 truncate">${escapeHtml(c.job_title)}</p>` : ''}
-                  ${c.email ? `<a href="mailto:${escapeAttr(c.email)}" class="text-[11px] text-brand-600 inline-flex items-center gap-1 truncate active:underline"><i data-lucide="mail" class="w-3 h-3"></i>${escapeHtml(c.email)}</a>` : ''}
+                  ${c.email ? `<p class="text-[11px] text-brand-600 inline-flex items-center gap-1 truncate"><i data-lucide="mail" class="w-3 h-3"></i>${escapeHtml(c.email)}</p>` : ''}
                   <p class="text-[10px] text-ink-400 mt-0.5"><span class="inline-block w-1.5 h-1.5 rounded-full mr-1" style="background:${escapeAttr(c._accountColor)}"></span>${escapeHtml(c._accountName)}</p>
                 </div>
-              </div>
+                <i data-lucide="chevron-right" class="w-4 h-4 text-ink-400 shrink-0 mt-2"></i>
+              </button>
               ${phones.length ? `
                 <div class="mt-2 ${showPhonesProminently ? 'space-y-1.5' : 'space-y-1'}">
                   ${phones.map(p => {
@@ -7880,7 +7891,10 @@ function renderSearchResults() {
       </div>
     </div>` : '';
 
-  const ticketBlock = tickets.length ? `
+  // Wenn intent='contact', Tickets in den Hintergrund — User wollte explizit Kontakt-Lookup.
+  // Sie werden als kleiner kollabierter Block angezeigt („X weitere Tickets · zum Aufklappen tippen").
+  const hideTickets = intent === 'contact' && contacts.length > 0;
+  const ticketBlock = (tickets.length && !hideTickets) ? `
     <div>
       <p class="text-[10px] uppercase font-bold text-ink-500 tracking-wider mb-2">Tickets (${tickets.length}) <span class="text-ink-400 font-normal normal-case">— inkl. bei dir ausgeblendete</span></p>
       <div class="space-y-2">
@@ -7912,6 +7926,28 @@ function renderSearchResults() {
       </div>
     </div>` : '';
 
+  // Wenn Tickets ausgeblendet sind (intent='contact'), kleinen Hinweis mit Toggle einbauen
+  const hiddenTicketsHint = (hideTickets && tickets.length) ? `
+    <details class="mt-4 bg-ink-50 border border-ink-200 rounded-xl">
+      <summary class="px-3 py-2 text-[11px] text-ink-600 cursor-pointer flex items-center gap-1.5">
+        <i data-lucide="ticket" class="w-3.5 h-3.5 text-ink-500"></i>
+        <span><b>${tickets.length}</b> verknüpfte Ticket${tickets.length === 1 ? '' : 's'} ausgeblendet — du wolltest nur Kontakte. Tippen zum Anzeigen.</span>
+      </summary>
+      <div class="p-3 pt-1 space-y-2">
+        ${tickets.slice(0, 10).map(t => {
+          const st = FD_STATUS[t.status] || { label: '?', cls: 'bg-ink-100 text-ink-600 border-ink-200' };
+          const reqDisplay = getRequesterDisplay(t);
+          const senderTxt = reqDisplay.name || reqDisplay.email || t.requester?.email || '?';
+          return `
+            <button onclick="closeSearchModal(); openTicketDetail('${escapeAttr(t._accountId)}', ${t.id})" class="w-full text-left bg-white border border-ink-200 rounded-lg p-2 active:bg-ink-100">
+              <p class="text-sm text-ink-900 truncate"><span class="text-[10px] uppercase px-1 py-0.5 rounded mr-1 ${st.cls}">${escapeHtml(st.label)}</span>${escapeHtml(t.subject || '(ohne Betreff)')}</p>
+              <p class="text-[10px] text-ink-500 truncate mt-0.5">#${t.id} · ${escapeHtml(senderTxt)} · ${escapeHtml(t._accountName)}</p>
+            </button>`;
+        }).join('')}
+        ${tickets.length > 10 ? `<p class="text-[10px] text-ink-400 italic text-center">… ${tickets.length - 10} weitere nicht angezeigt</p>` : ''}
+      </div>
+    </details>` : '';
+
   // Header zeigen wenn KI verwendet wurde ODER ein Direct-Lookup (ticketId / Filter) aktiv ist
   const showHeader = aiUsed || ticketId != null || activeFilterChips.length;
   const headerSummary = showHeader ? `
@@ -7925,7 +7961,7 @@ function renderSearchResults() {
       ${filterChipsHtml}
     </div>` : '';
 
-  $('searchResults').innerHTML = headerSummary + contactBlock + ticketBlock;
+  $('searchResults').innerHTML = headerSummary + contactBlock + ticketBlock + hiddenTicketsHint;
   if (window.lucide) lucide.createIcons();
 }
 
