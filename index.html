@@ -289,7 +289,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.40.4';
+const APP_VERSION = 'v2.40.5';
 // Read-Token absichtlich gesplittet, damit GitHub Secret-Scanning beim Push nicht blockt.
 // Der Token ist read-only und Base-scoped → bewusst eingebettet (Architektur-Entscheidung).
 const _RK = 'patu8KWM8aWB' + 'yxCGL.69fae5d9fa4b94c2' + '66b426dadd71a51f574945d840b33569058ab5e9d89ebef3';
@@ -6593,6 +6593,7 @@ function openCardActionsSheet(accountId, ticketId) {
           ${row('clock',            'indigo',  'Auf Wiedervorlage…',             `closeCardActionsSheet(); openWiedervorlagePicker('${escapeAttr(accountId)}', ${ticketId}, true)`, 'Aus meiner Sicht ausblenden bis…')}
           ${row('message-circle',   'emerald', 'Per WhatsApp an Kollegen',       `closeCardActionsSheet(); openWhatsAppTicketShare('${escapeAttr(accountId)}', ${ticketId})`, 'Mit Deep-Link + optionaler KI-Begleittext')}
           ${row('wand-2',           'purple',  'KI-Regel aus Ticket erstellen',  `closeCardActionsSheet(); openRuleFromTicket('${escapeAttr(accountId)}', ${ticketId})`, 'Muster lernen für zukünftige Tickets')}
+          ${row('refresh-cw',       'purple',  'Aktive Regeln jetzt prüfen',     `closeCardActionsSheet(); forceApplyRulesToTicket('${escapeAttr(accountId)}', ${ticketId}, null)`, 'Diagnose: matched eine Regel auf dieses Ticket?')}
           ${row('link',             'ink',     'Freshdesk-Link kopieren',        `copyTicketLink('${escapeAttr(accountId)}', ${ticketId}, this); closeCardActionsSheet()`, buildTicketLink(accountId, ticketId) || '')}
           ${row('external-link',    'ink',     'In Freshdesk öffnen',            `closeCardActionsSheet(); openInFreshdesk('${escapeAttr(accountId)}', ${ticketId})`, 'Neuer Tab')}
           ${row('check-square',     'brand',   'Mehrfach-Auswahl starten',       `closeCardActionsSheet(); msEnter('${escapeAttr(accountId)}', ${ticketId})`, 'Mehrere Tickets gemeinsam bearbeiten')}
@@ -7434,6 +7435,7 @@ function _ticketActionBarIcons(accountId, ticketId) {
     btn('mic',            'purple',  'KI-Assistent (Antworten/Notizen/Zuweisen per Sprache)',  `openAssistantModal('${accIdAttr}', ${ticketId})`),
     btn('sticky-note',    'amber',   'Schnell-Notiz hinzufügen',                               `openQuickNoteSheet('${accIdAttr}', ${ticketId})`),
     btn('wand-2',         'purple',  'KI-Regel aus diesem Ticket erstellen',                   `openRuleFromTicket('${accIdAttr}', ${ticketId})`),
+    btn('refresh-cw',     'purple',  'Aktive Regeln auf dieses Ticket anwenden (Diagnose)',    `forceApplyRulesToTicket('${accIdAttr}', ${ticketId}, this)`),
     `<span class="shrink-0 w-px h-5 bg-ink-200 mx-0.5"></span>`,
     btn('clock',          'indigo',  'Auf Wiedervorlage / aus meiner Sicht ausblenden',        `openWiedervorlagePicker('${accIdAttr}', ${ticketId})`),
     btn('message-circle', 'emerald', 'Per WhatsApp an Kollegen schicken',                     `openWhatsAppTicketShare('${accIdAttr}', ${ticketId})`),
@@ -13314,6 +13316,78 @@ async function autoApplyRulesForTickets(tickets) {
     }
   } finally {
     AUTO_APPLY_RUNNING = false;
+  }
+}
+
+/* Diagnose-Tool: zwingt eine sofortige Regel-Anwendung auf EIN konkretes Ticket.
+   - Lädt das Ticket frisch (inkl. conversations) damit der KI-Match die volle Info hat
+   - Leert den _processed-Marker damit auch schon evaluierte Tickets re-evaluiert werden
+   - Ruft autoApplyRulesForTickets mit nur diesem Ticket
+   - Schreibt detaillierten Log in Console + zeigt klares Toast-Resultat
+   Wird vom „Regeln jetzt prüfen"-Button im Ticket-Detail aufgerufen — User bekommt
+   schnelle Antwort warum eine Regel (nicht) greift. */
+async function forceApplyRulesToTicket(accountId, ticketId, btnEl) {
+  if (!accountId || !ticketId) return;
+  if (btnEl) setBusy(btnEl, true, 'Prüfe…');
+  try {
+    const activeRules = getActiveRules();
+    if (!activeRules.length) {
+      toast('Keine aktiven Regeln vorhanden — nichts zu prüfen.', 'warn', 6000);
+      return;
+    }
+    console.log('[force-apply] Starte Regel-Check für Ticket #' + ticketId + ' auf Account ' + accountId);
+    console.log('[force-apply] Aktive Regeln (' + activeRules.length + '):',
+      activeRules.map(r => '„' + r.titel + '" → ' + (r.action?.actions || []).map(a => a.type).join(',')).join(' | '));
+
+    // Ticket frisch laden — wichtig für korrektes Matching
+    let ticket;
+    try {
+      ticket = await fetchTicketDetail(accountId, ticketId);
+    } catch (e) {
+      toast('Ticket nicht ladbar: ' + e.message, 'error', 6000);
+      return;
+    }
+    ticket._accountId = accountId;
+
+    // _processed-Marker für DIESES Ticket leeren — sonst skippt autoApply es als „schon prozessiert"
+    try {
+      const m = _getProcessedMap();
+      delete m[accountId + '|' + ticketId];
+      localStorage.setItem(PROCESSED_RULES_KEY, JSON.stringify(m));
+    } catch (_) {}
+
+    // Direkter Eval-Call statt autoApply — wir wollen das Resultat sehen
+    const matches = await evaluateRulesForTickets([ticket], activeRules);
+    console.log('[force-apply] KI-Matches:', matches);
+
+    if (!matches.length) {
+      const ruleTitles = activeRules.map(r => '„' + r.titel + '"').join(', ');
+      toast('Keine Regel matched dieses Ticket. Aktive Regeln geprüft: ' + ruleTitles + '. Tipp: Regel zu eng formuliert? In der Regel-Bearbeitung das Beispiel-Ticket anpassen.', 'warn', 12000);
+      return;
+    }
+
+    // Aktionen ausführen
+    let totalActions = 0;
+    const performedByRule = [];
+    for (const m of matches) {
+      const rule = activeRules.find(r => r.id === m.ruleId);
+      if (!rule) continue;
+      const performed = await applyRuleActions(rule, ticket);
+      totalActions += performed.length;
+      performedByRule.push({ title: rule.titel, actions: performed });
+    }
+    // _processed-Marker neu setzen damit es nicht beim nächsten Auto-Apply erneut läuft
+    try { _setProcessed(accountId, ticketId, _ruleHash(activeRules)); } catch (_) {}
+    refreshTicketsListFromCache();
+
+    // Detaillierter Toast: Welche Regel + welche Aktionen?
+    const summary = performedByRule.map(r => '„' + r.title + '" → ' + (r.actions.join(' · ') || '(keine Aktion gelaufen)')).join(' | ');
+    toast('Regel angewandt: ' + summary + (totalActions ? '' : ' — aber keine Aktion lief erfolgreich (siehe Console)'), totalActions ? 'success' : 'warn', 12000);
+  } catch (e) {
+    console.error('[force-apply] Fehler:', e);
+    toast('Regel-Check fehlgeschlagen: ' + (e.message || e), 'error', 8000);
+  } finally {
+    if (btnEl) setBusy(btnEl, false);
   }
 }
 
