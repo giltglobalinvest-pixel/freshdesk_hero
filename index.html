@@ -289,7 +289,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.40.3';
+const APP_VERSION = 'v2.40.4';
 // Read-Token absichtlich gesplittet, damit GitHub Secret-Scanning beim Push nicht blockt.
 // Der Token ist read-only und Base-scoped → bewusst eingebettet (Architektur-Entscheidung).
 const _RK = 'patu8KWM8aWB' + 'yxCGL.69fae5d9fa4b94c2' + '66b426dadd71a51f574945d840b33569058ab5e9d89ebef3';
@@ -10458,6 +10458,10 @@ function closeAssistantModal() {
   const host = document.getElementById('subModalHost');
   if (host) host.innerHTML = '';
   ASSISTANT_CTX = null;
+  // Safety net: Liste neu rendern falls der User das Modal via X schließt ohne „Fertig"
+  // zu klicken — sicherzustellen dass hide/status/assign-Aktionen visuell wirken,
+  // auch wenn das Modal sie überdeckt hatte.
+  refreshTicketsListFromCache();
 }
 
 function renderAssistantInput() {
@@ -11065,9 +11069,17 @@ function renderAssistantPreview() {
         <button onclick="finalizeAssistantRun()" class="flex-[2] bg-brand-500 hover:bg-brand-600 text-white px-4 py-2.5 rounded-lg text-sm font-semibold inline-flex items-center justify-center gap-2"><i data-lucide="x" class="w-4 h-4"></i> Fertig</button>
       </div>`;
   } else {
+    // Anzahl der noch ausstehenden Schritte für den „Alle bestätigen"-Button
+    const pendingCount = actions.filter(a => a._state === 'pending').length;
     footer = `
-      <div class="flex gap-2 pt-1">
-        <button onclick="renderAssistantInput()" class="flex-1 bg-white border border-ink-200 px-3 py-2.5 rounded-lg text-sm font-medium hover:bg-ink-50">← Zurück (Eingabe ändern)</button>
+      <div class="flex flex-col gap-2 pt-1">
+        ${pendingCount > 1 ? `
+          <button onclick="confirmAllAssistantSteps(this)" class="w-full bg-gradient-to-br from-purple-500 to-brand-600 hover:opacity-90 text-white px-4 py-2.5 rounded-lg text-sm font-bold inline-flex items-center justify-center gap-2 shadow shadow-purple-500/20">
+            <i data-lucide="zap" class="w-4 h-4"></i> Alle ${pendingCount} Schritte ausführen
+          </button>
+          <p class="text-[10px] text-ink-500 text-center -mt-0.5">Spart Klicks — jeder Schritt wird trotzdem einzeln gegen Freshdesk gefahren</p>
+        ` : ''}
+        <button onclick="renderAssistantInput()" class="w-full bg-white border border-ink-200 px-3 py-2.5 rounded-lg text-sm font-medium hover:bg-ink-50">← Zurück (Eingabe ändern)</button>
       </div>`;
   }
 
@@ -11217,6 +11229,42 @@ function skipAssistantStep(idx) {
   renderAssistantPreview();
 }
 
+/* „Alle Schritte ausführen": fährt alle pending-Aktionen der Reihe nach durch confirmAssistantStep.
+   Stoppt bei einem Fehler nicht — jeder Schritt darf failen, aber alle anderen werden weiter
+   versucht. Am Ende automatisch finalize wenn nichts mehr pending ist. */
+async function confirmAllAssistantSteps(btnEl) {
+  const ctx = ASSISTANT_CTX;
+  if (!ctx?.plan) return;
+  if (btnEl) setBusy(btnEl, true, 'Führe alle Schritte aus…');
+  try {
+    // Snapshot der Indices BEVOR wir laufen — verhindert Endlosschleifen wenn der State
+    // zwischendrin manipuliert wird.
+    const indices = [];
+    for (let i = 0; i < ctx.plan.actions.length; i++) {
+      if (ctx.plan.actions[i]._state === 'pending') indices.push(i);
+    }
+    for (const idx of indices) {
+      // Re-check: Karte könnte zwischenzeitlich erledigt/übersprungen worden sein
+      const a = ctx.plan.actions[idx];
+      if (!a || a._state !== 'pending') continue;
+      // Nicht-Editierbare Pflicht-Inputs (assign/group/status) müssen einen Wert haben —
+      // confirmAssistantStep wirft sonst einen Toast, wir fangen das und gehen weiter.
+      try {
+        await confirmAssistantStep(idx, null);
+      } catch (e) {
+        console.warn('[confirmAll] Step ' + idx + ' Fehler:', e);
+      }
+    }
+    // Falls alle done: automatisch finalize (rendert Tickets-Liste neu)
+    const allDone = ctx.plan.actions.every(a => a._state === 'done' || a._state === 'skipped' || a._state === 'failed');
+    if (allDone) {
+      await finalizeAssistantRun();
+    }
+  } finally {
+    if (btnEl) setBusy(btnEl, false);
+  }
+}
+
 async function retryAssistantStep(idx, btnEl) {
   const ctx = ASSISTANT_CTX;
   if (!ctx?.plan) return;
@@ -11299,8 +11347,26 @@ async function executeSingleAssistantAction(ctx, a) {
     const days = Math.max(1, Math.min(365, parseInt(a.days, 10) || 3));
     const frist = _daysToFrist(days, { morning: true });
     await addWiedervorlage(ctx.accountId, ctx.ticketId, frist, 'manuell');
-    // Übersicht neu rendern — bei Filter „aktiv" verschwindet das Ticket jetzt
+    console.log('[assist-hide] Wiedervorlage gesetzt für', ctx.accountId, ctx.ticketId,
+      '· frist=', frist, '· isOnWv-Check=', isOnWiedervorlage(ctx.accountId, ctx.ticketId));
+    // (1) Übersicht neu rendern — bei Filter „aktiv" verschwindet das Ticket jetzt
     refreshTicketsListFromCache();
+    // (2) Defense in Depth: Card direkt aus dem DOM entfernen, falls der Re-Render
+    // aus irgendeinem Grund nicht greift (z.B. Filter-Race, Cache-Sync-Delay).
+    // Der nächste echte Render baut sie korrekt-gefiltert wieder auf wenn nötig.
+    try {
+      const card = document.querySelector(
+        `[data-swipe-content][data-account-id="${CSS.escape(ctx.accountId)}"][data-ticket-id="${ctx.ticketId}"]`
+      );
+      const wrapper = card?.closest('[data-swipe-card]');
+      if (wrapper && wrapper.parentNode) {
+        wrapper.style.transition = 'opacity .2s, max-height .2s, margin .2s';
+        wrapper.style.opacity = '0';
+        wrapper.style.maxHeight = '0';
+        wrapper.style.margin = '0';
+        setTimeout(() => { try { wrapper.remove(); } catch (_) {} }, 220);
+      }
+    } catch (_) {}
   } else {
     throw new Error('Unbekannter Aktionstyp: ' + a.type);
   }
