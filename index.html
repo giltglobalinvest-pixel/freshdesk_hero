@@ -289,7 +289,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.41.1';
+const APP_VERSION = 'v2.41.2';
 // Read-Token absichtlich gesplittet, damit GitHub Secret-Scanning beim Push nicht blockt.
 // Der Token ist read-only und Base-scoped → bewusst eingebettet (Architektur-Entscheidung).
 const _RK = 'patu8KWM8aWB' + 'yxCGL.69fae5d9fa4b94c2' + '66b426dadd71a51f574945d840b33569058ab5e9d89ebef3';
@@ -6169,42 +6169,22 @@ function renderTicketList(tickets) {
                   <div class="flex items-baseline gap-2">
                     <p class="font-semibold text-ink-900 text-sm leading-snug truncate flex-1">${escapeHtml(subj)}</p>
                     ${(() => {
+                      // KI-Regel-Schnellfunktion: Klick auf das Icon öffnet den Regel-Editor
+                      // mit DIESEM Ticket als Lern-Beispiel.
+                      // Wenn auf das Ticket bereits eine Regel angewandt wurde (typ='regel' in MeineNotizen),
+                      // wird das Icon als „bot"-Indikator (Regel hat hier was getan) angezeigt — Klick führt
+                      // trotzdem zum Regel-Editor, damit User die existierende Regel anpassen oder eine
+                      // neue erstellen kann.
                       const my = getMyNotesForTicket(t._accountId, t.id);
-                      // „Meine Notizen" = nur die, die ICH erstellt habe (manuell).
-                      // KI-Zusammenfassungen (summary), KI-Regel-Notes (regel) und KI-Assistant-Notes (assistant) zählen NICHT.
-                      const manual = my.filter(n => n.typ === 'manuell');
-                      const hasManual = manual.length > 0;
-                      const hasRule   = my.some(n => n.typ === 'regel');
-                      let iconColor, badgeColor, iconName, tooltip, timeLabel = '';
-                      if (hasManual) {
-                        // Manuelle Notizen haben immer Vorrang im Icon-Status.
-                        const latest = manual.slice().sort((a, b) => new Date(b.created || 0) - new Date(a.created || 0))[0];
-                        const rel = _relTimeFull(latest?.created);
-                        iconColor  = 'text-amber-600 active:text-amber-800 hover:bg-amber-50';
-                        iconName   = 'sticky-note';
-                        tooltip    = manual.length + ' eigene Notiz' + (manual.length === 1 ? '' : 'en') + (rel ? ' · letzte ' + rel : '');
-                        badgeColor = 'bg-amber-500';
-                        timeLabel  = rel;
-                      } else if (hasRule) {
-                        // Keine eigenen Notizen, aber KI-Regel hat was hinterlassen → Bot-Indikator.
-                        iconColor  = 'text-purple-600 active:text-purple-800 hover:bg-purple-50';
-                        iconName   = 'bot';
-                        tooltip    = 'Automatisiert per KI-Regel';
-                        badgeColor = 'bg-purple-500';
-                      } else {
-                        // Garnichts „mein" — Plus-Hinweis zum Hinzufügen.
-                        iconColor  = 'text-ink-300 active:text-brand-600 hover:bg-brand-50';
-                        iconName   = 'edit-3';
-                        tooltip    = 'Notiz hinzufügen';
-                        badgeColor = '';
-                      }
-                      const countBadge = hasManual && manual.length > 1
-                        ? `<span class="absolute -top-0.5 -right-0.5 ${badgeColor} text-white text-[8px] font-bold leading-none w-3.5 h-3.5 rounded-full flex items-center justify-center">${manual.length}</span>`
-                        : '';
-                      const inlineTime = (hasManual && timeLabel)
-                        ? `<span class="text-[10px] font-medium text-amber-700 shrink-0">${escapeHtml(timeLabel)}</span>`
-                        : '';
-                      return `${inlineTime}<button data-action="myNotes" data-account-id="${escapeAttr(t._accountId)}" data-ticket-id="${t.id}" class="${iconColor} -m-1 p-1 rounded shrink-0 relative" title="${escapeAttr(tooltip)}"><i data-lucide="${iconName}" class="w-4 h-4"></i>${countBadge}</button>`;
+                      const hasRule = my.some(n => n.typ === 'regel');
+                      const iconColor = hasRule
+                        ? 'text-purple-700 active:text-purple-900 hover:bg-purple-100'
+                        : 'text-purple-500 active:text-purple-700 hover:bg-purple-50';
+                      const iconName = hasRule ? 'bot' : 'wand-2';
+                      const tooltip  = hasRule
+                        ? 'Regel hat dieses Ticket bereits berührt — Klick: neue Regel anlegen oder bestehende anpassen'
+                        : 'KI-Regel aus diesem Ticket erstellen';
+                      return `<button data-action="ruleFromTicket" data-account-id="${escapeAttr(t._accountId)}" data-ticket-id="${t.id}" class="${iconColor} -m-1 p-1 rounded shrink-0" title="${escapeAttr(tooltip)}"><i data-lucide="${iconName}" class="w-4 h-4"></i></button>`;
                     })()}
                     <button data-action="summarize" data-account-id="${escapeAttr(t._accountId)}" data-ticket-id="${t.id}" class="text-purple-500 active:text-purple-700 hover:bg-purple-50 -m-1 p-1 rounded shrink-0" title="KI-Zusammenfassung">
                       <i data-lucide="sparkles" class="w-4 h-4"></i>
@@ -7022,6 +7002,10 @@ function attachSwipeToCards() {
         else if (action === 'suggestion') {
           if (_openSwipedContent) _resetSwipe();
           openKnowledgeSuggestionModal(accId, tId);
+        }
+        else if (action === 'ruleFromTicket') {
+          if (_openSwipedContent) _resetSwipe();
+          openRuleFromTicket(accId, tId);
         }
         else if (action === 'more') {
           if (_openSwipedContent) _resetSwipe();
