@@ -325,7 +325,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.43.2';
+const APP_VERSION = 'v2.43.3';
 // Read-Token absichtlich gesplittet, damit GitHub Secret-Scanning beim Push nicht blockt.
 // Der Token ist read-only und Base-scoped → bewusst eingebettet (Architektur-Entscheidung).
 const _RK = 'patu8KWM8aWB' + 'yxCGL.69fae5d9fa4b94c2' + '66b426dadd71a51f574945d840b33569058ab5e9d89ebef3';
@@ -13390,40 +13390,174 @@ function _renderTasksList() {
   if (window.lucide) lucide.createIcons();
 }
 
-/* Diagnose-Modus: aktiviert detailliertes Console-Logging beim nächsten Tasks-Fetch
-   + zeigt zusätzlich Toast mit Statistiken. */
+/* Diagnose-Modus: testet alle relevanten Freshsales-Endpoints einzeln und zeigt
+   detailliert ob jeder Endpoint lesbar ist + welche Daten er liefert.
+   Ziel: User sofort erkennen lassen ob's an Permissions/Owner-Match/leeren Tasks liegt. */
 async function diagnoseTasks() {
   window._fsTasksDebug = true;
-  toast('Diagnose-Modus aktiv — bitte Browser-Konsole öffnen und Tasks neu laden', 'info', 6000);
-  // Direkt einen Fetch über alle FS-Accounts machen und zählen
   const fsAccounts = (APP_STATE.accounts || []).filter(a => accountHasFreshsales(a));
-  const diagResults = [];
-  for (const acc of fsAccounts) {
-    try {
-      const me = await fetchFsMe(acc.id);
-      const tasks = await fetchFsTasks(acc.id);
-      const today = new Date(); today.setHours(0,0,0,0);
-      const overdueCount = tasks.filter(t => t.due_date && new Date(t.due_date).getTime() < today.getTime()).length;
-      diagResults.push({
-        account: acc.name,
-        me: me ? (me.display_name || me.name || me.email) : '(nicht gefunden)',
-        myEmail: APP_KEYS.user?.email || '',
-        meFound: !!me,
-        tasksOwnedByMe: tasks.length,
-        overdueByMe: overdueCount,
-      });
-    } catch (e) {
-      diagResults.push({ account: acc.name, error: e.message });
-    }
+  if (!fsAccounts.length) {
+    alert('Kein Freshsales-Account konfiguriert.');
+    return;
   }
-  console.log('[diagnoseTasks] Resultat:', diagResults);
-  // Sichtbare Diagnose-Anzeige als Modal
-  const summary = diagResults.map(r => r.error
-    ? '✗ ' + r.account + ': ' + r.error
-    : (r.meFound ? '✓' : '✗') + ' ' + r.account + ': me=' + r.me + ', Tasks=' + r.tasksOwnedByMe + ', überfällig=' + r.overdueByMe
-  ).join('\n');
-  alert('FS-Tasks-Diagnose:\n\n' + summary + '\n\nVoll-Log in Browser-Konsole (F12).');
-  renderTasksPage();
+
+  // Detail-Tests pro Account
+  const myEmail = String(APP_KEYS.user?.email || '').toLowerCase().trim();
+  const fullReport = [];
+
+  for (const acc of fsAccounts) {
+    const report = { name: acc.name, accountId: acc.id, tests: {} };
+    const base = '/freshsales/' + encodeURIComponent(acc.id) + '/api';
+
+    // Test 1: Owners-Endpoint (Basis-Permission-Check)
+    try {
+      const data = await proxyJson(base + '/selector/owners');
+      const owners = data?.users || data?.owners || [];
+      const meRec = owners.find(o => String(o.email || '').toLowerCase().trim() === myEmail);
+      report.tests.owners = {
+        status: '✓ OK',
+        count: owners.length,
+        myEmail,
+        meFound: !!meRec,
+        meId: meRec?.id || null,
+        meName: meRec?.display_name || meRec?.name || '(unbekannt)',
+      };
+      // Wenn User nicht in der Owner-Liste: alle Owner zur Diagnose zeigen
+      if (!meRec && owners.length) {
+        report.tests.owners.allOwners = owners.slice(0, 10).map(o => o.email + ' → ' + (o.display_name || o.name || o.id));
+      }
+    } catch (e) {
+      report.tests.owners = { status: '✗ FEHLER', error: e.message };
+    }
+
+    // Test 2: Tasks-Filters (welche Views gibt's)
+    try {
+      const data = await proxyJson(base + '/tasks/filters');
+      const filters = data?.filters || data || [];
+      const list = Array.isArray(filters) ? filters : [];
+      report.tests.taskFilters = {
+        status: list.length ? '✓ OK' : '⚠ Keine Views',
+        count: list.length,
+        views: list.slice(0, 8).map(f => f.id + ': ' + f.name),
+      };
+    } catch (e) {
+      report.tests.taskFilters = { status: '✗ FEHLER', error: e.message };
+    }
+
+    // Test 3: Direkter Tasks-Endpoint (ohne View)
+    try {
+      const data = await proxyJson(base + '/tasks?include=targetable,owner&per_page=20');
+      const tasks = data?.tasks || data?.items || (Array.isArray(data) ? data : []);
+      report.tests.tasksDirect = {
+        status: tasks.length ? '✓ OK' : '⚠ Leer',
+        count: tasks.length,
+        sample: tasks.slice(0, 3).map(t => ({
+          id: t.id,
+          title: t.title || t.subject || '(leer)',
+          status: t.status,
+          owner_id: t.owner_id || t.owner?.id || null,
+          owner_email: t.owner?.email || '(?)',
+          due: t.due_date || t.due_on || null,
+        })),
+      };
+    } catch (e) {
+      report.tests.tasksDirect = { status: '✗ FEHLER', error: e.message };
+    }
+
+    // Test 4: Tasks-via-View (erste verfügbare View)
+    const firstViewId = report.tests.taskFilters?.views?.[0]?.split(':')?.[0]?.trim();
+    if (firstViewId) {
+      try {
+        const data = await proxyJson(base + '/tasks/view/' + firstViewId + '?include=targetable,owner&per_page=20');
+        const tasks = data?.tasks || data?.items || [];
+        report.tests.tasksView = {
+          status: tasks.length ? '✓ OK' : '⚠ Leer',
+          viewId: firstViewId,
+          count: tasks.length,
+        };
+      } catch (e) {
+        report.tests.tasksView = { status: '✗ FEHLER', error: e.message };
+      }
+    }
+
+    // Zusammenfassung: was sollte funktionieren?
+    const meId = report.tests.owners?.meId;
+    const directTasks = report.tests.tasksDirect?.sample || [];
+    const mine = directTasks.filter(t => meId && String(t.owner_id) === String(meId));
+    report.summary = {
+      meEmailInFs: report.tests.owners?.meFound ? '✓ ja' : '✗ NEIN — Email-Mismatch!',
+      tasksReadable: (report.tests.tasksDirect?.status?.includes('OK') || report.tests.tasksView?.status?.includes('OK')) ? '✓ ja' : '✗ NEIN — Permission?',
+      mineInSample: mine.length,
+    };
+    fullReport.push(report);
+  }
+
+  console.log('=== FS-TASKS DIAGNOSE ===');
+  console.log('User-Email:', myEmail);
+  fullReport.forEach(r => console.log(r.name, r));
+
+  // Sichtbarer Bericht als Modal
+  const html = fullReport.map(r => {
+    const t = r.tests;
+    return `
+      <div class="bg-white border border-ink-200 rounded-xl p-3 space-y-2">
+        <p class="font-semibold text-ink-900">${escapeHtml(r.name)}</p>
+        <div class="text-[11px] space-y-1">
+          <div class="bg-ink-50 rounded p-2">
+            <p class="font-mono"><b>Owners-Endpoint:</b> ${escapeHtml(t.owners?.status || '?')}</p>
+            ${t.owners?.error ? `<p class="text-red-600 mt-1">${escapeHtml(t.owners.error)}</p>` : ''}
+            ${t.owners?.meFound !== undefined ? `<p>${t.owners.meFound ? '✓' : '✗'} Du im FS-Owner-Pool: <b>${escapeHtml(t.owners.meName || '–')}</b> (ID ${escapeHtml(String(t.owners.meId || '?'))})</p>` : ''}
+            ${t.owners?.allOwners ? `<details class="mt-1"><summary class="cursor-pointer text-brand-600">Alle ${escapeHtml(String(t.owners.count))} Owner zeigen</summary><div class="mt-1 font-mono text-[10px] whitespace-pre-line">${escapeHtml(t.owners.allOwners.join('\\n'))}</div></details>` : ''}
+          </div>
+          <div class="bg-ink-50 rounded p-2">
+            <p class="font-mono"><b>Tasks-Filters-Endpoint:</b> ${escapeHtml(t.taskFilters?.status || '?')}</p>
+            ${t.taskFilters?.error ? `<p class="text-red-600 mt-1">${escapeHtml(t.taskFilters.error)}</p>` : ''}
+            ${t.taskFilters?.views?.length ? `<p class="font-mono text-[10px] mt-1">${escapeHtml(t.taskFilters.views.join(' / '))}</p>` : ''}
+          </div>
+          <div class="bg-ink-50 rounded p-2">
+            <p class="font-mono"><b>Direkter Tasks-Call:</b> ${escapeHtml(t.tasksDirect?.status || '?')} (${escapeHtml(String(t.tasksDirect?.count ?? '?'))})</p>
+            ${t.tasksDirect?.error ? `<p class="text-red-600 mt-1">${escapeHtml(t.tasksDirect.error)}</p>` : ''}
+            ${t.tasksDirect?.sample?.length ? `<details class="mt-1"><summary class="cursor-pointer text-brand-600">Sample anzeigen</summary><pre class="mt-1 text-[10px] overflow-x-auto bg-white p-1 rounded">${escapeHtml(JSON.stringify(t.tasksDirect.sample, null, 2))}</pre></details>` : ''}
+          </div>
+          ${t.tasksView ? `
+            <div class="bg-ink-50 rounded p-2">
+              <p class="font-mono"><b>Tasks-via-View ${escapeHtml(String(t.tasksView.viewId))}:</b> ${escapeHtml(t.tasksView.status)} (${escapeHtml(String(t.tasksView.count ?? '?'))})</p>
+              ${t.tasksView.error ? `<p class="text-red-600 mt-1">${escapeHtml(t.tasksView.error)}</p>` : ''}
+            </div>` : ''}
+          <div class="bg-${r.summary.meEmailInFs.includes('ja') && r.summary.tasksReadable.includes('ja') ? 'emerald' : 'amber'}-50 border border-${r.summary.meEmailInFs.includes('ja') && r.summary.tasksReadable.includes('ja') ? 'emerald' : 'amber'}-200 rounded p-2 font-semibold">
+            <p>Du in FS: ${escapeHtml(r.summary.meEmailInFs)}</p>
+            <p>Tasks lesbar: ${escapeHtml(r.summary.tasksReadable)}</p>
+            <p>Deine Tasks im Sample: ${r.summary.mineInSample}</p>
+          </div>
+        </div>
+      </div>`;
+  }).join('');
+
+  // Modal anzeigen
+  let host = document.getElementById('subModalHost');
+  if (!host) { host = document.createElement('div'); host.id = 'subModalHost'; document.body.appendChild(host); }
+  host.innerHTML = `
+    <div class="fixed inset-0 z-[60] bg-white flex flex-col">
+      <header class="sticky top-0 z-10 bg-white border-b border-ink-200 safe-top">
+        <div class="px-2 py-2.5 flex items-center gap-1.5">
+          <button onclick="document.getElementById('subModalHost').innerHTML=''; document.body.style.overflow=''" class="w-9 h-9 rounded-lg hover:bg-ink-100 flex items-center justify-center">
+            <i data-lucide="arrow-left" class="w-5 h-5 text-ink-700"></i>
+          </button>
+          <h1 class="font-bold text-ink-900 flex-1 inline-flex items-center gap-1.5"><i data-lucide="bug" class="w-4 h-4 text-amber-600"></i> Freshsales-Diagnose</h1>
+        </div>
+      </header>
+      <div class="flex-1 overflow-y-auto p-3 space-y-3">
+        <div class="bg-amber-50 border border-amber-200 rounded-xl p-3 text-[12px] text-amber-900">
+          <p class="font-semibold">Eingeloggter User-Email:</p>
+          <p class="font-mono text-[11px] mt-1">${escapeHtml(myEmail || '(nicht gesetzt)')}</p>
+          <p class="text-[10px] mt-2 opacity-80">Wenn deine Email NICHT in der „Alle Owner zeigen"-Liste auftaucht → das ist der Bug. Lösung: in Freshsales den Owner mit deiner App-Email anlegen, ODER deine User-Email in der App-Master-Base auf die FS-Email anpassen.</p>
+        </div>
+        ${html}
+        <button onclick="document.getElementById('subModalHost').innerHTML=''; document.body.style.overflow=''" class="w-full bg-ink-100 hover:bg-ink-200 text-ink-700 rounded-lg py-2.5 font-semibold">Schließen</button>
+      </div>
+    </div>`;
+  document.body.style.overflow = 'hidden';
+  if (window.lucide) lucide.createIcons();
 }
 
 function _renderTaskCard(t) {
