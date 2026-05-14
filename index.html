@@ -289,7 +289,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.40.5';
+const APP_VERSION = 'v2.41.0';
 // Read-Token absichtlich gesplittet, damit GitHub Secret-Scanning beim Push nicht blockt.
 // Der Token ist read-only und Base-scoped → bewusst eingebettet (Architektur-Entscheidung).
 const _RK = 'patu8KWM8aWB' + 'yxCGL.69fae5d9fa4b94c2' + '66b426dadd71a51f574945d840b33569058ab5e9d89ebef3';
@@ -1131,6 +1131,7 @@ const WIEDERVORLAGE_TABLE = 'Wiedervorlage';
 const REGELN_TABLE = 'Regeln';
 const NOTIZEN_TABLE = 'MeineNotizen';
 const ACCESS_TABLE = 'AccountAccess';
+const WISSEN_TABLE = 'KI_Wissen';
 
 async function ensureAppTables() {
   // Accounts-Tabelle anlegen falls nicht vorhanden
@@ -1176,6 +1177,24 @@ async function ensureAppTables() {
     { name: 'freshdesk_api_key',  type: 'singleLineText' },  // User-spezifischer FD-Key
     { name: 'freshsales_api_key', type: 'singleLineText' },  // optional: User-spezifischer Freshsales-Key
     { name: 'created',            type: 'singleLineText' },
+  ]);
+  // Team-Wissen: jede Aktion (reply/assign/group/status/hide/spam/forward/note) wird hier
+  // als Lern-Datensatz gespeichert. Wird von der Vorschlag-Engine + Indikator-Icons gelesen.
+  // Pro Account isoliert (Multi-Tenant-Sicht), innerhalb eines Accounts team-weit sichtbar.
+  await ensureTable(WISSEN_TABLE, [
+    { name: 'account_id',       type: 'singleLineText' },  // Airtable record ID des FD-Accounts
+    { name: 'ticket_id',        type: 'singleLineText' },
+    { name: 'subject',          type: 'singleLineText' },  // Ticket-Subject (erste ~200 Zeichen)
+    { name: 'description',      type: 'multilineText'  },  // Erste ~1500 Zeichen
+    { name: 'sender_email',     type: 'singleLineText' },
+    { name: 'sender_domain',    type: 'singleLineText' },  // Für schnelles Routing-Match
+    { name: 'action_type',      type: 'singleLineText' },  // reply|assign|group|status|hide|spam|note|forward
+    { name: 'action_payload',   type: 'multilineText'  },  // JSON mit Werten (zB {agent:"Julia", group:"Buchhaltung"})
+    { name: 'reply_text',       type: 'multilineText'  },  // Nur bei action_type='reply' befüllt
+    { name: 'agent_email',      type: 'singleLineText' },  // Wer die Aktion gemacht hat (Team-Sicht)
+    { name: 'agent_name',       type: 'singleLineText' },
+    { name: 'feedback',         type: 'singleLineText' },  // leer | 'bestätigt' | 'abgelehnt' (für Lern-Loop)
+    { name: 'created',          type: 'singleLineText' },
   ]);
 }
 
@@ -1349,6 +1368,476 @@ async function recordMyNote(accountId, ticketId, body, typ) {
 
 function getMyNotesForTicket(accountId, ticketId) {
   return APP_STATE.myNotesMap?.get(accountId + '|' + ticketId) || [];
+}
+
+/* ============================================================
+   TEAM-WISSEN — KI lernt aus allen Aktionen pro Account
+   ============================================================ */
+
+/* Lädt die letzten N Wissens-Records pro Account in einen lokalen Index.
+   Wird beim Login/Boot einmalig gerufen. Reine Daten-Vorhaltung — die Filterung
+   (sender_domain, keyword, action_type) passiert client-seitig im Memory.
+   Bei großen Mengen würde man auf serverseitige Filter umstellen — für die
+   ersten paar tausend Records reicht in-memory locker. */
+async function loadKnowledge() {
+  if (!APP_STATE.knowledgeByAccount) APP_STATE.knowledgeByAccount = new Map();
+  if (!APP_KEYS.user) return;
+  try {
+    // Nur Records der Accounts auf die der User Zugriff hat — Sicherheit + Performance
+    const myAccountIds = (APP_STATE.accounts || []).map(a => a.id);
+    if (!myAccountIds.length) return;
+    // Filter-Formula: account_id in myAccountIds (OR-Verkettung) — letzte 6 Monate
+    const cutoff = new Date(Date.now() - 180 * 86400e3).toISOString();
+    const formulaParts = myAccountIds.map(id => `{account_id}='${String(id).replace(/'/g, "\\'")}'`);
+    const formula = 'AND(OR(' + formulaParts.join(',') + "),{created}>='" + cutoff + "')";
+    const recs = await airtableRead(WISSEN_TABLE, { filter: formula, pageSize: 100, maxRecords: 2000 });
+    APP_STATE.knowledgeByAccount.clear();
+    (recs || []).forEach(r => {
+      const f = r.fields || {};
+      const accId = f.account_id;
+      if (!accId) return;
+      const arr = APP_STATE.knowledgeByAccount.get(accId) || [];
+      arr.push({
+        recordId:        r.id,
+        ticket_id:       f.ticket_id || '',
+        subject:         f.subject || '',
+        description:     f.description || '',
+        sender_email:    f.sender_email || '',
+        sender_domain:   f.sender_domain || '',
+        action_type:     f.action_type || '',
+        action_payload:  f.action_payload || '',
+        reply_text:      f.reply_text || '',
+        agent_email:     f.agent_email || '',
+        agent_name:      f.agent_name || '',
+        feedback:        f.feedback || '',
+        created:         f.created || '',
+      });
+      APP_STATE.knowledgeByAccount.set(accId, arr);
+    });
+    console.log('[wissen] Geladen:', recs.length, 'Records auf', APP_STATE.knowledgeByAccount.size, 'Accounts');
+  } catch (e) {
+    console.warn('loadKnowledge fehlgeschlagen (nicht kritisch — Tabelle existiert evtl. noch nicht):', e.message);
+  }
+}
+
+/* Records eine Aktion in der Wissens-Tabelle. Fire-and-forget — der Aufrufer wartet nicht.
+   - ticket: das volle Ticket-Objekt (für Subject/Description/Sender-Extraktion)
+   - actionType: 'reply' | 'assign' | 'group' | 'status' | 'hide' | 'spam' | 'note' | 'forward'
+   - payload: Objekt mit den konkreten Werten (zB {agent:'Julia', group:'Buchhaltung'})
+   - replyText: Bei action='reply' der versendete Antwort-Text (für Antwort-Vorschläge)
+
+   Multi-Tenant-Sicherheit: account_id wird strikt durchgereicht; pro Account isoliert. */
+async function recordKnowledge(accountId, ticket, actionType, payload, replyText) {
+  if (!accountId || !ticket || !actionType) return;
+  if (!APP_KEYS.user?.api_key) return;
+  try {
+    const senderEmail = ticket.requester?.email || ticket.from_email || '';
+    const senderDomain = senderEmail.includes('@') ? senderEmail.split('@').pop().toLowerCase() : '';
+    const subject = String(ticket.subject || '').slice(0, 200);
+    const description = String(
+      ticket.description_text ||
+      (typeof htmlToText === 'function' ? htmlToText(ticket.description || '') : (ticket.description || ''))
+    ).slice(0, 1500);
+    const me = APP_KEYS.user || {};
+    const fields = {
+      account_id:     accountId,
+      ticket_id:      String(ticket.id),
+      subject,
+      description,
+      sender_email:   senderEmail,
+      sender_domain:  senderDomain,
+      action_type:    actionType,
+      action_payload: payload ? JSON.stringify(payload).slice(0, 3000) : '',
+      reply_text:     String(replyText || '').slice(0, 4000),
+      agent_email:    me.email || '',
+      agent_name:     me.name  || '',
+      feedback:       '',
+      created:        nowIso(),
+    };
+    const rec = await airtableWrite(WISSEN_TABLE, fields);
+    // Lokalen Cache aktualisieren damit die Vorschlag-Engine sofort die neue Aktion kennt
+    if (!APP_STATE.knowledgeByAccount) APP_STATE.knowledgeByAccount = new Map();
+    const arr = APP_STATE.knowledgeByAccount.get(accountId) || [];
+    arr.unshift({
+      recordId: rec.id,
+      ticket_id: fields.ticket_id, subject, description,
+      sender_email: senderEmail, sender_domain: senderDomain,
+      action_type: actionType, action_payload: fields.action_payload,
+      reply_text: fields.reply_text,
+      agent_email: fields.agent_email, agent_name: fields.agent_name,
+      feedback: '', created: fields.created,
+    });
+    APP_STATE.knowledgeByAccount.set(accountId, arr);
+  } catch (e) {
+    console.warn('recordKnowledge fehlgeschlagen (nicht kritisch):', e.message);
+  }
+}
+
+/* Findet ähnliche historische Aktionen für ein aktuelles Ticket.
+   Match-Strategie v1 (lokal, kostenlos):
+   1. Primär: gleicher sender_domain (sehr starkes Routing-Signal)
+   2. Sekundär: Subject-Keyword-Overlap (Top 3 Wörter ohne Stopwords)
+   3. Tertiär: Description-Keyword-Overlap
+   Score = 10*domainMatch + 3*subjectKeywordOverlap + subjectKeywordOverlap
+   Sortiert absteigend, gibt Top-N zurück. */
+function findSimilarKnowledge(accountId, ticket, limit = 20) {
+  const arr = APP_STATE.knowledgeByAccount?.get(accountId) || [];
+  if (!arr.length) return [];
+  const senderEmail = ticket.requester?.email || ticket.from_email || '';
+  const domain = senderEmail.includes('@') ? senderEmail.split('@').pop().toLowerCase() : '';
+  const subjectWords = _wissenKeywords(ticket.subject || '');
+  const descWords = _wissenKeywords(typeof htmlToText === 'function' ?
+    htmlToText(ticket.description_text || ticket.description || '') :
+    (ticket.description_text || ticket.description || ''));
+
+  const scored = arr
+    .filter(k => String(k.ticket_id) !== String(ticket.id)) // nicht das aktuelle Ticket
+    .map(k => {
+      let score = 0;
+      if (domain && k.sender_domain === domain) score += 10;
+      const subjOverlap = _setOverlap(subjectWords, _wissenKeywords(k.subject));
+      const descOverlap = _setOverlap(descWords,    _wissenKeywords(k.description));
+      score += 3 * subjOverlap + descOverlap;
+      // Feedback-Boost: 'bestätigt' bekommt Bonus, 'abgelehnt' wird abgewertet
+      if (k.feedback === 'bestätigt') score += 2;
+      if (k.feedback === 'abgelehnt') score -= 5;
+      return { k, score };
+    })
+    .filter(x => x.score > 0)
+    .sort((a, b) => b.score - a.score)
+    .slice(0, limit)
+    .map(x => x.k);
+  return scored;
+}
+
+/* Extrahiert relevante Keywords aus einem Text — Lowercase, ohne Stopwords, ≥4 Zeichen. */
+const _WISSEN_STOPWORDS = new Set([
+  'der','die','das','und','oder','aber','wir','sie','ich','ihr','euch','uns','mich','dich','dem','den','des','ein','eine','einer','eines',
+  'einem','vom','von','zur','zum','bei','mit','aus','für','auf','sich','sein','wird','wurde','werden','ist','sind','wir','war','waren',
+  'sehr','geehrt','geehrte','geehrter','damen','herren','hallo','liebe','lieber','liebes','grüße','grüssen','freundliche','freundlichen',
+  'mit','wie','was','wer','wann','wo','warum','dass','daß','noch','schon','also','dann','denn','aber','nur','auch','jedoch','allerdings',
+  'this','that','these','those','what','when','where','have','your','with','from','they','their','about','please','thanks','dear',
+]);
+function _wissenKeywords(text) {
+  if (!text) return new Set();
+  const words = String(text).toLowerCase()
+    .replace(/[^a-zäöüß0-9\s]/gi, ' ')
+    .split(/\s+/)
+    .filter(w => w.length >= 4 && !_WISSEN_STOPWORDS.has(w));
+  return new Set(words.slice(0, 20));
+}
+function _setOverlap(a, b) {
+  if (!a.size || !b.size) return 0;
+  let n = 0;
+  for (const x of a) if (b.has(x)) n++;
+  return n;
+}
+
+/* Aggregiert ähnliche Cases zu konkreten Vorschlägen (Routing-Cluster, Top-Antworten,
+   typische Folge-Aktionen). KEIN KI-Call hier — reine lokale Statistik. Wird vom
+   Indikator-Icon und vom Vorschlag-Modal genutzt. */
+function buildKnowledgeSuggestion(accountId, ticket) {
+  const similar = findSimilarKnowledge(accountId, ticket, 30);
+  if (!similar.length) return { count: 0, routing: null, topReplies: [], followups: [], cases: [] };
+
+  // Routing-Cluster: häufigster Agent + häufigste Gruppe
+  const agentCounts = {};
+  const groupCounts = {};
+  const statusCounts = {};
+  const hideCounts = { total: 0, sumDays: 0 };
+  const replies = [];
+
+  for (const k of similar) {
+    let payload = null;
+    try { payload = k.action_payload ? JSON.parse(k.action_payload) : null; } catch (_) {}
+    if (k.action_type === 'assign' && payload?.agent) {
+      const key = payload.agent;
+      agentCounts[key] = (agentCounts[key] || 0) + 1;
+    }
+    if (k.action_type === 'group' && payload?.group) {
+      const key = payload.group;
+      groupCounts[key] = (groupCounts[key] || 0) + 1;
+    }
+    if (k.action_type === 'status' && payload?.label) {
+      const key = payload.label;
+      statusCounts[key] = (statusCounts[key] || 0) + 1;
+    }
+    if (k.action_type === 'hide' && payload?.days) {
+      hideCounts.total++;
+      hideCounts.sumDays += parseInt(payload.days, 10) || 0;
+    }
+    if (k.action_type === 'reply' && k.reply_text) {
+      replies.push({ text: k.reply_text, agent: k.agent_name || k.agent_email || '', when: k.created });
+    }
+  }
+
+  const topAgent = _topByCount(agentCounts);
+  const topGroup = _topByCount(groupCounts);
+  const topStatus = _topByCount(statusCounts);
+  const avgHideDays = hideCounts.total ? Math.round(hideCounts.sumDays / hideCounts.total) : 0;
+
+  // Top-3 Antworten — eindeutige (gleicher Text wird nicht doppelt vorgeschlagen)
+  const seenReplies = new Set();
+  const topReplies = [];
+  replies.slice(0, 10).forEach(r => {
+    const key = r.text.slice(0, 100).toLowerCase().trim();
+    if (!seenReplies.has(key)) { seenReplies.add(key); topReplies.push(r); }
+  });
+
+  const followups = [];
+  if (hideCounts.total >= 2) followups.push({ kind: 'hide', count: hideCounts.total, days: avgHideDays });
+  if (topStatus) followups.push({ kind: 'status', label: topStatus.key, count: topStatus.count });
+
+  return {
+    count: similar.length,
+    routing: {
+      agent: topAgent ? { name: topAgent.key, count: topAgent.count } : null,
+      group: topGroup ? { name: topGroup.key, count: topGroup.count } : null,
+    },
+    topReplies: topReplies.slice(0, 3),
+    followups,
+    cases: similar.slice(0, 5).map(k => ({
+      ticket_id: k.ticket_id,
+      subject: k.subject,
+      action_type: k.action_type,
+      agent_name: k.agent_name,
+      created: k.created,
+    })),
+  };
+}
+
+function _topByCount(obj) {
+  let topKey = null, topCount = 0;
+  for (const [k, v] of Object.entries(obj || {})) {
+    if (v > topCount) { topKey = k; topCount = v; }
+  }
+  return topKey ? { key: topKey, count: topCount } : null;
+}
+
+/* === UI: Vorschlag-Modal ============================================== */
+let SUGGESTION_CTX = null;
+
+function openKnowledgeSuggestionModal(accountId, ticketId) {
+  const ticket = CURRENT_TICKET && CURRENT_TICKET.id === ticketId
+    ? CURRENT_TICKET
+    : (APP_STATE.pageState?.tickets || []).find(t => t._accountId === accountId && t.id === ticketId)
+    || APP_STATE.ticketCache?.get?.(accountId + '|' + ticketId)
+    || null;
+  if (!ticket) {
+    toast('Ticket-Daten nicht im Cache — bitte einmal öffnen', 'warn');
+    return;
+  }
+  const suggestion = buildKnowledgeSuggestion(accountId, ticket);
+  SUGGESTION_CTX = { accountId, ticketId, ticket, suggestion };
+
+  let host = document.getElementById('subModalHost');
+  if (!host) { host = document.createElement('div'); host.id = 'subModalHost'; document.body.appendChild(host); }
+  host.innerHTML = `
+    <div class="fixed inset-0 z-[60] flex items-end justify-center bg-black/40" onclick="if(event.target===this)closeKnowledgeSuggestionModal()">
+      <div class="bg-white w-full max-w-2xl rounded-t-2xl shadow-2xl flex flex-col safe-bottom" style="max-height:92vh">
+        <div class="px-4 py-3 border-b border-ink-200 flex items-center justify-between gap-2">
+          <div class="min-w-0">
+            <h3 class="font-bold text-ink-900 inline-flex items-center gap-2"><i data-lucide="lightbulb" class="w-4 h-4 text-amber-500"></i> Vorschlag aus Team-Historie</h3>
+            <p class="text-[11px] text-ink-500 truncate">Basis: ${suggestion.count} ähnliche Tickets in den letzten 6 Monaten</p>
+          </div>
+          <button onclick="closeKnowledgeSuggestionModal()" class="w-9 h-9 rounded-lg hover:bg-ink-100 flex items-center justify-center shrink-0">
+            <i data-lucide="x" class="w-5 h-5 text-ink-700"></i>
+          </button>
+        </div>
+        <div class="flex-1 overflow-y-auto p-4 space-y-3" id="suggestionBody">
+          ${_renderSuggestionBody(suggestion)}
+        </div>
+        <div class="border-t border-ink-200 p-3">
+          <button onclick="closeKnowledgeSuggestionModal()" class="w-full bg-ink-100 hover:bg-ink-200 text-ink-700 rounded-lg px-3 py-2.5 text-sm font-semibold">Schließen</button>
+        </div>
+      </div>
+    </div>`;
+  if (window.lucide) lucide.createIcons();
+  document.body.style.overflow = 'hidden';
+}
+
+function closeKnowledgeSuggestionModal() {
+  SUGGESTION_CTX = null;
+  const host = document.getElementById('subModalHost');
+  if (host) host.innerHTML = '';
+  document.body.style.overflow = '';
+}
+
+function _renderSuggestionBody(s) {
+  if (!s.count) {
+    return `<div class="bg-ink-50 border border-ink-200 rounded-xl p-4 text-center">
+      <i data-lucide="info" class="w-8 h-8 mx-auto text-ink-400"></i>
+      <p class="text-sm text-ink-700 mt-2 font-semibold">Noch keine ähnlichen Tickets im Team-Wissen.</p>
+      <p class="text-[11px] text-ink-500 mt-1">Sobald du oder dein Team ähnliche Tickets bearbeitet, sammelt das System Vorschläge.</p>
+    </div>`;
+  }
+  const confidence = s.count >= 5 ? 'stark' : (s.count >= 3 ? 'mittel' : 'schwach');
+  const confColor = s.count >= 5 ? 'emerald' : (s.count >= 3 ? 'amber' : 'ink');
+
+  let html = `<div class="bg-${confColor}-50 border border-${confColor}-200 rounded-xl px-3 py-2 text-[11px] inline-flex items-center gap-2">
+    <i data-lucide="bar-chart-3" class="w-3.5 h-3.5 text-${confColor}-700"></i>
+    <span class="text-${confColor}-900">Confidence: <b>${confidence}</b> (${s.count} Cases)</span>
+  </div>`;
+
+  // Routing-Vorschlag
+  if (s.routing?.agent || s.routing?.group) {
+    html += `<div class="bg-white border-2 border-brand-200 rounded-xl p-3 space-y-2">
+      <p class="text-[10px] uppercase tracking-wider font-semibold text-brand-700 inline-flex items-center gap-1.5"><i data-lucide="users" class="w-3 h-3"></i> Routing-Vorschlag</p>
+      <div class="space-y-1.5">
+        ${s.routing.agent ? `
+          <div class="flex items-center justify-between gap-2 bg-brand-50/60 rounded-lg px-3 py-2">
+            <div class="min-w-0">
+              <p class="text-[11px] text-ink-500">Bearbeiter</p>
+              <p class="text-sm font-semibold text-ink-900 truncate">${escapeHtml(s.routing.agent.name)} <span class="text-[10px] text-ink-500">· ${s.routing.agent.count}× im Cluster</span></p>
+            </div>
+            <button onclick="applySuggestionRouting('agent', '${escapeAttr(s.routing.agent.name)}', this)" class="shrink-0 text-[11px] bg-brand-600 hover:bg-brand-700 text-white px-3 py-1.5 rounded-lg font-semibold inline-flex items-center gap-1"><i data-lucide="check" class="w-3.5 h-3.5"></i> Übernehmen</button>
+          </div>` : ''}
+        ${s.routing.group ? `
+          <div class="flex items-center justify-between gap-2 bg-brand-50/60 rounded-lg px-3 py-2">
+            <div class="min-w-0">
+              <p class="text-[11px] text-ink-500">Gruppe</p>
+              <p class="text-sm font-semibold text-ink-900 truncate">${escapeHtml(s.routing.group.name)} <span class="text-[10px] text-ink-500">· ${s.routing.group.count}× im Cluster</span></p>
+            </div>
+            <button onclick="applySuggestionRouting('group', '${escapeAttr(s.routing.group.name)}', this)" class="shrink-0 text-[11px] bg-brand-600 hover:bg-brand-700 text-white px-3 py-1.5 rounded-lg font-semibold inline-flex items-center gap-1"><i data-lucide="check" class="w-3.5 h-3.5"></i> Übernehmen</button>
+          </div>` : ''}
+      </div>
+    </div>`;
+  }
+
+  // Antwort-Vorschläge
+  if (s.topReplies.length) {
+    html += `<div class="bg-white border-2 border-purple-200 rounded-xl p-3">
+      <p class="text-[10px] uppercase tracking-wider font-semibold text-purple-700 inline-flex items-center gap-1.5 mb-2"><i data-lucide="message-square-quote" class="w-3 h-3"></i> Antwort-Vorlagen aus Team</p>
+      <div class="space-y-2">
+        ${s.topReplies.map((r, idx) => `
+          <div class="bg-purple-50/40 border border-purple-200 rounded-lg p-2">
+            <div class="flex items-center gap-1.5 text-[10px] text-purple-700 mb-1">
+              <i data-lucide="user" class="w-3 h-3"></i>
+              <span>${escapeHtml(r.agent || 'Team')}</span>
+              <span class="text-ink-400">·</span>
+              <span class="text-ink-500">${escapeHtml(r.when ? new Date(r.when).toLocaleDateString('de-DE') : '')}</span>
+            </div>
+            <p class="text-xs text-ink-800 whitespace-pre-line break-words line-clamp-4">${escapeHtml(r.text.slice(0, 400))}${r.text.length > 400 ? '…' : ''}</p>
+            <div class="flex gap-1.5 mt-2">
+              <button onclick="applySuggestionReply(${idx}, this)" class="text-[11px] bg-purple-600 hover:bg-purple-700 text-white px-3 py-1 rounded inline-flex items-center gap-1 font-semibold"><i data-lucide="reply" class="w-3 h-3"></i> Als Antwort übernehmen</button>
+              <button onclick="copySuggestionReply(${idx}, this)" class="text-[11px] bg-white border border-purple-300 text-purple-700 px-3 py-1 rounded inline-flex items-center gap-1 font-medium"><i data-lucide="copy" class="w-3 h-3"></i> Kopieren</button>
+            </div>
+          </div>`).join('')}
+      </div>
+    </div>`;
+  }
+
+  // Folge-Aktionen
+  if (s.followups.length) {
+    html += `<div class="bg-white border-2 border-indigo-200 rounded-xl p-3">
+      <p class="text-[10px] uppercase tracking-wider font-semibold text-indigo-700 inline-flex items-center gap-1.5 mb-2"><i data-lucide="arrow-right-circle" class="w-3 h-3"></i> Typische Folge-Aktionen</p>
+      <div class="space-y-1.5">
+        ${s.followups.map(f => f.kind === 'hide'
+          ? `<div class="flex items-center justify-between gap-2 bg-indigo-50/60 rounded-lg px-3 py-2">
+              <p class="text-sm text-ink-800"><i data-lucide="eye-off" class="w-3.5 h-3.5 inline mr-1"></i>${f.count}× ausgeblendet, im Schnitt für <b>${f.days || 3} Tage</b></p>
+              <button onclick="applySuggestionHide(${f.days || 3}, this)" class="shrink-0 text-[11px] bg-indigo-600 hover:bg-indigo-700 text-white px-3 py-1.5 rounded-lg font-semibold inline-flex items-center gap-1"><i data-lucide="check" class="w-3.5 h-3.5"></i> Übernehmen</button>
+            </div>`
+          : `<div class="flex items-center gap-2 bg-indigo-50/60 rounded-lg px-3 py-2 text-sm text-ink-800">
+              <i data-lucide="flag" class="w-3.5 h-3.5"></i> Status oft auf <b>${escapeHtml(f.label)}</b> gesetzt (${f.count}×)
+            </div>`
+        ).join('')}
+      </div>
+    </div>`;
+  }
+
+  // Beispiel-Cases zur Transparenz
+  if (s.cases.length) {
+    html += `<details class="bg-ink-50 border border-ink-200 rounded-xl">
+      <summary class="px-3 py-2 cursor-pointer text-[11px] text-ink-700 font-semibold inline-flex items-center gap-1.5"><i data-lucide="list" class="w-3 h-3"></i> ${s.cases.length} Beispiel-Tickets aus dem Cluster</summary>
+      <div class="px-3 pb-2 space-y-1">
+        ${s.cases.map(c => `<div class="text-[11px] text-ink-600 flex items-center gap-2 py-1 border-t border-ink-100">
+          <span class="font-mono text-ink-500">#${escapeHtml(c.ticket_id)}</span>
+          <span class="truncate flex-1">${escapeHtml(c.subject || '(ohne Betreff)')}</span>
+          <span class="text-[10px] text-ink-400 shrink-0">${escapeHtml(c.action_type)} · ${escapeHtml(c.agent_name || '')}</span>
+        </div>`).join('')}
+      </div>
+    </details>`;
+  }
+
+  return html;
+}
+
+async function applySuggestionRouting(kind, name, btnEl) {
+  const ctx = SUGGESTION_CTX;
+  if (!ctx) return;
+  setBusy(btnEl, true, 'Setze…');
+  try {
+    if (kind === 'agent') {
+      const id = findAgentByHint(ctx.accountId, name);
+      if (!id) { toast('Agent „' + name + '" nicht gefunden im aktuellen Account', 'warn', 6000); return; }
+      const path = '/freshdesk/' + encodeURIComponent(ctx.accountId) + '/api/v2/tickets/' + ctx.ticketId;
+      await proxyJson(path, { method: 'PUT', body: JSON.stringify({ responder_id: id }) });
+      patchTicketInList(ctx.accountId, ctx.ticketId, { responder_id: id });
+      refreshTicketsListFromCache();
+      recordKnowledge(ctx.accountId, ctx.ticket, 'assign', { agent_id: id, agent: name, via: 'suggestion' }).catch(() => {});
+      toast('Bearbeiter „' + name + '" zugewiesen', 'success', 3000);
+    } else if (kind === 'group') {
+      const id = findGroupByHint(ctx.accountId, name);
+      if (!id) { toast('Gruppe „' + name + '" nicht gefunden im aktuellen Account', 'warn', 6000); return; }
+      const path = '/freshdesk/' + encodeURIComponent(ctx.accountId) + '/api/v2/tickets/' + ctx.ticketId;
+      await proxyJson(path, { method: 'PUT', body: JSON.stringify({ group_id: id }) });
+      patchTicketInList(ctx.accountId, ctx.ticketId, { group_id: id });
+      refreshTicketsListFromCache();
+      recordKnowledge(ctx.accountId, ctx.ticket, 'group', { group_id: id, group: name, via: 'suggestion' }).catch(() => {});
+      toast('Gruppe „' + name + '" zugewiesen', 'success', 3000);
+    }
+  } catch (e) {
+    toast('Fehler: ' + e.message, 'error', 6000);
+  } finally {
+    setBusy(btnEl, false);
+  }
+}
+
+async function applySuggestionHide(days, btnEl) {
+  const ctx = SUGGESTION_CTX;
+  if (!ctx) return;
+  setBusy(btnEl, true, 'Setze…');
+  try {
+    const frist = _daysToFrist(days, { morning: true });
+    await addWiedervorlage(ctx.accountId, ctx.ticketId, frist, 'manuell');
+    recordKnowledge(ctx.accountId, ctx.ticket, 'hide', { days, via: 'suggestion' }).catch(() => {});
+    refreshTicketsListFromCache();
+    toast('Ticket für ' + days + ' Tage ausgeblendet', 'success', 3000);
+    closeKnowledgeSuggestionModal();
+  } catch (e) {
+    toast('Fehler: ' + e.message, 'error', 6000);
+  } finally {
+    setBusy(btnEl, false);
+  }
+}
+
+function applySuggestionReply(idx, btnEl) {
+  const ctx = SUGGESTION_CTX;
+  if (!ctx) return;
+  const reply = ctx.suggestion.topReplies[idx];
+  if (!reply) return;
+  closeKnowledgeSuggestionModal();
+  // Direct-Reply-Composer öffnen + vorbefüllen
+  setTimeout(() => {
+    openDirectReplyComposer(ctx.accountId, ctx.ticketId);
+    setTimeout(() => {
+      const ta = $('directReplyText');
+      if (ta) { ta.value = reply.text; ta.focus(); }
+    }, 120);
+  }, 120);
+}
+
+function copySuggestionReply(idx, btnEl) {
+  const ctx = SUGGESTION_CTX;
+  if (!ctx) return;
+  const reply = ctx.suggestion.topReplies[idx];
+  if (!reply) return;
+  try {
+    navigator.clipboard.writeText(reply.text);
+    toast('Antwort-Text kopiert', 'success', 2500);
+  } catch (e) {
+    toast('Kopieren fehlgeschlagen: ' + e.message, 'error');
+  }
 }
 
 /* === Spracherkennung — zentrale Helper für Permission + Fehlermeldungen ====
@@ -5709,6 +6198,18 @@ function renderTicketList(tickets) {
                     <button data-action="summarize" data-account-id="${escapeAttr(t._accountId)}" data-ticket-id="${t.id}" class="text-purple-500 active:text-purple-700 hover:bg-purple-50 -m-1 p-1 rounded shrink-0" title="KI-Zusammenfassung">
                       <i data-lucide="sparkles" class="w-4 h-4"></i>
                     </button>
+                    ${(() => {
+                      // Indikator: Wenn mindestens 3 ähnliche Cases im Team-Wissen vorhanden,
+                      // zeigt ein farbiges Lampen-Icon — Klick öffnet Vorschlag-Modal.
+                      const sim = findSimilarKnowledge(t._accountId, t, 30);
+                      if (sim.length < 3) return '';
+                      const strong = sim.length >= 5;
+                      const color = strong ? 'emerald' : 'amber';
+                      const tooltip = sim.length + ' ähnliche Tickets im Team-Wissen — Klick für Vorschlag';
+                      return `<button data-action="suggestion" data-account-id="${escapeAttr(t._accountId)}" data-ticket-id="${t.id}" class="text-${color}-500 active:text-${color}-700 hover:bg-${color}-50 -m-1 p-1 rounded shrink-0" title="${escapeAttr(tooltip)}">
+                        <i data-lucide="lightbulb" class="w-4 h-4"></i>
+                      </button>`;
+                    })()}
                     <!-- Desktop-Quick-Aktionen: auf Mobile (Swipes vorhanden) ausgeblendet, ab sm: sichtbar -->
                     <button data-action="assistant" data-account-id="${escapeAttr(t._accountId)}" data-ticket-id="${t.id}" class="hidden sm:inline-flex text-purple-500 active:text-purple-700 hover:bg-purple-50 -m-1 p-1 rounded shrink-0" title="KI-Assistent (Sprache/Text)">
                       <i data-lucide="mic" class="w-4 h-4"></i>
@@ -6507,6 +7008,10 @@ function attachSwipeToCards() {
           if (hasRelevant) openMyNotesPopup(accId, tId);
           else             openQuickNoteSheet(accId, tId);
         }
+        else if (action === 'suggestion') {
+          if (_openSwipedContent) _resetSwipe();
+          openKnowledgeSuggestionModal(accId, tId);
+        }
         else if (action === 'more') {
           if (_openSwipedContent) _resetSwipe();
           openCardActionsSheet(accId, tId);
@@ -6594,6 +7099,7 @@ function openCardActionsSheet(accountId, ticketId) {
           ${row('message-circle',   'emerald', 'Per WhatsApp an Kollegen',       `closeCardActionsSheet(); openWhatsAppTicketShare('${escapeAttr(accountId)}', ${ticketId})`, 'Mit Deep-Link + optionaler KI-Begleittext')}
           ${row('wand-2',           'purple',  'KI-Regel aus Ticket erstellen',  `closeCardActionsSheet(); openRuleFromTicket('${escapeAttr(accountId)}', ${ticketId})`, 'Muster lernen für zukünftige Tickets')}
           ${row('refresh-cw',       'purple',  'Aktive Regeln jetzt prüfen',     `closeCardActionsSheet(); forceApplyRulesToTicket('${escapeAttr(accountId)}', ${ticketId}, null)`, 'Diagnose: matched eine Regel auf dieses Ticket?')}
+          ${row('lightbulb',        'amber',   'Vorschlag aus Team-Historie',    `closeCardActionsSheet(); openKnowledgeSuggestionModal('${escapeAttr(accountId)}', ${ticketId})`, 'Was hat das Team bei ähnlichen Tickets gemacht?')}
           ${row('link',             'ink',     'Freshdesk-Link kopieren',        `copyTicketLink('${escapeAttr(accountId)}', ${ticketId}, this); closeCardActionsSheet()`, buildTicketLink(accountId, ticketId) || '')}
           ${row('external-link',    'ink',     'In Freshdesk öffnen',            `closeCardActionsSheet(); openInFreshdesk('${escapeAttr(accountId)}', ${ticketId})`, 'Neuer Tab')}
           ${row('check-square',     'brand',   'Mehrfach-Auswahl starten',       `closeCardActionsSheet(); msEnter('${escapeAttr(accountId)}', ${ticketId})`, 'Mehrere Tickets gemeinsam bearbeiten')}
@@ -6620,6 +7126,11 @@ async function ticketActionClose(accountId, ticketId, btn) {
     // damit unmittelbar aus der „Offen"-Liste, ohne auf einen kompletten Refetch warten zu müssen.
     patchTicketInList(accountId, ticketId, { status: 5 });
     refreshTicketsListFromCache();
+    // KI-Lernen: Snapshot vom Ticket für Wissens-Eintrag
+    const snapshot = APP_STATE.pageState?.tickets?.find(t => t._accountId === accountId && t.id === ticketId)
+                  || APP_STATE.ticketCache?.get?.(accountId + '|' + ticketId)
+                  || { id: ticketId };
+    recordKnowledge(accountId, snapshot, 'status', { status: 5, label: 'geschlossen' }).catch(() => {});
     toast('Ticket #' + ticketId + ' geschlossen', 'success');
     if (btn) setBusy(btn, false);
   } catch (e) {
@@ -6641,6 +7152,8 @@ async function ticketActionSpam(accountId, ticketId, btn) {
       _resetSwipe();
       removeTicketFromList(accountId, ticketId);
       refreshTicketsListFromCache();
+      // KI-Lernen: SPAM-Muster speichern (Sender-Domain + Subject) für zukünftige Auto-Erkennung
+      if (snapshot) recordKnowledge(accountId, snapshot, 'spam', {}).catch(() => {});
       toast('Ticket #' + ticketId + ' in Papierkorb verschoben', 'success');
       if (btn) setBusy(btn, false);
       // Nach Erfolg: User fragen ob Regel daraus gelernt werden soll
@@ -7436,6 +7949,7 @@ function _ticketActionBarIcons(accountId, ticketId) {
     btn('sticky-note',    'amber',   'Schnell-Notiz hinzufügen',                               `openQuickNoteSheet('${accIdAttr}', ${ticketId})`),
     btn('wand-2',         'purple',  'KI-Regel aus diesem Ticket erstellen',                   `openRuleFromTicket('${accIdAttr}', ${ticketId})`),
     btn('refresh-cw',     'purple',  'Aktive Regeln auf dieses Ticket anwenden (Diagnose)',    `forceApplyRulesToTicket('${accIdAttr}', ${ticketId}, this)`),
+    btn('lightbulb',      'amber',   'Vorschlag aus Team-Historie',                            `openKnowledgeSuggestionModal('${accIdAttr}', ${ticketId})`),
     `<span class="shrink-0 w-px h-5 bg-ink-200 mx-0.5"></span>`,
     btn('clock',          'indigo',  'Auf Wiedervorlage / aus meiner Sicht ausblenden',        `openWiedervorlagePicker('${accIdAttr}', ${ticketId})`),
     btn('message-circle', 'emerald', 'Per WhatsApp an Kollegen schicken',                     `openWhatsAppTicketShare('${accIdAttr}', ${ticketId})`),
@@ -9838,6 +10352,8 @@ async function sendDirectReply(btnEl) {
     }
     const base = '/freshdesk/' + encodeURIComponent(ctx.accountId) + '/api/v2/tickets/' + ctx.ticketId;
     await proxyJson(base + '/reply', { method: 'POST', body: JSON.stringify({ body: bodyHtml }) });
+    // KI-Lernen: direkter Antwort-Text wird als Vorlage für ähnliche zukünftige Tickets gespeichert
+    recordKnowledge(ctx.accountId, ctx.ticket || { id: ctx.ticketId }, 'reply', { via: 'direct' }, text).catch(() => {});
     closeDirectReplyComposer();
     toast('Antwort gesendet', 'success', 4000);
     // Detail-View neu laden damit die neue Conversation sichtbar ist
@@ -11315,40 +11831,49 @@ async function reclassifyAssistantStep(idx, newType) {
    Keine Toast/UI-Updates hier — die Schleife steuert das. */
 async function executeSingleAssistantAction(ctx, a) {
   const base = '/freshdesk/' + encodeURIComponent(ctx.accountId) + '/api/v2/tickets/' + ctx.ticketId;
+  // Ticket-Snapshot für KI-Lern-Records (alle Aktionen werden in WISSEN_TABLE protokolliert)
+  const _t = ctx.ticket || { id: ctx.ticketId };
   if (a.type === 'reply') {
     const me = await fetchAgentMe(ctx.accountId);
     const sig = me?.signature || '';
     const body = appendSignatureHtml(textToHtmlForFreshdesk(a.body), sig);
     await proxyJson(base + '/reply', { method: 'POST', body: JSON.stringify({ body }) });
+    recordKnowledge(ctx.accountId, _t, 'reply', { summary: a.summary || '' }, a.body).catch(() => {});
   } else if (a.type === 'note') {
     // Notizen ohne Signatur (intern, kein Mail-Versand)
     await proxyJson(base + '/notes', { method: 'POST', body: JSON.stringify({ body: textToHtmlForFreshdesk(a.body), private: true }) });
     recordMyNote(ctx.accountId, ctx.ticketId, a.body, 'assistant').catch(() => {});
+    recordKnowledge(ctx.accountId, _t, 'note', { summary: a.summary || '' }, a.body).catch(() => {});
   } else if (a.type === 'forward') {
     const me = await fetchAgentMe(ctx.accountId);
     const sig = me?.signature || '';
     const body = appendSignatureHtml(textToHtmlForFreshdesk(a.body), sig);
     await proxyJson(base + '/forward', { method: 'POST', body: JSON.stringify({ to_emails: a.forward_to, body }) });
+    recordKnowledge(ctx.accountId, _t, 'forward', { to: a.forward_to || [] }, a.body).catch(() => {});
   } else if (a.type === 'assign') {
     if (!a.agent_id) throw new Error('Kein Bearbeiter ausgewählt');
     await proxyJson(base, { method: 'PUT', body: JSON.stringify({ responder_id: a.agent_id }) });
     // Lokalen Cache + Übersicht + CURRENT_TICKET sofort updaten (Freshdesk-Search-Index laggt sonst)
     patchTicketInList(ctx.accountId, ctx.ticketId, { responder_id: a.agent_id });
     refreshTicketsListFromCache();
+    recordKnowledge(ctx.accountId, _t, 'assign', { agent_id: a.agent_id, agent: getAgentName(ctx.accountId, a.agent_id) || '' }).catch(() => {});
   } else if (a.type === 'group') {
     if (!a.group_id) throw new Error('Keine Gruppe ausgewählt');
     await proxyJson(base, { method: 'PUT', body: JSON.stringify({ group_id: a.group_id }) });
     patchTicketInList(ctx.accountId, ctx.ticketId, { group_id: a.group_id });
     refreshTicketsListFromCache();
+    recordKnowledge(ctx.accountId, _t, 'group', { group_id: a.group_id, group: getGroupName(ctx.accountId, a.group_id) || '' }).catch(() => {});
   } else if (a.type === 'status') {
     await proxyJson(base, { method: 'PUT', body: JSON.stringify({ status: a.status }) });
     patchTicketInList(ctx.accountId, ctx.ticketId, { status: a.status });
     refreshTicketsListFromCache();
+    recordKnowledge(ctx.accountId, _t, 'status', { status: a.status, label: FD_STATUS[a.status]?.label || String(a.status) }).catch(() => {});
   } else if (a.type === 'hide') {
     // Lokale Wiedervorlage — ändert keinen Freshdesk-Status!
     const days = Math.max(1, Math.min(365, parseInt(a.days, 10) || 3));
     const frist = _daysToFrist(days, { morning: true });
     await addWiedervorlage(ctx.accountId, ctx.ticketId, frist, 'manuell');
+    recordKnowledge(ctx.accountId, _t, 'hide', { days }).catch(() => {});
     console.log('[assist-hide] Wiedervorlage gesetzt für', ctx.accountId, ctx.ticketId,
       '· frist=', frist, '· isOnWv-Check=', isOnWiedervorlage(ctx.accountId, ctx.ticketId));
     // (1) Übersicht neu rendern — bei Filter „aktiv" verschwindet das Ticket jetzt
@@ -14292,6 +14817,8 @@ async function showApp() {
   loadRules().catch(e => console.warn('Rules-Load:', e.message));
   // Meine-Notizen-Index laden (im Hintergrund)
   loadMyNotes().catch(e => console.warn('MyNotes-Load:', e.message));
+  // Team-Wissen-Index laden (im Hintergrund — Tabelle wird beim ersten Bedarf via ensureAppTables erstellt)
+  loadKnowledge().catch(e => console.warn('Wissen-Load:', e.message));
   navTo('tickets');
   // Deep-Link: wenn URL-Hash auf ein Ticket zeigt, direkt öffnen
   handleDeepLink();
