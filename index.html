@@ -289,7 +289,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.41.0';
+const APP_VERSION = 'v2.41.1';
 // Read-Token absichtlich gesplittet, damit GitHub Secret-Scanning beim Push nicht blockt.
 // Der Token ist read-only und Base-scoped → bewusst eingebettet (Architektur-Entscheidung).
 const _RK = 'patu8KWM8aWB' + 'yxCGL.69fae5d9fa4b94c2' + '66b426dadd71a51f574945d840b33569058ab5e9d89ebef3';
@@ -6076,6 +6076,17 @@ function renderTicketList(tickets) {
       if (visMode === 'active')        return !onWv;
       if (visMode === 'wiedervorlage') return onWv;
       return true;
+    });
+  }
+  // Sortierung: IMMER nach letzter Änderung (updated_at), neueste zuerst.
+  // Fallback auf created_at falls updated_at fehlt. Wird hier bei jedem Render gemacht
+  // (statt nur bei fetchTickets), damit lokal gepatchte Tickets (patchTicketInList etc.)
+  // sofort an die richtige Position rutschen — vorher: Reihenfolge blieb stale nach Card-Aktionen.
+  if (Array.isArray(tickets) && tickets.length > 1) {
+    tickets = tickets.slice().sort((a, b) => {
+      const ta = new Date(a.updated_at || a.created_at || 0).getTime();
+      const tb = new Date(b.updated_at || b.created_at || 0).getTime();
+      return tb - ta;
     });
   }
   if (!tickets.length) {
