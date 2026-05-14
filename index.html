@@ -325,7 +325,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.44.0';
+const APP_VERSION = 'v2.44.1';
 // Read-Token absichtlich gesplittet, damit GitHub Secret-Scanning beim Push nicht blockt.
 // Der Token ist read-only und Base-scoped → bewusst eingebettet (Architektur-Entscheidung).
 const _RK = 'patu8KWM8aWB' + 'yxCGL.69fae5d9fa4b94c2' + '66b426dadd71a51f574945d840b33569058ab5e9d89ebef3';
@@ -1274,7 +1274,6 @@ const NOTIZEN_TABLE = 'MeineNotizen';
 const ACCESS_TABLE = 'AccountAccess';
 const WISSEN_TABLE = 'KI_Wissen';
 const KOSTEN_TABLE = 'KI_Kosten';
-const AUFGABEN_TABLE = 'MeineAufgaben';
 
 // Anthropic-Modell-Preise (USD je 1M Tokens). Stand 2026-Q1.
 // Beim Update einer neuen Modell-Version: hier eintragen, sonst wird Default-Eintrag genutzt.
@@ -1449,30 +1448,6 @@ async function ensureAppTables() {
     { name: 'agent_email',    type: 'singleLineText' },
     { name: 'agent_name',     type: 'singleLineText' },
     { name: 'created',        type: 'singleLineText' },
-  ]);
-  // Eigene Aufgaben — Freshsales-Tasks-Ersatz für User die nicht Pro/Enterprise haben.
-  // Pro Account isolier, Multi-User-Team-fähig (assignee_user_api_key). Wird vom Tasks-Tab
-  // genutzt + per KI-Assistent aus Tickets/Kontakten erstellt.
-  await ensureTable(AUFGABEN_TABLE, [
-    { name: 'account_id',          type: 'singleLineText' },  // Optional: zugehöriger FD-Account
-    { name: 'assignee_user_api_key', type: 'singleLineText' },  // Wem ist die Aufgabe zugewiesen
-    { name: 'assignee_name',       type: 'singleLineText' },  // Anzeige-Name (denormalisiert)
-    { name: 'title',               type: 'singleLineText' },
-    { name: 'description',         type: 'multilineText'  },
-    { name: 'due_date',            type: 'singleLineText' },  // ISO-String
-    { name: 'priority',            type: 'singleLineText' },  // low|normal|high
-    { name: 'status',              type: 'singleLineText' },  // open|done
-    { name: 'task_type',           type: 'singleLineText' },  // call|email|meeting|other
-    { name: 'source_type',         type: 'singleLineText' },  // ticket|contact|manual
-    { name: 'source_id',           type: 'singleLineText' },  // Ticket- oder Contact-ID
-    { name: 'related_name',        type: 'singleLineText' },  // Verknüpfte Person/Firma für Anzeige
-    { name: 'related_email',       type: 'singleLineText' },
-    { name: 'related_phone',       type: 'singleLineText' },
-    { name: 'related_mobile',      type: 'singleLineText' },
-    { name: 'created_by_user_api_key', type: 'singleLineText' },
-    { name: 'created_by_name',     type: 'singleLineText' },
-    { name: 'created',             type: 'singleLineText' },
-    { name: 'completed_at',        type: 'singleLineText' },
   ]);
   // Team-Wissen: jede Aktion (reply/assign/group/status/hide/spam/forward/note) wird hier
   // als Lern-Datensatz gespeichert. Wird von der Vorschlag-Engine + Indikator-Icons gelesen.
@@ -3651,9 +3626,6 @@ function renderContactPreviewBody() {
           <i data-lucide="external-link" class="w-4 h-4"></i> Freshdesk
         </button>` : ''}
       </div>
-      <button type="button" onclick="closeContactPreviewModal(); openAufgabeFromContact('${escapeAttr(ctx.accountId)}', ${ctx.contactId})" class="w-full bg-gradient-to-br from-emerald-500 to-emerald-600 hover:opacity-90 text-white px-3 py-2.5 rounded-lg text-sm font-semibold inline-flex items-center justify-center gap-1.5 mt-1">
-        <i data-lucide="sparkles" class="w-4 h-4"></i> Aufgabe für diesen Kontakt (KI)
-      </button>
     </div>`;
   if (window.lucide) lucide.createIcons();
 }
@@ -5577,117 +5549,6 @@ async function fetchTicketsAllAccounts(opts = {}) {
    ============================================================ */
 async function fetchUsers() {
   return await airtableRead('User', { sort: [{ field: 'name', direction: 'asc' }] });
-}
-
-/* ============================================================
-   MEINE AUFGABEN — App-eigene Aufgaben-Verwaltung
-   Ersatz für Freshsales-Tasks (Growth-Plan hat keinen Zugriff).
-   Per-User-Assignee, Multi-Account, KI-Assistent kann anlegen.
-   ============================================================ */
-
-/* Lädt offene Aufgaben für den aktuellen User (assignee = me) plus alle die ich
-   erstellt habe (auch wenn anderem zugewiesen — damit ich überblicke was mein Team
-   gerade tut). Cache in APP_STATE.aufgaben. */
-async function loadAufgaben() {
-  if (!APP_KEYS.user?.api_key) return;
-  try {
-    const myKey = APP_KEYS.user.api_key.replace(/'/g, "\\'");
-    const cutoff = new Date(Date.now() - 365 * 86400e3).toISOString();
-    // Lade alle Aufgaben die mich betreffen: zugewiesen ODER von mir erstellt
-    // (Admin: später separat alle laden möglich)
-    const formula = "AND(OR({assignee_user_api_key}='" + myKey + "',{created_by_user_api_key}='" + myKey + "'),{created}>='" + cutoff + "')";
-    const recs = await airtableRead(AUFGABEN_TABLE, { filter: formula, pageSize: 100, maxRecords: 2000 });
-    APP_STATE.aufgaben = (recs || []).map(_normalizeAufgabe);
-  } catch (e) {
-    console.warn('loadAufgaben fehlgeschlagen (nicht kritisch — Tabelle wird beim ersten Bedarf angelegt):', e.message);
-    APP_STATE.aufgaben = [];
-  }
-}
-
-function _normalizeAufgabe(r) {
-  const f = r.fields || {};
-  return {
-    recordId:             r.id,
-    account_id:           f.account_id || '',
-    assignee_user_api_key: f.assignee_user_api_key || '',
-    assignee_name:        f.assignee_name || '',
-    title:                f.title || '',
-    description:          f.description || '',
-    due_date:             f.due_date || '',
-    priority:             f.priority || 'normal',
-    status:               f.status || 'open',
-    task_type:            f.task_type || 'other',
-    source_type:          f.source_type || 'manual',
-    source_id:            f.source_id || '',
-    related_name:         f.related_name || '',
-    related_email:        f.related_email || '',
-    related_phone:        f.related_phone || '',
-    related_mobile:       f.related_mobile || '',
-    created_by_user_api_key: f.created_by_user_api_key || '',
-    created_by_name:      f.created_by_name || '',
-    created:              f.created || '',
-    completed_at:         f.completed_at || '',
-  };
-}
-
-/* Legt eine neue Aufgabe an. Pflicht: title. Optional: due_date (default morgen 09:00),
-   assignee (default = aktueller User), priority (default normal), task_type (default other). */
-async function createAufgabe(opts) {
-  const me = APP_KEYS.user || {};
-  if (!opts?.title?.trim()) throw new Error('Titel fehlt');
-  const fields = {
-    account_id:              opts.account_id || '',
-    assignee_user_api_key:   opts.assignee_user_api_key || me.api_key,
-    assignee_name:           opts.assignee_name || me.name || '',
-    title:                   String(opts.title).trim(),
-    description:             String(opts.description || '').trim(),
-    due_date:                opts.due_date || _daysToFrist(1, { morning: true }),
-    priority:                opts.priority || 'normal',
-    status:                  'open',
-    task_type:               opts.task_type || 'other',
-    source_type:             opts.source_type || 'manual',
-    source_id:               String(opts.source_id || ''),
-    related_name:            opts.related_name || '',
-    related_email:           opts.related_email || '',
-    related_phone:           opts.related_phone || '',
-    related_mobile:          opts.related_mobile || '',
-    created_by_user_api_key: me.api_key || '',
-    created_by_name:         me.name || '',
-    created:                 nowIso(),
-    completed_at:            '',
-  };
-  const rec = await airtableWrite(AUFGABEN_TABLE, fields);
-  const item = _normalizeAufgabe(rec);
-  if (!APP_STATE.aufgaben) APP_STATE.aufgaben = [];
-  APP_STATE.aufgaben.unshift(item);
-  return item;
-}
-
-async function updateAufgabe(recordId, fields) {
-  if (!recordId) throw new Error('Aufgabe-ID fehlt');
-  const rec = await airtableUpdate(AUFGABEN_TABLE, recordId, fields);
-  const item = _normalizeAufgabe(rec);
-  // Lokalen Cache aktualisieren
-  if (Array.isArray(APP_STATE.aufgaben)) {
-    const i = APP_STATE.aufgaben.findIndex(a => a.recordId === recordId);
-    if (i >= 0) APP_STATE.aufgaben[i] = item;
-  }
-  return item;
-}
-
-async function completeAufgabe(recordId) {
-  return await updateAufgabe(recordId, { status: 'done', completed_at: nowIso() });
-}
-
-async function postponeAufgabe(recordId, days) {
-  return await updateAufgabe(recordId, { due_date: _daysToFrist(days || 1, { morning: true }) });
-}
-
-async function deleteAufgabe(recordId) {
-  await airtableDelete(AUFGABEN_TABLE, recordId);
-  if (Array.isArray(APP_STATE.aufgaben)) {
-    APP_STATE.aufgaben = APP_STATE.aufgaben.filter(a => a.recordId !== recordId);
-  }
 }
 
 /* Lädt fehlende Felder (insbes. email) für den eingeloggten User direkt aus Airtable nach.
@@ -11840,7 +11701,6 @@ async function aiInterpretCommand(ticket, command, accountId) {
     '- "group": Ticket einer Gruppe/Team zuweisen (group_id setzen) — Feld "group_id"\n' +
     '- "status": Freshdesk-Status setzen — verändert das Ticket für ALLE (Kunde, andere Agents, Workflows). Werte: 2=offen, 3=wartet, 4=gelöst, 5=geschlossen.\n' +
     '- "hide": Ticket NUR aus der persönlichen App-Sicht DES USERS ausblenden (lokale Wiedervorlage). Ändert den Freshdesk-Status NICHT, andere Agents/Kunde merken nichts. Feld "days" = Dauer in Tagen (Default 3, max 365 für "für immer").\n' +
-    '- "aufgabe": EIGENE Aufgabe/To-Do im internen Aufgaben-Tab anlegen (NICHT in Freshdesk, NICHT in Freshsales). Felder: "title" (Pflicht, kurz), "description" (optional, Details), "task_type" (call|email|meeting|other), "priority" (low|normal|high, default normal), "dueInDays" (Default 1), "assigneeHint" (Vorname/Name des Kollegen, wenn der Task einem anderen User zugewiesen werden soll — sonst leer = mir selbst). Diese Aufgabe taucht im Aufgaben-Tab auf. Nutze diesen Typ wenn der User sagt: „Aufgabe für mich/X anlegen", „Erinnerung anlegen", „auf Aufgabenliste setzen", „Müller in 3 Tagen anrufen", „Wiedervorlage für Sandra in 1 Woche". WICHTIG: „auf Wiedervorlage" allein ohne Kontext = type="hide" (Ticket bei mir ausblenden); aber „Wiedervorlage anlegen mit Anruf Müller in 3 Tagen" oder „Aufgabe für X" = type="aufgabe".\n' +
     '- "unknown": Befehl ist unklar oder mehrdeutig\n\n' +
     '############### KRITISCHE UNTERSCHEIDUNG: "status" vs "hide" ###############\n' +
     'Diese zwei Aktionen sind NICHT austauschbar.\n\n' +
@@ -11903,7 +11763,7 @@ async function aiInterpretCommand(ticket, command, accountId) {
     'KORREKT: type="reply" mit „...wir können bis Freitag liefern...". HIER ist reply richtig, weil der User EXPLIZIT sagt „antworte dem Kunden".\n\n' +
     'JSON-FORMAT:\n' +
     '{"overall_summary":"Kurz auf Deutsch was insgesamt passieren soll","actions":[\n' +
-    '  {"type":"reply|note|forward|assign|group|status|hide|aufgabe|unknown","body":"...","forward_to":["..."],"agent_id":12345,"group_id":67,"status":4,"days":3,"title":"...","description":"...","task_type":"call","priority":"normal","dueInDays":3,"assigneeHint":"Sandra","summary":"Kurze deutsche Beschreibung dieses Schritts"}\n' +
+    '  {"type":"reply|note|forward|assign|group|status|hide|unknown","body":"...","forward_to":["..."],"agent_id":12345,"group_id":67,"status":4,"days":3,"summary":"Kurze deutsche Beschreibung dieses Schritts"}\n' +
     ']}';
 
   const userPrompt = 'TICKET:\n' +
@@ -11992,7 +11852,6 @@ function renderAssistantPreview() {
     group:   { icon: 'users',         color: 'brand',   label: 'Gruppe zuweisen' },
     status:  { icon: 'flag',          color: 'purple',  label: 'Freshdesk-Status setzen (für alle sichtbar)' },
     hide:    { icon: 'eye-off',       color: 'indigo',  label: 'Bei mir ausblenden (lokal)' },
-    aufgabe: { icon: 'phone-call',    color: 'emerald', label: 'Aufgabe anlegen (Aufgaben-Tab)' },
     unknown: { icon: 'help-circle',   color: 'amber',   label: 'Befehl unklar' },
   };
   // Vorab-Caches für die Dropdowns
@@ -12144,80 +12003,6 @@ function renderAssistantPreview() {
           </div>`;
       } else {
         body = `<p class="text-sm"><span class="text-ink-500">→</span> <span class="font-semibold text-ink-900">${defaultDays} Tag${defaultDays===1?'':'e'} lokal ausgeblendet</span></p>`;
-      }
-    } else if (a.type === 'aufgabe') {
-      // KI-erzeugte App-eigene Aufgabe — editierbar bevor sie gespeichert wird
-      const defaultDueDays = Math.max(1, Math.min(365, parseInt(a.dueInDays, 10) || 1));
-      const assigneeHint = a.assigneeHint || '';
-      // Versuche, Hint auf einen User aus der App-Master-Base zu mappen — cached in window._teamUsersCache
-      if (isActive && isPending) {
-        body = `
-          <label class="text-[10px] uppercase font-semibold text-${meta.color}-800 block">Titel</label>
-          <input id="stepAufTitle_${i}" type="text" value="${escapeAttr(a.title || a.body || '')}" placeholder="z.B. Müller anrufen" class="w-full text-sm px-3 py-2 border border-${meta.color}-300 bg-white rounded-lg mt-1 mb-2">
-          <label class="text-[10px] uppercase font-semibold text-${meta.color}-800 block">Beschreibung</label>
-          <textarea id="stepAufDesc_${i}" class="w-full text-sm px-3 py-2 border border-${meta.color}-300 bg-white rounded-lg whitespace-pre-line mt-1 mb-2" rows="3">${escapeHtml(a.description || '')}</textarea>
-          <div class="grid grid-cols-3 gap-2">
-            <div>
-              <label class="text-[10px] uppercase font-semibold text-${meta.color}-800 block">Fällig in</label>
-              <div class="flex items-center gap-1 mt-1">
-                <input id="stepAufDays_${i}" type="number" min="0" max="365" value="${defaultDueDays}" class="w-full text-sm px-2 py-2 border border-${meta.color}-300 bg-white rounded-lg">
-                <span class="text-[11px] text-ink-700">d</span>
-              </div>
-            </div>
-            <div>
-              <label class="text-[10px] uppercase font-semibold text-${meta.color}-800 block">Typ</label>
-              <select id="stepAufType_${i}" class="w-full text-sm px-2 py-2 border border-${meta.color}-300 bg-white rounded-lg mt-1">
-                <option value="call"    ${a.task_type === 'call' ? 'selected' : ''}>📞 Anruf</option>
-                <option value="email"   ${a.task_type === 'email' ? 'selected' : ''}>✉ Email</option>
-                <option value="meeting" ${a.task_type === 'meeting' ? 'selected' : ''}>📅 Termin</option>
-                <option value="other"   ${(!a.task_type || a.task_type === 'other') ? 'selected' : ''}>📋 Sonst.</option>
-              </select>
-            </div>
-            <div>
-              <label class="text-[10px] uppercase font-semibold text-${meta.color}-800 block">Priorität</label>
-              <select id="stepAufPrio_${i}" class="w-full text-sm px-2 py-2 border border-${meta.color}-300 bg-white rounded-lg mt-1">
-                <option value="low"    ${a.priority === 'low' ? 'selected' : ''}>Niedrig</option>
-                <option value="normal" ${(!a.priority || a.priority === 'normal') ? 'selected' : ''}>Normal</option>
-                <option value="high"   ${a.priority === 'high' ? 'selected' : ''}>Hoch</option>
-              </select>
-            </div>
-          </div>
-          <label class="text-[10px] uppercase font-semibold text-${meta.color}-800 block mt-2">Zuweisen an</label>
-          <select id="stepAufAssignee_${i}" class="w-full text-sm px-2 py-2 border border-${meta.color}-300 bg-white rounded-lg mt-1">
-            <option value="${escapeAttr(APP_KEYS.user?.api_key || '')}|${escapeAttr(APP_KEYS.user?.name || 'Ich')}">Mich selbst (${escapeHtml(APP_KEYS.user?.name || '')})</option>
-            <option value="__loading__" disabled>Lade Team…</option>
-          </select>
-          ${assigneeHint ? `<p class="text-[10px] text-${meta.color}-700 mt-1">KI-Vorschlag: <b>${escapeHtml(assigneeHint)}</b> — bitte unten auswählen</p>` : ''}`;
-        // Team-Liste async laden
-        setTimeout(() => {
-          const sel = $('stepAufAssignee_' + i);
-          if (!sel) return;
-          fetchUsers().then(users => {
-            const active = (users || []).filter(u => (u.fields?.status || 'aktiv').toLowerCase() === 'aktiv');
-            const myKey = APP_KEYS.user?.api_key || '';
-            const hintLower = String(assigneeHint || '').toLowerCase().trim();
-            let preselect = myKey + '|' + (APP_KEYS.user?.name || 'Ich');
-            // Match Hint auf User
-            if (hintLower) {
-              const match = active.find(u => {
-                const n = String(u.fields.name || '').toLowerCase();
-                return n === hintLower || n.split(/\s+/)[0] === hintLower || n.includes(hintLower);
-              });
-              if (match) preselect = (match.fields.api_key || '') + '|' + (match.fields.name || '');
-            }
-            sel.innerHTML = `<option value="${escapeAttr(myKey)}|${escapeAttr(APP_KEYS.user?.name || 'Ich')}" ${preselect.startsWith(myKey + '|') ? 'selected' : ''}>Mich selbst (${escapeHtml(APP_KEYS.user?.name || '')})</option>
-              <option disabled>──────────</option>
-              ${active.filter(u => u.fields.api_key !== myKey).map(u => {
-                const k = u.fields.api_key || '';
-                const n = u.fields.name || '?';
-                const sel2 = preselect === (k + '|' + n);
-                return `<option value="${escapeAttr(k)}|${escapeAttr(n)}" ${sel2 ? 'selected' : ''}>${escapeHtml(n)}</option>`;
-              }).join('')}`;
-          }).catch(() => {});
-        }, 50);
-      } else {
-        const lbl = a.title || a.body || '(ohne Titel)';
-        body = `<p class="text-sm"><span class="text-ink-500">→</span> <span class="font-semibold text-ink-900">${escapeHtml(lbl)}</span> · in ${defaultDueDays} Tag${defaultDueDays===1?'':'en'}${assigneeHint ? ' für ' + escapeHtml(assigneeHint) : ''}</p>`;
       }
     } else {
       // unknown: dem User trotzdem nützliche Picker geben
@@ -12449,21 +12234,6 @@ async function confirmAssistantStep(idx, btnEl) {
     if (!a.days || a.days < 1) a.days = 3;
     if (a.days > 365) a.days = 365;
   }
-  if (a.type === 'aufgabe') {
-    a.title       = ($('stepAufTitle_' + idx)?.value || a.title || a.body || '').trim();
-    a.description = ($('stepAufDesc_' + idx)?.value || a.description || '').trim();
-    const days = parseInt($('stepAufDays_' + idx)?.value, 10);
-    if (!isNaN(days)) a.dueInDays = Math.max(0, Math.min(365, days));
-    a.task_type = $('stepAufType_' + idx)?.value || a.task_type || 'other';
-    a.priority  = $('stepAufPrio_' + idx)?.value || a.priority || 'normal';
-    const assignVal = $('stepAufAssignee_' + idx)?.value || '';
-    if (assignVal && !assignVal.startsWith('__')) {
-      const [key, nm] = assignVal.split('|');
-      a._assigneeKey = key;
-      a._assigneeName = nm;
-    }
-    if (!a.title) return toast('Aufgabe braucht einen Titel', 'warn');
-  }
 
   a._state = 'running';
   renderAssistantPreview();
@@ -12643,28 +12413,10 @@ async function executeSingleAssistantAction(ctx, a) {
         setTimeout(() => { try { wrapper.remove(); } catch (_) {} }, 220);
       }
     } catch (_) {}
-  } else if (a.type === 'aufgabe') {
-    // App-eigene Aufgabe anlegen — landet im Tasks-Tab
-    const days = Math.max(0, Math.min(365, parseInt(a.dueInDays, 10) || 1));
-    const req = ctx.ticket?.requester || {};
-    await createAufgabe({
-      account_id:           ctx.accountId,
-      title:                a.title || a.body || 'Aufgabe',
-      description:          a.description || '',
-      due_date:             _daysToFrist(days, { morning: true }),
-      priority:             a.priority || 'normal',
-      task_type:            a.task_type || 'other',
-      assignee_user_api_key: a._assigneeKey || APP_KEYS.user?.api_key || '',
-      assignee_name:        a._assigneeName || APP_KEYS.user?.name || '',
-      source_type:          'ticket',
-      source_id:            String(ctx.ticketId),
-      related_name:         req.name || '',
-      related_email:        req.email || '',
-      related_phone:        req.phone || '',
-      related_mobile:       req.mobile || '',
-    });
-    recordKnowledge(ctx.accountId, _t, 'aufgabe', { title: a.title, dueInDays: days, assignee: a._assigneeName || 'me' }).catch(() => {});
   } else {
+    throw new Error('Unbekannter Aktionstyp: ' + a.type);
+  }
+}
 
 /* Wird gerufen wenn der User „Fertig" tippt nachdem alle Schritte durch sind.
    Setzt eine sinnvolle Auto-Wiedervorlage (höchste Prio: reply > assign > note). */
@@ -13722,14 +13474,34 @@ function renderCostsPage() {
 }
 
 /* ===================== FRESHSALES-TASKS PAGE ===================== */
-let TASKS_STATE = { accountId: 'all', filter: 'today', mine: 'mine' };
+let TASKS_STATE = { accountId: 'all', filter: 'today', tasks: [], loading: false };
 
 async function renderTasksPage() {
-  setPageTitle('Aufgaben', 'Anrufe + To-Dos');
+  setPageTitle('Aufgaben', 'Anrufe + To-Dos aus Freshsales');
   setActiveNav('tasks');
-  const accounts = APP_STATE.accounts || [];
 
-  // Layout aufbauen
+  // Nur Accounts mit FS-Anbindung sind relevant
+  const fsAccounts = (APP_STATE.accounts || []).filter(a => accountHasFreshsales(a));
+  if (!fsAccounts.length) {
+    $('pageContent').innerHTML = `
+      <div class="space-y-3 max-w-2xl mx-auto">
+        <div class="bg-white rounded-2xl border border-ink-200 p-6 text-center">
+          <div class="w-14 h-14 mx-auto rounded-2xl bg-amber-50 flex items-center justify-center mb-3">
+            <i data-lucide="info" class="w-7 h-7 text-amber-600"></i>
+          </div>
+          <h3 class="font-semibold text-ink-900">Kein Freshsales-Account konfiguriert</h3>
+          <p class="text-sm text-ink-500 mt-1 leading-relaxed">Aufgaben kommen aus Freshsales. Trag deinen Freshsales-API-Key in mindestens einem Account ein, um Tasks zu sehen.</p>
+          ${APP_KEYS.user?.is_admin ? `
+            <button onclick="navTo('accounts')" class="mt-4 inline-flex items-center gap-2 bg-brand-500 hover:bg-brand-600 text-white rounded-lg px-4 py-2 text-sm font-medium">
+              <i data-lucide="building-2" class="w-4 h-4"></i> Account konfigurieren
+            </button>` : ''}
+        </div>
+      </div>`;
+    if (window.lucide) lucide.createIcons();
+    return;
+  }
+
+  // Header rendern (Account-Tabs + Filter-Chips)
   $('pageContent').innerHTML = `
     <div class="space-y-3 max-w-2xl mx-auto">
       <div id="tasksHeader"></div>
@@ -13740,69 +13512,73 @@ async function renderTasksPage() {
         </div>
       </div>
     </div>`;
+  _renderTasksHeader(fsAccounts);
 
-  // Falls Aufgaben noch nicht geladen (Boot-Reihenfolge): jetzt nachholen
-  if (!APP_STATE.aufgaben) {
-    try { await loadAufgaben(); } catch (_) {}
+  // Tasks laden für gewählten Account (oder alle)
+  TASKS_STATE.loading = true;
+  const accs = TASKS_STATE.accountId === 'all' ? fsAccounts : fsAccounts.filter(a => a.id === TASKS_STATE.accountId);
+  if (!accs.length) {
+    TASKS_STATE.accountId = 'all';
+    return renderTasksPage();
   }
-
-  _renderTasksHeader(accounts);
-  _renderTasksList();
+  try {
+    const results = await Promise.all(accs.map(a => fetchFsTasks(a.id).catch(e => {
+      console.warn('Tasks fetch failed für', a.id, e.message);
+      return [];
+    })));
+    let merged = [];
+    accs.forEach((a, i) => {
+      results[i].forEach(t => merged.push({ ...t, _accountName: a.name, _accountColor: a.color }));
+    });
+    // Nach Fälligkeit sortieren (überfällig zuerst, dann nach Datum)
+    merged.sort((a, b) => {
+      const ta = a.due_date ? new Date(a.due_date).getTime() : Infinity;
+      const tb = b.due_date ? new Date(b.due_date).getTime() : Infinity;
+      return ta - tb;
+    });
+    TASKS_STATE.tasks = merged;
+    TASKS_STATE.loading = false;
+    _renderTasksList();
+    _renderTasksHeader(fsAccounts);  // Counter aktualisieren
+  } catch (e) {
+    console.error('Tasks Page error:', e);
+    $('tasksList').innerHTML = `<div class="bg-red-50 border border-red-200 rounded-2xl p-4 text-sm text-red-800">Tasks-Fehler: ${escapeHtml(e.message)}</div>`;
+  }
 }
 
-function _renderTasksHeader(accounts) {
+function _renderTasksHeader(fsAccounts) {
   const host = $('tasksHeader');
   if (!host) return;
-  const all = APP_STATE.aufgaben || [];
-  const myKey = APP_KEYS.user?.api_key || '';
-  // Visible-Pool für Counter: nach Account-Filter + Mine-Filter
-  const visible = all.filter(a => {
-    if (a.status === 'done') return false;
-    if (TASKS_STATE.accountId !== 'all' && a.account_id !== TASKS_STATE.accountId) return false;
-    if (TASKS_STATE.mine === 'mine' && a.assignee_user_api_key !== myKey) return false;
-    return true;
-  });
+  const tasks = TASKS_STATE.tasks || [];
+  // Counters pro Filter
+  const now = Date.now();
   const today = new Date(); today.setHours(0,0,0,0);
   const todayEnd = today.getTime() + 86400e3;
   const weekEnd = today.getTime() + 7 * 86400e3;
-  const cntOverdue = visible.filter(a => a.due_date && new Date(a.due_date).getTime() < today.getTime()).length;
-  const cntToday   = visible.filter(a => a.due_date && new Date(a.due_date).getTime() >= today.getTime() && new Date(a.due_date).getTime() < todayEnd).length;
-  const cntWeek    = visible.filter(a => a.due_date && new Date(a.due_date).getTime() < weekEnd).length;
-  const cntAll     = visible.length;
+  const cntOverdue = tasks.filter(t => t.due_date && new Date(t.due_date).getTime() < today.getTime()).length;
+  const cntToday   = tasks.filter(t => t.due_date && new Date(t.due_date).getTime() >= today.getTime() && new Date(t.due_date).getTime() < todayEnd).length;
+  const cntWeek    = tasks.filter(t => t.due_date && new Date(t.due_date).getTime() < weekEnd).length;
+  const cntAll     = tasks.length;
   const filterChip = (key, label, count, active) => `
-    <button onclick="TASKS_STATE.filter='${key}'; _renderTasksHeader(window._tasksAccCache || []); _renderTasksList()" class="shrink-0 inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full text-[12px] font-semibold border ${active ? 'bg-brand-600 text-white border-brand-600 shadow-sm' : 'bg-white text-ink-700 border-ink-200'}">
+    <button onclick="TASKS_STATE.filter='${key}'; _renderTasksHeader(window._tasksFsAccountsCache || []); _renderTasksList()" class="shrink-0 inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full text-[12px] font-semibold border ${active ? 'bg-brand-600 text-white border-brand-600 shadow-sm' : 'bg-white text-ink-700 border-ink-200'}">
       ${escapeHtml(label)}
       ${count > 0 ? `<span class="text-[10px] font-mono ${active ? 'bg-white/30' : 'bg-ink-100'} px-1.5 rounded-full">${count}</span>` : ''}
     </button>`;
-  window._tasksAccCache = accounts;
-
-  // „Mir zugewiesen" vs „Alle (auch von mir erstellte)"
-  const myAssignedCount = all.filter(a => a.status === 'open' && a.assignee_user_api_key === myKey).length;
-  const allCount        = all.filter(a => a.status === 'open').length;
-
+  window._tasksFsAccountsCache = fsAccounts;
   host.innerHTML = `
     <div class="bg-white/95 backdrop-blur sticky top-0 z-10 -mx-1 px-1 py-2 border-b border-ink-100">
-      <!-- Account-Tabs -->
+      <!-- Account-Tabs (analog Tickets-Page) -->
       <div class="flex gap-1.5 overflow-x-auto scrollbar-hidden -mx-1 px-1 mb-2">
         <button onclick="TASKS_STATE.accountId='all'; renderTasksPage()" class="shrink-0 inline-flex items-center gap-1 px-3 py-1.5 rounded-full text-[12px] font-semibold ${TASKS_STATE.accountId === 'all' ? 'bg-ink-900 text-white' : 'bg-white text-ink-700 border border-ink-200'}">
-          <i data-lucide="layers" class="w-3.5 h-3.5"></i> Alle (${accounts.length})
+          <i data-lucide="layers" class="w-3.5 h-3.5"></i> Alle (${fsAccounts.length})
         </button>
-        ${accounts.map(a => `
+        ${fsAccounts.map(a => `
           <button onclick="TASKS_STATE.accountId='${escapeAttr(a.id)}'; renderTasksPage()" class="shrink-0 inline-flex items-center gap-1 px-3 py-1.5 rounded-full text-[12px] font-semibold ${TASKS_STATE.accountId === a.id ? 'bg-ink-900 text-white' : 'bg-white text-ink-700 border border-ink-200'}">
             <span class="w-2 h-2 rounded-full" style="background:${escapeAttr(a.color)}"></span>
             <span class="truncate max-w-32">${escapeHtml(a.name)}</span>
           </button>`).join('')}
-        <button onclick="openNewAufgabeModal()" class="shrink-0 inline-flex items-center gap-1 px-2.5 py-1.5 rounded-full text-[11px] font-semibold bg-emerald-500 text-white hover:bg-emerald-600">
-          <i data-lucide="plus" class="w-3 h-3"></i> Neu
-        </button>
-      </div>
-      <!-- Mine vs alle -->
-      <div class="flex gap-1.5 mb-2">
-        <button onclick="TASKS_STATE.mine='mine'; _renderTasksHeader(window._tasksAccCache || []); _renderTasksList()" class="flex-1 px-2.5 py-1.5 rounded-lg text-[11px] font-semibold border ${TASKS_STATE.mine === 'mine' ? 'bg-brand-500 text-white border-brand-500' : 'bg-white text-ink-700 border-ink-200'}">
-          Mir zugewiesen ${myAssignedCount > 0 ? `<span class="text-[10px] font-mono opacity-80">· ${myAssignedCount}</span>` : ''}
-        </button>
-        <button onclick="TASKS_STATE.mine='all'; _renderTasksHeader(window._tasksAccCache || []); _renderTasksList()" class="flex-1 px-2.5 py-1.5 rounded-lg text-[11px] font-semibold border ${TASKS_STATE.mine === 'all' ? 'bg-brand-500 text-white border-brand-500' : 'bg-white text-ink-700 border-ink-200'}">
-          Alle (auch eigene) ${allCount > 0 ? `<span class="text-[10px] font-mono opacity-80">· ${allCount}</span>` : ''}
+        <button onclick="diagnoseTasks()" class="shrink-0 inline-flex items-center gap-1 px-2.5 py-1.5 rounded-full text-[11px] font-medium bg-amber-50 text-amber-700 border border-amber-200 hover:bg-amber-100" title="FS-Tasks-Diagnose ausführen">
+          <i data-lucide="bug" class="w-3 h-3"></i> Diagnose
         </button>
       </div>
       <!-- Filter-Chips -->
@@ -13819,52 +13595,43 @@ function _renderTasksHeader(accounts) {
 function _renderTasksList() {
   const host = $('tasksList');
   if (!host) return;
-  const all = APP_STATE.aufgaben || [];
-  const myKey = APP_KEYS.user?.api_key || '';
+  const tasks = TASKS_STATE.tasks || [];
   const today = new Date(); today.setHours(0,0,0,0);
   const todayEnd = today.getTime() + 86400e3;
   const weekEnd = today.getTime() + 7 * 86400e3;
-
-  // Visible-Pool: nur offene, Account-Filter, Mine-Filter
-  let visible = all.filter(a => {
-    if (a.status === 'done') return false;
-    if (TASKS_STATE.accountId !== 'all' && a.account_id !== TASKS_STATE.accountId) return false;
-    if (TASKS_STATE.mine === 'mine' && a.assignee_user_api_key !== myKey) return false;
-    return true;
-  });
-
-  // Filter-Chip anwenden
+  let filtered = tasks;
   if (TASKS_STATE.filter === 'overdue') {
-    visible = visible.filter(a => a.due_date && new Date(a.due_date).getTime() < today.getTime());
+    filtered = tasks.filter(t => t.due_date && new Date(t.due_date).getTime() < today.getTime());
   } else if (TASKS_STATE.filter === 'today') {
-    visible = visible.filter(a => a.due_date && new Date(a.due_date).getTime() >= today.getTime() && new Date(a.due_date).getTime() < todayEnd);
+    filtered = tasks.filter(t => t.due_date && new Date(t.due_date).getTime() >= today.getTime() && new Date(t.due_date).getTime() < todayEnd);
   } else if (TASKS_STATE.filter === 'week') {
-    visible = visible.filter(a => a.due_date && new Date(a.due_date).getTime() < weekEnd);
+    filtered = tasks.filter(t => t.due_date && new Date(t.due_date).getTime() < weekEnd);
   }
 
-  // Sortierung: überfällig zuerst, dann nach due_date
-  visible.sort((a, b) => {
-    const ta = a.due_date ? new Date(a.due_date).getTime() : Infinity;
-    const tb = b.due_date ? new Date(b.due_date).getTime() : Infinity;
-    return ta - tb;
-  });
-
-  if (!visible.length) {
+  if (!filtered.length) {
     const filterLabel = { overdue:'überfällige', today:'für heute', week:'in dieser Woche', all:'offene' }[TASKS_STATE.filter] || '';
+    const diagnoseHint = tasks.length === 0
+      ? `<p class="text-[11px] text-ink-600 mt-2 leading-relaxed">Im aktuellen Account-Filter wurden gar keine Tasks gefunden. Mögliche Ursachen:</p>
+         <ul class="text-[11px] text-ink-600 text-left mt-1 mx-auto max-w-sm space-y-0.5 list-disc pl-5">
+           <li>Email in App ≠ Email in Freshsales (Owner-Match scheitert)</li>
+           <li>Freshsales-API-Key hat keine Tasks-Lese-Rechte</li>
+           <li>Tasks-Filter-View ist im FS-Tenant nicht eingerichtet</li>
+         </ul>
+         <button onclick="diagnoseTasks()" class="mt-3 inline-flex items-center gap-1.5 px-3 py-1.5 bg-amber-100 hover:bg-amber-200 text-amber-800 rounded-lg text-[11px] font-semibold">
+           <i data-lucide="bug" class="w-3.5 h-3.5"></i> Diagnose ausführen
+         </button>`
+      : `<p class="text-[11px] text-ink-500 mt-1">Du bist auf dem Stand. ✨ <span class="text-ink-400">(${tasks.length} insgesamt offen, aber keine ${escapeHtml(filterLabel)})</span></p>`;
     host.innerHTML = `
       <div class="bg-white rounded-2xl border border-ink-200 p-8 text-center">
         <i data-lucide="check-circle-2" class="w-10 h-10 mx-auto text-emerald-400"></i>
-        <p class="text-sm text-ink-700 mt-2 font-semibold">Keine ${escapeHtml(filterLabel)} Aufgaben.</p>
-        <p class="text-[11px] text-ink-500 mt-1">Du bist auf dem Stand. ✨</p>
-        <button onclick="openNewAufgabeModal()" class="mt-4 inline-flex items-center gap-1.5 px-3 py-2 bg-emerald-500 hover:bg-emerald-600 text-white rounded-lg text-xs font-semibold">
-          <i data-lucide="plus" class="w-3.5 h-3.5"></i> Neue Aufgabe
-        </button>
+        <p class="text-sm text-ink-700 mt-2 font-semibold">Keine ${escapeHtml(filterLabel)} Aufgaben${TASKS_STATE.accountId === 'all' ? '' : ' in diesem Account'}.</p>
+        ${diagnoseHint}
       </div>`;
     if (window.lucide) lucide.createIcons();
     return;
   }
 
-  host.innerHTML = '<div class="space-y-2">' + visible.map(_renderTaskCard).join('') + '</div>';
+  host.innerHTML = '<div class="space-y-2">' + filtered.map(_renderTaskCard).join('') + '</div>';
   if (window.lucide) lucide.createIcons();
 }
 
@@ -14047,8 +13814,8 @@ async function diagnoseTasks() {
   if (window.lucide) lucide.createIcons();
 }
 
-function _renderTaskCard(a) {
-  const due = a.due_date ? new Date(a.due_date) : null;
+function _renderTaskCard(t) {
+  const due = t.due_date ? new Date(t.due_date) : null;
   const today = new Date(); today.setHours(0,0,0,0);
   const isOverdue = due && due.getTime() < today.getTime();
   const isToday   = due && due.getTime() >= today.getTime() && due.getTime() < today.getTime() + 86400e3;
@@ -14056,38 +13823,17 @@ function _renderTaskCard(a) {
   const dueColor  = isOverdue ? 'text-red-700' : (isToday ? 'text-amber-700' : 'text-ink-600');
   const dueBg     = isOverdue ? 'bg-red-50 border-red-200' : (isToday ? 'bg-amber-50 border-amber-200' : 'bg-ink-50 border-ink-200');
 
-  // Telefonnummern
+  // Telefonnummern aus Target
   const phones = [];
-  if (a.related_phone) phones.push({ label: 'Festnetz', num: a.related_phone });
-  if (a.related_mobile) phones.push({ label: 'Mobil', num: a.related_mobile });
+  if (t.target?.phone) phones.push({ label: 'Festnetz', num: t.target.phone });
+  if (t.target?.mobile) phones.push({ label: 'Mobil', num: t.target.mobile });
 
-  // Type-Icon
-  const typeIcon = a.task_type === 'call' ? 'phone-call'
-                 : a.task_type === 'email' ? 'mail'
-                 : a.task_type === 'meeting' ? 'calendar'
-                 : 'check-square';
-  const typeColor = a.task_type === 'call' ? 'emerald' : (a.priority === 'high' ? 'red' : 'brand');
+  // Task-Typ-Icon (Call = phone-call, sonst stickynote)
+  // Freshsales gibt task_type_id zurück — Standardwerte: 1=call, 2=email, 3=meeting, ...
+  const typeIcon = t.task_type_id === 1 ? 'phone-call' : (t.task_type_id === 2 ? 'mail' : (t.task_type_id === 3 ? 'calendar' : 'check-square'));
+  const typeColor = t.task_type_id === 1 ? 'emerald' : 'brand';
 
-  // Priority-Badge
-  const priorityBadge = a.priority === 'high'
-    ? '<span class="text-[9px] uppercase tracking-wider bg-red-100 text-red-700 px-1.5 py-0.5 rounded font-bold">Hoch</span>'
-    : (a.priority === 'low' ? '<span class="text-[9px] uppercase tracking-wider bg-ink-100 text-ink-500 px-1.5 py-0.5 rounded font-medium">Niedrig</span>' : '');
-
-  // Account-Anzeige + Color
-  const acc = (APP_STATE.accounts || []).find(x => x.id === a.account_id);
-  const accountName  = acc?.name || '';
-  const accountColor = acc?.color || '#cbd5e1';
-
-  // Assignee-Anzeige (wenn nicht ich)
-  const myKey = APP_KEYS.user?.api_key || '';
-  const showAssignee = a.assignee_user_api_key !== myKey;
-
-  // Source-Link (Ticket / Contact)
-  const sourceBtn = a.source_type === 'ticket' && a.source_id
-    ? `<button onclick="openTicketDetail('${escapeAttr(a.account_id)}', ${parseInt(a.source_id, 10) || 0})" class="text-[10px] inline-flex items-center gap-1 px-1.5 py-0.5 bg-brand-50 text-brand-700 border border-brand-200 rounded font-mono hover:bg-brand-100"><i data-lucide="ticket" class="w-3 h-3"></i>#${escapeHtml(a.source_id)}</button>`
-    : (a.source_type === 'contact' && a.source_id
-        ? `<button onclick="openContactPreviewModal('${escapeAttr(a.account_id)}', ${parseInt(a.source_id, 10) || 0})" class="text-[10px] inline-flex items-center gap-1 px-1.5 py-0.5 bg-purple-50 text-purple-700 border border-purple-200 rounded hover:bg-purple-100"><i data-lucide="user" class="w-3 h-3"></i>Kontakt</button>`
-        : '');
+  const targetName = t.target?.name?.trim() || ([t.target?.first_name, t.target?.last_name].filter(Boolean).join(' ').trim()) || '';
 
   return `
     <div class="bg-white rounded-2xl border border-ink-200 p-3 shadow-sm">
@@ -14097,17 +13843,16 @@ function _renderTaskCard(a) {
           <i data-lucide="${typeIcon}" class="w-4 h-4"></i>
         </div>
         <div class="flex-1 min-w-0">
-          <div class="flex items-center gap-1.5 flex-wrap">
-            <p class="font-semibold text-ink-900 text-sm leading-snug">${escapeHtml(a.title || '(ohne Titel)')}</p>
-            ${priorityBadge}
-          </div>
-          ${a.related_name ? `<p class="text-[11px] text-ink-600 truncate mt-0.5"><i data-lucide="user" class="w-3 h-3 inline mr-0.5"></i>${escapeHtml(a.related_name)}${a.related_email ? ' · ' + escapeHtml(a.related_email) : ''}</p>` : ''}
+          <p class="font-semibold text-ink-900 text-sm leading-snug">${escapeHtml(t.title || '(ohne Titel)')}</p>
+          ${targetName ? `<p class="text-[11px] text-ink-600 truncate mt-0.5"><i data-lucide="user" class="w-3 h-3 inline mr-0.5"></i>${escapeHtml(targetName)}${t.target?.email ? ' · ' + escapeHtml(t.target.email) : ''}</p>` : ''}
         </div>
         <span class="text-[10px] uppercase tracking-wider px-2 py-0.5 rounded-full font-semibold border ${dueColor} ${dueBg} shrink-0">${escapeHtml(dueLabel)}</span>
       </div>
 
-      ${a.description ? `<p class="text-[11px] text-ink-600 leading-snug mt-1 line-clamp-2 whitespace-pre-line break-words">${escapeHtml(a.description)}</p>` : ''}
+      <!-- Optional: Description -->
+      ${t.description ? `<p class="text-[11px] text-ink-600 leading-snug mt-1 line-clamp-2 whitespace-pre-line break-words">${escapeHtml(t.description)}</p>` : ''}
 
+      <!-- Telefonnummern als große anrufbare Pills -->
       ${phones.length ? `
         <div class="flex flex-wrap gap-1.5 mt-2">
           ${phones.map(p => {
@@ -14120,25 +13865,21 @@ function _renderTaskCard(a) {
           }).join('')}
         </div>` : ''}
 
-      <!-- Footer: Meta + Aktionen -->
-      <div class="flex items-center gap-2 mt-2 pt-2 border-t border-ink-100 flex-wrap">
-        ${accountName ? `<span class="text-[10px] text-ink-500 inline-flex items-center gap-1 truncate min-w-0">
-          <span class="w-1.5 h-1.5 rounded-full shrink-0" style="background:${escapeAttr(accountColor)}"></span>
-          <span class="truncate">${escapeHtml(accountName)}</span>
-        </span>` : ''}
-        ${sourceBtn}
-        ${showAssignee ? `<span class="text-[10px] text-purple-700 bg-purple-50 border border-purple-200 px-1.5 py-0.5 rounded inline-flex items-center gap-1"><i data-lucide="user-check" class="w-2.5 h-2.5"></i>${escapeHtml(a.assignee_name || 'Andere')}</span>` : ''}
-        <div class="ml-auto flex gap-1.5">
-          <button onclick="taskPostpone('${escapeAttr(a.recordId)}', 1, this)" class="inline-flex items-center gap-1 px-2 py-1 bg-white border border-ink-200 hover:bg-ink-50 text-ink-700 rounded-lg text-[11px] font-medium" title="Auf morgen verschieben">
-            <i data-lucide="clock" class="w-3 h-3"></i> +1d
-          </button>
-          <button onclick="taskPostpone('${escapeAttr(a.recordId)}', 7, this)" class="inline-flex items-center gap-1 px-2 py-1 bg-white border border-ink-200 hover:bg-ink-50 text-ink-700 rounded-lg text-[11px] font-medium" title="Auf nächste Woche verschieben">
-            <i data-lucide="calendar-clock" class="w-3 h-3"></i> +7d
-          </button>
-          <button onclick="taskCompleteLocal('${escapeAttr(a.recordId)}', this)" class="inline-flex items-center gap-1 px-2.5 py-1 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-[11px] font-semibold">
-            <i data-lucide="check" class="w-3 h-3"></i> Erledigt
-          </button>
-        </div>
+      <!-- Accent-Footer: Account + Aktionen -->
+      <div class="flex items-center gap-2 mt-2 pt-2 border-t border-ink-100">
+        <span class="text-[10px] text-ink-500 inline-flex items-center gap-1 truncate min-w-0">
+          <span class="w-1.5 h-1.5 rounded-full shrink-0" style="background:${escapeAttr(t._accountColor)}"></span>
+          <span class="truncate">${escapeHtml(t._accountName || '')}</span>
+        </span>
+        <button onclick="taskPostpone('${escapeAttr(t._accountId)}', ${t.id}, 1, this)" class="ml-auto inline-flex items-center gap-1 px-2 py-1 bg-white border border-ink-200 hover:bg-ink-50 text-ink-700 rounded-lg text-[11px] font-medium" title="Auf morgen verschieben">
+          <i data-lucide="clock" class="w-3 h-3"></i> +1d
+        </button>
+        <button onclick="taskPostpone('${escapeAttr(t._accountId)}', ${t.id}, 7, this)" class="inline-flex items-center gap-1 px-2 py-1 bg-white border border-ink-200 hover:bg-ink-50 text-ink-700 rounded-lg text-[11px] font-medium" title="Auf nächste Woche verschieben">
+          <i data-lucide="calendar-clock" class="w-3 h-3"></i> +7d
+        </button>
+        <button onclick="taskComplete('${escapeAttr(t._accountId)}', ${t.id}, this)" class="inline-flex items-center gap-1 px-2.5 py-1 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-[11px] font-semibold">
+          <i data-lucide="check" class="w-3 h-3"></i> Erledigt
+        </button>
       </div>
     </div>`;
 }
@@ -14155,12 +13896,14 @@ function _fmtDueDate(d) {
   return d.toLocaleDateString('de-DE', { day:'2-digit', month:'2-digit' }) + (time ? ' · ' + time : '');
 }
 
-async function taskCompleteLocal(recordId, btn) {
+async function taskComplete(accountId, taskId, btn) {
   if (btn) setBusy(btn, true, '…');
   try {
-    await completeAufgabe(recordId);
+    await completeFsTask(accountId, taskId);
+    // Aus dem lokalen Cache entfernen + Re-Render
+    TASKS_STATE.tasks = (TASKS_STATE.tasks || []).filter(t => !(t._accountId === accountId && t.id === taskId));
     _renderTasksList();
-    _renderTasksHeader(window._tasksAccCache || []);
+    _renderTasksHeader(window._tasksFsAccountsCache || []);
     toast('Aufgabe erledigt', 'success', 2500);
   } catch (e) {
     if (btn) setBusy(btn, false);
@@ -14168,220 +13911,19 @@ async function taskCompleteLocal(recordId, btn) {
   }
 }
 
-async function taskPostpone(recordId, days, btn) {
+async function taskPostpone(accountId, taskId, days, btn) {
   if (btn) setBusy(btn, true, '…');
   try {
-    await postponeAufgabe(recordId, days);
+    await postponeFsTask(accountId, taskId, days);
+    // Aus lokalem Cache nehmen + Re-Render (nicht mehr „heute"/„überfällig")
+    TASKS_STATE.tasks = (TASKS_STATE.tasks || []).filter(t => !(t._accountId === accountId && t.id === taskId));
     _renderTasksList();
-    _renderTasksHeader(window._tasksAccCache || []);
+    _renderTasksHeader(window._tasksFsAccountsCache || []);
     toast('Verschoben um ' + days + ' Tag' + (days === 1 ? '' : 'e'), 'success', 2500);
   } catch (e) {
     if (btn) setBusy(btn, false);
     toast('Fehler: ' + e.message, 'error', 6000);
   }
-}
-
-/* ===== Neue-Aufgabe-Modal — manuell anlegen (auch über Tasks-Tab erreichbar) =====
-   Felder: Titel, Beschreibung, Fälligkeit, Account, Bearbeiter, Typ, Priorität.
-   Wird in createAufgabe + cache eingefügt + Tasks-Liste neu gerendert. */
-function openNewAufgabeModal(prefill) {
-  const pre = prefill || {};
-  const accounts = APP_STATE.accounts || [];
-  // Default-Account: aktueller TASKS_STATE.accountId falls != all, sonst erster oder leer
-  const defaultAcc = pre.account_id || (TASKS_STATE.accountId !== 'all' ? TASKS_STATE.accountId : (accounts[0]?.id || ''));
-  // Team-Mitglieder für Assignee-Picker laden (alle User mit Zugriff auf den Account)
-  const myKey = APP_KEYS.user?.api_key || '';
-  const defaultDate = pre.due_date || _daysToFrist(1, { morning: true });
-
-  let host = document.getElementById('subModalHost');
-  if (!host) { host = document.createElement('div'); host.id = 'subModalHost'; document.body.appendChild(host); }
-  host.innerHTML = `
-    <div class="fixed inset-0 z-[60] flex items-end justify-center bg-black/40" onclick="if(event.target===this)closeNewAufgabeModal()">
-      <div class="bg-white w-full max-w-md rounded-t-2xl shadow-2xl flex flex-col safe-bottom" style="max-height:92vh">
-        <div class="px-4 py-3 border-b border-ink-200 flex items-center justify-between gap-2">
-          <h3 class="font-bold text-ink-900 inline-flex items-center gap-2"><i data-lucide="phone-call" class="w-4 h-4 text-emerald-600"></i> Neue Aufgabe</h3>
-          <button onclick="closeNewAufgabeModal()" class="w-9 h-9 rounded-lg hover:bg-ink-100 flex items-center justify-center">
-            <i data-lucide="x" class="w-5 h-5 text-ink-700"></i>
-          </button>
-        </div>
-        <div class="flex-1 overflow-y-auto p-4 space-y-3">
-          <div>
-            <label class="text-xs font-semibold text-ink-700 uppercase tracking-wider">Titel</label>
-            <input id="newAufTitle" type="text" placeholder="z.B. Müller anrufen wegen Angebot" value="${escapeAttr(pre.title || '')}" class="w-full mt-1 px-3 py-2 border border-ink-200 rounded-lg text-sm focus:ring-2 focus:ring-emerald-500/30 focus:border-emerald-500">
-          </div>
-          <div>
-            <label class="text-xs font-semibold text-ink-700 uppercase tracking-wider">Beschreibung <span class="text-ink-400 normal-case font-normal">(optional)</span></label>
-            <textarea id="newAufDesc" rows="3" placeholder="Worum geht's konkret?" class="w-full mt-1 px-3 py-2 border border-ink-200 rounded-lg text-sm focus:ring-2 focus:ring-emerald-500/30 focus:border-emerald-500 resize-y">${escapeHtml(pre.description || '')}</textarea>
-          </div>
-          <div class="grid grid-cols-2 gap-2">
-            <div>
-              <label class="text-xs font-semibold text-ink-700 uppercase tracking-wider">Fälligkeit</label>
-              <input id="newAufDue" type="datetime-local" value="${escapeAttr(_isoToLocalInput(defaultDate))}" class="w-full mt-1 px-2 py-2 border border-ink-200 rounded-lg text-sm focus:ring-2 focus:ring-emerald-500/30 focus:border-emerald-500">
-            </div>
-            <div>
-              <label class="text-xs font-semibold text-ink-700 uppercase tracking-wider">Typ</label>
-              <select id="newAufType" class="w-full mt-1 px-2 py-2 border border-ink-200 rounded-lg text-sm bg-white focus:ring-2 focus:ring-emerald-500/30 focus:border-emerald-500">
-                <option value="call" ${pre.task_type === 'call' ? 'selected' : ''}>📞 Anruf</option>
-                <option value="email" ${pre.task_type === 'email' ? 'selected' : ''}>✉ Email</option>
-                <option value="meeting" ${pre.task_type === 'meeting' ? 'selected' : ''}>📅 Termin</option>
-                <option value="other" ${(!pre.task_type || pre.task_type === 'other') ? 'selected' : ''}>📋 Sonstiges</option>
-              </select>
-            </div>
-          </div>
-          <div class="grid grid-cols-2 gap-2">
-            <div>
-              <label class="text-xs font-semibold text-ink-700 uppercase tracking-wider">Account</label>
-              <select id="newAufAccount" class="w-full mt-1 px-2 py-2 border border-ink-200 rounded-lg text-sm bg-white focus:ring-2 focus:ring-emerald-500/30 focus:border-emerald-500">
-                <option value="">— Account-übergreifend —</option>
-                ${accounts.map(a => `<option value="${escapeAttr(a.id)}" ${a.id === defaultAcc ? 'selected' : ''}>${escapeHtml(a.name)}</option>`).join('')}
-              </select>
-            </div>
-            <div>
-              <label class="text-xs font-semibold text-ink-700 uppercase tracking-wider">Priorität</label>
-              <select id="newAufPriority" class="w-full mt-1 px-2 py-2 border border-ink-200 rounded-lg text-sm bg-white focus:ring-2 focus:ring-emerald-500/30 focus:border-emerald-500">
-                <option value="low" ${pre.priority === 'low' ? 'selected' : ''}>Niedrig</option>
-                <option value="normal" ${(!pre.priority || pre.priority === 'normal') ? 'selected' : ''}>Normal</option>
-                <option value="high" ${pre.priority === 'high' ? 'selected' : ''}>Hoch</option>
-              </select>
-            </div>
-          </div>
-          <div id="newAufAssigneeWrap">
-            <label class="text-xs font-semibold text-ink-700 uppercase tracking-wider">Zuweisen an</label>
-            <select id="newAufAssignee" class="w-full mt-1 px-2 py-2 border border-ink-200 rounded-lg text-sm bg-white focus:ring-2 focus:ring-emerald-500/30 focus:border-emerald-500">
-              <option value="${escapeAttr(myKey)}|${escapeAttr(APP_KEYS.user?.name || 'Ich')}">Mich selbst</option>
-              <option disabled>──────────</option>
-              <option value="__loading__">Lade Team…</option>
-            </select>
-          </div>
-          ${pre.related_name ? `
-            <div class="bg-brand-50/50 border border-brand-200 rounded-lg p-2.5 text-[11px]">
-              <p class="text-[10px] uppercase tracking-wider text-brand-700 font-semibold">Verknüpft mit</p>
-              <p class="text-ink-800 truncate mt-0.5"><b>${escapeHtml(pre.related_name)}</b>${pre.related_email ? ' · ' + escapeHtml(pre.related_email) : ''}</p>
-              ${pre.related_phone ? `<p class="text-emerald-700 font-mono mt-0.5">📞 ${escapeHtml(pre.related_phone)}</p>` : ''}
-              ${pre.related_mobile ? `<p class="text-emerald-700 font-mono">📱 ${escapeHtml(pre.related_mobile)}</p>` : ''}
-            </div>` : ''}
-          <div id="newAufErr" class="hidden text-xs text-red-700 bg-red-50 border border-red-200 rounded px-2 py-1.5"></div>
-        </div>
-        <div class="border-t border-ink-200 p-3 flex gap-2">
-          <button onclick="closeNewAufgabeModal()" class="flex-1 bg-ink-100 hover:bg-ink-200 text-ink-700 rounded-lg px-3 py-2.5 text-sm font-semibold">Abbrechen</button>
-          <button onclick="saveNewAufgabe(this)" class="flex-[2] bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg px-3 py-2.5 text-sm font-semibold inline-flex items-center justify-center gap-1.5">
-            <i data-lucide="plus" class="w-4 h-4"></i> Anlegen
-          </button>
-        </div>
-      </div>
-    </div>`;
-  if (window.lucide) lucide.createIcons();
-  document.body.style.overflow = 'hidden';
-  setTimeout(() => $('newAufTitle')?.focus(), 80);
-
-  // Prefill-Daten in window-State sichern für Save (related_*-Felder)
-  window._newAufPrefill = pre;
-
-  // Team-Liste async laden (alle aktiven User)
-  fetchUsers().then(users => {
-    const sel = $('newAufAssignee');
-    if (!sel) return;
-    const active = users.filter(u => (u.fields?.status || 'aktiv').toLowerCase() === 'aktiv');
-    sel.innerHTML = `<option value="${escapeAttr(myKey)}|${escapeAttr(APP_KEYS.user?.name || 'Ich')}">Mich selbst (${escapeHtml(APP_KEYS.user?.name || '')})</option>
-      <option disabled>──────────</option>
-      ${active.filter(u => u.fields.api_key !== myKey).map(u => {
-        const k = u.fields.api_key || '';
-        const n = u.fields.name || '?';
-        return `<option value="${escapeAttr(k)}|${escapeAttr(n)}">${escapeHtml(n)}</option>`;
-      }).join('')}`;
-  }).catch(() => {});
-}
-
-function closeNewAufgabeModal() {
-  window._newAufPrefill = null;
-  const host = document.getElementById('subModalHost');
-  if (host) host.innerHTML = '';
-  document.body.style.overflow = '';
-}
-
-async function saveNewAufgabe(btnEl) {
-  const title = ($('newAufTitle')?.value || '').trim();
-  const description = ($('newAufDesc')?.value || '').trim();
-  const dueRaw = ($('newAufDue')?.value || '').trim();
-  const task_type = ($('newAufType')?.value || 'other');
-  const account_id = ($('newAufAccount')?.value || '');
-  const priority = ($('newAufPriority')?.value || 'normal');
-  const assignVal = ($('newAufAssignee')?.value || '');
-  const errEl = $('newAufErr');
-  errEl?.classList.add('hidden');
-  if (!title) {
-    if (errEl) { errEl.textContent = 'Titel fehlt'; errEl.classList.remove('hidden'); }
-    return;
-  }
-  const [assignee_user_api_key, assignee_name] = assignVal.split('|');
-  const pre = window._newAufPrefill || {};
-  const due_date = dueRaw ? new Date(dueRaw).toISOString() : _daysToFrist(1, { morning: true });
-  setBusy(btnEl, true, 'Lege an…');
-  try {
-    await createAufgabe({
-      title,
-      description,
-      due_date,
-      task_type,
-      account_id,
-      priority,
-      assignee_user_api_key,
-      assignee_name,
-      source_type: pre.source_type || 'manual',
-      source_id: pre.source_id || '',
-      related_name: pre.related_name || '',
-      related_email: pre.related_email || '',
-      related_phone: pre.related_phone || '',
-      related_mobile: pre.related_mobile || '',
-    });
-    closeNewAufgabeModal();
-    toast('Aufgabe angelegt' + (assignee_name && assignee_user_api_key !== APP_KEYS.user?.api_key ? ' für ' + assignee_name : ''), 'success', 4000);
-    if (APP_STATE.page === 'tasks') {
-      _renderTasksList();
-      _renderTasksHeader(window._tasksAccCache || []);
-    }
-  } catch (e) {
-    setBusy(btnEl, false);
-    if (errEl) { errEl.textContent = e.message || String(e); errEl.classList.remove('hidden'); }
-  }
-}
-
-/* Öffnet Neue-Aufgabe-Modal mit den Kontakt-Daten vorbefüllt.
-   Aufgerufen vom Contact-Preview-Modal-Button („Aufgabe für diesen Kontakt"). */
-async function openAufgabeFromContact(accountId, contactId) {
-  if (!accountId || !contactId) return;
-  let contact = null;
-  // Erst aus Cache, sonst nachladen
-  try { contact = getCachedRequester(accountId, contactId); } catch (_) {}
-  if (!contact) {
-    try { contact = await fetchContact(accountId, contactId); } catch (_) {}
-  }
-  if (!contact) {
-    toast('Kontakt konnte nicht geladen werden', 'error');
-    return;
-  }
-  const fullName = contact.name || [contact.first_name, contact.last_name].filter(Boolean).join(' ').trim();
-  openNewAufgabeModal({
-    title: 'Anruf ' + (fullName || '–'),
-    task_type: 'call',
-    account_id: accountId,
-    source_type: 'contact',
-    source_id: String(contactId),
-    related_name: fullName,
-    related_email: contact.email || '',
-    related_phone: contact.phone || '',
-    related_mobile: contact.mobile || '',
-  });
-}
-
-/* Konvertiert ISO-String → datetime-local Input-Value (yyyy-MM-ddThh:mm) */
-function _isoToLocalInput(iso) {
-  if (!iso) return '';
-  const d = new Date(iso);
-  if (isNaN(d)) return '';
-  const pad = n => String(n).padStart(2, '0');
-  return d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate()) +
-    'T' + pad(d.getHours()) + ':' + pad(d.getMinutes());
 }
 
 /* ===================== USERS PAGE (Admin) ===================== */
@@ -16705,8 +16247,6 @@ async function showApp() {
   loadKnowledge().catch(e => console.warn('Wissen-Load:', e.message));
   // KI-Kosten-Log laden (im Hintergrund — fürs Dashboard)
   loadAiCostLog().catch(e => console.warn('AI-Cost-Load:', e.message));
-  // Eigene Aufgaben laden (Tasks-Tab) — Tabelle wird beim ersten Bedarf via ensureAppTables erstellt
-  loadAufgaben().catch(e => console.warn('Aufgaben-Load:', e.message));
   navTo('tickets');
   // Deep-Link: wenn URL-Hash auf ein Ticket zeigt, direkt öffnen
   handleDeepLink();
