@@ -90,6 +90,38 @@
   /* Hide tailwind play CDN dev-warning */
   #tailwind-cdn-warn, #__tailwind_cdn_warning__ { display:none !important; }
 
+  /* Email-Body Styling — wird auf gesanitiztes HTML angewandt damit Signaturen, Listen,
+     Tabellen, eingebettete Bilder etc. aus Emails korrekt dargestellt werden. */
+  .email-body { font-size: 0.875rem; line-height: 1.55; color: #1e293b; word-wrap: break-word; overflow-wrap: anywhere; }
+  .email-body p { margin: 0.5em 0; }
+  .email-body p:first-child { margin-top: 0; }
+  .email-body p:last-child { margin-bottom: 0; }
+  .email-body br { display: block; content: ''; margin-top: 0.25em; }
+  .email-body ul, .email-body ol { margin: 0.5em 0; padding-left: 1.5em; }
+  .email-body ul { list-style: disc; }
+  .email-body ol { list-style: decimal; }
+  .email-body li { margin: 0.15em 0; }
+  .email-body a { color: #0284c7; text-decoration: underline; word-break: break-all; }
+  .email-body a:active { color: #075985; }
+  .email-body strong, .email-body b { font-weight: 600; }
+  .email-body em, .email-body i { font-style: italic; }
+  .email-body img { max-width: 100% !important; height: auto !important; display: inline-block; border-radius: 6px; margin: 0.25em 0; }
+  .email-body blockquote { border-left: 3px solid #cbd5e1; padding-left: 0.75em; margin: 0.5em 0; color: #475569; }
+  .email-body table { border-collapse: collapse; margin: 0.5em 0; max-width: 100%; }
+  .email-body td, .email-body th { padding: 0.25em 0.5em; border: 1px solid #e2e8f0; vertical-align: top; }
+  .email-body th { background: #f1f5f9; font-weight: 600; }
+  .email-body hr { border: none; border-top: 1px solid #e2e8f0; margin: 0.75em 0; }
+  .email-body pre, .email-body code { font-family: ui-monospace, monospace; font-size: 0.85em; }
+  .email-body pre { background: #f1f5f9; padding: 0.5em; border-radius: 4px; overflow-x: auto; }
+  .email-body h1, .email-body h2, .email-body h3, .email-body h4 { font-weight: 600; margin: 0.75em 0 0.3em; line-height: 1.3; }
+  .email-body h1 { font-size: 1.15em; }
+  .email-body h2 { font-size: 1.1em; }
+  .email-body h3 { font-size: 1.05em; }
+  .email-body h4 { font-size: 1em; }
+  /* Häufig in Email-Signaturen: Tabellen mit fixed-Layout — Mobile-Schutz */
+  .email-body table[style*="width"] { width: auto !important; max-width: 100% !important; }
+  .email-body * { max-width: 100% !important; }
+
   /* iOS Safari Auto-Zoom-Fix: Wenn ein Input einen font-size < 16px hat,
      zoomt Safari beim Antippen automatisch rein und nicht wieder raus.
      Wir erzwingen min 16px nur auf iOS via @supports-Hack, damit andere
@@ -289,7 +321,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.41.2';
+const APP_VERSION = 'v2.41.3';
 // Read-Token absichtlich gesplittet, damit GitHub Secret-Scanning beim Push nicht blockt.
 // Der Token ist read-only und Base-scoped → bewusst eingebettet (Architektur-Entscheidung).
 const _RK = 'patu8KWM8aWB' + 'yxCGL.69fae5d9fa4b94c2' + '66b426dadd71a51f574945d840b33569058ab5e9d89ebef3';
@@ -396,6 +428,83 @@ function htmlToText(s) {
   t = t.replace(/\n[ \t]+/g, '\n').replace(/\n{3,}/g, '\n\n');
   return t.trim();
 }
+
+/* Sicherer HTML-Sanitizer für Email-Bodies aus Freshdesk-Conversations.
+   Whitelist-Ansatz: nur sichere Tags und Attribute überleben — alles andere wird
+   entfernt (Tags) oder gestrippt (Attribute). Schützt vor XSS, behält aber
+   Email-übliches HTML: Signaturen mit Tabellen, eingebettete Bilder (<img>),
+   Links, Listen, Formatierung (b/i/u), Blockquotes, etc. */
+const _SANE_ALLOWED_TAGS = new Set([
+  'a','abbr','b','blockquote','br','code','div','em','font','hr','i','img',
+  'li','ol','p','pre','small','span','strike','strong','sub','sup',
+  'table','tbody','td','tfoot','th','thead','tr','u','ul',
+  'h1','h2','h3','h4','h5','h6',
+]);
+const _SANE_ALLOWED_ATTRS = {
+  a: ['href','title','target','rel'],
+  img: ['src','alt','title','width','height'],
+  td: ['colspan','rowspan','align','valign'],
+  th: ['colspan','rowspan','align','valign'],
+  font: ['color'],
+};
+function sanitizeHtml(html) {
+  if (!html) return '';
+  let doc;
+  try {
+    doc = new DOMParser().parseFromString(String(html), 'text/html');
+  } catch (_) {
+    // Falls DOMParser scheitert: Fallback auf escaped Plain-Text
+    return escapeHtml(String(html));
+  }
+  if (!doc?.body) return '';
+  // <style> + <script> komplett entfernen bevor wir den Tree durchlaufen
+  doc.querySelectorAll('script, style, link, meta, iframe, object, embed').forEach(n => n.remove());
+  _saneCleanNode(doc.body);
+  return doc.body.innerHTML;
+}
+function _saneCleanNode(node) {
+  const kids = Array.from(node.childNodes);
+  for (const k of kids) {
+    if (k.nodeType === 3) continue; // Text-Node — OK
+    if (k.nodeType === 8) { k.remove(); continue; } // Kommentar weg
+    if (k.nodeType !== 1) { k.remove(); continue; }
+    const tag = k.tagName.toLowerCase();
+    if (!_SANE_ALLOWED_TAGS.has(tag)) {
+      // Tag nicht erlaubt → Kinder behalten, Wrapper-Tag entfernen
+      const frag = doc().createDocumentFragment();
+      while (k.firstChild) frag.appendChild(k.firstChild);
+      k.parentNode.replaceChild(frag, k);
+      continue;
+    }
+    // Attribute säubern
+    const allowed = _SANE_ALLOWED_ATTRS[tag] || [];
+    for (const attr of Array.from(k.attributes)) {
+      const name = attr.name.toLowerCase();
+      if (!allowed.includes(name)) {
+        k.removeAttribute(attr.name);
+      }
+    }
+    if (tag === 'a') {
+      const href = (k.getAttribute('href') || '').trim();
+      if (/^(javascript|data|vbscript):/i.test(href)) {
+        k.removeAttribute('href');
+      }
+      k.setAttribute('target', '_blank');
+      k.setAttribute('rel', 'noopener noreferrer');
+    }
+    if (tag === 'img') {
+      const src = (k.getAttribute('src') || '').trim();
+      if (!src || /^(javascript|vbscript):/i.test(src)) {
+        k.remove();
+        continue;
+      }
+      k.setAttribute('loading', 'lazy');
+      k.setAttribute('referrerpolicy', 'no-referrer');
+    }
+    _saneCleanNode(k);
+  }
+}
+function doc() { return document; }
 
 function relTime(iso) {
   if (!iso) return '';
@@ -8236,7 +8345,16 @@ function renderTicketDetailBody(ticket) {
           ${_renderTranslateButton(htmlToText(ticket.description_text || ticket.description || ''), 'desc')}
         </div>
         <div data-translatable-area="desc">
-          <div class="text-sm text-ink-800 whitespace-pre-line break-words">${escapeHtml(htmlToText(ticket.description_text || ticket.description || '') || '(kein Text)')}</div>
+          ${(() => {
+            // Body als gesanitiztes HTML rendern — Signaturen, Listen, Tabellen, Inline-Bilder
+            // werden korrekt dargestellt. Plain-Text-Fallback wenn nichts da ist.
+            const rawHtml = ticket.description || '';
+            if (rawHtml && /<[a-z]/i.test(rawHtml)) {
+              return `<div class="email-body">${sanitizeHtml(rawHtml)}</div>`;
+            }
+            const plain = ticket.description_text || htmlToText(rawHtml);
+            return `<div class="text-sm text-ink-800 whitespace-pre-line break-words">${escapeHtml(plain || '(kein Text)')}</div>`;
+          })()}
         </div>
       </div>
 
@@ -8272,19 +8390,24 @@ function renderTicketDetailBody(ticket) {
             const who = isPrivate ? 'Interne Notiz' : (isIncoming ? (c.from_email || 'Kunde') : 'Agent');
             const align = isIncoming ? 'border-brand-300 bg-brand-50/50' : (isPrivate ? 'border-amber-300 bg-amber-50/50' : 'border-ink-200 bg-ink-50/50');
             const arrow = isPrivate ? '⊙' : (isIncoming ? '←' : '→');
-            const body = htmlToText(c.body_text || c.body || '');
-            const truncated = body.length > 1500;
+            const rawHtml = c.body || '';
+            const bodyPlain = c.body_text || htmlToText(rawHtml);  // für Übersetzungs-KI
             const cAtts = (c.attachments || []);
             const convId = 'conv-' + idx;
+            // Bevorzugt HTML-Body anzeigen (Signatur-Formatierung + Inline-Bilder).
+            // Fallback auf escaped Plain-Text wenn kein HTML vorhanden.
+            const bodyRender = (rawHtml && /<[a-z]/i.test(rawHtml))
+              ? `<div class="email-body">${sanitizeHtml(rawHtml)}</div>`
+              : `<div class="text-sm text-ink-700 whitespace-pre-line break-words">${escapeHtml(bodyPlain.slice(0, 5000))}${bodyPlain.length > 5000 ? '…' : ''}</div>`;
             return `
               <div class="border-l-2 ${align} pl-3 py-2 rounded-r">
                 <div class="flex items-baseline justify-between gap-2 text-[11px] mb-1">
                   <span class="font-semibold text-ink-700 truncate">${escapeHtml(arrow + ' ' + who)}</span>
                   <span class="text-ink-400 shrink-0">${escapeHtml(fmtDate(c.created_at))}</span>
-                  ${_renderTranslateButton(body, convId)}
+                  ${_renderTranslateButton(bodyPlain, convId)}
                 </div>
                 <div data-translatable-area="${convId}">
-                  <div class="text-sm text-ink-700 whitespace-pre-line break-words">${escapeHtml(body.slice(0, 1500))}${truncated ? '…' : ''}</div>
+                  ${bodyRender}
                 </div>
                 ${cAtts.length ? `
                   <div class="mt-2 flex flex-wrap gap-1.5 items-start">
