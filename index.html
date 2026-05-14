@@ -325,7 +325,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.43.3';
+const APP_VERSION = 'v2.43.4';
 // Read-Token absichtlich gesplittet, damit GitHub Secret-Scanning beim Push nicht blockt.
 // Der Token ist read-only und Base-scoped → bewusst eingebettet (Architektur-Entscheidung).
 const _RK = 'patu8KWM8aWB' + 'yxCGL.69fae5d9fa4b94c2' + '66b426dadd71a51f574945d840b33569058ab5e9d89ebef3';
@@ -1055,6 +1055,7 @@ async function _bootstrapLogin(userKey) {
     _id: rec.id,
     api_key: rec.fields.api_key,
     name:    rec.fields.name || '',
+    email:   rec.fields.email || '',
     role:    rec.fields.role || '',
     is_admin: role === 'admin' || rec.fields.is_admin === true,
     allow_default_keys: _truthyFieldValue(rec.fields.allow_default_keys),
@@ -1109,6 +1110,7 @@ async function loginWithUserKey(userKey, longLived = false) {
     _id:      data.user.id,
     api_key:  data.user.api_key,
     name:     data.user.name,
+    email:    data.user.email || '',
     role:     data.user.role,
     is_admin: !!data.user.is_admin,
     allow_default_keys: !!data.user.allow_default_keys,
@@ -1131,12 +1133,17 @@ async function tryAutoLogin() {
           _id:      data.user.id,
           api_key:  data.user.api_key,
           name:     data.user.name,
+          email:    data.user.email || '',
           role:     data.user.role,
           is_admin: !!data.user.is_admin,
           allow_default_keys: !!data.user.allow_default_keys,
           phone:    data.user.phone || '',
         };
         APP_KEYS.sessionToken = token;
+        // Falls /me die Email nicht zurückliefert (alter Proxy): direkt aus Airtable nachladen
+        if (!APP_KEYS.user.email && APP_KEYS.user._id) {
+          _hydrateUserEmail(APP_KEYS.user._id).catch(() => {});
+        }
         return true;
       }
       if (res.status >= 500) proxyBroken = true;
@@ -5509,6 +5516,22 @@ async function fetchTicketsAllAccounts(opts = {}) {
    ============================================================ */
 async function fetchUsers() {
   return await airtableRead('User', { sort: [{ field: 'name', direction: 'asc' }] });
+}
+
+/* Lädt fehlende Felder (insbes. email) für den eingeloggten User direkt aus Airtable nach.
+   Wird gerufen wenn /me die Email nicht zurückgegeben hat (alter Val.town-Proxy). */
+async function _hydrateUserEmail(userId) {
+  if (!userId || !APP_KEYS.user) return;
+  try {
+    const recs = await airtableRead('User', { filter: "RECORD_ID()='" + userId + "'", maxRecords: 1 });
+    const rec = recs?.[0];
+    if (rec?.fields) {
+      APP_KEYS.user.email = rec.fields.email || APP_KEYS.user.email || '';
+      APP_KEYS.user.phone = rec.fields.phone || APP_KEYS.user.phone || '';
+    }
+  } catch (e) {
+    console.warn('[hydrateUserEmail]', e.message);
+  }
 }
 async function createUser({ api_key, name, role, status, phone, allow_default_keys }) {
   const fields = {
@@ -12910,14 +12933,26 @@ function renderProfilePage() {
   setPageTitle('Profil', '');
   setActiveNav('profile');
   const u = APP_KEYS.user || {};
+  const emailMissing = !u.email;
   $('pageContent').innerHTML = `
     <div class="space-y-3">
-      <div class="bg-white rounded-2xl border border-ink-200 p-5 text-center">
-        <div class="w-16 h-16 mx-auto rounded-full bg-gradient-to-br from-brand-500 to-brand-700 flex items-center justify-center text-white text-2xl font-bold">
-          ${escapeHtml((u.name || '?').charAt(0).toUpperCase())}
+      <div class="bg-white rounded-2xl border ${emailMissing ? 'border-amber-300' : 'border-ink-200'} p-5">
+        <div class="text-center">
+          <div class="w-16 h-16 mx-auto rounded-full bg-gradient-to-br from-brand-500 to-brand-700 flex items-center justify-center text-white text-2xl font-bold">
+            ${escapeHtml((u.name || '?').charAt(0).toUpperCase())}
+          </div>
+          <h3 class="font-bold text-ink-900 text-lg mt-2">${escapeHtml(u.name || '–')}</h3>
+          <p class="text-sm text-ink-500">${escapeHtml(u.role || '–')}${u.is_admin?' · Admin':''}</p>
+          ${u.email ? `
+            <p class="text-[12px] text-ink-600 mt-1 inline-flex items-center gap-1"><i data-lucide="mail" class="w-3 h-3"></i>${escapeHtml(u.email)}</p>
+          ` : `
+            <p class="text-[11px] text-amber-700 mt-2 bg-amber-50 border border-amber-200 rounded-lg px-2 py-1 inline-flex items-center gap-1"><i data-lucide="alert-triangle" class="w-3 h-3"></i> Email fehlt — Freshsales-Tasks funktionieren nicht</p>
+          `}
+          ${u.phone ? `<p class="text-[11px] text-ink-500 mt-0.5 inline-flex items-center gap-1"><i data-lucide="phone" class="w-3 h-3"></i>${escapeHtml(u.phone)}</p>` : ''}
         </div>
-        <h3 class="font-bold text-ink-900 text-lg mt-2">${escapeHtml(u.name || '–')}</h3>
-        <p class="text-sm text-ink-500">${escapeHtml(u.role || '–')}${u.is_admin?' · Admin':''}</p>
+        <button onclick="openMyProfileEditModal()" class="w-full mt-3 bg-white border border-brand-200 hover:bg-brand-50 text-brand-700 rounded-lg py-2 text-sm font-semibold inline-flex items-center justify-center gap-1.5">
+          <i data-lucide="user-cog" class="w-4 h-4"></i> Mein Profil bearbeiten
+        </button>
       </div>
 
       <div class="bg-white rounded-2xl border border-ink-200 divide-y divide-ink-100">
@@ -12985,6 +13020,91 @@ function renderProfilePage() {
       <p class="text-[10px] text-center text-ink-400 mt-2">Project-ID: ${escapeHtml(APP_CONFIG.PROJECT_ID)}</p>
     </div>`;
   if (window.lucide) lucide.createIcons();
+}
+
+/* Eigenes-Profil-Bearbeiten-Modal — User kann Name/Email/Telefon ändern.
+   Email ist wichtig für Freshsales-Owner-Match (Tasks-Tab). */
+function openMyProfileEditModal() {
+  const u = APP_KEYS.user || {};
+  let host = document.getElementById('subModalHost');
+  if (!host) { host = document.createElement('div'); host.id = 'subModalHost'; document.body.appendChild(host); }
+  host.innerHTML = `
+    <div class="fixed inset-0 z-[60] flex items-end justify-center bg-black/40" onclick="if(event.target===this)closeMyProfileEditModal()">
+      <div class="bg-white w-full max-w-md rounded-t-2xl shadow-2xl flex flex-col safe-bottom" style="max-height:90vh">
+        <div class="px-4 py-3 border-b border-ink-200 flex items-center justify-between gap-2">
+          <h3 class="font-bold text-ink-900 inline-flex items-center gap-2"><i data-lucide="user-cog" class="w-4 h-4 text-brand-600"></i> Mein Profil</h3>
+          <button onclick="closeMyProfileEditModal()" class="w-9 h-9 rounded-lg hover:bg-ink-100 flex items-center justify-center">
+            <i data-lucide="x" class="w-5 h-5 text-ink-700"></i>
+          </button>
+        </div>
+        <div class="flex-1 overflow-y-auto p-4 space-y-3">
+          <p class="text-[11px] text-ink-500 leading-snug">Diese Daten werden in der App-Master-Base gespeichert. Email muss mit deiner Freshsales-Login-Email übereinstimmen, damit dir zugewiesene Aufgaben gefunden werden.</p>
+          <div>
+            <label class="text-xs font-semibold text-ink-700 uppercase tracking-wider">Name</label>
+            <input id="myProfileName" type="text" value="${escapeAttr(u.name || '')}" class="w-full mt-1 px-3 py-2 border border-ink-200 rounded-lg text-sm focus:ring-2 focus:ring-brand-500/30 focus:border-brand-500">
+          </div>
+          <div>
+            <label class="text-xs font-semibold text-ink-700 uppercase tracking-wider">Email <span class="text-amber-600 normal-case font-medium">· wichtig für Tasks-Tab</span></label>
+            <input id="myProfileEmail" type="email" inputmode="email" autocomplete="email" placeholder="deine.email@beispiel.de" value="${escapeAttr(u.email || '')}" class="w-full mt-1 px-3 py-2 border border-ink-200 rounded-lg text-sm focus:ring-2 focus:ring-brand-500/30 focus:border-brand-500">
+            <p class="text-[10px] text-ink-500 mt-1 leading-snug">Muss exakt mit der Email übereinstimmen, mit der du in Freshsales angelegt bist. Im Diagnose-Bericht („Alle Owner zeigen") siehst du wie deine Email dort heißt.</p>
+          </div>
+          <div>
+            <label class="text-xs font-semibold text-ink-700 uppercase tracking-wider">Telefon <span class="text-ink-400 normal-case font-normal">(optional)</span></label>
+            <input id="myProfilePhone" type="tel" inputmode="tel" placeholder="+49 ..." value="${escapeAttr(u.phone || '')}" class="w-full mt-1 px-3 py-2 border border-ink-200 rounded-lg text-sm focus:ring-2 focus:ring-brand-500/30 focus:border-brand-500">
+          </div>
+          <div id="myProfileErr" class="hidden text-xs text-red-700 bg-red-50 border border-red-200 rounded px-2 py-1.5"></div>
+        </div>
+        <div class="border-t border-ink-200 p-3 flex gap-2">
+          <button onclick="closeMyProfileEditModal()" class="flex-1 bg-ink-100 hover:bg-ink-200 text-ink-700 rounded-lg px-3 py-2.5 text-sm font-semibold">Abbrechen</button>
+          <button onclick="saveMyProfile(this)" class="flex-[2] bg-brand-500 hover:bg-brand-600 text-white rounded-lg px-3 py-2.5 text-sm font-semibold inline-flex items-center justify-center gap-1.5">
+            <i data-lucide="save" class="w-4 h-4"></i> Speichern
+          </button>
+        </div>
+      </div>
+    </div>`;
+  if (window.lucide) lucide.createIcons();
+  document.body.style.overflow = 'hidden';
+  setTimeout(() => $('myProfileEmail')?.focus(), 80);
+}
+
+function closeMyProfileEditModal() {
+  const host = document.getElementById('subModalHost');
+  if (host) host.innerHTML = '';
+  document.body.style.overflow = '';
+}
+
+async function saveMyProfile(btnEl) {
+  const u = APP_KEYS.user;
+  if (!u?._id) return toast('Kein User-Datensatz', 'error');
+  const name  = ($('myProfileName')?.value || '').trim();
+  const email = ($('myProfileEmail')?.value || '').trim();
+  const phone = ($('myProfilePhone')?.value || '').trim();
+  const errEl = $('myProfileErr');
+  errEl?.classList.add('hidden');
+  // Email-Validierung — leer erlaubt, aber wenn gesetzt muss sie wie eine Email aussehen
+  if (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+    if (errEl) { errEl.textContent = 'Email-Adresse sieht nicht gültig aus'; errEl.classList.remove('hidden'); }
+    return;
+  }
+  setBusy(btnEl, true, 'Speichere…');
+  try {
+    // Email-Feld in der Tabelle anlegen falls nicht vorhanden (idempotent)
+    try { await ensureAirtableField('User', 'email', 'email'); } catch (_) {}
+    const fields = { name, email, phone };
+    await updateUser(u._id, fields);
+    // Lokalen APP_KEYS.user-Cache aktualisieren
+    APP_KEYS.user.name  = name;
+    APP_KEYS.user.email = email;
+    APP_KEYS.user.phone = phone;
+    // FS-Me-Cache leeren — neuer Email-Match beim nächsten Tasks-Fetch
+    Object.keys(FS_ME_CACHE).forEach(k => delete FS_ME_CACHE[k]);
+    closeMyProfileEditModal();
+    toast('Profil gespeichert' + (email ? ' · FS-Email: ' + email : ''), 'success', 4000);
+    renderProfilePage();
+  } catch (e) {
+    setBusy(btnEl, false);
+    if (errEl) { errEl.textContent = e.message || String(e); errEl.classList.remove('hidden'); }
+  }
 }
 
 /* ===================== KI-KOSTEN-DASHBOARD ===================== */
