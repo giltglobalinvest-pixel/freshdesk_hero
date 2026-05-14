@@ -289,7 +289,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.40.2';
+const APP_VERSION = 'v2.40.3';
 // Read-Token absichtlich gesplittet, damit GitHub Secret-Scanning beim Push nicht blockt.
 // Der Token ist read-only und Base-scoped → bewusst eingebettet (Architektur-Entscheidung).
 const _RK = 'patu8KWM8aWB' + 'yxCGL.69fae5d9fa4b94c2' + '66b426dadd71a51f574945d840b33569058ab5e9d89ebef3';
@@ -12845,25 +12845,70 @@ async function saveRuleAndClose(btnEl) {
       action:       { ...ctx.parsed, title },
       aktiv:        ctx.aktiv,
     });
+    // Bevor wir den Editor schließen: das Ticket merken aus dem die Regel kam — damit
+    // wir sicher sein können dass es im Auto-Apply mit drin ist.
+    const ruleSourceTicket = ctx.ticketContext ? {
+      accountId: ctx.ticketContext.accountId,
+      ticketId: ctx.ticketContext.ticketId,
+    } : null;
     closeRuleEditor();
     toast(ctx.id ? 'Regel aktualisiert' : 'Regel gespeichert', 'success');
     await loadRules();
     renderRulesList();
-    // NEU: Wenn die Regel aktiv ist, sofort auf die aktuell angezeigten Tickets anwenden.
-    // Vorher: User legte z.B. „SPAM schließen + ausblenden"-Regel an, aber die passenden
-    // Tickets blieben in der Übersicht offen sichtbar — Auto-Apply lief nur beim Page-Render.
-    // Wir resetten den _processed-Marker für ALLE Tickets in der Liste (neue Regel = neuer
-    // Hash, aber wir wollen explizit re-evaluieren statt auf den Hash-Drift zu vertrauen).
-    if (ctx.aktiv && APP_STATE.pageState?.tickets?.length) {
-      const tickets = APP_STATE.pageState.tickets;
-      // Processed-Map für genau diese Tickets leeren, damit autoApply sie erneut prüft
-      try {
-        const m = _getProcessedMap();
-        tickets.forEach(t => { delete m[t._accountId + '|' + t.id]; });
-        localStorage.setItem(PROCESSED_RULES_KEY, JSON.stringify(m));
-      } catch (_) {}
-      toast('Wende neue Regel auf ' + tickets.length + ' Ticket' + (tickets.length === 1 ? '' : 's') + ' an…', 'info', 3500);
-      autoApplyRulesForTickets(tickets).catch(e => console.warn('post-save autoApply:', e));
+    // Sofort-Apply auf die relevanten Tickets — drei Quellen werden zusammengeführt:
+    // (1) pageState.tickets (aktuelle Übersichts-Liste)
+    // (2) CURRENT_TICKET (falls Detail-View offen ist — kann ein Ticket sein das NICHT in der Liste ist)
+    // (3) ruleSourceTicket (das Ticket aus dem die Regel erstellt wurde — über ticketContext)
+    if (ctx.aktiv) {
+      const ticketsToCheck = [];
+      const seen = new Set();
+      const addTicket = (t) => {
+        if (!t || !t._accountId || !t.id) return;
+        const k = t._accountId + '|' + t.id;
+        if (seen.has(k)) return;
+        seen.add(k);
+        ticketsToCheck.push(t);
+      };
+      // (1) Übersichts-Liste
+      (APP_STATE.pageState?.tickets || []).forEach(addTicket);
+      // (2) CURRENT_TICKET — auch dann wenn es nicht in der Liste ist (z.B. via Search geöffnet)
+      if (CURRENT_TICKET) addTicket(CURRENT_TICKET);
+      // (3) Das Source-Ticket aus dem die Regel kam — falls noch nicht im Cache, vom Server laden
+      if (ruleSourceTicket && !seen.has(ruleSourceTicket.accountId + '|' + ruleSourceTicket.ticketId)) {
+        try {
+          const full = await fetchTicketDetail(ruleSourceTicket.accountId, ruleSourceTicket.ticketId);
+          if (full) addTicket(full);
+        } catch (e) {
+          console.warn('[saveRule] Source-Ticket nicht ladbar:', e.message);
+        }
+      }
+      if (ticketsToCheck.length) {
+        // Processed-Map für genau diese Tickets leeren, damit autoApply sie erneut prüft
+        try {
+          const m = _getProcessedMap();
+          ticketsToCheck.forEach(t => { delete m[t._accountId + '|' + t.id]; });
+          localStorage.setItem(PROCESSED_RULES_KEY, JSON.stringify(m));
+        } catch (_) {}
+        toast('Wende neue Regel auf ' + ticketsToCheck.length + ' Ticket' + (ticketsToCheck.length === 1 ? '' : 's') + ' an…', 'info', 3500);
+        try {
+          await autoApplyRulesForTickets(ticketsToCheck);
+        } catch (e) { console.warn('post-save autoApply:', e); }
+        // Falls das CURRENT_TICKET nach Auto-Apply geschlossen/ausgeblendet wurde:
+        // Detail-View aktualisieren oder schließen, sonst sieht der User weiterhin das alte Ticket
+        if (CURRENT_TICKET) {
+          const updated = ticketsToCheck.find(t => t._accountId === CURRENT_TICKET._accountId && t.id === CURRENT_TICKET.id);
+          if (updated && (updated.status === 5 || updated.status === 4)) {
+            // Frisch aus Cache nehmen und Detail-View neu rendern
+            try {
+              const full = await fetchTicketDetail(CURRENT_TICKET._accountId, CURRENT_TICKET.id);
+              if (full) {
+                CURRENT_TICKET = full;
+                renderTicketDetailBody(full);
+              }
+            } catch (_) {}
+          }
+        }
+      }
     }
   } catch (e) {
     setBusy(btnEl, false);
