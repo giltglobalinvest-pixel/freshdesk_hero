@@ -293,6 +293,10 @@
         <i data-lucide="ticket" class="w-5 h-5"></i>
         <span class="text-[10px] font-medium">Tickets</span>
       </button>
+      <button data-nav="tasks"    onclick="navTo('tasks')"    class="flex-1 py-2 flex flex-col items-center gap-0.5 text-ink-500">
+        <i data-lucide="phone-call" class="w-5 h-5"></i>
+        <span class="text-[10px] font-medium">Aufgaben</span>
+      </button>
       <button data-nav="accounts" onclick="navTo('accounts')" class="flex-1 py-2 flex flex-col items-center gap-0.5 text-ink-500">
         <i data-lucide="building-2" class="w-5 h-5"></i>
         <span class="text-[10px] font-medium">Accounts</span>
@@ -321,7 +325,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.42.1';
+const APP_VERSION = 'v2.43.0';
 // Read-Token absichtlich gesplittet, damit GitHub Secret-Scanning beim Push nicht blockt.
 // Der Token ist read-only und Base-scoped → bewusst eingebettet (Architektur-Entscheidung).
 const _RK = 'patu8KWM8aWB' + 'yxCGL.69fae5d9fa4b94c2' + '66b426dadd71a51f574945d840b33569058ab5e9d89ebef3';
@@ -2702,6 +2706,142 @@ async function updateCompany(accountId, companyId, fields) {
    einmalig im Profil → Setup → „Val aktualisieren" neu deployt werden. */
 function accountHasFreshsales(account) {
   return !!(account?.freshsales_domain && account?.freshsales_api_key);
+}
+
+/* ===================== Freshsales-Tasks ============================
+   Holt offene Tasks aus Freshsales und filtert auf den eingeloggten User.
+   - Owner-Erkennung: per Email-Match in /selector/owners
+   - Task-Filter: über /tasks/filters → erstmal „Open Tasks" oder „All Tasks"-View nutzen
+   - Cache pro Account: 5 Min TTL
+   ==================================================================== */
+const FS_ME_CACHE = {};
+async function fetchFsMe(accountId) {
+  if (!accountId) return null;
+  const cached = FS_ME_CACHE[accountId];
+  if (cached && cached.expires > Date.now()) return cached.data;
+  try {
+    const data = await proxyJson('/freshsales/' + encodeURIComponent(accountId) + '/api/selector/owners');
+    const owners = data?.users || data?.owners || [];
+    const myEmail = String(APP_KEYS.user?.email || '').toLowerCase().trim();
+    let me = null;
+    if (myEmail) {
+      me = owners.find(o => String(o.email || '').toLowerCase().trim() === myEmail) || null;
+    }
+    // Fallback: wenn nur 1 Owner in FS → das bin ich (Solo-Account)
+    if (!me && owners.length === 1) me = owners[0];
+    FS_ME_CACHE[accountId] = { data: me, expires: Date.now() + 5 * 60 * 1000 };
+    return me;
+  } catch (e) {
+    console.warn('[fs-me] fehlgeschlagen für', accountId, e.message);
+    FS_ME_CACHE[accountId] = { data: null, expires: Date.now() + 60 * 1000 };
+    return null;
+  }
+}
+
+/* Holt offene Tasks für den eingeloggten FS-User auf einem Account.
+   Strategie: erst /api/tasks/filters laden, einen „Open Tasks"-View finden, dann
+   /api/tasks/view/{filterId}?include=targetable,owner. Filter auf owner_id = me.id.
+   Bei kein View: Fallback auf direkten /api/tasks Call (manche FS-Tenants haben das). */
+async function fetchFsTasks(accountId, options = {}) {
+  if (!accountId) return [];
+  const me = await fetchFsMe(accountId);
+  if (!me?.id) return [];
+  let viewId = null;
+  try {
+    const filtersResp = await proxyJson('/freshsales/' + encodeURIComponent(accountId) + '/api/tasks/filters');
+    const filters = filtersResp?.filters || filtersResp || [];
+    // Bevorzugt: View mit „open" / „my" im Namen
+    const arr = Array.isArray(filters) ? filters : [];
+    const byPriority = ['open', 'today', 'all', 'my'];
+    for (const kw of byPriority) {
+      const v = arr.find(f => String(f.name || '').toLowerCase().includes(kw));
+      if (v) { viewId = v.id; break; }
+    }
+    if (!viewId && arr.length) viewId = arr[0].id;
+  } catch (e) {
+    console.warn('[fs-tasks] filters-Endpoint fehlgeschlagen:', e.message);
+  }
+  let allTasks = [];
+  try {
+    const path = viewId
+      ? '/freshsales/' + encodeURIComponent(accountId) + '/api/tasks/view/' + viewId + '?include=targetable,owner&per_page=100'
+      : '/freshsales/' + encodeURIComponent(accountId) + '/api/tasks?include=targetable,owner&per_page=100';
+    const data = await proxyJson(path);
+    allTasks = data?.tasks || data?.items || (Array.isArray(data) ? data : []);
+  } catch (e) {
+    console.warn('[fs-tasks] Tasks-Endpoint fehlgeschlagen:', e.message);
+    return [];
+  }
+  // Owner-Filter (clientseitig — FS-Filter ignoriert das manchmal je nach View)
+  const mineOnly = allTasks.filter(t => {
+    if (t.owner_id && String(t.owner_id) === String(me.id)) return true;
+    if (t.owner?.id && String(t.owner.id) === String(me.id)) return true;
+    return false;
+  });
+  // Status-Filter: nur offen (status 1 = open in FS-Standard)
+  const onlyOpen = options.includeCompleted
+    ? mineOnly
+    : mineOnly.filter(t => {
+        if (t.status === 1 || t.status === 'open' || t.status === undefined) return true;
+        return false;
+      });
+  // Targetable + Owner-Felder normalisieren — manche FS-Tenants liefern includes als
+  // separates Objekt, andere inline
+  const targetableMap = {};
+  (data => {
+    const incl = data?.included_objects || data?.includes || {};
+    Object.keys(incl).forEach(k => {
+      (Array.isArray(incl[k]) ? incl[k] : []).forEach(it => {
+        targetableMap[k + ':' + it.id] = it;
+      });
+    });
+  });
+  return onlyOpen.map(t => {
+    const targetType = t.targetable_type || t.target_type || t.targetable?.type || '';
+    const targetId   = t.targetable_id   || t.targetable?.id || null;
+    const target = t.targetable || (targetType && targetId ? targetableMap[targetType + ':' + targetId] : null);
+    return {
+      _accountId: accountId,
+      id:        t.id,
+      title:     t.title || '',
+      description: t.description || '',
+      due_date:  t.due_date || t.due_on || null,
+      status:    t.status,
+      owner_id:  t.owner_id || t.owner?.id || null,
+      owner_name: t.owner?.display_name || t.owner?.name || (me?.display_name || me?.name) || '',
+      task_type_id: t.task_type_id || null,
+      outcome_id:   t.outcome_id || null,
+      target: target ? {
+        type: targetType || '',
+        id:   targetId,
+        name: target.name || target.display_name || target.first_name + ' ' + (target.last_name || '') || '',
+        first_name: target.first_name || '',
+        last_name:  target.last_name  || '',
+        email: target.email || '',
+        phone: target.work_number || target.phone_numbers?.find(p => p.label?.toLowerCase().includes('work'))?.value || target.phone || '',
+        mobile: target.mobile_number || target.phone_numbers?.find(p => p.label?.toLowerCase().includes('mobile'))?.value || '',
+      } : null,
+    };
+  });
+}
+
+/* Markiert eine Task als erledigt (status=2 in FS = completed). */
+async function completeFsTask(accountId, taskId) {
+  return await proxyJson('/freshsales/' + encodeURIComponent(accountId) + '/api/tasks/' + taskId, {
+    method: 'PUT',
+    body: JSON.stringify({ task: { status: 2 } }),
+  });
+}
+
+/* Verschiebt due_date einer Task um N Tage in die Zukunft. */
+async function postponeFsTask(accountId, taskId, days) {
+  const d = new Date();
+  d.setDate(d.getDate() + (days || 1));
+  d.setHours(9, 0, 0, 0); // verschieben auf 9 Uhr morgens
+  return await proxyJson('/freshsales/' + encodeURIComponent(accountId) + '/api/tasks/' + taskId, {
+    method: 'PUT',
+    body: JSON.stringify({ task: { due_date: d.toISOString() } }),
+  });
 }
 
 async function freshsalesLookupContact(accountId, email) {
@@ -5369,7 +5509,7 @@ function setActiveNav(name) {
 }
 function navTo(page) {
   APP_STATE.page = page;
-  setActiveNav(['tickets','accounts','profile'].includes(page) ? page : '');
+  setActiveNav(['tickets','tasks','accounts','profile'].includes(page) ? page : '');
   // Page-Render in einem Try-Catch ausführen, damit ein Fehler in der Render-Funktion
   // nicht den ganzen Stack-Trace in pageContent leakt.
   let renderFn = renderTicketsPage;
@@ -5380,6 +5520,7 @@ function navTo(page) {
   else if (page === 'rules')     renderFn = renderRulesPage;
   else if (page === 'automated') renderFn = renderAutomatedPage;
   else if (page === 'costs')     renderFn = renderCostsPage;
+  else if (page === 'tasks')     renderFn = renderTasksPage;
   try {
     const result = renderFn();
     if (result && typeof result.catch === 'function') {
@@ -13033,6 +13174,266 @@ function renderCostsPage() {
       </p>
     </div>`;
   if (window.lucide) lucide.createIcons();
+}
+
+/* ===================== FRESHSALES-TASKS PAGE ===================== */
+let TASKS_STATE = { accountId: 'all', filter: 'today', tasks: [], loading: false };
+
+async function renderTasksPage() {
+  setPageTitle('Aufgaben', 'Anrufe + To-Dos aus Freshsales');
+  setActiveNav('tasks');
+
+  // Nur Accounts mit FS-Anbindung sind relevant
+  const fsAccounts = (APP_STATE.accounts || []).filter(a => accountHasFreshsales(a));
+  if (!fsAccounts.length) {
+    $('pageContent').innerHTML = `
+      <div class="space-y-3 max-w-2xl mx-auto">
+        <div class="bg-white rounded-2xl border border-ink-200 p-6 text-center">
+          <div class="w-14 h-14 mx-auto rounded-2xl bg-amber-50 flex items-center justify-center mb-3">
+            <i data-lucide="info" class="w-7 h-7 text-amber-600"></i>
+          </div>
+          <h3 class="font-semibold text-ink-900">Kein Freshsales-Account konfiguriert</h3>
+          <p class="text-sm text-ink-500 mt-1 leading-relaxed">Aufgaben kommen aus Freshsales. Trag deinen Freshsales-API-Key in mindestens einem Account ein, um Tasks zu sehen.</p>
+          ${APP_KEYS.user?.is_admin ? `
+            <button onclick="navTo('accounts')" class="mt-4 inline-flex items-center gap-2 bg-brand-500 hover:bg-brand-600 text-white rounded-lg px-4 py-2 text-sm font-medium">
+              <i data-lucide="building-2" class="w-4 h-4"></i> Account konfigurieren
+            </button>` : ''}
+        </div>
+      </div>`;
+    if (window.lucide) lucide.createIcons();
+    return;
+  }
+
+  // Header rendern (Account-Tabs + Filter-Chips)
+  $('pageContent').innerHTML = `
+    <div class="space-y-3 max-w-2xl mx-auto">
+      <div id="tasksHeader"></div>
+      <div id="tasksList">
+        <div class="bg-white rounded-2xl border border-ink-200 p-6 text-center">
+          <div class="spinner inline-block w-7 h-7 border-[3px] text-brand-500"></div>
+          <p class="text-sm text-ink-500 mt-2">Lade Aufgaben…</p>
+        </div>
+      </div>
+    </div>`;
+  _renderTasksHeader(fsAccounts);
+
+  // Tasks laden für gewählten Account (oder alle)
+  TASKS_STATE.loading = true;
+  const accs = TASKS_STATE.accountId === 'all' ? fsAccounts : fsAccounts.filter(a => a.id === TASKS_STATE.accountId);
+  if (!accs.length) {
+    TASKS_STATE.accountId = 'all';
+    return renderTasksPage();
+  }
+  try {
+    const results = await Promise.all(accs.map(a => fetchFsTasks(a.id).catch(e => {
+      console.warn('Tasks fetch failed für', a.id, e.message);
+      return [];
+    })));
+    let merged = [];
+    accs.forEach((a, i) => {
+      results[i].forEach(t => merged.push({ ...t, _accountName: a.name, _accountColor: a.color }));
+    });
+    // Nach Fälligkeit sortieren (überfällig zuerst, dann nach Datum)
+    merged.sort((a, b) => {
+      const ta = a.due_date ? new Date(a.due_date).getTime() : Infinity;
+      const tb = b.due_date ? new Date(b.due_date).getTime() : Infinity;
+      return ta - tb;
+    });
+    TASKS_STATE.tasks = merged;
+    TASKS_STATE.loading = false;
+    _renderTasksList();
+    _renderTasksHeader(fsAccounts);  // Counter aktualisieren
+  } catch (e) {
+    console.error('Tasks Page error:', e);
+    $('tasksList').innerHTML = `<div class="bg-red-50 border border-red-200 rounded-2xl p-4 text-sm text-red-800">Tasks-Fehler: ${escapeHtml(e.message)}</div>`;
+  }
+}
+
+function _renderTasksHeader(fsAccounts) {
+  const host = $('tasksHeader');
+  if (!host) return;
+  const tasks = TASKS_STATE.tasks || [];
+  // Counters pro Filter
+  const now = Date.now();
+  const today = new Date(); today.setHours(0,0,0,0);
+  const todayEnd = today.getTime() + 86400e3;
+  const weekEnd = today.getTime() + 7 * 86400e3;
+  const cntOverdue = tasks.filter(t => t.due_date && new Date(t.due_date).getTime() < today.getTime()).length;
+  const cntToday   = tasks.filter(t => t.due_date && new Date(t.due_date).getTime() >= today.getTime() && new Date(t.due_date).getTime() < todayEnd).length;
+  const cntWeek    = tasks.filter(t => t.due_date && new Date(t.due_date).getTime() < weekEnd).length;
+  const cntAll     = tasks.length;
+  const filterChip = (key, label, count, active) => `
+    <button onclick="TASKS_STATE.filter='${key}'; _renderTasksHeader(window._tasksFsAccountsCache || []); _renderTasksList()" class="shrink-0 inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full text-[12px] font-semibold border ${active ? 'bg-brand-600 text-white border-brand-600 shadow-sm' : 'bg-white text-ink-700 border-ink-200'}">
+      ${escapeHtml(label)}
+      ${count > 0 ? `<span class="text-[10px] font-mono ${active ? 'bg-white/30' : 'bg-ink-100'} px-1.5 rounded-full">${count}</span>` : ''}
+    </button>`;
+  window._tasksFsAccountsCache = fsAccounts;
+  host.innerHTML = `
+    <div class="bg-white/95 backdrop-blur sticky top-0 z-10 -mx-1 px-1 py-2 border-b border-ink-100">
+      <!-- Account-Tabs (analog Tickets-Page) -->
+      <div class="flex gap-1.5 overflow-x-auto scrollbar-hidden -mx-1 px-1 mb-2">
+        <button onclick="TASKS_STATE.accountId='all'; renderTasksPage()" class="shrink-0 inline-flex items-center gap-1 px-3 py-1.5 rounded-full text-[12px] font-semibold ${TASKS_STATE.accountId === 'all' ? 'bg-ink-900 text-white' : 'bg-white text-ink-700 border border-ink-200'}">
+          <i data-lucide="layers" class="w-3.5 h-3.5"></i> Alle (${fsAccounts.length})
+        </button>
+        ${fsAccounts.map(a => `
+          <button onclick="TASKS_STATE.accountId='${escapeAttr(a.id)}'; renderTasksPage()" class="shrink-0 inline-flex items-center gap-1 px-3 py-1.5 rounded-full text-[12px] font-semibold ${TASKS_STATE.accountId === a.id ? 'bg-ink-900 text-white' : 'bg-white text-ink-700 border border-ink-200'}">
+            <span class="w-2 h-2 rounded-full" style="background:${escapeAttr(a.color)}"></span>
+            <span class="truncate max-w-32">${escapeHtml(a.name)}</span>
+          </button>`).join('')}
+      </div>
+      <!-- Filter-Chips -->
+      <div class="flex gap-1.5 overflow-x-auto scrollbar-hidden -mx-1 px-1">
+        ${filterChip('overdue', 'Überfällig', cntOverdue, TASKS_STATE.filter === 'overdue')}
+        ${filterChip('today',   'Heute',     cntToday,   TASKS_STATE.filter === 'today')}
+        ${filterChip('week',    'Woche',     cntWeek,    TASKS_STATE.filter === 'week')}
+        ${filterChip('all',     'Alle Offen', cntAll,    TASKS_STATE.filter === 'all')}
+      </div>
+    </div>`;
+  if (window.lucide) lucide.createIcons();
+}
+
+function _renderTasksList() {
+  const host = $('tasksList');
+  if (!host) return;
+  const tasks = TASKS_STATE.tasks || [];
+  const today = new Date(); today.setHours(0,0,0,0);
+  const todayEnd = today.getTime() + 86400e3;
+  const weekEnd = today.getTime() + 7 * 86400e3;
+  let filtered = tasks;
+  if (TASKS_STATE.filter === 'overdue') {
+    filtered = tasks.filter(t => t.due_date && new Date(t.due_date).getTime() < today.getTime());
+  } else if (TASKS_STATE.filter === 'today') {
+    filtered = tasks.filter(t => t.due_date && new Date(t.due_date).getTime() >= today.getTime() && new Date(t.due_date).getTime() < todayEnd);
+  } else if (TASKS_STATE.filter === 'week') {
+    filtered = tasks.filter(t => t.due_date && new Date(t.due_date).getTime() < weekEnd);
+  }
+
+  if (!filtered.length) {
+    const filterLabel = { overdue:'überfällige', today:'für heute', week:'in dieser Woche', all:'offene' }[TASKS_STATE.filter] || '';
+    host.innerHTML = `
+      <div class="bg-white rounded-2xl border border-ink-200 p-8 text-center">
+        <i data-lucide="check-circle-2" class="w-10 h-10 mx-auto text-emerald-400"></i>
+        <p class="text-sm text-ink-700 mt-2 font-semibold">Keine ${escapeHtml(filterLabel)} Aufgaben${TASKS_STATE.accountId === 'all' ? '' : ' in diesem Account'}.</p>
+        <p class="text-[11px] text-ink-500 mt-1">Du bist auf dem Stand. ✨</p>
+      </div>`;
+    if (window.lucide) lucide.createIcons();
+    return;
+  }
+
+  host.innerHTML = '<div class="space-y-2">' + filtered.map(_renderTaskCard).join('') + '</div>';
+  if (window.lucide) lucide.createIcons();
+}
+
+function _renderTaskCard(t) {
+  const due = t.due_date ? new Date(t.due_date) : null;
+  const today = new Date(); today.setHours(0,0,0,0);
+  const isOverdue = due && due.getTime() < today.getTime();
+  const isToday   = due && due.getTime() >= today.getTime() && due.getTime() < today.getTime() + 86400e3;
+  const dueLabel  = due ? _fmtDueDate(due) : 'kein Termin';
+  const dueColor  = isOverdue ? 'text-red-700' : (isToday ? 'text-amber-700' : 'text-ink-600');
+  const dueBg     = isOverdue ? 'bg-red-50 border-red-200' : (isToday ? 'bg-amber-50 border-amber-200' : 'bg-ink-50 border-ink-200');
+
+  // Telefonnummern aus Target
+  const phones = [];
+  if (t.target?.phone) phones.push({ label: 'Festnetz', num: t.target.phone });
+  if (t.target?.mobile) phones.push({ label: 'Mobil', num: t.target.mobile });
+
+  // Task-Typ-Icon (Call = phone-call, sonst stickynote)
+  // Freshsales gibt task_type_id zurück — Standardwerte: 1=call, 2=email, 3=meeting, ...
+  const typeIcon = t.task_type_id === 1 ? 'phone-call' : (t.task_type_id === 2 ? 'mail' : (t.task_type_id === 3 ? 'calendar' : 'check-square'));
+  const typeColor = t.task_type_id === 1 ? 'emerald' : 'brand';
+
+  const targetName = t.target?.name?.trim() || ([t.target?.first_name, t.target?.last_name].filter(Boolean).join(' ').trim()) || '';
+
+  return `
+    <div class="bg-white rounded-2xl border border-ink-200 p-3 shadow-sm">
+      <!-- Header: Type-Icon + Title + Due-Pill -->
+      <div class="flex items-start gap-2.5 mb-1.5">
+        <div class="w-9 h-9 rounded-xl bg-${typeColor}-50 border border-${typeColor}-200 flex items-center justify-center text-${typeColor}-700 shrink-0">
+          <i data-lucide="${typeIcon}" class="w-4 h-4"></i>
+        </div>
+        <div class="flex-1 min-w-0">
+          <p class="font-semibold text-ink-900 text-sm leading-snug">${escapeHtml(t.title || '(ohne Titel)')}</p>
+          ${targetName ? `<p class="text-[11px] text-ink-600 truncate mt-0.5"><i data-lucide="user" class="w-3 h-3 inline mr-0.5"></i>${escapeHtml(targetName)}${t.target?.email ? ' · ' + escapeHtml(t.target.email) : ''}</p>` : ''}
+        </div>
+        <span class="text-[10px] uppercase tracking-wider px-2 py-0.5 rounded-full font-semibold border ${dueColor} ${dueBg} shrink-0">${escapeHtml(dueLabel)}</span>
+      </div>
+
+      <!-- Optional: Description -->
+      ${t.description ? `<p class="text-[11px] text-ink-600 leading-snug mt-1 line-clamp-2 whitespace-pre-line break-words">${escapeHtml(t.description)}</p>` : ''}
+
+      <!-- Telefonnummern als große anrufbare Pills -->
+      ${phones.length ? `
+        <div class="flex flex-wrap gap-1.5 mt-2">
+          ${phones.map(p => {
+            const tel = _cleanPhoneForTel(p.num);
+            return `<a href="tel:${escapeAttr(tel)}" class="inline-flex items-center gap-1.5 px-3 py-2 bg-emerald-50 border border-emerald-300 text-emerald-800 rounded-lg active:bg-emerald-100 font-semibold">
+              <i data-lucide="phone-call" class="w-4 h-4"></i>
+              <span class="text-[12px] font-mono">${escapeHtml(p.num)}</span>
+              <span class="text-[9px] uppercase tracking-wider opacity-70">${escapeHtml(p.label)}</span>
+            </a>`;
+          }).join('')}
+        </div>` : ''}
+
+      <!-- Accent-Footer: Account + Aktionen -->
+      <div class="flex items-center gap-2 mt-2 pt-2 border-t border-ink-100">
+        <span class="text-[10px] text-ink-500 inline-flex items-center gap-1 truncate min-w-0">
+          <span class="w-1.5 h-1.5 rounded-full shrink-0" style="background:${escapeAttr(t._accountColor)}"></span>
+          <span class="truncate">${escapeHtml(t._accountName || '')}</span>
+        </span>
+        <button onclick="taskPostpone('${escapeAttr(t._accountId)}', ${t.id}, 1, this)" class="ml-auto inline-flex items-center gap-1 px-2 py-1 bg-white border border-ink-200 hover:bg-ink-50 text-ink-700 rounded-lg text-[11px] font-medium" title="Auf morgen verschieben">
+          <i data-lucide="clock" class="w-3 h-3"></i> +1d
+        </button>
+        <button onclick="taskPostpone('${escapeAttr(t._accountId)}', ${t.id}, 7, this)" class="inline-flex items-center gap-1 px-2 py-1 bg-white border border-ink-200 hover:bg-ink-50 text-ink-700 rounded-lg text-[11px] font-medium" title="Auf nächste Woche verschieben">
+          <i data-lucide="calendar-clock" class="w-3 h-3"></i> +7d
+        </button>
+        <button onclick="taskComplete('${escapeAttr(t._accountId)}', ${t.id}, this)" class="inline-flex items-center gap-1 px-2.5 py-1 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-[11px] font-semibold">
+          <i data-lucide="check" class="w-3 h-3"></i> Erledigt
+        </button>
+      </div>
+    </div>`;
+}
+
+function _fmtDueDate(d) {
+  const today = new Date(); today.setHours(0,0,0,0);
+  const dDay = new Date(d); dDay.setHours(0,0,0,0);
+  const diff = Math.round((dDay.getTime() - today.getTime()) / 86400e3);
+  const time = d.getHours() || d.getMinutes() ? d.toLocaleTimeString('de-DE', { hour: '2-digit', minute: '2-digit' }) : '';
+  if (diff < 0) return Math.abs(diff) + 'd überfällig' + (time ? ' · ' + time : '');
+  if (diff === 0) return 'Heute' + (time ? ' ' + time : '');
+  if (diff === 1) return 'Morgen' + (time ? ' ' + time : '');
+  if (diff < 7) return 'in ' + diff + 'd' + (time ? ' · ' + time : '');
+  return d.toLocaleDateString('de-DE', { day:'2-digit', month:'2-digit' }) + (time ? ' · ' + time : '');
+}
+
+async function taskComplete(accountId, taskId, btn) {
+  if (btn) setBusy(btn, true, '…');
+  try {
+    await completeFsTask(accountId, taskId);
+    // Aus dem lokalen Cache entfernen + Re-Render
+    TASKS_STATE.tasks = (TASKS_STATE.tasks || []).filter(t => !(t._accountId === accountId && t.id === taskId));
+    _renderTasksList();
+    _renderTasksHeader(window._tasksFsAccountsCache || []);
+    toast('Aufgabe erledigt', 'success', 2500);
+  } catch (e) {
+    if (btn) setBusy(btn, false);
+    toast('Fehler: ' + e.message, 'error', 6000);
+  }
+}
+
+async function taskPostpone(accountId, taskId, days, btn) {
+  if (btn) setBusy(btn, true, '…');
+  try {
+    await postponeFsTask(accountId, taskId, days);
+    // Aus lokalem Cache nehmen + Re-Render (nicht mehr „heute"/„überfällig")
+    TASKS_STATE.tasks = (TASKS_STATE.tasks || []).filter(t => !(t._accountId === accountId && t.id === taskId));
+    _renderTasksList();
+    _renderTasksHeader(window._tasksFsAccountsCache || []);
+    toast('Verschoben um ' + days + ' Tag' + (days === 1 ? '' : 'e'), 'success', 2500);
+  } catch (e) {
+    if (btn) setBusy(btn, false);
+    toast('Fehler: ' + e.message, 'error', 6000);
+  }
 }
 
 /* ===================== USERS PAGE (Admin) ===================== */
