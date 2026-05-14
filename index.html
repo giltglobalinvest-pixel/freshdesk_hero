@@ -89,6 +89,28 @@
   .scrollbar-hidden { scrollbar-width: none; }
   /* Hide tailwind play CDN dev-warning */
   #tailwind-cdn-warn, #__tailwind_cdn_warning__ { display:none !important; }
+
+  /* iOS Safari Auto-Zoom-Fix: Wenn ein Input einen font-size < 16px hat,
+     zoomt Safari beim Antippen automatisch rein und nicht wieder raus.
+     Wir erzwingen min 16px nur auf iOS via @supports-Hack, damit andere
+     Geräte ihre kompaktere text-sm/text-xs-Optik behalten. */
+  @supports (-webkit-touch-callout: none) {
+    input[type="text"],
+    input[type="email"],
+    input[type="tel"],
+    input[type="number"],
+    input[type="search"],
+    input[type="url"],
+    input[type="password"],
+    input[type="date"],
+    input[type="datetime-local"],
+    input[type="time"],
+    input:not([type]),
+    select,
+    textarea {
+      font-size: 16px !important;
+    }
+  }
 </style>
 </head>
 <body class="text-ink-900">
@@ -267,7 +289,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.39.3';
+const APP_VERSION = 'v2.39.4';
 // Read-Token absichtlich gesplittet, damit GitHub Secret-Scanning beim Push nicht blockt.
 // Der Token ist read-only und Base-scoped → bewusst eingebettet (Architektur-Entscheidung).
 const _RK = 'patu8KWM8aWB' + 'yxCGL.69fae5d9fa4b94c2' + '66b426dadd71a51f574945d840b33569058ab5e9d89ebef3';
