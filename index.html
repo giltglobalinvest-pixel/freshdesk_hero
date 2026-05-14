@@ -289,7 +289,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.39.5';
+const APP_VERSION = 'v2.40.0';
 // Read-Token absichtlich gesplittet, damit GitHub Secret-Scanning beim Push nicht blockt.
 // Der Token ist read-only und Base-scoped → bewusst eingebettet (Architektur-Entscheidung).
 const _RK = 'patu8KWM8aWB' + 'yxCGL.69fae5d9fa4b94c2' + '66b426dadd71a51f574945d840b33569058ab5e9d89ebef3';
@@ -7495,6 +7495,9 @@ function _detailReplyComposer(ticket) {
       <div class="flex items-center gap-2 mb-2">
         <i data-lucide="sparkles" class="w-4 h-4 text-brand-600"></i>
         <h3 class="font-semibold text-ink-900 text-sm">KI-Assistent: Was soll passieren?</h3>
+        <button type="button" onclick="openDirectReplyComposer('${accId}', ${ticket.id})" class="ml-auto inline-flex items-center gap-1 px-2 py-1 bg-white hover:bg-emerald-50 border border-emerald-300 text-emerald-700 rounded-lg text-[11px] font-semibold" title="Direkt antworten mit Übersetzungs-Option">
+          <i data-lucide="languages" class="w-3.5 h-3.5"></i> Direkt antworten
+        </button>
       </div>
       <p class="text-[11px] text-ink-600 mb-2 leading-snug">Sag oder tippe was zu tun ist — Antworten, Notizen, Weiterleitungen, Zuweisungen, Status, Ausblenden. Auch mehrere Aktionen in einem Satz. Jeder Schritt wird einzeln bestätigt.</p>
       <textarea id="detailAssistInput" rows="4" placeholder="z.B. „Antworte: Wir liefern bis Freitag" / „Notiz: mit Lager abstimmen" / „Weise Sandra zu und auf Gelöst setzen" / „Bei mir 3 Tage ausblenden"" class="w-full px-3 py-2 border border-brand-200 bg-white rounded-lg text-sm focus:ring-2 focus:ring-brand-500/30 focus:border-brand-500 resize-y"></textarea>
@@ -7684,8 +7687,13 @@ function renderTicketDetailBody(ticket) {
 
       <!-- Erste Anfrage -->
       <div class="bg-white rounded-2xl border border-ink-200 p-4">
-        <p class="text-[10px] font-semibold text-ink-500 uppercase tracking-wider mb-2">Erste Anfrage</p>
-        <div class="text-sm text-ink-800 whitespace-pre-line break-words">${escapeHtml(htmlToText(ticket.description_text || ticket.description || '') || '(kein Text)')}</div>
+        <div class="flex items-center mb-2 gap-1.5">
+          <p class="text-[10px] font-semibold text-ink-500 uppercase tracking-wider">Erste Anfrage</p>
+          ${_renderTranslateButton(htmlToText(ticket.description_text || ticket.description || ''), 'desc')}
+        </div>
+        <div data-translatable-area="desc">
+          <div class="text-sm text-ink-800 whitespace-pre-line break-words">${escapeHtml(htmlToText(ticket.description_text || ticket.description || '') || '(kein Text)')}</div>
+        </div>
       </div>
 
       <!-- Anhänge (aus Ticket + allen Conversations) -->
@@ -7714,7 +7722,7 @@ function renderTicketDetailBody(ticket) {
           <span class="text-[10px] text-ink-400">${conversations.length} Nachricht${conversations.length === 1 ? '' : 'en'}</span>
         </div>
         <div class="space-y-3">
-          ${conversations.map(c => {
+          ${conversations.map((c, idx) => {
             const isIncoming = c.incoming === true;
             const isPrivate  = c.private === true;
             const who = isPrivate ? 'Interne Notiz' : (isIncoming ? (c.from_email || 'Kunde') : 'Agent');
@@ -7723,13 +7731,17 @@ function renderTicketDetailBody(ticket) {
             const body = htmlToText(c.body_text || c.body || '');
             const truncated = body.length > 1500;
             const cAtts = (c.attachments || []);
+            const convId = 'conv-' + idx;
             return `
               <div class="border-l-2 ${align} pl-3 py-2 rounded-r">
                 <div class="flex items-baseline justify-between gap-2 text-[11px] mb-1">
                   <span class="font-semibold text-ink-700 truncate">${escapeHtml(arrow + ' ' + who)}</span>
                   <span class="text-ink-400 shrink-0">${escapeHtml(fmtDate(c.created_at))}</span>
+                  ${_renderTranslateButton(body, convId)}
                 </div>
-                <div class="text-sm text-ink-700 whitespace-pre-line break-words">${escapeHtml(body.slice(0, 1500))}${truncated ? '…' : ''}</div>
+                <div data-translatable-area="${convId}">
+                  <div class="text-sm text-ink-700 whitespace-pre-line break-words">${escapeHtml(body.slice(0, 1500))}${truncated ? '…' : ''}</div>
+                </div>
                 ${cAtts.length ? `
                   <div class="mt-2 flex flex-wrap gap-1.5 items-start">
                     ${cAtts.map(a => _renderInlineAttachment(a)).join('')}
@@ -9445,6 +9457,365 @@ function extractPhoneNumbers(text) {
 function _cleanPhoneForTel(s) {
   const hasPlus = /^\+/.test(s.trim());
   return (hasPlus ? '+' : '') + s.replace(/\D/g, '');
+}
+
+/* ===================== Übersetzungs-Helper =====================
+   - User-Default-Sprache: aus navigator.language abgeleitet (zB 'de')
+   - translateMessage(text, targetLang, options) → { sourceLang, sourceLangName, targetLangName, translation }
+   - Cache pro (text-Hash + targetLang) für Session-Dauer */
+const USER_DEFAULT_LANG = (() => {
+  try {
+    const l = (navigator.language || 'de').toLowerCase().slice(0, 2);
+    return ['de','en','fr','es','it','nl','pt','pl','tr','ru','cs'].includes(l) ? l : 'de';
+  } catch (_) { return 'de'; }
+})();
+
+const LANG_NAMES = {
+  de: 'Deutsch', en: 'Englisch', fr: 'Französisch', es: 'Spanisch', it: 'Italienisch',
+  nl: 'Niederländisch', pt: 'Portugiesisch', pl: 'Polnisch', tr: 'Türkisch',
+  ru: 'Russisch', cs: 'Tschechisch', uk: 'Ukrainisch', ro: 'Rumänisch',
+  hu: 'Ungarisch', sv: 'Schwedisch', da: 'Dänisch', no: 'Norwegisch',
+  fi: 'Finnisch', el: 'Griechisch', ar: 'Arabisch', zh: 'Chinesisch',
+  ja: 'Japanisch', ko: 'Koreanisch',
+};
+
+const _TRANSLATE_CACHE = new Map();
+function _hashText(s) {
+  let h = 0;
+  const str = String(s || '');
+  for (let i = 0; i < str.length; i++) { h = (h * 31 + str.charCodeAt(i)) | 0; }
+  return h.toString(36);
+}
+
+/* Hauptfunktion: erkennt die Quellsprache + übersetzt in Zielsprache.
+   - text: Original-Text (kann auch HTML/Plaintext sein, wird nicht escaped)
+   - targetLang: ISO-Code (default USER_DEFAULT_LANG)
+   - hint: optionale Hint-Quellsprache (überspringt Erkennung)
+   Bei Quelle == Ziel → translation = original, sourceLang = targetLang. */
+async function translateMessage(text, targetLang, options) {
+  const opts = options || {};
+  const target = (targetLang || USER_DEFAULT_LANG).toLowerCase().slice(0, 2);
+  const raw = String(text || '').trim();
+  if (!raw) return { sourceLang: target, sourceLangName: LANG_NAMES[target] || target, targetLangName: LANG_NAMES[target] || target, translation: '' };
+  const key = target + ':' + _hashText(raw.slice(0, 4000));
+  if (_TRANSLATE_CACHE.has(key)) return _TRANSLATE_CACHE.get(key);
+
+  const sys = 'Du erkennst Sprachen und übersetzt zwischen ihnen. Behalte den Schreibstil + Tonfall + Anrede + Formatierung bei. ' +
+    'Bei Anreden, Namen, Firmennamen, technischen Begriffen, Produktcodes, E-Mail-Adressen, URLs, Telefonnummern: nicht übersetzen. ' +
+    'Antworte AUSSCHLIESSLICH mit JSON. Kein Markdown, keine Erklärung außerhalb des JSON.';
+  const user = 'ZIEL-SPRACHE: ' + (LANG_NAMES[target] || target) + ' (' + target + ')\n\n' +
+    'TEXT:\n' + raw.slice(0, 6000) + (raw.length > 6000 ? '\n\n[…gekürzt für Übersetzung…]' : '') + '\n\n' +
+    'AUFGABE:\n' +
+    '1. Erkenne die Sprache des Textes (ISO-Code, 2 Buchstaben, z.B. "en", "de", "fr").\n' +
+    '2. Wenn Quellsprache == Zielsprache: translation = der ORIGINAL-Text wortwörtlich (gibt kein "nichts zu tun" o.ä.).\n' +
+    '3. Sonst: übersetze in die Zielsprache und behalte die Struktur (Absätze, Listen, Anrede, Signatur).\n\n' +
+    'Antworte als JSON:\n' +
+    '{"sourceLang":"<iso2>","translation":"<übersetzter Text>"}';
+
+  try {
+    const data = await proxyJson('/anthropic/v1/messages', {
+      method: 'POST',
+      body: JSON.stringify({
+        model: 'claude-haiku-4-5-20251001',
+        max_tokens: 4000,
+        system: sys,
+        messages: [{ role: 'user', content: user }],
+      }),
+    });
+    const respText = (data.content && data.content[0] && data.content[0].text) || '';
+    let parsed = null;
+    try {
+      const m = respText.match(/\{[\s\S]*\}/);
+      if (m) parsed = JSON.parse(m[0]);
+    } catch (_) {}
+    if (!parsed || typeof parsed.translation !== 'string') {
+      throw new Error('KI-Antwort unbrauchbar: ' + respText.slice(0, 150));
+    }
+    const sourceLang = String(parsed.sourceLang || target).toLowerCase().slice(0, 2);
+    const result = {
+      sourceLang,
+      sourceLangName: LANG_NAMES[sourceLang] || sourceLang.toUpperCase(),
+      targetLangName: LANG_NAMES[target] || target.toUpperCase(),
+      translation: parsed.translation,
+    };
+    _TRANSLATE_CACHE.set(key, result);
+    return result;
+  } catch (e) {
+    console.warn('[translate] KI-Fehler:', e.message);
+    throw e;
+  }
+}
+
+/* Inline-Button-Toggle für eine Conversation-Bubble.
+   - btnEl: der geklickte Button
+   - container: das Element in das die Übersetzung eingefügt wird
+   - text: Original-Text
+   Wenn schon eine Übersetzung angezeigt wird: entfernt sie. Sonst: lädt + zeigt. */
+async function toggleInlineTranslation(btnEl, containerSel, text) {
+  const container = typeof containerSel === 'string' ? document.querySelector(containerSel) : containerSel;
+  if (!container) return;
+  const existing = container.querySelector('[data-translation-box]');
+  if (existing) {
+    existing.remove();
+    btnEl.classList.remove('bg-emerald-100', 'text-emerald-700');
+    btnEl.classList.add('hover:bg-ink-100', 'text-ink-500');
+    const lbl = btnEl.querySelector('[data-translate-label]');
+    if (lbl) lbl.textContent = 'Übersetzen';
+    return;
+  }
+  const lbl = btnEl.querySelector('[data-translate-label]');
+  const origIcon = btnEl.querySelector('[data-lucide]');
+  if (lbl) lbl.textContent = 'Übersetze…';
+  if (origIcon) origIcon.setAttribute('data-lucide', 'loader-circle');
+  btnEl.disabled = true;
+  if (window.lucide) lucide.createIcons();
+  try {
+    const res = await translateMessage(text, USER_DEFAULT_LANG);
+    const box = document.createElement('div');
+    box.setAttribute('data-translation-box', '');
+    box.className = 'mt-2 border-l-2 border-emerald-400 bg-emerald-50/60 rounded-r px-3 py-2';
+    box.innerHTML = `
+      <div class="flex items-center gap-1.5 mb-1 text-[10px] uppercase tracking-wider text-emerald-700 font-semibold">
+        <i data-lucide="languages" class="w-3 h-3"></i>
+        <span>${escapeHtml(res.targetLangName)} <span class="opacity-70">(aus ${escapeHtml(res.sourceLangName)})</span></span>
+      </div>
+      <div class="text-sm text-ink-800 whitespace-pre-line break-words">${escapeHtml(res.translation)}</div>`;
+    container.appendChild(box);
+    btnEl.classList.add('bg-emerald-100', 'text-emerald-700');
+    btnEl.classList.remove('hover:bg-ink-100', 'text-ink-500');
+    if (lbl) lbl.textContent = res.sourceLang === USER_DEFAULT_LANG ? 'Gleiche Sprache' : 'Original zeigen';
+    if (origIcon) origIcon.setAttribute('data-lucide', 'languages');
+    if (window.lucide) lucide.createIcons();
+  } catch (e) {
+    toast('Übersetzung fehlgeschlagen: ' + e.message, 'error', 6000);
+    if (lbl) lbl.textContent = 'Übersetzen';
+    if (origIcon) origIcon.setAttribute('data-lucide', 'languages');
+    if (window.lucide) lucide.createIcons();
+  } finally {
+    btnEl.disabled = false;
+  }
+}
+
+/* Rendert einen kompakten Übersetzen-Button. `dataAttr` ist eine eindeutige Refrenz
+   für den Container-Selector (z.B. „desc" oder „conv-3"). Der Container wird per
+   data-translatable-area="<id>" markiert, damit der Button die Box dort einhängt. */
+function _renderTranslateButton(text, containerId) {
+  if (!text || !text.trim()) return '';
+  const encoded = encodeURIComponent(text.slice(0, 6000));
+  return `<button type="button" data-translate-trigger
+    data-target="[data-translatable-area='${escapeAttr(containerId)}']"
+    data-text="${encoded}"
+    class="ml-auto shrink-0 inline-flex items-center gap-1 px-1.5 py-0.5 text-[10px] text-ink-500 hover:bg-ink-100 rounded transition" title="In ${escapeHtml(LANG_NAMES[USER_DEFAULT_LANG] || 'Deutsch')} übersetzen">
+    <i data-lucide="languages" class="w-3 h-3"></i>
+    <span data-translate-label>Übersetzen</span>
+  </button>`;
+}
+
+// Globale Click-Delegation für [data-translate-trigger]
+(function _setupTranslateDelegation() {
+  document.addEventListener('click', (e) => {
+    const btn = e.target.closest('[data-translate-trigger]');
+    if (!btn) return;
+    e.preventDefault();
+    e.stopPropagation();
+    const target = btn.dataset.target;
+    const text = decodeURIComponent(btn.dataset.text || '');
+    if (!target || !text) return;
+    toggleInlineTranslation(btn, target, text);
+  });
+})();
+
+/* ============================================================
+   Direkt-Antwort-Composer mit Übersetzungs-Option
+
+   Modal mit:
+   - Textarea (User tippt seine Antwort in seiner Sprache)
+   - Erkennung der Kunden-Sprache aus dem Ticket
+   - Button „Übersetzen & beide Sprachen einfügen" → fügt unter dem Text eine
+     Trennlinie + die Übersetzung ein
+   - Button „Nur Übersetzung" → ersetzt durch Übersetzung
+   - Sende-Button schickt den finalen Text als Reply
+   ============================================================ */
+let DIRECT_REPLY_CTX = null;
+
+async function openDirectReplyComposer(accountId, ticketId) {
+  if (!accountId || !ticketId) return;
+  const ticket = CURRENT_TICKET || (APP_STATE.ticketCache?.get?.(accountId + '|' + ticketId)) || null;
+  DIRECT_REPLY_CTX = {
+    accountId, ticketId, ticket,
+    detectedCustomerLang: null,
+    customerLangName: '',
+  };
+  let host = document.getElementById('subModalHost');
+  if (!host) { host = document.createElement('div'); host.id = 'subModalHost'; document.body.appendChild(host); }
+  host.innerHTML = `
+    <div class="fixed inset-0 z-[60] flex items-end justify-center bg-black/40" onclick="if(event.target===this)closeDirectReplyComposer()">
+      <div class="bg-white w-full max-w-2xl rounded-t-2xl shadow-2xl flex flex-col safe-bottom" style="max-height:92vh">
+        <div class="px-4 py-3 border-b border-ink-200 flex items-center justify-between gap-2">
+          <div class="min-w-0">
+            <h3 class="font-bold text-ink-900 inline-flex items-center gap-2"><i data-lucide="languages" class="w-4 h-4 text-emerald-600"></i> Direkt antworten</h3>
+            <p class="text-[11px] text-ink-500 truncate" id="directReplyLangInfo">Erkenne Kunden-Sprache…</p>
+          </div>
+          <button onclick="closeDirectReplyComposer()" class="w-9 h-9 rounded-lg hover:bg-ink-100 flex items-center justify-center shrink-0">
+            <i data-lucide="x" class="w-5 h-5 text-ink-700"></i>
+          </button>
+        </div>
+        <div class="flex-1 overflow-y-auto p-4 space-y-3">
+          <div>
+            <label class="text-[10px] font-semibold text-ink-500 uppercase tracking-wider mb-1.5 inline-block">Deine Antwort (${escapeHtml(LANG_NAMES[USER_DEFAULT_LANG] || 'Deutsch')})</label>
+            <textarea id="directReplyText" rows="8" placeholder="Schreib deine Antwort hier…" class="w-full px-3 py-2 border border-ink-200 rounded-lg text-sm focus:ring-2 focus:ring-emerald-500/30 focus:border-emerald-500 resize-y"></textarea>
+          </div>
+          <div class="bg-emerald-50/60 border border-emerald-200 rounded-xl p-3">
+            <p class="text-[11px] font-semibold text-emerald-800 mb-2 inline-flex items-center gap-1.5"><i data-lucide="wand-sparkles" class="w-3.5 h-3.5"></i> Übersetzungs-Aktionen</p>
+            <div class="flex flex-col sm:flex-row gap-2">
+              <button id="directReplyBothBtn" type="button" onclick="directReplyAppendTranslation(this, false)" class="flex-1 bg-emerald-600 hover:bg-emerald-700 text-white px-3 py-2 rounded-lg text-xs font-semibold inline-flex items-center justify-center gap-1.5">
+                <i data-lucide="layers" class="w-3.5 h-3.5"></i> Übersetzen + beide Sprachen
+              </button>
+              <button id="directReplyOnlyBtn" type="button" onclick="directReplyAppendTranslation(this, true)" class="flex-1 bg-white hover:bg-emerald-50 border border-emerald-300 text-emerald-700 px-3 py-2 rounded-lg text-xs font-semibold inline-flex items-center justify-center gap-1.5">
+                <i data-lucide="languages" class="w-3.5 h-3.5"></i> Nur in Kunden-Sprache
+              </button>
+            </div>
+            <p class="text-[10px] text-emerald-700/80 mt-1.5 leading-snug">„Beide Sprachen" hängt die Übersetzung mit Trennlinie an deinen Text an — Kunde liest seine Sprache, du dokumentierst das Original.</p>
+          </div>
+          <label class="flex items-center gap-2 text-[12px] text-ink-700 cursor-pointer">
+            <input type="checkbox" id="directReplyWithSig" checked class="w-4 h-4 rounded border-ink-300 text-emerald-600 focus:ring-emerald-500">
+            <span>Signatur des Agents anhängen</span>
+          </label>
+        </div>
+        <div class="border-t border-ink-200 p-3 flex gap-2">
+          <button type="button" onclick="closeDirectReplyComposer()" class="flex-1 bg-ink-100 hover:bg-ink-200 text-ink-700 rounded-lg px-3 py-2.5 text-sm font-semibold">Abbrechen</button>
+          <button id="directReplySendBtn" type="button" onclick="sendDirectReply(this)" class="flex-[2] bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg px-3 py-2.5 text-sm font-semibold inline-flex items-center justify-center gap-1.5">
+            <i data-lucide="send" class="w-4 h-4"></i> Senden
+          </button>
+        </div>
+      </div>
+    </div>`;
+  if (window.lucide) lucide.createIcons();
+  document.body.style.overflow = 'hidden';
+  setTimeout(() => $('directReplyText')?.focus(), 80);
+
+  // Kunden-Sprache im Hintergrund erkennen (aus Description + erster eingehender Conversation)
+  _detectCustomerLanguageForTicket(ticket).then(lang => {
+    if (!DIRECT_REPLY_CTX) return;
+    DIRECT_REPLY_CTX.detectedCustomerLang = lang;
+    DIRECT_REPLY_CTX.customerLangName = LANG_NAMES[lang] || lang.toUpperCase();
+    const info = $('directReplyLangInfo');
+    if (info) {
+      if (lang === USER_DEFAULT_LANG) {
+        info.innerHTML = `Kunde schreibt auf <b>${escapeHtml(DIRECT_REPLY_CTX.customerLangName)}</b> — Übersetzung nicht nötig.`;
+      } else {
+        info.innerHTML = `Kunden-Sprache erkannt: <b>${escapeHtml(DIRECT_REPLY_CTX.customerLangName)}</b> · Übersetzung möglich.`;
+      }
+    }
+  }).catch(e => {
+    const info = $('directReplyLangInfo');
+    if (info) info.textContent = 'Sprach-Erkennung fehlgeschlagen — du kannst trotzdem antworten.';
+    console.warn('[directReply] detect:', e.message);
+  });
+}
+
+function closeDirectReplyComposer() {
+  DIRECT_REPLY_CTX = null;
+  const host = document.getElementById('subModalHost');
+  if (host) host.innerHTML = '';
+  document.body.style.overflow = '';
+}
+
+/* Erkennt die wahrscheinliche Sprache des Kunden aus dem Ticket-Text.
+   Quelle bevorzugt: Description (Original-Anfrage). Falls leer: erste eingehende Conversation. */
+const _TICKET_CUSTOMER_LANG_CACHE = new Map();
+async function _detectCustomerLanguageForTicket(ticket) {
+  if (!ticket) return USER_DEFAULT_LANG;
+  const key = ticket._accountId + '|' + ticket.id;
+  if (_TICKET_CUSTOMER_LANG_CACHE.has(key)) return _TICKET_CUSTOMER_LANG_CACHE.get(key);
+  let text = htmlToText(ticket.description_text || ticket.description || '');
+  if (text.length < 20 && Array.isArray(ticket.conversations)) {
+    const firstIncoming = ticket.conversations.find(c => c.incoming);
+    if (firstIncoming) text = htmlToText(firstIncoming.body_text || firstIncoming.body || '');
+  }
+  if (text.length < 20) {
+    _TICKET_CUSTOMER_LANG_CACHE.set(key, USER_DEFAULT_LANG);
+    return USER_DEFAULT_LANG;
+  }
+  // Wir nutzen translateMessage mit target = unsere User-Sprache — das gibt uns
+  // die erkannte Quellsprache zurück. Cache wird mitbenutzt.
+  try {
+    const res = await translateMessage(text.slice(0, 2000), USER_DEFAULT_LANG);
+    _TICKET_CUSTOMER_LANG_CACHE.set(key, res.sourceLang);
+    return res.sourceLang;
+  } catch (e) {
+    _TICKET_CUSTOMER_LANG_CACHE.set(key, USER_DEFAULT_LANG);
+    return USER_DEFAULT_LANG;
+  }
+}
+
+async function directReplyAppendTranslation(btnEl, replaceMode) {
+  const ctx = DIRECT_REPLY_CTX;
+  if (!ctx) return;
+  const ta = $('directReplyText');
+  if (!ta) return;
+  const text = (ta.value || '').trim();
+  if (!text) return toast('Bitte erst deine Antwort eintippen', 'warn');
+  const targetLang = ctx.detectedCustomerLang || USER_DEFAULT_LANG;
+  if (targetLang === USER_DEFAULT_LANG) {
+    return toast('Kunde schreibt schon ' + (LANG_NAMES[USER_DEFAULT_LANG] || 'Deutsch') + ' — keine Übersetzung nötig', 'info', 4000);
+  }
+  setBusy(btnEl, true, 'Übersetze…');
+  // den jeweils ANDEREN Button auch sperren
+  const otherId = btnEl.id === 'directReplyBothBtn' ? 'directReplyOnlyBtn' : 'directReplyBothBtn';
+  const other = $(otherId);
+  if (other) other.disabled = true;
+  try {
+    const res = await translateMessage(text, targetLang, { hintSource: USER_DEFAULT_LANG });
+    if (replaceMode) {
+      ta.value = res.translation;
+    } else {
+      const separator = '\n\n---  ' + (LANG_NAMES[targetLang] || targetLang.toUpperCase()) + '  ---\n\n';
+      ta.value = text + separator + res.translation;
+    }
+    // Scroll an's Ende und re-focus
+    ta.focus();
+    ta.scrollTop = ta.scrollHeight;
+    toast('Übersetzt nach ' + (LANG_NAMES[targetLang] || targetLang), 'success', 3000);
+  } catch (e) {
+    toast('Übersetzung fehlgeschlagen: ' + e.message, 'error', 6000);
+  } finally {
+    setBusy(btnEl, false);
+    if (other) other.disabled = false;
+  }
+}
+
+async function sendDirectReply(btnEl) {
+  const ctx = DIRECT_REPLY_CTX;
+  if (!ctx) return;
+  const text = ($('directReplyText')?.value || '').trim();
+  if (!text) return toast('Antwort ist leer', 'warn');
+  const withSig = $('directReplyWithSig')?.checked !== false;
+  setBusy(btnEl, true, 'Sende…');
+  try {
+    let bodyHtml = textToHtmlForFreshdesk(text);
+    if (withSig) {
+      try {
+        const me = await fetchAgentMe(ctx.accountId);
+        const sig = me?.signature || '';
+        if (sig) bodyHtml = appendSignatureHtml(bodyHtml, sig);
+      } catch (_) {}
+    }
+    const base = '/freshdesk/' + encodeURIComponent(ctx.accountId) + '/api/v2/tickets/' + ctx.ticketId;
+    await proxyJson(base + '/reply', { method: 'POST', body: JSON.stringify({ body: bodyHtml }) });
+    closeDirectReplyComposer();
+    toast('Antwort gesendet', 'success', 4000);
+    // Detail-View neu laden damit die neue Conversation sichtbar ist
+    if (CURRENT_TICKET && CURRENT_TICKET.id === ctx.ticketId) {
+      try {
+        const full = await fetchTicketDetail(ctx.accountId, ctx.ticketId);
+        if (full) { CURRENT_TICKET = full; renderTicketDetailBody(full); }
+      } catch (_) {}
+    }
+  } catch (e) {
+    setBusy(btnEl, false);
+    toast('Senden fehlgeschlagen: ' + e.message, 'error', 8000);
+  }
 }
 
 // Mini-Markdown: **fett** + Zeilenumbrüche, alles andere escapen
