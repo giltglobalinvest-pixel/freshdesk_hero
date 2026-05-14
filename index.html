@@ -321,7 +321,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.41.3';
+const APP_VERSION = 'v2.42.0';
 // Read-Token absichtlich gesplittet, damit GitHub Secret-Scanning beim Push nicht blockt.
 // Der Token ist read-only und Base-scoped → bewusst eingebettet (Architektur-Entscheidung).
 const _RK = 'patu8KWM8aWB' + 'yxCGL.69fae5d9fa4b94c2' + '66b426dadd71a51f574945d840b33569058ab5e9d89ebef3';
@@ -1197,6 +1197,27 @@ async function proxyJson(path, init = {}) {
   if (typeof data === 'string' && /^[\{\[]/.test(data.trim())) {
     try { data = JSON.parse(data); } catch (_) {}
   }
+  // KI-Kosten-Audit: erfolgreiche Anthropic-Calls werden automatisch geloggt.
+  // Fire-and-forget — blockiert nichts, kein Fehler-Propagation. Feature-Label wird
+  // heuristisch aus dem system-Prompt geraten.
+  if (res.ok && typeof path === 'string' && path.startsWith('/anthropic')) {
+    try {
+      const usage = data?.usage || data?.message?.usage;
+      if (usage && typeof usage.input_tokens === 'number') {
+        const model = (data?.model || (() => {
+          try { return (typeof init.body === 'string' ? JSON.parse(init.body) : init.body || {})?.model; } catch (_) { return null; }
+        })()) || '_default';
+        const feature = (init && init._aiFeature) || _detectAiFeature(init?.body);
+        recordAiUsage({
+          model,
+          input_tokens:  usage.input_tokens || 0,
+          output_tokens: usage.output_tokens || 0,
+          feature,
+          accountId: init?._aiAccountId || null,
+        }).catch(() => {});
+      }
+    } catch (_) {}
+  }
   if (!res.ok) {
     // ALLE Felder strikt clippen, damit ein riesiger Response-Body nie die UI flutet
     const clip = (s) => String(s ?? '').slice(0, 300);
@@ -1241,6 +1262,123 @@ const REGELN_TABLE = 'Regeln';
 const NOTIZEN_TABLE = 'MeineNotizen';
 const ACCESS_TABLE = 'AccountAccess';
 const WISSEN_TABLE = 'KI_Wissen';
+const KOSTEN_TABLE = 'KI_Kosten';
+
+// Anthropic-Modell-Preise (USD je 1M Tokens). Stand 2026-Q1.
+// Beim Update einer neuen Modell-Version: hier eintragen, sonst wird Default-Eintrag genutzt.
+const AI_MODEL_PRICES = {
+  // Haiku-Reihe — günstig, für hochfrequente Calls (Eval, Validierung, kleine Helfer)
+  'claude-haiku-4-5':           { in: 1.00, out: 5.00 },
+  'claude-haiku-4-5-20251001':  { in: 1.00, out: 5.00 },
+  'claude-haiku-3-5':           { in: 0.80, out: 4.00 },
+  'claude-haiku-3-5-20241022':  { in: 0.80, out: 4.00 },
+  // Sonnet-Reihe — Standard für KI-Assistant, Vorschläge, Zusammenfassungen
+  'claude-sonnet-4-5':          { in: 3.00, out: 15.00 },
+  'claude-sonnet-4-5-20250929': { in: 3.00, out: 15.00 },
+  'claude-sonnet-3-5':          { in: 3.00, out: 15.00 },
+  // Opus — selten, nur für aufwendige Aufgaben
+  'claude-opus-4':              { in: 15.00, out: 75.00 },
+  // Default-Fallback wenn Modell unbekannt
+  '_default':                   { in: 3.00, out: 15.00 },
+};
+
+/* Berechnet Kosten in USD aus Token-Counts und Modell. */
+function _calcAiCost(model, inputTokens, outputTokens) {
+  const prices = AI_MODEL_PRICES[model] || AI_MODEL_PRICES._default;
+  const inCost  = (inputTokens  / 1_000_000) * prices.in;
+  const outCost = (outputTokens / 1_000_000) * prices.out;
+  return inCost + outCost;
+}
+
+/* Schreibt einen Kostenpunkt nach Airtable + lokalen Cache. Fire-and-forget. */
+async function recordAiUsage(opts) {
+  const { model, input_tokens, output_tokens, feature, accountId } = opts || {};
+  if (!APP_KEYS.user?.api_key) return;
+  if (typeof input_tokens !== 'number' && typeof output_tokens !== 'number') return;
+  try {
+    const cost = _calcAiCost(model || '_default', input_tokens || 0, output_tokens || 0);
+    const me = APP_KEYS.user || {};
+    const fields = {
+      account_id:     accountId || '',
+      feature:        feature || 'misc',
+      model:          model || '_default',
+      input_tokens:   String(input_tokens || 0),
+      output_tokens:  String(output_tokens || 0),
+      cost_usd:       cost.toFixed(6),
+      agent_email:    me.email || '',
+      agent_name:     me.name  || '',
+      created:        nowIso(),
+    };
+    const rec = await airtableWrite(KOSTEN_TABLE, fields);
+    // Lokalen Cache aktualisieren — Dashboard kann sofort die neue Zahl zeigen
+    if (!APP_STATE.aiCostLog) APP_STATE.aiCostLog = [];
+    APP_STATE.aiCostLog.unshift({
+      recordId: rec.id,
+      account_id:    fields.account_id,
+      feature:       fields.feature,
+      model:         fields.model,
+      input_tokens:  parseInt(fields.input_tokens, 10) || 0,
+      output_tokens: parseInt(fields.output_tokens, 10) || 0,
+      cost_usd:      cost,
+      agent_email:   fields.agent_email,
+      agent_name:    fields.agent_name,
+      created:       fields.created,
+    });
+    // Cap auf 5000 Einträge im RAM
+    if (APP_STATE.aiCostLog.length > 5000) APP_STATE.aiCostLog.length = 5000;
+  } catch (e) {
+    console.warn('recordAiUsage fehlgeschlagen (nicht kritisch):', e.message);
+  }
+}
+
+/* Lädt die letzten 90 Tage Kostenpunkte beim Boot — für sofortige Dashboard-Anzeige. */
+async function loadAiCostLog() {
+  if (!APP_KEYS.user) return;
+  try {
+    const cutoff = new Date(Date.now() - 90 * 86400e3).toISOString();
+    const formula = "{created}>='" + cutoff + "'";
+    const recs = await airtableRead(KOSTEN_TABLE, { filter: formula, pageSize: 100, maxRecords: 5000 });
+    APP_STATE.aiCostLog = (recs || []).map(r => {
+      const f = r.fields || {};
+      return {
+        recordId: r.id,
+        account_id:    f.account_id || '',
+        feature:       f.feature || 'misc',
+        model:         f.model || '_default',
+        input_tokens:  parseInt(f.input_tokens, 10) || 0,
+        output_tokens: parseInt(f.output_tokens, 10) || 0,
+        cost_usd:      parseFloat(f.cost_usd) || 0,
+        agent_email:   f.agent_email || '',
+        agent_name:    f.agent_name || '',
+        created:       f.created || '',
+      };
+    }).sort((a, b) => new Date(b.created || 0) - new Date(a.created || 0));
+    console.log('[ai-costs] Geladen:', APP_STATE.aiCostLog.length, 'Records');
+  } catch (e) {
+    console.warn('loadAiCostLog fehlgeschlagen (nicht kritisch):', e.message);
+  }
+}
+
+/* Heuristische Erkennung des Feature-Labels aus dem System-Prompt eines Anthropic-Calls.
+   Da wir nicht alle proxyJson('/anthropic/...')-Aufrufstellen anfassen wollen, raten wir
+   das Feature anhand von markanten Schlüsselwörtern im system-Prompt. */
+function _detectAiFeature(body) {
+  try {
+    const parsed = typeof body === 'string' ? JSON.parse(body) : body;
+    const sys = String(parsed?.system || '').toLowerCase();
+    const userMsg = String(parsed?.messages?.[0]?.content || '').toLowerCase();
+    const combined = sys + ' ' + userMsg.slice(0, 500);
+    if (/übersetz|übersetze/.test(combined))          return 'translation';
+    if (/telefonnummer|gehören.*nummer/.test(combined)) return 'phone-validation';
+    if (/regel|matchcriteria|rule/.test(combined))    return 'rule';
+    if (/zusammen|summary|fasse/.test(combined))      return 'summary';
+    if (/whatsapp/.test(combined))                     return 'whatsapp';
+    if (/such|search|interpretier/.test(combined))    return 'search';
+    if (/kontakt.*vorschlag|aiSuggest|vervoll/.test(combined)) return 'contact-suggest';
+    if (/assistant|aktion|antworte/.test(combined))   return 'assistant';
+    return 'misc';
+  } catch (_) { return 'misc'; }
+}
 
 async function ensureAppTables() {
   // Accounts-Tabelle anlegen falls nicht vorhanden
@@ -1286,6 +1424,19 @@ async function ensureAppTables() {
     { name: 'freshdesk_api_key',  type: 'singleLineText' },  // User-spezifischer FD-Key
     { name: 'freshsales_api_key', type: 'singleLineText' },  // optional: User-spezifischer Freshsales-Key
     { name: 'created',            type: 'singleLineText' },
+  ]);
+  // KI-Kosten-Audit: jeder Anthropic-API-Call wird hier mit Tokens + USD-Kosten geloggt
+  // für das Dashboard. Pro Call ein Record. Wird über proxyJson auto-getrackt.
+  await ensureTable(KOSTEN_TABLE, [
+    { name: 'account_id',     type: 'singleLineText' },  // Optional: zugehöriger FD-Account
+    { name: 'feature',        type: 'singleLineText' },  // 'summary' | 'rule' | 'translation' | ...
+    { name: 'model',          type: 'singleLineText' },  // 'claude-haiku-4-5-20251001' etc.
+    { name: 'input_tokens',   type: 'singleLineText' },  // Number-as-string (Airtable-kompatibel)
+    { name: 'output_tokens',  type: 'singleLineText' },
+    { name: 'cost_usd',       type: 'singleLineText' },  // 6 Dezimalstellen
+    { name: 'agent_email',    type: 'singleLineText' },
+    { name: 'agent_name',     type: 'singleLineText' },
+    { name: 'created',        type: 'singleLineText' },
   ]);
   // Team-Wissen: jede Aktion (reply/assign/group/status/hide/spam/forward/note) wird hier
   // als Lern-Datensatz gespeichert. Wird von der Vorschlag-Engine + Indikator-Icons gelesen.
@@ -5228,6 +5379,7 @@ function navTo(page) {
   else if (page === 'users')     renderFn = renderUsersPage;
   else if (page === 'rules')     renderFn = renderRulesPage;
   else if (page === 'automated') renderFn = renderAutomatedPage;
+  else if (page === 'costs')     renderFn = renderCostsPage;
   try {
     const result = renderFn();
     if (result && typeof result.catch === 'function') {
@@ -12608,12 +12760,254 @@ function renderProfilePage() {
           <i data-lucide="bot" class="w-4 h-4 text-purple-600"></i> Automatisiert
         </button>
       </div>
+      <button onclick="navTo('costs')" class="w-full bg-gradient-to-r from-emerald-50 to-amber-50 border border-emerald-200 rounded-xl py-3 px-3 text-sm font-medium hover:opacity-90 flex items-center justify-center gap-2">
+        <i data-lucide="wallet" class="w-4 h-4 text-emerald-600"></i> KI-Kosten-Dashboard
+        ${(() => {
+          const log = APP_STATE.aiCostLog || [];
+          const today = new Date(); today.setHours(0,0,0,0);
+          const todaySum = log.filter(x => new Date(x.created) >= today).reduce((s, x) => s + (x.cost_usd || 0), 0);
+          return todaySum > 0 ? `<span class="text-[10px] text-emerald-700 font-mono bg-emerald-100 px-1.5 py-0.5 rounded">$${todaySum.toFixed(4)} heute</span>` : '';
+        })()}
+      </button>
 
       <button onclick="logout()" class="w-full bg-red-50 border border-red-200 hover:bg-red-100 text-red-700 rounded-xl py-3 font-medium flex items-center justify-center gap-2">
         <i data-lucide="log-out" class="w-4 h-4"></i> Abmelden
       </button>
 
       <p class="text-[10px] text-center text-ink-400 mt-2">Project-ID: ${escapeHtml(APP_CONFIG.PROJECT_ID)}</p>
+    </div>`;
+  if (window.lucide) lucide.createIcons();
+}
+
+/* ===================== KI-KOSTEN-DASHBOARD ===================== */
+function renderCostsPage() {
+  setPageTitle('KI-Kosten', 'API + Modell-Verbrauch');
+  setActiveNav('');
+  const log = APP_STATE.aiCostLog || [];
+
+  // Zeitperioden
+  const now = Date.now();
+  const todayStart = new Date(); todayStart.setHours(0,0,0,0);
+  const weekStart = todayStart.getTime() - 6 * 86400e3;
+  const monthStart = todayStart.getTime() - 29 * 86400e3;
+
+  // Filter wählen — Default: 30 Tage
+  const period = APP_STATE.costsPeriod || 'month';
+  const periodCutoff = period === 'today' ? todayStart.getTime()
+                     : period === 'week'  ? weekStart
+                     : period === 'month' ? monthStart
+                     : 0;
+  const inPeriod = log.filter(x => new Date(x.created || 0).getTime() >= periodCutoff);
+
+  // Aggregate
+  const totalCost   = inPeriod.reduce((s, x) => s + (x.cost_usd || 0), 0);
+  const totalIn     = inPeriod.reduce((s, x) => s + (x.input_tokens || 0), 0);
+  const totalOut    = inPeriod.reduce((s, x) => s + (x.output_tokens || 0), 0);
+  const callCount   = inPeriod.length;
+
+  // Heute & gestern für Vergleich
+  const today = log.filter(x => new Date(x.created || 0).getTime() >= todayStart.getTime());
+  const todayCost = today.reduce((s, x) => s + (x.cost_usd || 0), 0);
+  const ydStart = todayStart.getTime() - 86400e3;
+  const yd = log.filter(x => {
+    const t = new Date(x.created || 0).getTime();
+    return t >= ydStart && t < todayStart.getTime();
+  });
+  const ydCost = yd.reduce((s, x) => s + (x.cost_usd || 0), 0);
+
+  // Verteilung nach Feature
+  const byFeature = {};
+  inPeriod.forEach(x => {
+    const f = x.feature || 'misc';
+    if (!byFeature[f]) byFeature[f] = { count: 0, cost: 0, in: 0, out: 0 };
+    byFeature[f].count++;
+    byFeature[f].cost += x.cost_usd || 0;
+    byFeature[f].in   += x.input_tokens || 0;
+    byFeature[f].out  += x.output_tokens || 0;
+  });
+  const featuresSorted = Object.entries(byFeature).sort((a, b) => b[1].cost - a[1].cost);
+
+  // Verteilung nach Modell
+  const byModel = {};
+  inPeriod.forEach(x => {
+    const m = x.model || '_default';
+    if (!byModel[m]) byModel[m] = { count: 0, cost: 0 };
+    byModel[m].count++;
+    byModel[m].cost += x.cost_usd || 0;
+  });
+  const modelsSorted = Object.entries(byModel).sort((a, b) => b[1].cost - a[1].cost);
+
+  // Verteilung nach Agent (Team-Sicht)
+  const byAgent = {};
+  inPeriod.forEach(x => {
+    const a = x.agent_name || x.agent_email || '(unbekannt)';
+    if (!byAgent[a]) byAgent[a] = { count: 0, cost: 0 };
+    byAgent[a].count++;
+    byAgent[a].cost += x.cost_usd || 0;
+  });
+  const agentsSorted = Object.entries(byAgent).sort((a, b) => b[1].cost - a[1].cost);
+
+  // Tages-Sparkline (letzte 14 Tage)
+  const days = [];
+  for (let i = 13; i >= 0; i--) {
+    const dStart = todayStart.getTime() - i * 86400e3;
+    const dEnd = dStart + 86400e3;
+    const sum = log.filter(x => {
+      const t = new Date(x.created || 0).getTime();
+      return t >= dStart && t < dEnd;
+    }).reduce((s, x) => s + (x.cost_usd || 0), 0);
+    days.push({ date: new Date(dStart), cost: sum });
+  }
+  const maxDayCost = Math.max(0.0001, ...days.map(d => d.cost));
+
+  const fmtUsd = (n) => '$' + (n || 0).toFixed(n < 0.01 ? 6 : 4);
+  const fmtTokens = (n) => {
+    if (n < 1000) return String(n);
+    if (n < 1_000_000) return (n/1000).toFixed(1) + 'k';
+    return (n/1_000_000).toFixed(2) + 'M';
+  };
+
+  const featureLabels = {
+    summary: 'Zusammenfassung', rule: 'Regel-Eval', translation: 'Übersetzung',
+    'phone-validation': 'Tel-Validierung', whatsapp: 'WhatsApp-Text',
+    search: 'Suche', 'contact-suggest': 'Kontakt-Vorschlag',
+    assistant: 'KI-Assistent', misc: 'Sonstiges',
+  };
+  const periodLabels = { today: 'Heute', week: 'letzte 7 Tage', month: 'letzte 30 Tage', all: 'gesamt' };
+
+  $('pageContent').innerHTML = `
+    <div class="space-y-3 max-w-2xl mx-auto">
+      <button onclick="navTo('profile')" class="text-[11px] text-brand-600 inline-flex items-center gap-1 -ml-1"><i data-lucide="arrow-left" class="w-3 h-3"></i> Zurück zum Profil</button>
+
+      <!-- Hero-Karte: Gesamtkosten -->
+      <div class="bg-gradient-to-br from-emerald-50 via-amber-50 to-brand-50 border border-emerald-200 rounded-2xl p-4">
+        <div class="flex items-start gap-3">
+          <div class="w-12 h-12 rounded-xl bg-gradient-to-br from-emerald-500 to-amber-500 flex items-center justify-center text-white shrink-0">
+            <i data-lucide="wallet" class="w-6 h-6"></i>
+          </div>
+          <div class="flex-1 min-w-0">
+            <p class="text-[10px] uppercase tracking-wider text-emerald-800 font-semibold">${escapeHtml(periodLabels[period] || 'gesamt')} · Anthropic-API</p>
+            <p class="text-3xl font-bold text-ink-900 mt-1">${escapeHtml(fmtUsd(totalCost))}</p>
+            <p class="text-[11px] text-ink-600 mt-0.5">${callCount} Calls · ${escapeHtml(fmtTokens(totalIn))} in + ${escapeHtml(fmtTokens(totalOut))} out Tokens</p>
+          </div>
+        </div>
+        <!-- Periode-Tabs -->
+        <div class="flex gap-1 mt-3 bg-white/60 rounded-lg p-1">
+          ${['today','week','month','all'].map(p => `
+            <button onclick="APP_STATE.costsPeriod='${p}'; renderCostsPage()" class="flex-1 text-[11px] py-1.5 rounded font-semibold ${period === p ? 'bg-emerald-600 text-white shadow' : 'text-ink-700 hover:bg-white'}">
+              ${escapeHtml(periodLabels[p])}
+            </button>`).join('')}
+        </div>
+      </div>
+
+      <!-- Heute vs Gestern Vergleich -->
+      <div class="grid grid-cols-2 gap-2">
+        <div class="bg-white border border-ink-200 rounded-xl p-3">
+          <p class="text-[10px] uppercase tracking-wider text-ink-500 font-semibold">Heute</p>
+          <p class="text-xl font-bold text-ink-900 mt-1">${escapeHtml(fmtUsd(todayCost))}</p>
+          <p class="text-[10px] text-ink-500 mt-0.5">${today.length} Calls</p>
+        </div>
+        <div class="bg-white border border-ink-200 rounded-xl p-3">
+          <p class="text-[10px] uppercase tracking-wider text-ink-500 font-semibold">Gestern</p>
+          <p class="text-xl font-bold text-ink-700 mt-1">${escapeHtml(fmtUsd(ydCost))}</p>
+          <p class="text-[10px] text-ink-500 mt-0.5">${yd.length} Calls${todayCost > 0 && ydCost > 0 ? ' · ' + (((todayCost/ydCost - 1) * 100) >= 0 ? '+' : '') + ((todayCost/ydCost - 1) * 100).toFixed(0) + '%' : ''}</p>
+        </div>
+      </div>
+
+      <!-- 14-Tage-Sparkline -->
+      <div class="bg-white border border-ink-200 rounded-xl p-3">
+        <p class="text-[10px] uppercase tracking-wider text-ink-500 font-semibold mb-2">Letzte 14 Tage</p>
+        <div class="flex items-end gap-1 h-20">
+          ${days.map(d => {
+            const h = Math.max(2, (d.cost / maxDayCost) * 100);
+            const isToday = d.date.toDateString() === new Date().toDateString();
+            const tip = d.date.toLocaleDateString('de-DE', { weekday: 'short', day: '2-digit', month: '2-digit' }) + ': ' + fmtUsd(d.cost);
+            return `<div class="flex-1 flex flex-col justify-end" title="${escapeAttr(tip)}">
+              <div class="${isToday ? 'bg-emerald-500' : 'bg-emerald-300'} rounded-t" style="height:${h}%"></div>
+            </div>`;
+          }).join('')}
+        </div>
+        <div class="flex justify-between mt-1.5 text-[9px] text-ink-400">
+          <span>${days[0].date.toLocaleDateString('de-DE', { day: '2-digit', month: '2-digit' })}</span>
+          <span>${days[days.length - 1].date.toLocaleDateString('de-DE', { day: '2-digit', month: '2-digit' })}</span>
+        </div>
+      </div>
+
+      <!-- Nach Feature -->
+      ${featuresSorted.length ? `
+        <div class="bg-white border border-ink-200 rounded-xl p-3">
+          <p class="text-[10px] uppercase tracking-wider text-ink-500 font-semibold mb-2">Verbrauch nach Feature</p>
+          <div class="space-y-2">
+            ${featuresSorted.map(([key, v]) => {
+              const pct = totalCost > 0 ? (v.cost / totalCost) * 100 : 0;
+              return `
+                <div>
+                  <div class="flex items-center justify-between text-[11px] mb-0.5">
+                    <span class="text-ink-800 font-medium truncate">${escapeHtml(featureLabels[key] || key)}</span>
+                    <span class="text-ink-600 font-mono">${escapeHtml(fmtUsd(v.cost))} <span class="text-ink-400">· ${v.count}×</span></span>
+                  </div>
+                  <div class="h-1.5 bg-ink-100 rounded-full overflow-hidden">
+                    <div class="h-full bg-gradient-to-r from-emerald-400 to-amber-400 rounded-full" style="width:${pct.toFixed(1)}%"></div>
+                  </div>
+                </div>`;
+            }).join('')}
+          </div>
+        </div>` : ''}
+
+      <!-- Nach Modell -->
+      ${modelsSorted.length ? `
+        <div class="bg-white border border-ink-200 rounded-xl p-3">
+          <p class="text-[10px] uppercase tracking-wider text-ink-500 font-semibold mb-2">Verbrauch nach Modell</p>
+          <div class="space-y-1.5">
+            ${modelsSorted.map(([model, v]) => {
+              const prices = AI_MODEL_PRICES[model] || AI_MODEL_PRICES._default;
+              return `<div class="flex items-center justify-between gap-2 text-[11px]">
+                <div class="min-w-0 flex-1">
+                  <p class="text-ink-800 font-medium truncate font-mono text-[10px]">${escapeHtml(model)}</p>
+                  <p class="text-[9px] text-ink-400">in: $${prices.in.toFixed(2)}/Mtok · out: $${prices.out.toFixed(2)}/Mtok</p>
+                </div>
+                <div class="text-right shrink-0">
+                  <p class="text-ink-900 font-mono">${escapeHtml(fmtUsd(v.cost))}</p>
+                  <p class="text-[9px] text-ink-500">${v.count}×</p>
+                </div>
+              </div>`;
+            }).join('')}
+          </div>
+        </div>` : ''}
+
+      <!-- Nach Bearbeiter -->
+      ${agentsSorted.length > 1 ? `
+        <div class="bg-white border border-ink-200 rounded-xl p-3">
+          <p class="text-[10px] uppercase tracking-wider text-ink-500 font-semibold mb-2">Verbrauch nach Bearbeiter</p>
+          <div class="space-y-1.5">
+            ${agentsSorted.slice(0, 10).map(([name, v]) => {
+              const pct = totalCost > 0 ? (v.cost / totalCost) * 100 : 0;
+              return `<div class="flex items-center gap-2 text-[11px]">
+                <div class="w-7 h-7 rounded-full bg-brand-100 text-brand-700 flex items-center justify-center font-semibold shrink-0">${escapeHtml(name.charAt(0).toUpperCase())}</div>
+                <div class="flex-1 min-w-0">
+                  <div class="flex items-center justify-between gap-1">
+                    <span class="text-ink-800 font-medium truncate">${escapeHtml(name)}</span>
+                    <span class="text-ink-600 font-mono shrink-0">${escapeHtml(fmtUsd(v.cost))}</span>
+                  </div>
+                  <div class="h-1 bg-ink-100 rounded-full overflow-hidden mt-0.5">
+                    <div class="h-full bg-brand-400 rounded-full" style="width:${pct.toFixed(1)}%"></div>
+                  </div>
+                </div>
+              </div>`;
+            }).join('')}
+          </div>
+        </div>` : ''}
+
+      ${!inPeriod.length ? `
+        <div class="bg-ink-50 border border-ink-200 rounded-xl p-6 text-center">
+          <i data-lucide="info" class="w-8 h-8 mx-auto text-ink-400"></i>
+          <p class="text-sm text-ink-700 mt-2 font-semibold">Noch keine KI-Aktivität in ${escapeHtml(periodLabels[period])}.</p>
+          <p class="text-[11px] text-ink-500 mt-1">Nutze die KI-Features (Zusammenfassung, Assistant, Übersetzung, …) — hier siehst du dann die Kosten.</p>
+        </div>` : ''}
+
+      <p class="text-[10px] text-center text-ink-400 mt-2">
+        Preise: Anthropic-Listenpreise (USD pro 1M Tokens). Aktualisiert sich automatisch wenn neue Modell-Versionen genutzt werden.
+      </p>
     </div>`;
   if (window.lucide) lucide.createIcons();
 }
@@ -14937,6 +15331,8 @@ async function showApp() {
   loadMyNotes().catch(e => console.warn('MyNotes-Load:', e.message));
   // Team-Wissen-Index laden (im Hintergrund — Tabelle wird beim ersten Bedarf via ensureAppTables erstellt)
   loadKnowledge().catch(e => console.warn('Wissen-Load:', e.message));
+  // KI-Kosten-Log laden (im Hintergrund — fürs Dashboard)
+  loadAiCostLog().catch(e => console.warn('AI-Cost-Load:', e.message));
   navTo('tickets');
   // Deep-Link: wenn URL-Hash auf ein Ticket zeigt, direkt öffnen
   handleDeepLink();
