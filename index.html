@@ -325,7 +325,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.43.0';
+const APP_VERSION = 'v2.43.1';
 // Read-Token absichtlich gesplittet, damit GitHub Secret-Scanning beim Push nicht blockt.
 // Der Token ist read-only und Base-scoped → bewusst eingebettet (Architektur-Entscheidung).
 const _RK = 'patu8KWM8aWB' + 'yxCGL.69fae5d9fa4b94c2' + '66b426dadd71a51f574945d840b33569058ab5e9d89ebef3';
@@ -2739,71 +2739,111 @@ async function fetchFsMe(accountId) {
 }
 
 /* Holt offene Tasks für den eingeloggten FS-User auf einem Account.
-   Strategie: erst /api/tasks/filters laden, einen „Open Tasks"-View finden, dann
-   /api/tasks/view/{filterId}?include=targetable,owner. Filter auf owner_id = me.id.
-   Bei kein View: Fallback auf direkten /api/tasks Call (manche FS-Tenants haben das). */
+   Strategie: probiert mehrere Views aus tasks/filters durch + Fallback auf direkten
+   /api/tasks Call. Mergt die Ergebnisse und filtert clientseitig.
+
+   Bei Diagnose-Mode (window._fsTasksDebug=true): Console-Log mit allen Schritten +
+   Toast mit Zähl-Statistik. */
 async function fetchFsTasks(accountId, options = {}) {
   if (!accountId) return [];
   const me = await fetchFsMe(accountId);
-  if (!me?.id) return [];
-  let viewId = null;
+  const dbg = !!window._fsTasksDebug;
+  if (dbg) console.log('[fs-tasks-dbg] me:', me, 'on acc', accountId);
+
+  // Schritt 1: Filter-Views laden
+  let filterViews = [];
   try {
     const filtersResp = await proxyJson('/freshsales/' + encodeURIComponent(accountId) + '/api/tasks/filters');
-    const filters = filtersResp?.filters || filtersResp || [];
-    // Bevorzugt: View mit „open" / „my" im Namen
-    const arr = Array.isArray(filters) ? filters : [];
-    const byPriority = ['open', 'today', 'all', 'my'];
-    for (const kw of byPriority) {
-      const v = arr.find(f => String(f.name || '').toLowerCase().includes(kw));
-      if (v) { viewId = v.id; break; }
-    }
-    if (!viewId && arr.length) viewId = arr[0].id;
+    const list = filtersResp?.filters || filtersResp || [];
+    filterViews = Array.isArray(list) ? list : [];
+    if (dbg) console.log('[fs-tasks-dbg] Verfügbare Filter-Views:', filterViews.map(f => f.id + ':' + f.name));
   } catch (e) {
     console.warn('[fs-tasks] filters-Endpoint fehlgeschlagen:', e.message);
   }
-  let allTasks = [];
-  try {
-    const path = viewId
-      ? '/freshsales/' + encodeURIComponent(accountId) + '/api/tasks/view/' + viewId + '?include=targetable,owner&per_page=100'
-      : '/freshsales/' + encodeURIComponent(accountId) + '/api/tasks?include=targetable,owner&per_page=100';
-    const data = await proxyJson(path);
-    allTasks = data?.tasks || data?.items || (Array.isArray(data) ? data : []);
-  } catch (e) {
-    console.warn('[fs-tasks] Tasks-Endpoint fehlgeschlagen:', e.message);
-    return [];
+
+  // Schritt 2: ALLE potentiell relevanten Views durchprobieren, Ergebnisse mergen + deduplizieren
+  // Bevorzugt: my/owned/open/today — sonst alle
+  const sortedViews = filterViews.slice().sort((a, b) => {
+    const score = v => {
+      const n = String(v.name || '').toLowerCase();
+      if (/my\b|mine|mir|owned/.test(n)) return 0;
+      if (/open|offen/.test(n)) return 1;
+      if (/today|heute/.test(n)) return 2;
+      if (/overdue|ueberf|überf/.test(n)) return 3;
+      if (/week|woche/.test(n)) return 4;
+      if (/all/.test(n)) return 5;
+      return 6;
+    };
+    return score(a) - score(b);
+  });
+  // Maximal die ersten 3 Views ausprobieren (Performance)
+  const viewsToTry = sortedViews.slice(0, 3);
+
+  const collected = new Map(); // id → task
+  for (const view of viewsToTry) {
+    try {
+      const path = '/freshsales/' + encodeURIComponent(accountId) + '/api/tasks/view/' + view.id +
+        '?include=targetable,owner&per_page=100';
+      const data = await proxyJson(path);
+      const tasks = data?.tasks || data?.items || (Array.isArray(data) ? data : []);
+      if (dbg) console.log('[fs-tasks-dbg] View „' + view.name + '" liefert', tasks.length, 'Tasks');
+      tasks.forEach(t => { if (t?.id != null) collected.set(t.id, { ...t, _viewSource: view.name }); });
+      // Wenn schon viele Tasks gesammelt sind, bei nächster View nicht mehr nötig
+      if (collected.size >= 100) break;
+    } catch (e) {
+      if (dbg) console.warn('[fs-tasks-dbg] View', view.id, view.name, 'failed:', e.message);
+    }
   }
-  // Owner-Filter (clientseitig — FS-Filter ignoriert das manchmal je nach View)
+
+  // Schritt 3: Falls nichts kam — direkter /api/tasks Call ohne View
+  if (collected.size === 0) {
+    try {
+      const data = await proxyJson('/freshsales/' + encodeURIComponent(accountId) + '/api/tasks?include=targetable,owner&per_page=100');
+      const tasks = data?.tasks || data?.items || (Array.isArray(data) ? data : []);
+      if (dbg) console.log('[fs-tasks-dbg] Direkter /tasks-Call liefert', tasks.length, 'Tasks');
+      tasks.forEach(t => { if (t?.id != null) collected.set(t.id, t); });
+    } catch (e) {
+      console.warn('[fs-tasks] Direct /tasks-Endpoint fehlgeschlagen:', e.message);
+    }
+  }
+
+  const allTasks = Array.from(collected.values());
+  if (dbg) console.log('[fs-tasks-dbg] Gesamt-Pool nach Merge:', allTasks.length);
+
+  // Schritt 4: Owner-Filter — flexibel: owner_id, owner.id, owner.email
+  const myEmail = String(APP_KEYS.user?.email || me?.email || '').toLowerCase().trim();
+  const myId = me?.id ? String(me.id) : null;
   const mineOnly = allTasks.filter(t => {
-    if (t.owner_id && String(t.owner_id) === String(me.id)) return true;
-    if (t.owner?.id && String(t.owner.id) === String(me.id)) return true;
+    if (myId && t.owner_id && String(t.owner_id) === myId) return true;
+    if (myId && t.owner?.id && String(t.owner.id) === myId) return true;
+    if (myEmail && t.owner?.email && String(t.owner.email).toLowerCase() === myEmail) return true;
+    // Wenn der View bereits „my" hieß und keine Owner-Info da ist → vertraue dem Server
+    if (t._viewSource && /my\b|mine|mir/i.test(t._viewSource) && !t.owner_id && !t.owner) return true;
     return false;
   });
-  // Status-Filter: nur offen (status 1 = open in FS-Standard)
+  if (dbg) console.log('[fs-tasks-dbg] Nach Owner-Filter (me.id=' + myId + ', email=' + myEmail + '):', mineOnly.length);
+
+  // Schritt 5: Status-Filter — explizit „completed"-Werte ausschließen (alles andere ist offen)
+  // FS-Standard: status 1=open, 2=completed. Manche Tenants nutzen 'open'/'closed' Strings.
   const onlyOpen = options.includeCompleted
     ? mineOnly
     : mineOnly.filter(t => {
-        if (t.status === 1 || t.status === 'open' || t.status === undefined) return true;
-        return false;
+        if (t.status === 2 || t.status === 'completed' || t.status === 'closed' || t.status === 'done') return false;
+        return true;
       });
-  // Targetable + Owner-Felder normalisieren — manche FS-Tenants liefern includes als
-  // separates Objekt, andere inline
-  const targetableMap = {};
-  (data => {
-    const incl = data?.included_objects || data?.includes || {};
-    Object.keys(incl).forEach(k => {
-      (Array.isArray(incl[k]) ? incl[k] : []).forEach(it => {
-        targetableMap[k + ':' + it.id] = it;
-      });
-    });
-  });
+  if (dbg) console.log('[fs-tasks-dbg] Nach Status-Filter (offen):', onlyOpen.length);
+
+  // Schritt 6: Targetable normalisieren
   return onlyOpen.map(t => {
     const targetType = t.targetable_type || t.target_type || t.targetable?.type || '';
     const targetId   = t.targetable_id   || t.targetable?.id || null;
-    const target = t.targetable || (targetType && targetId ? targetableMap[targetType + ':' + targetId] : null);
+    const target = t.targetable || null;
+    const phoneNumbers = target?.phone_numbers || [];
+    const findPhone = (re) => phoneNumbers.find(p => re.test(String(p.label || '').toLowerCase()))?.value || '';
     return {
       _accountId: accountId,
       id:        t.id,
-      title:     t.title || '',
+      title:     t.title || t.subject || '',
       description: t.description || '',
       due_date:  t.due_date || t.due_on || null,
       status:    t.status,
@@ -2811,15 +2851,16 @@ async function fetchFsTasks(accountId, options = {}) {
       owner_name: t.owner?.display_name || t.owner?.name || (me?.display_name || me?.name) || '',
       task_type_id: t.task_type_id || null,
       outcome_id:   t.outcome_id || null,
+      _viewSource:  t._viewSource || '',
       target: target ? {
-        type: targetType || '',
+        type: targetType || target.type || '',
         id:   targetId,
-        name: target.name || target.display_name || target.first_name + ' ' + (target.last_name || '') || '',
+        name: target.name || target.display_name || [target.first_name, target.last_name].filter(Boolean).join(' '),
         first_name: target.first_name || '',
         last_name:  target.last_name  || '',
         email: target.email || '',
-        phone: target.work_number || target.phone_numbers?.find(p => p.label?.toLowerCase().includes('work'))?.value || target.phone || '',
-        mobile: target.mobile_number || target.phone_numbers?.find(p => p.label?.toLowerCase().includes('mobile'))?.value || '',
+        phone:  target.work_number  || findPhone(/work|büro|buero|fest/) || target.phone  || '',
+        mobile: target.mobile_number || findPhone(/mobile|mobil|cell|handy/)            || '',
       } : null,
     };
   });
@@ -13280,6 +13321,9 @@ function _renderTasksHeader(fsAccounts) {
             <span class="w-2 h-2 rounded-full" style="background:${escapeAttr(a.color)}"></span>
             <span class="truncate max-w-32">${escapeHtml(a.name)}</span>
           </button>`).join('')}
+        <button onclick="diagnoseTasks()" class="shrink-0 inline-flex items-center gap-1 px-2.5 py-1.5 rounded-full text-[11px] font-medium bg-amber-50 text-amber-700 border border-amber-200 hover:bg-amber-100" title="FS-Tasks-Diagnose ausführen">
+          <i data-lucide="bug" class="w-3 h-3"></i> Diagnose
+        </button>
       </div>
       <!-- Filter-Chips -->
       <div class="flex gap-1.5 overflow-x-auto scrollbar-hidden -mx-1 px-1">
@@ -13310,11 +13354,22 @@ function _renderTasksList() {
 
   if (!filtered.length) {
     const filterLabel = { overdue:'überfällige', today:'für heute', week:'in dieser Woche', all:'offene' }[TASKS_STATE.filter] || '';
+    const diagnoseHint = tasks.length === 0
+      ? `<p class="text-[11px] text-ink-600 mt-2 leading-relaxed">Im aktuellen Account-Filter wurden gar keine Tasks gefunden. Mögliche Ursachen:</p>
+         <ul class="text-[11px] text-ink-600 text-left mt-1 mx-auto max-w-sm space-y-0.5 list-disc pl-5">
+           <li>Email in App ≠ Email in Freshsales (Owner-Match scheitert)</li>
+           <li>Freshsales-API-Key hat keine Tasks-Lese-Rechte</li>
+           <li>Tasks-Filter-View ist im FS-Tenant nicht eingerichtet</li>
+         </ul>
+         <button onclick="diagnoseTasks()" class="mt-3 inline-flex items-center gap-1.5 px-3 py-1.5 bg-amber-100 hover:bg-amber-200 text-amber-800 rounded-lg text-[11px] font-semibold">
+           <i data-lucide="bug" class="w-3.5 h-3.5"></i> Diagnose ausführen
+         </button>`
+      : `<p class="text-[11px] text-ink-500 mt-1">Du bist auf dem Stand. ✨ <span class="text-ink-400">(${tasks.length} insgesamt offen, aber keine ${escapeHtml(filterLabel)})</span></p>`;
     host.innerHTML = `
       <div class="bg-white rounded-2xl border border-ink-200 p-8 text-center">
         <i data-lucide="check-circle-2" class="w-10 h-10 mx-auto text-emerald-400"></i>
         <p class="text-sm text-ink-700 mt-2 font-semibold">Keine ${escapeHtml(filterLabel)} Aufgaben${TASKS_STATE.accountId === 'all' ? '' : ' in diesem Account'}.</p>
-        <p class="text-[11px] text-ink-500 mt-1">Du bist auf dem Stand. ✨</p>
+        ${diagnoseHint}
       </div>`;
     if (window.lucide) lucide.createIcons();
     return;
@@ -13322,6 +13377,42 @@ function _renderTasksList() {
 
   host.innerHTML = '<div class="space-y-2">' + filtered.map(_renderTaskCard).join('') + '</div>';
   if (window.lucide) lucide.createIcons();
+}
+
+/* Diagnose-Modus: aktiviert detailliertes Console-Logging beim nächsten Tasks-Fetch
+   + zeigt zusätzlich Toast mit Statistiken. */
+async function diagnoseTasks() {
+  window._fsTasksDebug = true;
+  toast('Diagnose-Modus aktiv — bitte Browser-Konsole öffnen und Tasks neu laden', 'info', 6000);
+  // Direkt einen Fetch über alle FS-Accounts machen und zählen
+  const fsAccounts = (APP_STATE.accounts || []).filter(a => accountHasFreshsales(a));
+  const diagResults = [];
+  for (const acc of fsAccounts) {
+    try {
+      const me = await fetchFsMe(acc.id);
+      const tasks = await fetchFsTasks(acc.id);
+      const today = new Date(); today.setHours(0,0,0,0);
+      const overdueCount = tasks.filter(t => t.due_date && new Date(t.due_date).getTime() < today.getTime()).length;
+      diagResults.push({
+        account: acc.name,
+        me: me ? (me.display_name || me.name || me.email) : '(nicht gefunden)',
+        myEmail: APP_KEYS.user?.email || '',
+        meFound: !!me,
+        tasksOwnedByMe: tasks.length,
+        overdueByMe: overdueCount,
+      });
+    } catch (e) {
+      diagResults.push({ account: acc.name, error: e.message });
+    }
+  }
+  console.log('[diagnoseTasks] Resultat:', diagResults);
+  // Sichtbare Diagnose-Anzeige als Modal
+  const summary = diagResults.map(r => r.error
+    ? '✗ ' + r.account + ': ' + r.error
+    : (r.meFound ? '✓' : '✗') + ' ' + r.account + ': me=' + r.me + ', Tasks=' + r.tasksOwnedByMe + ', überfällig=' + r.overdueByMe
+  ).join('\n');
+  alert('FS-Tasks-Diagnose:\n\n' + summary + '\n\nVoll-Log in Browser-Konsole (F12).');
+  renderTasksPage();
 }
 
 function _renderTaskCard(t) {
