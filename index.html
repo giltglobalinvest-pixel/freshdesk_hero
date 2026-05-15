@@ -325,7 +325,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.45.5';
+const APP_VERSION = 'v2.45.6';
 // Read-Token absichtlich gesplittet, damit GitHub Secret-Scanning beim Push nicht blockt.
 // Der Token ist read-only und Base-scoped → bewusst eingebettet (Architektur-Entscheidung).
 const _RK = 'patu8KWM8aWB' + 'yxCGL.69fae5d9fa4b94c2' + '66b426dadd71a51f574945d840b33569058ab5e9d89ebef3';
@@ -15654,8 +15654,11 @@ async function aiParseRule(description, ticketContext) {
     'AKTIONS-TYPEN:\n' +
     '- {"type":"note", "body":"interner Notiz-Text (Deutsch, professionell, mit \\n für Absätze)"}\n' +
     '- {"type":"reply", "body":"öffentlicher Antwort-Text an Kunde (Deutsch, höflich, mit Anrede + Abschluss)"}\n' +
-    '- {"type":"assign", "agentHint":"Name oder Rollen-Hinweis des Agents"}\n' +
-    '- {"type":"group", "groupHint":"Name oder Hinweis der Gruppe"}\n' +
+    '- {"type":"assign", "agentHint":"Name oder Rollen-Hinweis des Agents", "onlyIfUnassigned":true?}\n' +
+    '  WICHTIG: agentHint enthält AUSSCHLIESSLICH den Namen (z.B. "Mirkan Tasin") — KEINE Bedingungen, KEINE Klammer-Klauseln. Bedingungen gehören in separate Felder!\n' +
+    '  Wenn der User sagt „weise X zu, aber nur wenn noch kein Bearbeiter zugewiesen ist" → onlyIfUnassigned:true (und agentHint NUR der Name).\n' +
+    '- {"type":"group", "groupHint":"Name oder Hinweis der Gruppe", "onlyIfNoGroup":true?}\n' +
+    '  Analog: groupHint = nur der Gruppenname, ohne Bedingungen. Bedingung „nur wenn noch keine Gruppe gesetzt" → onlyIfNoGroup:true.\n' +
     '- {"type":"status", "status":"open|pending|resolved|closed"}\n' +
     '- {"type":"type", "typeHint":"Hinweis auf den Ticket-Typ"}\n' +
     '- {"type":"wiedervorlage", "days":N, "grund":"manuell|antwort|notiz|zuweisung"}\n' +
@@ -15921,42 +15924,79 @@ function _clearProcessedForTicket(accountId, ticketId) {
   }
 }
 
-// Fuzzy-Matching: hint → ID
+/* Bereinigt einen Hint-String: schneidet Klammer-Klauseln, Bindestrich-Kommentare und
+   Conditional-Phrasen ab. Beispiel: „Mirkan Tasin (nur wenn noch kein Bearbeiter
+   zugewiesen)" → „Mirkan Tasin". Wird genutzt wenn der KI-Parser Bedingungen in den
+   agentHint geschrieben hat statt sie als separates Feld zu extrahieren. */
+function _cleanHint(hint) {
+  if (!hint) return '';
+  let s = String(hint);
+  // Klammer-Klauseln raus: (..), [..], <..>, {..}
+  s = s.replace(/\s*[\(\[\{<][^\)\]\}>]*[\)\]\}>]\s*/g, ' ');
+  // Conditional-Phrasen nach Komma/Bindestrich/Doppelpunkt: „Mirkan Tasin, wenn …", „Mirkan – nur wenn …"
+  s = s.replace(/\s*[,;:–—–-]\s*(nur\s+wenn|falls|aber\s+nur|sofern|wenn\s+kein|wenn\s+nicht)\b.*$/i, '');
+  // Mehrfach-Spaces → single
+  return s.replace(/\s+/g, ' ').trim();
+}
+
+// Fuzzy-Matching: hint → ID. Tolerant gegen vom KI-Parser eingeschmuggelte Bedingungen.
 function findAgentByHint(accountId, hint) {
   if (!hint) return null;
   const cache = APP_STATE.agentsCache?.[accountId];
   if (!cache?.agents?.length) return null;
-  const h = String(hint).toLowerCase().trim();
-  const exact = cache.agents.find(a => a.name.toLowerCase() === h);
-  if (exact) return exact.id;
-  const firstName = cache.agents.find(a => a.name.toLowerCase().split(/\s+/)[0] === h);
-  if (firstName) return firstName.id;
-  const contains = cache.agents.find(a => a.name.toLowerCase().includes(h));
-  if (contains) return contains.id;
-  // E-Mail-Match
-  const byEmail = cache.agents.find(a => (a.email || '').toLowerCase() === h);
-  if (byEmail) return byEmail.id;
+  // 1. Direkter Match mit Original-Hint
+  const tryMatch = (h) => {
+    const exact = cache.agents.find(a => a.name.toLowerCase() === h);
+    if (exact) return exact.id;
+    const firstName = cache.agents.find(a => a.name.toLowerCase().split(/\s+/)[0] === h);
+    if (firstName) return firstName.id;
+    const contains = cache.agents.find(a => a.name.toLowerCase().includes(h));
+    if (contains) return contains.id;
+    const byEmail = cache.agents.find(a => (a.email || '').toLowerCase() === h);
+    if (byEmail) return byEmail.id;
+    return null;
+  };
+  const raw = String(hint).toLowerCase().trim();
+  const direct = tryMatch(raw);
+  if (direct) return direct;
+  // 2. Fallback: Klammer-Klauseln/Bedingungen abschneiden und neu versuchen
+  const cleaned = _cleanHint(hint).toLowerCase().trim();
+  if (cleaned && cleaned !== raw) return tryMatch(cleaned);
   return null;
 }
 function findGroupByHint(accountId, hint) {
   if (!hint) return null;
   const cache = APP_STATE.groupsCache?.[accountId];
   if (!cache?.groups?.length) return null;
-  const h = String(hint).toLowerCase().trim();
-  const exact = cache.groups.find(g => g.name.toLowerCase() === h);
-  if (exact) return exact.id;
-  const contains = cache.groups.find(g => g.name.toLowerCase().includes(h) || h.includes(g.name.toLowerCase()));
-  if (contains) return contains.id;
+  const tryMatch = (h) => {
+    const exact = cache.groups.find(g => g.name.toLowerCase() === h);
+    if (exact) return exact.id;
+    const contains = cache.groups.find(g => g.name.toLowerCase().includes(h) || h.includes(g.name.toLowerCase()));
+    if (contains) return contains.id;
+    return null;
+  };
+  const raw = String(hint).toLowerCase().trim();
+  const direct = tryMatch(raw);
+  if (direct) return direct;
+  const cleaned = _cleanHint(hint).toLowerCase().trim();
+  if (cleaned && cleaned !== raw) return tryMatch(cleaned);
   return null;
 }
 function findTypeByHint(accountId, hint) {
   if (!hint) return null;
   const types = APP_STATE.typesCache?.[accountId]?.types || [];
-  const h = String(hint).toLowerCase().trim();
-  const exact = types.find(t => t.toLowerCase() === h);
-  if (exact) return exact;
-  const contains = types.find(t => t.toLowerCase().includes(h) || h.includes(t.toLowerCase()));
-  if (contains) return contains;
+  const tryMatch = (h) => {
+    const exact = types.find(t => t.toLowerCase() === h);
+    if (exact) return exact;
+    const contains = types.find(t => t.toLowerCase().includes(h) || h.includes(t.toLowerCase()));
+    if (contains) return contains;
+    return null;
+  };
+  const raw = String(hint).toLowerCase().trim();
+  const direct = tryMatch(raw);
+  if (direct) return direct;
+  const cleaned = _cleanHint(hint).toLowerCase().trim();
+  if (cleaned && cleaned !== raw) return tryMatch(cleaned);
   return null;
 }
 
@@ -16017,22 +16057,37 @@ async function applyRuleActions(rule, ticket) {
         });
         performed.push('Antwort');
       } else if (a.type === 'assign') {
-        const agentId = findAgentByHint(accountId, a.agentHint);
-        if (agentId) {
-          await proxyJson(base, { method: 'PUT', body: JSON.stringify({ responder_id: agentId }) });
-          patchTicketInList(accountId, ticketId, { responder_id: agentId });
-          performed.push('Bearbeiter=' + getAgentName(accountId, agentId));
+        // Bedingung respektieren: „nur wenn noch kein Bearbeiter zugewiesen".
+        // Quelle: Feld a.onlyIfUnassigned ODER erkennbare Phrase im agentHint.
+        const condFromField = a.onlyIfUnassigned === true;
+        const condFromHint  = /\b(nur\s+wenn|falls)\b[^)]*kein.*bearbeiter|nur\s+wenn\s+nicht\s+zugewiesen/i.test(String(a.agentHint || ''));
+        if ((condFromField || condFromHint) && ticket.responder_id) {
+          performed.push('Bearbeiter übersprungen (bereits zugewiesen)');
         } else {
-          failures.push({ what: 'Bearbeiter', error: 'Kein Agent gefunden für „' + (a.agentHint || '?') + '"' });
+          const agentId = findAgentByHint(accountId, a.agentHint);
+          if (agentId) {
+            await proxyJson(base, { method: 'PUT', body: JSON.stringify({ responder_id: agentId }) });
+            patchTicketInList(accountId, ticketId, { responder_id: agentId });
+            performed.push('Bearbeiter=' + getAgentName(accountId, agentId));
+          } else {
+            failures.push({ what: 'Bearbeiter', error: 'Kein Agent gefunden für „' + (a.agentHint || '?') + '"' });
+          }
         }
       } else if (a.type === 'group') {
-        const groupId = findGroupByHint(accountId, a.groupHint);
-        if (groupId) {
-          await proxyJson(base, { method: 'PUT', body: JSON.stringify({ group_id: groupId }) });
-          patchTicketInList(accountId, ticketId, { group_id: groupId });
-          performed.push('Gruppe=' + getGroupName(accountId, groupId));
+        // Analoge Bedingung: „nur wenn noch keine Gruppe gesetzt"
+        const condFromField = a.onlyIfNoGroup === true;
+        const condFromHint  = /\b(nur\s+wenn|falls)\b[^)]*keine.*gruppe/i.test(String(a.groupHint || ''));
+        if ((condFromField || condFromHint) && ticket.group_id) {
+          performed.push('Gruppe übersprungen (bereits gesetzt)');
         } else {
-          failures.push({ what: 'Gruppe', error: 'Keine Gruppe gefunden für „' + (a.groupHint || '?') + '"' });
+          const groupId = findGroupByHint(accountId, a.groupHint);
+          if (groupId) {
+            await proxyJson(base, { method: 'PUT', body: JSON.stringify({ group_id: groupId }) });
+            patchTicketInList(accountId, ticketId, { group_id: groupId });
+            performed.push('Gruppe=' + getGroupName(accountId, groupId));
+          } else {
+            failures.push({ what: 'Gruppe', error: 'Keine Gruppe gefunden für „' + (a.groupHint || '?') + '"' });
+          }
         }
       } else if (a.type === 'status') {
         const s = _normalizeRuleStatus(a.status);
