@@ -325,7 +325,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.7';
+const APP_VERSION = 'v2.46.8';
 // Read-Token absichtlich gesplittet, damit GitHub Secret-Scanning beim Push nicht blockt.
 // Der Token ist read-only und Base-scoped → bewusst eingebettet (Architektur-Entscheidung).
 const _RK = 'patu8KWM8aWB' + 'yxCGL.69fae5d9fa4b94c2' + '66b426dadd71a51f574945d840b33569058ab5e9d89ebef3';
@@ -7003,11 +7003,21 @@ function renderTicketList(tickets) {
     });
   }
   if (!tickets.length) {
+    // v2.46.8: Auch im leeren Zustand „Mehr laden"-Button zeigen wenn der Server noch mehr
+    // Tickets hat. Häufiger Fall: User hat alle aktuellen Tickets abgearbeitet, aber auf
+    // Page 2/3 wartet noch was. Vorher: leerer Zustand → keine Möglichkeit nachzuladen.
+    const hasMore = !!APP_STATE.pageState?.hasMore;
     $('ticketList').innerHTML = `
       <div class="bg-white rounded-2xl border border-ink-200 p-8 text-center">
         <i data-lucide="inbox" class="w-10 h-10 mx-auto text-ink-400"></i>
-        <p class="text-sm text-ink-500 mt-2">Keine Tickets gefunden.</p>
-      </div>`;
+        <p class="text-sm text-ink-500 mt-2">Keine Tickets gefunden${hasMore ? ' auf dieser Seite' : ''}.</p>
+        ${hasMore ? `<p class="text-[11px] text-ink-400 mt-1">Es könnten mehr auf dem Server sein — Seite ${(APP_STATE.pageState?.page || 1) + 1} laden:</p>` : ''}
+      </div>
+      ${hasMore ? `
+        <button onclick="loadMoreTickets(this)" class="w-full bg-white border border-brand-300 rounded-2xl py-3 text-sm font-semibold text-brand-600 hover:bg-brand-50 mt-2 inline-flex items-center justify-center gap-2 active:opacity-70">
+          <i data-lucide="chevron-down" class="w-4 h-4"></i> Weitere ${TICKETS_PER_PAGE} laden
+        </button>
+      ` : ''}`;
     if (window.lucide) lucide.createIcons();
     return;
   }
