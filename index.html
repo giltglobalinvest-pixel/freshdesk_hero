@@ -325,7 +325,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.10';
+const APP_VERSION = 'v2.46.11';
 // Read-Token absichtlich gesplittet, damit GitHub Secret-Scanning beim Push nicht blockt.
 // Der Token ist read-only und Base-scoped → bewusst eingebettet (Architektur-Entscheidung).
 const _RK = 'patu8KWM8aWB' + 'yxCGL.69fae5d9fa4b94c2' + '66b426dadd71a51f574945d840b33569058ab5e9d89ebef3';
@@ -14108,7 +14108,23 @@ function renderCostsPage() {
 }
 
 /* ===================== FRESHSALES-TASKS PAGE ===================== */
-let TASKS_STATE = { accountId: 'all', filter: 'today', mine: 'mine' };
+let TASKS_STATE = {
+  accountId: 'all',
+  filter: 'today',
+  mine: 'mine',
+  // v2.46.11: Design-Variante der Aufgaben-Cards. 'classic' = original (v2.46.4),
+  // 'fresh' = neue Variante mit Gradient/Bold-Typo/Color-Akzenten. Persistiert in
+  // localStorage damit der User die Wahl behält.
+  cardStyle: (function () {
+    try { return localStorage.getItem('fdh_task_card_style') || 'classic'; } catch (_) { return 'classic'; }
+  })(),
+};
+function setTaskCardStyle(style) {
+  TASKS_STATE.cardStyle = style;
+  try { localStorage.setItem('fdh_task_card_style', style); } catch (_) {}
+  _renderTasksHeader();
+  _renderTasksList();
+}
 
 /* ============================================================
    AUFGABEN (v2.46+) — Aufgaben sind FD-Tickets in konfigurierten Gruppen.
@@ -14446,14 +14462,25 @@ function _renderTasksHeader() {
         chip('week',    'Woche',     cntWeek,    TASKS_STATE.filter === 'week') +
         chip('all',     'Alle Offen', cntAll,    TASKS_STATE.filter === 'all') +
       '</div>' +
-      // v2.46.6: Reset-Link für Auto-Repair-Cache (nur sichtbar wenn schon Tickets markiert sind)
+      // v2.46.6 + v2.46.11: Reset-Link + Design-Toggle in einer Zeile
       (function () {
         var repairedCount = Object.keys(_getRepairedMap()).length;
-        if (!repairedCount) return '';
-        return '<div class="flex items-center justify-end mt-1.5 -mx-0.5 px-0.5">' +
-          '<button onclick="resetTaskRepairCache()" class="text-[10px] text-ink-400 hover:text-ink-700 inline-flex items-center gap-1 px-1.5 py-0.5 rounded" title="Vergisst welche Aufgaben bereits repariert wurden. Beim nächsten Tab-Aufruf wird der Repair-Pfad für alle Aufgaben neu durchlaufen (langsamer, aber prüft alles erneut).">' +
-            '<i data-lucide="refresh-ccw" class="w-3 h-3"></i> ' + repairedCount + ' repariert · Cache zurücksetzen' +
-          '</button>' +
+        var styleNow = TASKS_STATE.cardStyle;
+        var styleLabel = styleNow === 'fresh' ? 'Fresh' : 'Classic';
+        var nextStyle = styleNow === 'fresh' ? 'classic' : 'fresh';
+        var nextLabel = nextStyle === 'fresh' ? 'Fresh' : 'Classic';
+        var toggleBtn =
+          '<button onclick="setTaskCardStyle(\'' + nextStyle + '\')" class="text-[10px] text-ink-500 hover:text-brand-700 inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-white border border-ink-200 hover:border-brand-300" title="Aufgaben-Karten-Design wechseln">' +
+            '<i data-lucide="palette" class="w-3 h-3"></i> Design: ' + escapeHtml(styleLabel) + ' → ' + escapeHtml(nextLabel) +
+          '</button>';
+        var resetBtn = repairedCount
+          ? '<button onclick="resetTaskRepairCache()" class="text-[10px] text-ink-400 hover:text-ink-700 inline-flex items-center gap-1 px-1.5 py-0.5 rounded" title="Vergisst welche Aufgaben bereits repariert wurden.">' +
+              '<i data-lucide="refresh-ccw" class="w-3 h-3"></i> ' + repairedCount + ' repariert · Cache zurücksetzen' +
+            '</button>'
+          : '';
+        return '<div class="flex items-center justify-between gap-2 mt-1.5 -mx-0.5 px-0.5">' +
+          toggleBtn +
+          resetBtn +
         '</div>';
       })() +
     '</div>';
@@ -14551,7 +14578,9 @@ function _renderTasksList() {
     if (window.lucide) lucide.createIcons();
     return;
   }
-  host.innerHTML = '<div class="space-y-2">' + visible.map(_renderTaskTicketCard).join('') + '</div>';
+  // v2.46.11: Design-Variante-Picker
+  var renderFn = TASKS_STATE.cardStyle === 'fresh' ? _renderTaskTicketCardFresh : _renderTaskTicketCard;
+  host.innerHTML = '<div class="space-y-2">' + visible.map(renderFn).join('') + '</div>';
   if (window.lucide) lucide.createIcons();
   _attachTaskSwipe();
 }
@@ -14704,6 +14733,146 @@ function _renderTaskTicketCard(t) {
         (accountName ? '<span class="inline-flex items-center gap-1 truncate"><span class="w-1.5 h-1.5 rounded-full shrink-0" style="background:' + escapeAttr(accountColor) + '"></span><span class="truncate">' + escapeHtml(accountName) + '</span></span>' : '') +
         '<span class="inline-flex items-center gap-0.5 font-mono">#' + ticketId + '</span>' +
         (showAssignee ? '<span class="inline-flex items-center gap-0.5 text-purple-700"><i data-lucide="user-check" class="w-2.5 h-2.5"></i>' + escapeHtml(assigneeName) + '</span>' : '') +
+      '</div>' +
+    '</div>' +
+  '</div>';
+}
+
+/* v2.46.11: ALTERNATIVE Card-Design 'Fresh' — modern, gradient-driven, große Typo,
+   farbige Akzente. Status-Farbe als vertikaler Akzent-Bar links. Phone-Pills mit
+   Gradient. Action-Buttons mit subtilen Gradient-Übergängen. Spacing großzügiger. */
+function _renderTaskTicketCardFresh(t) {
+  var accountId = t._accountId;
+  var ticketId = t.id;
+  var wv = getWiedervorlage(accountId, ticketId);
+  var due = wv ? new Date(wv.frist_am) : null;
+  var today = new Date(); today.setHours(0,0,0,0);
+  var todayMs = today.getTime();
+  var isOverdue = due && due.getTime() < todayMs;
+  var isToday   = due && due.getTime() >= todayMs && due.getTime() < todayMs + 86400e3;
+  var isWeek    = due && !isOverdue && !isToday && due.getTime() < todayMs + 7 * 86400e3;
+  var dueLabel  = due ? _fmtDueDate(due) : 'kein Termin';
+
+  // Status-Farbe für Akzent-Bar links + Frist-Pill
+  // overdue → coral, today → amber, week → sky, später → violet, kein Termin → ink
+  var statusKey = isOverdue ? 'overdue' : isToday ? 'today' : isWeek ? 'week' : (due ? 'later' : 'none');
+  var stylesByStatus = {
+    overdue: { bar: 'from-rose-500 to-pink-500', pill: 'bg-gradient-to-r from-rose-500 to-pink-500 text-white shadow-rose-200', label: 'ÜBERFÄLLIG' },
+    today:   { bar: 'from-amber-400 to-orange-500', pill: 'bg-gradient-to-r from-amber-400 to-orange-500 text-white shadow-amber-200', label: 'HEUTE' },
+    week:    { bar: 'from-sky-400 to-cyan-500', pill: 'bg-gradient-to-r from-sky-400 to-cyan-500 text-white shadow-sky-200', label: 'BALD' },
+    later:   { bar: 'from-violet-400 to-purple-500', pill: 'bg-gradient-to-r from-violet-400 to-purple-500 text-white shadow-violet-200', label: 'GEPLANT' },
+    none:    { bar: 'from-ink-300 to-ink-400', pill: 'bg-ink-100 text-ink-600 border border-ink-200', label: '' },
+  };
+  var st = stylesByStatus[statusKey];
+
+  var groupName = (getGroupName(accountId, t.group_id) || '').toUpperCase();
+  // Requester (mit Cache-Fallback)
+  var req = t.requester || {};
+  if ((!req.name && !req.email) && t.requester_id) {
+    var cached = getCachedRequester(accountId, t.requester_id);
+    if (cached) req = Object.assign({ id: t.requester_id }, cached);
+  }
+  var reqName  = req.name  || t.email || '';
+  var reqEmail = req.email || t.email || '';
+  var reqPhone = req.phone || '';
+  var reqMobile = req.mobile || '';
+
+  var meta = _extractFsTaskMeta(t);
+  var beschreibung = meta.beschreibung || htmlToText(t.description_text || t.description || '').slice(0, 200);
+  var firma = meta.firma;
+
+  var accs = APP_STATE.accounts || [];
+  var acc = accs.find(function (x) { return x.id === accountId; });
+  var accountName  = acc ? acc.name  : '';
+  var accountColor = acc ? acc.color : '#cbd5e1';
+  var myAgentId = APP_STATE.currentUserAgentId || null;
+  var showAssignee = t.responder_id && t.responder_id !== myAgentId;
+  var assigneeName = getAgentFirstName(accountId, t.responder_id) || '';
+
+  var ticketRef = accountId + '|' + ticketId;
+  var repairingNow = TASK_REPAIR_IN_PROGRESS && TASK_REPAIR_IN_PROGRESS.has(ticketRef);
+  var canRetryRepair = _looksLikeFsAutoTask(t);
+
+  // Phone-Pills mit Gradient
+  var phonesHtml = '';
+  var phones = [];
+  if (reqPhone)  phones.push({ label: 'Festnetz', num: reqPhone, icon: 'phone' });
+  if (reqMobile) phones.push({ label: 'Mobil', num: reqMobile, icon: 'smartphone' });
+  if (phones.length) {
+    phonesHtml = '<div class="space-y-2 mt-4">' +
+      phones.map(function (p) {
+        var tel = _cleanPhoneForTel(p.num);
+        return '<a href="tel:' + escapeAttr(tel) + '" onclick="event.stopPropagation()" class="flex items-center gap-3 px-4 py-3.5 bg-gradient-to-r from-emerald-500 to-teal-500 hover:from-emerald-600 hover:to-teal-600 active:from-emerald-700 active:to-teal-700 text-white rounded-2xl font-semibold shadow-md shadow-emerald-200">' +
+          '<div class="w-9 h-9 rounded-xl bg-white/20 flex items-center justify-center backdrop-blur-sm"><i data-lucide="' + p.icon + '" class="w-5 h-5"></i></div>' +
+          '<div class="flex-1 min-w-0">' +
+            '<div class="text-[10px] uppercase tracking-widest opacity-80">' + escapeHtml(p.label) + '</div>' +
+            '<div class="text-[16px] font-mono font-bold">' + escapeHtml(p.num) + '</div>' +
+          '</div>' +
+          '<i data-lucide="arrow-up-right" class="w-5 h-5 opacity-70"></i>' +
+        '</a>';
+      }).join('') + '</div>';
+  }
+
+  // Action-Buttons: KI (violett-pink gradient) + Erledigt (emerald-teal gradient)
+  var actionRow =
+    '<div class="grid grid-cols-2 gap-2.5 mt-4">' +
+      '<button onclick="event.stopPropagation(); openTaskAiMini(\'' + escapeAttr(ticketRef) + '\')" class="bg-gradient-to-br from-violet-500 via-purple-500 to-fuchsia-500 hover:opacity-90 active:opacity-80 text-white rounded-2xl py-3.5 font-bold inline-flex items-center justify-center gap-2 shadow-md shadow-purple-200">' +
+        '<i data-lucide="sparkles" class="w-5 h-5"></i> <span class="text-[14px]">KI-Assistent</span>' +
+      '</button>' +
+      '<button onclick="event.stopPropagation(); taskTicketComplete(\'' + escapeAttr(ticketRef) + '\')" class="bg-gradient-to-br from-emerald-500 to-green-600 hover:opacity-90 active:opacity-80 text-white rounded-2xl py-3.5 font-bold inline-flex items-center justify-center gap-2 shadow-md shadow-emerald-200">' +
+        '<i data-lucide="check" class="w-5 h-5"></i> <span class="text-[14px]">Erledigt</span>' +
+      '</button>' +
+    '</div>';
+
+  // Sekundärbuttons als kleine ghost-pills
+  var secondaryRow =
+    '<div class="flex gap-1.5 mt-2.5">' +
+      (reqEmail ? '<a href="mailto:' + escapeAttr(reqEmail) + '" onclick="event.stopPropagation()" class="flex-1 inline-flex items-center justify-center gap-1.5 px-2.5 py-2 bg-ink-50 hover:bg-brand-50 border border-ink-200 text-ink-700 hover:text-brand-700 hover:border-brand-300 rounded-xl text-[11px] font-medium"><i data-lucide="mail" class="w-3.5 h-3.5"></i> Email</a>' : '') +
+      '<button onclick="event.stopPropagation(); openTaskRightActionSheet(\'' + escapeAttr(ticketRef) + '\')" class="flex-1 inline-flex items-center justify-center gap-1.5 px-2.5 py-2 bg-ink-50 hover:bg-ink-100 border border-ink-200 text-ink-700 rounded-xl text-[11px] font-medium"><i data-lucide="clock" class="w-3.5 h-3.5"></i> Verschieben</button>' +
+      (canRetryRepair ? '<button onclick="event.stopPropagation(); retrySingleTaskRepair(\'' + escapeAttr(ticketRef) + '\')" class="inline-flex items-center justify-center gap-1.5 px-2.5 py-2 bg-purple-50 hover:bg-purple-100 border border-purple-200 text-purple-700 rounded-xl text-[11px] font-medium" title="Kontakt aus Freshsales neu holen"><i data-lucide="refresh-ccw" class="w-3.5 h-3.5"></i></button>' : '') +
+      '<button onclick="event.stopPropagation(); openTicketDetail(\'' + escapeAttr(accountId) + '\', ' + ticketId + ')" class="inline-flex items-center justify-center gap-1.5 px-2.5 py-2 bg-ink-50 hover:bg-ink-100 border border-ink-200 text-ink-700 rounded-xl text-[11px] font-medium" title="Ticket öffnen"><i data-lucide="arrow-up-right" class="w-3.5 h-3.5"></i></button>' +
+    '</div>';
+
+  return '<div data-task-swipe-card data-task-ref="' + escapeAttr(ticketRef) + '" class="relative bg-white rounded-3xl shadow-sm overflow-hidden border border-ink-100' + (repairingNow ? ' ring-2 ring-purple-300 ring-offset-2' : '') + '">' +
+    // Swipe-Hints (Power-User)
+    '<div class="absolute inset-y-0 left-0 flex items-center pl-4 pr-2 text-emerald-700 font-bold pointer-events-none">' +
+      '<i data-lucide="check-circle-2" class="w-5 h-5 mr-1"></i><span class="text-sm">Erledigen…</span>' +
+    '</div>' +
+    '<div class="absolute inset-y-0 right-0 flex items-center pl-2 pr-4 text-purple-700 font-bold pointer-events-none">' +
+      '<span class="text-sm mr-1">KI-Assistent</span><i data-lucide="sparkles" class="w-5 h-5"></i>' +
+    '</div>' +
+    // Content mit Status-Farb-Akzent links
+    '<div data-task-swipe-content class="relative bg-white" style="transition: transform .22s ease; will-change: transform; touch-action: pan-y;">' +
+      // Akzent-Bar links (vertikal, gradient, 4px breit)
+      '<div class="absolute inset-y-0 left-0 w-1.5 bg-gradient-to-b ' + st.bar + '"></div>' +
+      '<div class="pl-5 pr-4 py-4">' +
+        // Header: Aufgabentyp-Chip + Frist-Pill
+        '<div class="flex items-center gap-2 mb-3">' +
+          (groupName ? '<span class="inline-flex items-center gap-1 text-[10px] tracking-widest px-2.5 py-1 rounded-full bg-ink-900 text-white font-bold">' + escapeHtml(groupName) + '</span>' : '') +
+          (repairingNow ? '<span class="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full text-[9px] bg-purple-100 text-purple-700 border border-purple-200 font-semibold"><span class="spinner inline-block w-2 h-2 border-[1.5px] text-purple-700"></span></span>' : '') +
+          '<span class="ml-auto inline-flex items-center text-[10px] tracking-widest px-3 py-1 rounded-full font-bold ' + st.pill + ' shadow-sm">' + escapeHtml(dueLabel) + '</span>' +
+        '</div>' +
+        // Kunde: GROSS und fett
+        (reqName
+          ? '<p class="text-2xl font-extrabold text-ink-900 leading-tight tracking-tight">' + escapeHtml(reqName) + '</p>'
+          : '<p class="text-xl font-bold text-ink-400 italic">Kontakt fehlt</p>'
+        ) +
+        // Firma als Untertitel mit Bullet
+        (firma ? '<p class="text-[13px] text-ink-500 mt-0.5 flex items-center gap-1.5"><span class="w-1 h-1 rounded-full bg-ink-400"></span>' + escapeHtml(firma) + '</p>' : '') +
+        // Beschreibung als Quote
+        (beschreibung ? '<div class="mt-3 pl-3 border-l-2 border-ink-200"><p class="text-[12px] text-ink-700 leading-snug italic line-clamp-2 break-words">' + escapeHtml(beschreibung) + '</p></div>' : '') +
+        // Phone-Buttons (groß, gradient)
+        phonesHtml +
+        // Action-Row
+        actionRow +
+        // Sekundärbuttons
+        secondaryRow +
+        // Footer
+        '<div class="flex items-center gap-2 mt-3 pt-2.5 border-t border-ink-100 text-[10px] text-ink-400 flex-wrap">' +
+          (accountName ? '<span class="inline-flex items-center gap-1.5 truncate"><span class="w-1.5 h-1.5 rounded-full shrink-0" style="background:' + escapeAttr(accountColor) + '"></span><span class="truncate font-medium">' + escapeHtml(accountName) + '</span></span>' : '') +
+          '<span class="inline-flex items-center gap-0.5 font-mono">#' + ticketId + '</span>' +
+          (showAssignee ? '<span class="inline-flex items-center gap-0.5 text-violet-600 font-medium"><i data-lucide="user-check" class="w-2.5 h-2.5"></i>' + escapeHtml(assigneeName) + '</span>' : '') +
+        '</div>' +
       '</div>' +
     '</div>' +
   '</div>';
