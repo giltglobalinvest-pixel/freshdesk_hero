@@ -517,7 +517,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.19';
+const APP_VERSION = 'v2.46.20';
 
 /* ============================================================
    GLOBAL THEME — v2.46.12
@@ -8381,6 +8381,68 @@ function closeStackAiModal() {
   document.body.style.overflow = '';
 }
 
+/* v2.46.20: Kompaktes KI-Zusammenfassungs-Modal für Stack-View. Im Gegensatz zum
+   bestehenden openTicketSummaryModal (Full-Screen) ist dies eine kleine Bottom-Sheet,
+   die nur die Zusammenfassung zeigt und sich wieder schließen lässt — Stack-Card
+   bleibt im Hintergrund sichtbar. */
+async function openQuickSummaryModal(accountId, ticketId) {
+  let host = document.getElementById('subModalHost');
+  if (!host) { host = document.createElement('div'); host.id = 'subModalHost'; document.body.appendChild(host); }
+  host.innerHTML =
+    '<div class="fixed inset-0 z-[60] flex items-end justify-center bg-black/50" onclick="if(event.target===this)closeQuickSummaryModal()">' +
+      '<div class="bg-white w-full max-w-md rounded-t-3xl shadow-2xl flex flex-col safe-bottom" style="max-height:88vh">' +
+        '<div class="px-4 py-3 border-b border-ink-200 flex items-center justify-between gap-2 shrink-0">' +
+          '<h3 class="font-bold text-ink-900 inline-flex items-center gap-2"><i data-lucide="sparkles" class="w-5 h-5 text-brand-600"></i> KI-Zusammenfassung</h3>' +
+          '<button onclick="closeQuickSummaryModal()" class="w-9 h-9 rounded-lg hover:bg-ink-100 flex items-center justify-center" title="Schließen"><i data-lucide="x" class="w-5 h-5 text-ink-700"></i></button>' +
+        '</div>' +
+        '<div id="quickSummaryContent" class="flex-1 overflow-y-auto p-4">' +
+          '<div class="text-center py-8">' +
+            '<div class="spinner inline-block w-7 h-7 border-[3px] text-brand-500"></div>' +
+            '<p class="text-sm text-ink-500 mt-3">Claude liest den Verlauf und fasst zusammen…</p>' +
+            '<p class="text-[11px] text-ink-400 mt-1">Ticket #' + ticketId + '</p>' +
+          '</div>' +
+        '</div>' +
+        '<div class="border-t border-ink-200 p-3 shrink-0">' +
+          '<button onclick="closeQuickSummaryModal()" class="w-full bg-ink-900 hover:bg-ink-800 text-white rounded-xl px-3 py-3 text-sm font-bold inline-flex items-center justify-center gap-1.5"><i data-lucide="check" class="w-4 h-4"></i> Schließen</button>' +
+        '</div>' +
+      '</div>' +
+    '</div>';
+  if (window.lucide) lucide.createIcons();
+  document.body.style.overflow = 'hidden';
+  // Ticket + Summary laden
+  try {
+    const ticket = await fetchTicketDetail(accountId, ticketId);
+    const summary = await aiSummarizeTicket(ticket);
+    const host2 = $('quickSummaryContent');
+    if (!host2) return; // Modal schon zu
+    const subj = ticket?.subject || ('#' + ticketId);
+    const reqName = ticket?.requester?.name || '';
+    host2.innerHTML =
+      '<div class="bg-ink-50 rounded-xl p-3 mb-3 text-[11px]">' +
+        '<p class="text-ink-500 uppercase tracking-wider text-[9px] font-bold">Ticket</p>' +
+        '<p class="font-semibold text-ink-900 mt-0.5 line-clamp-2">' + escapeHtml(subj) + '</p>' +
+        (reqName ? '<p class="text-ink-600 mt-0.5">' + escapeHtml(reqName) + '</p>' : '') +
+      '</div>' +
+      '<div class="prose prose-sm max-w-none text-ink-800 text-[13px] leading-relaxed whitespace-pre-line break-words">' +
+        escapeHtml(summary || '(keine Zusammenfassung)') +
+      '</div>';
+    // Auto-Save als Notiz wenn noch nicht da (gleiche Logik wie openTicketSummaryModal)
+    if (!hasExistingSummaryNote(ticket)) {
+      saveSummaryAsNote(accountId, ticketId, summary).then(ok => {
+        if (ok) toast('KI-Zusammenfassung als private Notiz gespeichert', 'success', 3500);
+      }).catch(e => console.warn('Note-Save fehlgeschlagen:', e));
+    }
+  } catch (e) {
+    const host2 = $('quickSummaryContent');
+    if (host2) host2.innerHTML = '<div class="bg-red-50 border border-red-200 rounded-xl p-3 text-sm text-red-800">' + escapeHtml(e.message || String(e)) + '</div>';
+  }
+}
+function closeQuickSummaryModal() {
+  const host = document.getElementById('subModalHost');
+  if (host) host.innerHTML = '';
+  document.body.style.overflow = '';
+}
+
 function _attachTicketStackSwipe() {
   const card = document.querySelector('[data-ticket-stack-current]');
   if (!card || card._stackSwipeAttached) return;
@@ -8499,8 +8561,8 @@ function _renderTicketStackCard(t, isTop) {
         '<span class="inline-flex items-center gap-1 text-[10px] tracking-widest px-2.5 py-1 rounded-full bg-white/20 backdrop-blur-sm font-bold">' + escapeHtml(st.label.toUpperCase()) + '</span>' +
         (onWv ? '<span class="inline-flex items-center gap-1 text-[10px] tracking-wider px-2.5 py-1 rounded-full bg-white/25 backdrop-blur-sm font-bold"><i data-lucide="clock" class="w-3 h-3"></i>' + escapeHtml(_fmtFrist(wv.frist_am)) + '</span>' : '') +
         '<span class="inline-flex items-center gap-1 text-[10px] tracking-wider px-2.5 py-1 rounded-full bg-white/20 backdrop-blur-sm font-mono">#' + ticketId + '</span>' +
-        // v2.46.19: KI-Zusammenfassungs-Button im Header
-        '<button onclick="event.stopPropagation(); openTicketSummaryModal(\'' + escapeAttr(accountId) + '\', ' + ticketId + ')" class="ml-auto inline-flex items-center gap-1 text-[10px] tracking-wider px-2.5 py-1 rounded-full bg-white/25 hover:bg-white/35 backdrop-blur-sm font-bold active:scale-95 transition" title="KI-Zusammenfassung">' +
+        // v2.46.20: KI-Zusammenfassungs-Button → kompaktes Quick-Modal (kein Full-Screen)
+        '<button onclick="event.stopPropagation(); openQuickSummaryModal(\'' + escapeAttr(accountId) + '\', ' + ticketId + ')" class="ml-auto inline-flex items-center gap-1 text-[10px] tracking-wider px-2.5 py-1 rounded-full bg-white/25 hover:bg-white/35 backdrop-blur-sm font-bold active:scale-95 transition" title="KI-Zusammenfassung">' +
           '<i data-lucide="sparkles" class="w-3 h-3"></i>Zusammenfassung' +
         '</button>' +
       '</div>' +
