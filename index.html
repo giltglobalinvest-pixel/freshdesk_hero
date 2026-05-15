@@ -325,7 +325,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.45.4';
+const APP_VERSION = 'v2.45.5';
 // Read-Token absichtlich gesplittet, damit GitHub Secret-Scanning beim Push nicht blockt.
 // Der Token ist read-only und Base-scoped → bewusst eingebettet (Architektur-Entscheidung).
 const _RK = 'patu8KWM8aWB' + 'yxCGL.69fae5d9fa4b94c2' + '66b426dadd71a51f574945d840b33569058ab5e9d89ebef3';
@@ -594,21 +594,33 @@ function confirmDialog(title, message, opts = {}) {
    AIRTABLE — DIRECT (read via embedded read-key, write via APP_KEYS.airtableWriteKey)
    ============================================================ */
 async function airtableRead(table, opts = {}) {
-  let url = 'https://api.airtable.com/v0/' + APP_CONFIG.APP_BASE_ID + '/' + encodeURIComponent(table);
-  const params = new URLSearchParams();
-  if (opts.filter)    params.set('filterByFormula', opts.filter);
-  if (opts.maxRecords) params.set('maxRecords', String(opts.maxRecords));
-  if (opts.pageSize)  params.set('pageSize', String(opts.pageSize));
-  (opts.sort || []).forEach((s, i) => {
-    params.set(`sort[${i}][field]`, s.field);
-    if (s.direction) params.set(`sort[${i}][direction]`, s.direction);
-  });
-  const qs = params.toString();
-  if (qs) url += '?' + qs;
-  const res = await fetch(url, { headers: { 'Authorization': 'Bearer ' + APP_CONFIG.AIRTABLE_READ_KEY } });
-  if (!res.ok) throw new Error('Airtable read fehlgeschlagen (' + res.status + ')');
-  const data = await res.json();
-  return data.records || [];
+  // Pagination-fähig: Airtable liefert pro Page max. 100 Records + ggf. `offset`.
+  // Vor v2.45.5 ging nur die erste Page — d.h. ab 101 WV-/Regel-/Notiz-Records waren
+  // die zusätzlichen unsichtbar (z.B. WV-Tickets erschienen nach Reload wieder).
+  const baseUrl = 'https://api.airtable.com/v0/' + APP_CONFIG.APP_BASE_ID + '/' + encodeURIComponent(table);
+  const all = [];
+  let offset = null;
+  const HARD_CAP = opts.maxRecords ? parseInt(opts.maxRecords, 10) : 5000; // Sicherheitslimit gegen Endlos-Loops
+  do {
+    const params = new URLSearchParams();
+    if (opts.filter)    params.set('filterByFormula', opts.filter);
+    if (opts.maxRecords) params.set('maxRecords', String(opts.maxRecords));
+    if (opts.pageSize)  params.set('pageSize', String(opts.pageSize));
+    (opts.sort || []).forEach((s, i) => {
+      params.set(`sort[${i}][field]`, s.field);
+      if (s.direction) params.set(`sort[${i}][direction]`, s.direction);
+    });
+    if (offset) params.set('offset', offset);
+    const qs = params.toString();
+    const url = qs ? baseUrl + '?' + qs : baseUrl;
+    const res = await fetch(url, { headers: { 'Authorization': 'Bearer ' + APP_CONFIG.AIRTABLE_READ_KEY } });
+    if (!res.ok) throw new Error('Airtable read fehlgeschlagen (' + res.status + ')');
+    const data = await res.json();
+    (data.records || []).forEach(r => all.push(r));
+    offset = data.offset || null;
+    if (all.length >= HARD_CAP) break;
+  } while (offset);
+  return all;
 }
 async function airtableWrite(table, fields) {
   if (!APP_KEYS.airtableWriteKey) throw new Error('Schreibzugriff fehlt — bitte einloggen oder Master-Base/Keys prüfen');
@@ -1516,12 +1528,14 @@ async function loadWiedervorlage() {
   if (!APP_KEYS.user?.api_key) return;
   const filter = "{api_key}='" + escapeFormula(APP_KEYS.user.api_key) + "'";
   let recs = [];
+  let readError = null;
   try {
     recs = await airtableRead(WIEDERVORLAGE_TABLE, { filter });
-  } catch (_) { recs = []; }
+  } catch (e) { readError = e; recs = []; }
+  let skipped = 0;
   recs.forEach(r => {
     const f = r.fields || {};
-    if (!f.account_id || !f.ticket_id || !f.frist_am) return;
+    if (!f.account_id || !f.ticket_id || !f.frist_am) { skipped++; return; }
     APP_STATE.wiedervorlageMap.set(_wvKey(f.account_id, f.ticket_id), {
       recordId:    r.id,
       account_id:  f.account_id,
@@ -1533,12 +1547,15 @@ async function loadWiedervorlage() {
   });
   // Auto-Cleanup: Einträge älter als 30 Tage löschen (Frist lange vorbei)
   const cutoff = Date.now() - 30 * 86400e3;
+  let cleaned = 0;
   for (const [k, v] of APP_STATE.wiedervorlageMap.entries()) {
     if (new Date(v.frist_am).getTime() < cutoff) {
       airtableDelete(WIEDERVORLAGE_TABLE, v.recordId).catch(() => {});
       APP_STATE.wiedervorlageMap.delete(k);
+      cleaned++;
     }
   }
+  console.log('[loadWiedervorlage] ' + recs.length + ' records geladen, ' + APP_STATE.wiedervorlageMap.size + ' aktiv in Map' + (skipped ? ', ' + skipped + ' übersprungen (Felder fehlen)' : '') + (cleaned ? ', ' + cleaned + ' alte gelöscht' : '') + (readError ? ' — READ-FEHLER: ' + readError.message : ''));
 }
 
 function getWiedervorlage(accountId, ticketId) {
@@ -1557,6 +1574,32 @@ function wasRecentlyReturned(accountId, ticketId, now = Date.now()) {
   const fristMs = new Date(wv.frist_am).getTime();
   return fristMs <= now && fristMs > (now - 24 * 3600e3); // letzte 24h
 }
+
+/* Debug-Helper: Console-Ausgabe der aktuellen WV-Map + Vergleich mit den geladenen Tickets.
+   Aufruf via `_wvDebug()` in der Browser-Console — hilft zu erkennen warum ein Ticket
+   wieder erscheint nach Reload (Pagination-Issue, Account-ID-Mismatch, etc.). */
+window._wvDebug = function() {
+  const entries = Array.from(APP_STATE.wiedervorlageMap?.entries() || []);
+  console.log('=== Wiedervorlage-Debug ===');
+  console.log('Map-Größe:', entries.length);
+  const now = Date.now();
+  const active = entries.filter(([, v]) => new Date(v.frist_am).getTime() > now);
+  console.log('Davon aktiv (frist_am > jetzt):', active.length);
+  console.log('Erste 5 aktive Einträge:', active.slice(0, 5).map(([k, v]) => ({ key: k, frist_am: v.frist_am, grund: v.grund })));
+  const tickets = APP_STATE.pageState?.tickets || [];
+  console.log('Aktuell gerenderte Tickets:', tickets.length);
+  if (tickets.length) {
+    const sampled = tickets.slice(0, 5).map(t => ({
+      ticketId: t.id,
+      accountId: t._accountId,
+      key: _wvKey(t._accountId, t.id),
+      hasWv: APP_STATE.wiedervorlageMap.has(_wvKey(t._accountId, t.id)),
+      onWv: isOnWiedervorlage(t._accountId, t.id),
+    }));
+    console.table(sampled);
+  }
+  console.log('Tipp: Wenn `key` nicht in der Map ist obwohl du das Ticket ausgeblendet hast → WV-Eintrag fehlt in Airtable (Write hat silent failed) oder Pagination-Bug (>100 Records).');
+};
 
 async function addWiedervorlage(accountId, ticketId, fristIso, grund = 'manuell') {
   if (!accountId || !ticketId) return;
