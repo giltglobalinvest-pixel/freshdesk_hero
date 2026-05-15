@@ -325,7 +325,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.3';
+const APP_VERSION = 'v2.46.4';
 // Read-Token absichtlich gesplittet, damit GitHub Secret-Scanning beim Push nicht blockt.
 // Der Token ist read-only und Base-scoped → bewusst eingebettet (Architektur-Entscheidung).
 const _RK = 'patu8KWM8aWB' + 'yxCGL.69fae5d9fa4b94c2' + '66b426dadd71a51f574945d840b33569058ab5e9d89ebef3';
@@ -14375,12 +14375,39 @@ function _renderTasksList() {
   _attachTaskSwipe();
 }
 
-/* Render-Funktion für ein Aufgaben-Ticket. Aufbau:
-   - Header: Aufgaben-Typ (= Gruppen-Name) als Badge, Frist (rot wenn überfällig)
-   - Body: Betreff, Beschreibung
-   - Kontakt-Block: Requester-Name + Email + Telefonnummern (Click-to-Call/Mail)
-   - Footer: Account, ggf. Bearbeiter, Wisch-Hint
-   Swipe rechts → erledigt/entfallen, Swipe links → KI-Assistent. */
+/* v2.46.4: Extrahiert relevante Felder aus dem FS-Aufgaben-Body (Freshsales-Email-Template).
+   Parsed die HTML-Tabelle: „Beschreibung", „Gehört zu", „Firma" (aus Subject als Fallback). */
+function _extractFsTaskMeta(t) {
+  var meta = { beschreibung: '', firma: '' };
+  var html = String(t?.description || '');
+  if (html) {
+    try {
+      var doc = new DOMParser().parseFromString(html, 'text/html');
+      var rows = doc.querySelectorAll('tr');
+      rows.forEach(function (row) {
+        var cells = row.querySelectorAll('td');
+        if (cells.length >= 2) {
+          var label = (cells[0].textContent || '').trim().toLowerCase();
+          var val   = (cells[1].textContent || '').trim();
+          if (/^beschreibung/.test(label)) meta.beschreibung = val;
+        }
+      });
+    } catch (_) {}
+  }
+  // Firma aus Subject parsen: „... Firma XYZ" oder „... ; Firma XYZ"
+  var subj = String(t?.subject || '');
+  var fm = subj.match(/Firma\s+([^;\n]+?)\s*'?\s*$/i);
+  if (fm) meta.firma = fm[1].trim();
+  return meta;
+}
+
+/* Render-Funktion für ein Aufgaben-Ticket — neugestaltet (v2.46.4):
+   - GROßER Action-Verb (Gruppen-Name in CAPS) + Frist-Pill
+   - Kunde groß, Firma als Untertitel
+   - „Worum geht's"-Zeile (Beschreibung aus FS-Body oder Subject-Fallback)
+   - Full-width Click-to-Call Buttons (visuell prominent)
+   - Zwei klare Action-Buttons: KI-Assistent + Erledigt
+   - Mini-Footer mit Account, #ID, Bearbeiter */
 function _renderTaskTicketCard(t) {
   var accountId = t._accountId;
   var ticketId = t.id;
@@ -14391,83 +14418,103 @@ function _renderTaskTicketCard(t) {
   var isOverdue = due && due.getTime() < todayMs;
   var isToday   = due && due.getTime() >= todayMs && due.getTime() < todayMs + 86400e3;
   var dueLabel  = due ? _fmtDueDate(due) : 'kein Termin';
-  var dueClass  = isOverdue ? 'text-red-700 bg-red-50 border-red-200'
-                : (isToday  ? 'text-amber-700 bg-amber-50 border-amber-200'
-                            : 'text-ink-600 bg-ink-50 border-ink-200');
-  // Aufgaben-Typ = Gruppen-Name
-  var groupName = getGroupName(accountId, t.group_id) || '';
-  // Requester-Kontakt (FD)
+  var dueClass  = isOverdue ? 'text-red-700 bg-red-100 border-red-300'
+                : (isToday  ? 'text-amber-800 bg-amber-100 border-amber-300'
+                            : 'text-ink-600 bg-ink-100 border-ink-200');
+  var groupName = (getGroupName(accountId, t.group_id) || '').toUpperCase();
+  // Requester (nach Auto-Repair der echte Kunde)
   var req = t.requester || {};
   var reqName  = req.name  || t.email || '';
   var reqEmail = req.email || t.email || '';
   var reqPhone = req.phone || '';
   var reqMobile = req.mobile || '';
-  // FS-Kontakt-Bridge: falls FS-Account vorhanden + cache erweitert, könnten Telefonnummern
-  // auch aus FS-Cache kommen. Hier erstmal nur FD.
-  var phones = [];
-  if (reqPhone)  phones.push({ label: 'Festnetz', num: reqPhone });
-  if (reqMobile) phones.push({ label: 'Mobil', num: reqMobile });
+  // FS-Body-Metadaten (was zu tun ist + Firma)
+  var meta = _extractFsTaskMeta(t);
+  var beschreibung = meta.beschreibung || htmlToText(t.description_text || t.description || '').slice(0, 200);
+  var firma = meta.firma;
+  // Account-Info
   var accs = APP_STATE.accounts || [];
   var acc = accs.find(function (x) { return x.id === accountId; });
   var accountName  = acc ? acc.name  : '';
   var accountColor = acc ? acc.color : '#cbd5e1';
   var myAgentId = APP_STATE.currentUserAgentId || null;
   var showAssignee = t.responder_id && t.responder_id !== myAgentId;
-  var assigneeName = getAgentFirstName(accountId, t.responder_id) || 'Andere';
-  var titel = t.subject || '(ohne Betreff)';
-  var descTxt = htmlToText(t.description_text || t.description || '').slice(0, 200);
+  var assigneeName = getAgentFirstName(accountId, t.responder_id) || '';
 
+  var ticketRef = accountId + '|' + ticketId;
+  var repairingNow = TASK_REPAIR_IN_PROGRESS && TASK_REPAIR_IN_PROGRESS.has(ticketRef);
+
+  // Click-to-Call Buttons (full-width, groß, prominent)
   var phonesHtml = '';
+  var phones = [];
+  if (reqPhone)  phones.push({ label: 'Festnetz', num: reqPhone, icon: 'phone' });
+  if (reqMobile) phones.push({ label: 'Mobil', num: reqMobile, icon: 'smartphone' });
   if (phones.length) {
-    phonesHtml = '<div class="flex flex-wrap gap-1.5 mt-2">' +
+    phonesHtml = '<div class="space-y-1.5 mt-3">' +
       phones.map(function (p) {
         var tel = _cleanPhoneForTel(p.num);
-        return '<a href="tel:' + escapeAttr(tel) + '" onclick="event.stopPropagation()" class="inline-flex items-center gap-1.5 px-3 py-2 bg-emerald-50 border border-emerald-300 text-emerald-800 rounded-lg active:bg-emerald-100 font-semibold">' +
-          '<i data-lucide="phone-call" class="w-4 h-4"></i>' +
-          '<span class="text-[12px] font-mono">' + escapeHtml(p.num) + '</span>' +
-          '<span class="text-[9px] uppercase tracking-wider opacity-70">' + escapeHtml(p.label) + '</span>' +
+        return '<a href="tel:' + escapeAttr(tel) + '" onclick="event.stopPropagation()" class="flex items-center justify-between gap-2 px-4 py-3 bg-emerald-50 hover:bg-emerald-100 active:bg-emerald-200 border-2 border-emerald-300 text-emerald-800 rounded-xl font-semibold shadow-sm">' +
+          '<span class="inline-flex items-center gap-2"><i data-lucide="' + p.icon + '" class="w-5 h-5"></i><span class="text-[11px] uppercase tracking-wider opacity-80">' + escapeHtml(p.label) + '</span></span>' +
+          '<span class="text-[14px] font-mono">' + escapeHtml(p.num) + '</span>' +
         '</a>';
       }).join('') + '</div>';
   }
-  var emailBtn = reqEmail ? ('<a href="mailto:' + escapeAttr(reqEmail) + '" onclick="event.stopPropagation()" class="inline-flex items-center gap-1.5 px-2 py-1 bg-brand-50 border border-brand-300 text-brand-800 rounded text-[11px] font-medium active:bg-brand-100"><i data-lucide="mail" class="w-3 h-3"></i>' + escapeHtml(reqEmail) + '</a>') : '';
-  // Wisch-Wrapper (gleiche Struktur wie früher — _attachTaskSwipe nutzt diese Attribute)
-  var ticketRef = accountId + '|' + ticketId;
-  // v2.46.3: Auto-Repair-Indikator wenn Requester gerade aus FS gezogen wird
-  var repairingNow = TASK_REPAIR_IN_PROGRESS && TASK_REPAIR_IN_PROGRESS.has(ticketRef);
-  var repairBadge = repairingNow ? '<span class="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[9px] bg-purple-100 text-purple-700 border border-purple-200 font-semibold"><span class="spinner inline-block w-2 h-2 border-[1.5px] text-purple-700"></span> Kontakt wird gezogen…</span>' : '';
+
+  // Action-Buttons (KI + Erledigt) — direkt klickbar, kein Swipe nötig
+  var actionRow =
+    '<div class="grid grid-cols-2 gap-2 mt-3">' +
+      '<button onclick="event.stopPropagation(); openTaskAiMini(\'' + escapeAttr(ticketRef) + '\')" class="bg-gradient-to-br from-purple-500 to-brand-600 hover:from-purple-600 hover:to-brand-700 active:opacity-90 text-white rounded-xl py-3 font-semibold inline-flex items-center justify-center gap-1.5 shadow-sm">' +
+        '<i data-lucide="sparkles" class="w-4 h-4"></i> KI-Assistent' +
+      '</button>' +
+      '<button onclick="event.stopPropagation(); taskTicketComplete(\'' + escapeAttr(ticketRef) + '\')" class="bg-emerald-600 hover:bg-emerald-700 active:bg-emerald-800 text-white rounded-xl py-3 font-semibold inline-flex items-center justify-center gap-1.5 shadow-sm">' +
+        '<i data-lucide="check-circle-2" class="w-4 h-4"></i> Erledigt' +
+      '</button>' +
+    '</div>';
+
+  // Email-Button + Verschieben kompakt darunter
+  var secondaryRow =
+    '<div class="flex gap-1.5 mt-2 flex-wrap">' +
+      (reqEmail ? '<a href="mailto:' + escapeAttr(reqEmail) + '" onclick="event.stopPropagation()" class="flex-1 inline-flex items-center justify-center gap-1.5 px-2 py-1.5 bg-white hover:bg-brand-50 border border-brand-300 text-brand-700 rounded-lg text-[11px] font-medium"><i data-lucide="mail" class="w-3.5 h-3.5"></i> Email</a>' : '') +
+      '<button onclick="event.stopPropagation(); openTaskRightActionSheet(\'' + escapeAttr(ticketRef) + '\')" class="flex-1 inline-flex items-center justify-center gap-1.5 px-2 py-1.5 bg-white hover:bg-ink-50 border border-ink-300 text-ink-700 rounded-lg text-[11px] font-medium"><i data-lucide="clock" class="w-3.5 h-3.5"></i> Verschieben</button>' +
+      '<button onclick="event.stopPropagation(); openTicketDetail(\'' + escapeAttr(accountId) + '\', ' + ticketId + ')" class="inline-flex items-center justify-center gap-1.5 px-2 py-1.5 bg-white hover:bg-ink-50 border border-ink-300 text-ink-700 rounded-lg text-[11px] font-medium" title="Ticket öffnen"><i data-lucide="arrow-up-right" class="w-3.5 h-3.5"></i></button>' +
+    '</div>';
+
   return '<div data-task-swipe-card data-task-ref="' + escapeAttr(ticketRef) + '" class="relative bg-white rounded-2xl border border-ink-200 shadow-sm overflow-hidden' + (repairingNow ? ' ring-2 ring-purple-300 ring-offset-1' : '') + '">' +
-    // Hint links (sichtbar bei Rechts-Swipe → Erledigt)
+    // Swipe-Hints (bleiben für Power-User)
     '<div class="absolute inset-y-0 left-0 flex items-center pl-4 pr-2 text-emerald-700 font-bold pointer-events-none">' +
       '<i data-lucide="check-circle-2" class="w-5 h-5 mr-1"></i><span class="text-sm">Erledigen…</span>' +
     '</div>' +
-    // Hint rechts (sichtbar bei Links-Swipe → KI-Assistent)
     '<div class="absolute inset-y-0 right-0 flex items-center pl-2 pr-4 text-purple-700 font-bold pointer-events-none">' +
       '<span class="text-sm mr-1">KI-Assistent</span><i data-lucide="sparkles" class="w-5 h-5"></i>' +
     '</div>' +
-    // Content (verschiebbar)
-    '<div data-task-swipe-content onclick="openTicketDetail(\'' + escapeAttr(accountId) + '\', ' + ticketId + ')" class="relative bg-white p-3 cursor-pointer" style="transition: transform .22s ease; will-change: transform; touch-action: pan-y;">' +
-      '<div class="flex items-start gap-2.5 mb-1.5">' +
-        '<div class="w-9 h-9 rounded-xl bg-brand-50 border border-brand-200 flex items-center justify-center text-brand-700 shrink-0">' +
-          '<i data-lucide="check-square" class="w-4 h-4"></i>' +
-        '</div>' +
-        '<div class="flex-1 min-w-0">' +
-          '<p class="font-semibold text-ink-900 text-sm leading-snug">' + escapeHtml(titel) + '</p>' +
-          (reqName ? '<p class="text-[11px] text-ink-700 truncate mt-0.5"><i data-lucide="user" class="w-3 h-3 inline mr-0.5"></i>' + escapeHtml(reqName) + '</p>' : '') +
-          '<div class="flex flex-wrap items-center gap-1 mt-1">' +
-            (groupName ? '<span class="inline-flex items-center gap-1 text-[10px] uppercase tracking-wider px-1.5 py-0.5 rounded bg-purple-100 text-purple-800 border border-purple-200 font-semibold">' + escapeHtml(groupName) + '</span>' : '') +
-            repairBadge +
-          '</div>' +
-        '</div>' +
-        '<span class="text-[10px] uppercase tracking-wider px-2 py-0.5 rounded-full font-semibold border shrink-0 ' + dueClass + '">' + escapeHtml(dueLabel) + '</span>' +
+    // Content
+    '<div data-task-swipe-content class="relative bg-white p-4" style="transition: transform .22s ease; will-change: transform; touch-action: pan-y;">' +
+      // Header-Zeile: Aufgabentyp + Frist
+      '<div class="flex items-center gap-2 mb-2">' +
+        (groupName ? '<span class="inline-flex items-center gap-1 text-[11px] tracking-wider px-2 py-0.5 rounded-full bg-purple-100 text-purple-800 border border-purple-200 font-bold">' + escapeHtml(groupName) + '</span>' : '') +
+        (repairingNow ? '<span class="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[9px] bg-purple-100 text-purple-700 border border-purple-200 font-semibold"><span class="spinner inline-block w-2 h-2 border-[1.5px] text-purple-700"></span> Kontakt wird gezogen…</span>' : '') +
+        '<span class="ml-auto text-[11px] tracking-wider px-2 py-0.5 rounded-full font-bold border shrink-0 ' + dueClass + '">' + escapeHtml(dueLabel) + '</span>' +
       '</div>' +
-      (descTxt ? '<p class="text-[11px] text-ink-600 leading-snug mt-1 line-clamp-2 whitespace-pre-line break-words">' + escapeHtml(descTxt) + '</p>' : '') +
+      // Kunde groß
+      (reqName
+        ? '<p class="text-lg font-bold text-ink-900 leading-tight">' + escapeHtml(reqName) + '</p>'
+        : '<p class="text-base font-semibold text-ink-500 italic">Kontakt fehlt</p>'
+      ) +
+      // Firma als Untertitel
+      (firma ? '<p class="text-[13px] text-ink-600 truncate"><i data-lucide="building-2" class="w-3.5 h-3.5 inline mr-0.5 -mt-0.5"></i>' + escapeHtml(firma) + '</p>' : '') +
+      // Worum geht's
+      (beschreibung ? '<p class="text-[12px] text-ink-700 leading-snug mt-2 italic line-clamp-2 break-words">„' + escapeHtml(beschreibung) + '"</p>' : '') +
+      // Telefonnummern (groß, prominent)
       phonesHtml +
-      (emailBtn ? '<div class="mt-1.5">' + emailBtn + '</div>' : '') +
-      '<div class="flex items-center gap-2 mt-2 pt-2 border-t border-ink-100 flex-wrap">' +
-        (accountName ? '<span class="text-[10px] text-ink-500 inline-flex items-center gap-1 truncate min-w-0"><span class="w-1.5 h-1.5 rounded-full shrink-0" style="background:' + escapeAttr(accountColor) + '"></span><span class="truncate">' + escapeHtml(accountName) + '</span></span>' : '') +
-        '<span class="text-[10px] inline-flex items-center gap-1 px-1.5 py-0.5 bg-brand-50 text-brand-700 border border-brand-200 rounded font-mono"><i data-lucide="ticket" class="w-3 h-3"></i>#' + ticketId + '</span>' +
-        (showAssignee ? '<span class="text-[10px] text-purple-700 bg-purple-50 border border-purple-200 px-1.5 py-0.5 rounded inline-flex items-center gap-1"><i data-lucide="user-check" class="w-2.5 h-2.5"></i>' + escapeHtml(assigneeName) + '</span>' : '') +
-        '<span class="ml-auto text-[10px] text-ink-400 inline-flex items-center gap-1"><i data-lucide="hand" class="w-3 h-3"></i>← KI · Erledigt →</span>' +
+      // Action-Row: KI + Erledigt
+      actionRow +
+      // Sekundärbuttons: Email + Verschieben + Details
+      secondaryRow +
+      // Mini-Footer
+      '<div class="flex items-center gap-2 mt-2.5 pt-2 border-t border-ink-100 text-[10px] text-ink-500 flex-wrap">' +
+        (accountName ? '<span class="inline-flex items-center gap-1 truncate"><span class="w-1.5 h-1.5 rounded-full shrink-0" style="background:' + escapeAttr(accountColor) + '"></span><span class="truncate">' + escapeHtml(accountName) + '</span></span>' : '') +
+        '<span class="inline-flex items-center gap-0.5 font-mono">#' + ticketId + '</span>' +
+        (showAssignee ? '<span class="inline-flex items-center gap-0.5 text-purple-700"><i data-lucide="user-check" class="w-2.5 h-2.5"></i>' + escapeHtml(assigneeName) + '</span>' : '') +
       '</div>' +
     '</div>' +
   '</div>';
