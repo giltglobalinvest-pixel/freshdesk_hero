@@ -325,7 +325,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.2';
+const APP_VERSION = 'v2.46.3';
 // Read-Token absichtlich gesplittet, damit GitHub Secret-Scanning beim Push nicht blockt.
 // Der Token ist read-only und Base-scoped → bewusst eingebettet (Architektur-Entscheidung).
 const _RK = 'patu8KWM8aWB' + 'yxCGL.69fae5d9fa4b94c2' + '66b426dadd71a51f574945d840b33569058ab5e9d89ebef3';
@@ -14076,6 +14076,110 @@ let TASKS_STATE = { accountId: 'all', filter: 'today', mine: 'mine' };
    prominent, Frist via Wiedervorlage, Click-to-Call/Mail).
    ============================================================ */
 
+/* v2.46.3: Erkennt FS-Auto-erstellte Aufgaben-Tickets (Freshsales-Email-Templates wie
+   „Aufgabe zugewiesen: …" / „Aufgabenerinnerung: …"). Der Body enthält einen Link
+   zum FS-Contact: https://<subdomain>.freshworks.com/crm/sales/contacts/<id>.
+   Wir extrahieren die FS-Contact-ID und können dann den Requester des FD-Tickets
+   auf den korrekten Kunden umbiegen (statt z.B. den App-User oder ein FS-System-
+   Konto). */
+const FS_CONTACT_LINK_RE = /freshworks\.com\/crm\/sales\/contacts\/(\d+)/i;
+function _extractFsContactIdFromTicket(t) {
+  const html = String(t?.description || t?.description_text || '');
+  const m = html.match(FS_CONTACT_LINK_RE);
+  return m ? m[1] : null;
+}
+function _looksLikeFsAutoTask(t) {
+  const subj = String(t?.subject || '');
+  if (/^(Aufgabe\s+zugewiesen|Aufgabenerinnerung|Nachfassen)\b/i.test(subj)) return true;
+  // Fallback: Body enthält den FS-Link → ist sehr wahrscheinlich Auto-Task
+  return !!_extractFsContactIdFromTicket(t);
+}
+
+/* Repariert ein einzelnes Aufgaben-Ticket: FS-Contact-ID aus Body → FS-Lookup →
+   FD-Contact-Bridge via Email → PUT requester_id. Cache wird lokal aktualisiert. */
+async function repairTaskTicketRequester(accountId, ticketId) {
+  if (!accountId || !ticketId) return { error: 'bad_args' };
+  // 1. Ticket-Detail laden (für description) wenn nicht schon im Cache
+  let t = APP_STATE.ticketCache?.get?.(accountId + '|' + ticketId);
+  if (!t || (!t.description && !t.description_text)) {
+    try { t = await fetchTicketDetail(accountId, ticketId); } catch (e) { return { error: 'ticket_fetch_failed', message: e.message }; }
+  }
+  if (!t) return { error: 'ticket_not_found' };
+  // 2. FS-Contact-ID extrahieren
+  const fsId = _extractFsContactIdFromTicket(t);
+  if (!fsId) return { skipped: true, reason: 'no_fs_link' };
+  // 3. FS-Contact-Daten holen
+  let fsContact;
+  try {
+    const data = await proxyJson('/freshsales/' + encodeURIComponent(accountId) + '/api/contacts/' + fsId);
+    fsContact = data?.contact || data;
+  } catch (e) { return { error: 'fs_lookup_failed', message: e.message }; }
+  if (!fsContact?.email) return { skipped: true, reason: 'no_fs_email', fsContactId: fsId };
+  // 4. Wenn aktueller Requester schon der FS-Kontakt (Email-Match) → nichts tun
+  const currentEmail = String(t.requester?.email || '').toLowerCase();
+  const fsEmail = String(fsContact.email).toLowerCase();
+  if (currentEmail === fsEmail) return { skipped: true, reason: 'already_correct' };
+  // 5. FD-Kontakt finden oder anlegen
+  const phoneNumbers = fsContact.phone_numbers || [];
+  const _phByLbl = (re) => { const hit = phoneNumbers.find(p => re.test(String(p.label || '').toLowerCase())); return hit ? hit.value : ''; };
+  const name = fsContact.display_name || ((fsContact.first_name || '') + ' ' + (fsContact.last_name || '')).trim() || fsEmail.split('@')[0];
+  const phone = fsContact.work_number || _phByLbl(/work|büro|buero|fest/) || '';
+  const mobile = fsContact.mobile_number || _phByLbl(/mobile|mobil|cell|handy/) || '';
+  let fdContact;
+  try {
+    fdContact = await findOrCreateFdContactByEmail(accountId, { name, email: fsEmail, phone, mobile });
+  } catch (e) { return { error: 'fd_contact_failed', message: e.message }; }
+  if (!fdContact?.id) return { error: 'fd_contact_failed' };
+  // 6. Ticket-Requester umstellen
+  try {
+    await proxyJson('/freshdesk/' + encodeURIComponent(accountId) + '/api/v2/tickets/' + ticketId, {
+      method: 'PUT',
+      body: JSON.stringify({ requester_id: fdContact.id }),
+    });
+  } catch (e) { return { error: 'ticket_update_failed', message: e.message }; }
+  // 7. Lokale Caches aktualisieren
+  const newRequester = { id: fdContact.id, name: fdContact.name || name, email: fsEmail, phone, mobile };
+  patchTicketInList(accountId, ticketId, { requester_id: fdContact.id, requester: newRequester });
+  if (Array.isArray(APP_STATE.taskTickets)) {
+    const idx = APP_STATE.taskTickets.findIndex(x => x._accountId === accountId && x.id === ticketId);
+    if (idx >= 0) {
+      APP_STATE.taskTickets[idx] = Object.assign({}, APP_STATE.taskTickets[idx], { requester_id: fdContact.id, requester: newRequester });
+    }
+  }
+  cacheRequester(accountId, newRequester);
+  return { repaired: true, fdContactId: fdContact.id, name: newRequester.name, email: fsEmail };
+}
+
+/* Auto-Repair-Lauf nach loadTaskTickets: identifiziert Kandidaten und repariert
+   max. 5 parallel. Markiert reparierte Tickets visuell. */
+const TASK_REPAIR_IN_PROGRESS = new Set();
+async function autoRepairTaskTickets() {
+  const all = APP_STATE.taskTickets || [];
+  const candidates = all.filter(_looksLikeFsAutoTask);
+  if (!candidates.length) return;
+  console.log('[auto-repair] ' + candidates.length + ' Kandidat(en) für Requester-Reparatur');
+  const CHUNK = 5;
+  let stats = { repaired: 0, skipped: 0, errors: 0 };
+  for (let i = 0; i < candidates.length; i += CHUNK) {
+    const chunk = candidates.slice(i, i + CHUNK);
+    chunk.forEach(t => { TASK_REPAIR_IN_PROGRESS.add(t._accountId + '|' + t.id); });
+    if (APP_STATE.page === 'tasks') _renderTasksList();
+    const results = await Promise.all(chunk.map(t => repairTaskTicketRequester(t._accountId, t.id).catch(e => ({ error: 'exception', message: e.message }))));
+    results.forEach((r, idx) => {
+      const ref = chunk[idx]._accountId + '|' + chunk[idx].id;
+      TASK_REPAIR_IN_PROGRESS.delete(ref);
+      if (r?.repaired) stats.repaired++;
+      else if (r?.skipped) stats.skipped++;
+      else if (r?.error) stats.errors++;
+    });
+    if (APP_STATE.page === 'tasks') _renderTasksList();
+  }
+  if (stats.repaired > 0) {
+    toast(stats.repaired + ' Aufgabe' + (stats.repaired === 1 ? '' : 'n') + ' — Kontakt aus Freshsales übernommen', 'success', 5000);
+  }
+  console.log('[auto-repair] fertig:', stats);
+}
+
 /* Lädt FD-Tickets aus allen konfigurierten Aufgaben-Gruppen über alle Accounts.
    Pro Account ein Search-API-Call: group_id:X OR group_id:Y. */
 async function loadTaskTickets() {
@@ -14144,6 +14248,9 @@ async function renderTasksPage() {
   try { await loadTaskTickets(); } catch (e) { console.warn('renderTasksPage load:', e); }
   _renderTasksHeader();
   _renderTasksList();
+  // v2.46.3: Auto-Repair der FS-Auto-Aufgaben im Hintergrund (fire-and-forget).
+  // Setzt den Requester auf den echten Kunden aus dem FS-Contact-Link.
+  autoRepairTaskTickets().catch(e => console.warn('autoRepair:', e));
 }
 
 function _renderTasksHeader() {
@@ -14325,7 +14432,10 @@ function _renderTaskTicketCard(t) {
   var emailBtn = reqEmail ? ('<a href="mailto:' + escapeAttr(reqEmail) + '" onclick="event.stopPropagation()" class="inline-flex items-center gap-1.5 px-2 py-1 bg-brand-50 border border-brand-300 text-brand-800 rounded text-[11px] font-medium active:bg-brand-100"><i data-lucide="mail" class="w-3 h-3"></i>' + escapeHtml(reqEmail) + '</a>') : '';
   // Wisch-Wrapper (gleiche Struktur wie früher — _attachTaskSwipe nutzt diese Attribute)
   var ticketRef = accountId + '|' + ticketId;
-  return '<div data-task-swipe-card data-task-ref="' + escapeAttr(ticketRef) + '" class="relative bg-white rounded-2xl border border-ink-200 shadow-sm overflow-hidden">' +
+  // v2.46.3: Auto-Repair-Indikator wenn Requester gerade aus FS gezogen wird
+  var repairingNow = TASK_REPAIR_IN_PROGRESS && TASK_REPAIR_IN_PROGRESS.has(ticketRef);
+  var repairBadge = repairingNow ? '<span class="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[9px] bg-purple-100 text-purple-700 border border-purple-200 font-semibold"><span class="spinner inline-block w-2 h-2 border-[1.5px] text-purple-700"></span> Kontakt wird gezogen…</span>' : '';
+  return '<div data-task-swipe-card data-task-ref="' + escapeAttr(ticketRef) + '" class="relative bg-white rounded-2xl border border-ink-200 shadow-sm overflow-hidden' + (repairingNow ? ' ring-2 ring-purple-300 ring-offset-1' : '') + '">' +
     // Hint links (sichtbar bei Rechts-Swipe → Erledigt)
     '<div class="absolute inset-y-0 left-0 flex items-center pl-4 pr-2 text-emerald-700 font-bold pointer-events-none">' +
       '<i data-lucide="check-circle-2" class="w-5 h-5 mr-1"></i><span class="text-sm">Erledigen…</span>' +
@@ -14343,7 +14453,10 @@ function _renderTaskTicketCard(t) {
         '<div class="flex-1 min-w-0">' +
           '<p class="font-semibold text-ink-900 text-sm leading-snug">' + escapeHtml(titel) + '</p>' +
           (reqName ? '<p class="text-[11px] text-ink-700 truncate mt-0.5"><i data-lucide="user" class="w-3 h-3 inline mr-0.5"></i>' + escapeHtml(reqName) + '</p>' : '') +
-          (groupName ? '<span class="inline-flex items-center gap-1 mt-1 text-[10px] uppercase tracking-wider px-1.5 py-0.5 rounded bg-purple-100 text-purple-800 border border-purple-200 font-semibold">' + escapeHtml(groupName) + '</span>' : '') +
+          '<div class="flex flex-wrap items-center gap-1 mt-1">' +
+            (groupName ? '<span class="inline-flex items-center gap-1 text-[10px] uppercase tracking-wider px-1.5 py-0.5 rounded bg-purple-100 text-purple-800 border border-purple-200 font-semibold">' + escapeHtml(groupName) + '</span>' : '') +
+            repairBadge +
+          '</div>' +
         '</div>' +
         '<span class="text-[10px] uppercase tracking-wider px-2 py-0.5 rounded-full font-semibold border shrink-0 ' + dueClass + '">' + escapeHtml(dueLabel) + '</span>' +
       '</div>' +
