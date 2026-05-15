@@ -325,7 +325,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.45.6';
+const APP_VERSION = 'v2.45.7';
 // Read-Token absichtlich gesplittet, damit GitHub Secret-Scanning beim Push nicht blockt.
 // Der Token ist read-only und Base-scoped → bewusst eingebettet (Architektur-Entscheidung).
 const _RK = 'patu8KWM8aWB' + 'yxCGL.69fae5d9fa4b94c2' + '66b426dadd71a51f574945d840b33569058ab5e9d89ebef3';
@@ -1792,7 +1792,10 @@ async function createAufgabe(opts) {
     created:                 nowIso(),
     completed_at:            '',
   };
-  const rec = await airtableWrite(AUFGABEN_TABLE, fields);
+  // WithAutoField: legt fehlende Felder (z.B. related_fs_contact_id auf älteren Bases) auto an.
+  const rec = await airtableWriteWithAutoField(AUFGABEN_TABLE, fields, {
+    description:  'multilineText',
+  });
   const item = _normalizeAufgabe(rec);
   if (!APP_STATE.aufgaben) APP_STATE.aufgaben = [];
   APP_STATE.aufgaben.unshift(item);
@@ -1801,7 +1804,9 @@ async function createAufgabe(opts) {
 
 async function updateAufgabe(recordId, fields) {
   if (!recordId) throw new Error('Aufgabe-ID fehlt');
-  const rec = await airtableUpdate(AUFGABEN_TABLE, recordId, fields);
+  const rec = await airtableUpdateWithAutoField(AUFGABEN_TABLE, recordId, fields, {
+    description: 'multilineText',
+  });
   const item = _normalizeAufgabe(rec);
   if (Array.isArray(APP_STATE.aufgaben)) {
     const i = APP_STATE.aufgaben.findIndex(a => a.recordId === recordId);
