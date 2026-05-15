@@ -145,102 +145,151 @@
   }
 
   /* ============================================================
-     v2.46.12 — FRESH THEME OVERRIDES
-     Aktiviert via <body class="theme-fresh"> + localStorage 'fdh_design'.
-     Strategie: kein Re-Render der HTML, sondern CSS-Override-Layer der
-     wichtige Komponenten-Klassen umstyled. Funktioniert mit dem
-     existierenden Tailwind-Markup.
+     v2.46.14 — FRESH THEME OVERRIDES (BOLD redesign)
+     Dark Bottom-Nav, Gradient-Stat-Pills, große Typo, vibrant Akzente.
+     Inspiriert von modernen Dashboard-Designs (gradient cards, dark nav).
      ============================================================ */
   body.theme-fresh {
     background:
-      radial-gradient(1200px 600px at 10% -10%, rgba(168, 85, 247, 0.08), transparent 60%),
-      radial-gradient(900px 500px at 90% 5%, rgba(20, 184, 166, 0.06), transparent 60%),
-      linear-gradient(180deg, #fafbfc 0%, #f4f6f8 100%);
+      radial-gradient(1200px 600px at 10% -10%, rgba(168, 85, 247, 0.10), transparent 60%),
+      radial-gradient(900px 500px at 95% 0%, rgba(244, 63, 94, 0.06), transparent 60%),
+      radial-gradient(700px 400px at 50% 100%, rgba(20, 184, 166, 0.05), transparent 70%),
+      linear-gradient(180deg, #f8fafc 0%, #eef2f7 100%);
     background-attachment: fixed;
   }
-  /* App-Shell: dezenter Schatten-Gradient hinter dem Content */
-  body.theme-fresh #appShell {
-    background: transparent;
-  }
-  /* Top-Bar mit Gradient (Version + User) */
+  body.theme-fresh #appShell { background: transparent; }
+
+  /* Top-Bar: dunkler Gradient (statt pastell), helle Schrift */
   body.theme-fresh #versionBar:not(.update-banner) {
-    background: linear-gradient(90deg, #ede9fe 0%, #fae8ff 50%, #e0e7ff 100%);
-    border-color: rgba(167, 139, 250, 0.3);
+    background: linear-gradient(90deg, #0f0a2e 0%, #1e1b4b 40%, #4c1d95 100%) !important;
+    border-color: transparent !important;
+    color: #fff !important;
   }
-  /* Sticky Page-Header (Pageheader-Bereich) */
+  body.theme-fresh #versionBar:not(.update-banner) * {
+    color: #fff !important;
+  }
+  body.theme-fresh #versionBar .text-brand-600 { color: #c4b5fd !important; }
+  body.theme-fresh #versionBar .text-ink-600,
+  body.theme-fresh #versionBar .text-ink-700,
+  body.theme-fresh #versionBar .text-ink-500 { color: rgba(255,255,255,0.85) !important; }
+
+  /* Page-Header (sticky) — clean white glass mit Schatten */
   body.theme-fresh header.sticky,
   body.theme-fresh > header {
-    backdrop-filter: blur(12px) saturate(140%);
-    -webkit-backdrop-filter: blur(12px) saturate(140%);
-    background: rgba(255, 255, 255, 0.75) !important;
+    backdrop-filter: blur(20px) saturate(160%);
+    -webkit-backdrop-filter: blur(20px) saturate(160%);
+    background: rgba(255, 255, 255, 0.92) !important;
+    box-shadow: 0 1px 0 rgba(15, 23, 42, 0.05);
   }
-  /* Karten: deutlich rundere Ecken + softer Shadow */
-  body.theme-fresh .rounded-2xl { border-radius: 1.5rem !important; }
-  body.theme-fresh .rounded-xl  { border-radius: 1rem !important; }
+  body.theme-fresh header.sticky h1,
+  body.theme-fresh header.sticky h2 {
+    font-weight: 800 !important;
+    letter-spacing: -0.02em;
+  }
+
+  /* Cards: deutlich rundere Ecken + 3D-Schatten */
+  body.theme-fresh .rounded-2xl { border-radius: 1.75rem !important; }
+  body.theme-fresh .rounded-xl  { border-radius: 1.25rem !important; }
+  body.theme-fresh .rounded-lg  { border-radius: 0.875rem !important; }
   body.theme-fresh .shadow-sm {
     box-shadow:
-      0 2px 4px -1px rgba(15, 23, 42, 0.04),
-      0 4px 12px -2px rgba(15, 23, 42, 0.06),
+      0 2px 8px -2px rgba(15, 23, 42, 0.06),
+      0 8px 24px -8px rgba(15, 23, 42, 0.08),
       0 0 0 1px rgba(15, 23, 42, 0.02) !important;
   }
-  /* Brand-Buttons → Gradient */
+
+  /* Brand-Buttons → kräftiger Gradient mit Glow */
   body.theme-fresh button.bg-brand-500,
   body.theme-fresh .bg-brand-500 {
     background: linear-gradient(135deg, #6366f1 0%, #8b5cf6 50%, #a855f7 100%) !important;
     border-color: transparent !important;
-    box-shadow: 0 4px 14px -2px rgba(139, 92, 246, 0.4);
+    box-shadow: 0 8px 20px -4px rgba(139, 92, 246, 0.45), 0 2px 4px rgba(139, 92, 246, 0.2);
   }
-  body.theme-fresh button.bg-brand-500:hover,
-  body.theme-fresh .bg-brand-500:hover {
-    filter: brightness(1.05);
-  }
+  body.theme-fresh button.bg-brand-500:hover { filter: brightness(1.08); transform: translateY(-1px); }
+  body.theme-fresh button.bg-brand-500 { transition: all 0.2s ease; }
   body.theme-fresh button.bg-brand-600 {
     background: linear-gradient(135deg, #4f46e5 0%, #7c3aed 50%, #9333ea 100%) !important;
     border-color: transparent !important;
+    box-shadow: 0 8px 20px -4px rgba(124, 58, 237, 0.45);
   }
   body.theme-fresh button.bg-emerald-600,
   body.theme-fresh button.bg-emerald-500 {
     background: linear-gradient(135deg, #10b981 0%, #14b8a6 100%) !important;
     border-color: transparent !important;
-    box-shadow: 0 4px 14px -2px rgba(16, 185, 129, 0.35);
+    box-shadow: 0 8px 20px -4px rgba(16, 185, 129, 0.4);
   }
   body.theme-fresh button.bg-red-600 {
     background: linear-gradient(135deg, #ef4444 0%, #f43f5e 100%) !important;
     border-color: transparent !important;
   }
-  /* Bottom-Nav-Bar: gradient + glasmorphism */
-  body.theme-fresh nav#bottomNav,
+
+  /* BOTTOM-NAV: dunkler Gradient (statt weiß-glass) — wie eine schwebende dark pill */
   body.theme-fresh nav.fixed.bottom-0 {
-    backdrop-filter: blur(20px) saturate(180%);
-    -webkit-backdrop-filter: blur(20px) saturate(180%);
-    background: rgba(255, 255, 255, 0.85) !important;
-    border-top: 1px solid rgba(167, 139, 250, 0.15) !important;
-    box-shadow: 0 -8px 24px -8px rgba(15, 23, 42, 0.08);
+    background: linear-gradient(135deg, #0f0a2e 0%, #1e1b4b 50%, #2e1065 100%) !important;
+    border: none !important;
+    border-top: 1px solid rgba(167, 139, 250, 0.2) !important;
+    box-shadow: 0 -12px 32px -8px rgba(15, 23, 42, 0.3) !important;
   }
-  /* Aktiver Nav-Tab in Brand-Gradient */
-  body.theme-fresh nav .text-brand-600,
-  body.theme-fresh nav .text-brand-500 {
-    color: #7c3aed !important;
+  body.theme-fresh nav.fixed.bottom-0 button {
+    color: rgba(255,255,255,0.55) !important;
+    transition: all 0.2s ease;
   }
-  /* Toggle-Active für Filter-Chips */
+  body.theme-fresh nav.fixed.bottom-0 button.text-brand-600,
+  body.theme-fresh nav.fixed.bottom-0 button.text-brand-500,
+  body.theme-fresh nav.fixed.bottom-0 button[data-nav-active="true"] {
+    color: #fff !important;
+  }
+  body.theme-fresh nav.fixed.bottom-0 button.text-brand-600 i,
+  body.theme-fresh nav.fixed.bottom-0 button.text-brand-500 i {
+    filter: drop-shadow(0 0 8px rgba(167, 139, 250, 0.6));
+  }
+  body.theme-fresh nav.fixed.bottom-0 button .text-\[10px\] {
+    font-weight: 600 !important;
+  }
+
+  /* Filter-Chips: aktive (bg-ink-900) → dark gradient pill */
   body.theme-fresh button.bg-ink-900 {
     background: linear-gradient(135deg, #1e1b4b 0%, #312e81 50%, #4338ca 100%) !important;
     border-color: transparent !important;
+    box-shadow: 0 4px 12px -2px rgba(67, 56, 202, 0.4);
   }
-  /* Modal-Backdrop softer */
+
+  /* Gradient-Stat-Cards: Klassen für Coral / Orange / Purple / Dark-Red, applizierbar via
+     classList von rendering-Code wenn gewünscht (Phase 2). Aktuell nicht aktiv eingesetzt. */
+  body.theme-fresh .stat-card-dark    { background: linear-gradient(135deg, #1e1b4b 0%, #4c1d95 100%) !important; color: white !important; }
+  body.theme-fresh .stat-card-coral   { background: linear-gradient(135deg, #f87171 0%, #fb923c 100%) !important; color: white !important; }
+  body.theme-fresh .stat-card-purple  { background: linear-gradient(135deg, #a78bfa 0%, #7c3aed 100%) !important; color: white !important; }
+  body.theme-fresh .stat-card-violet  { background: linear-gradient(135deg, #ec4899 0%, #be185d 100%) !important; color: white !important; }
+
+  /* Account-Tabs Chips: aktive Pille schöner */
+  body.theme-fresh button[data-account-tab].active,
+  body.theme-fresh button.bg-ink-900.rounded-full {
+    background: linear-gradient(135deg, #0f0a2e 0%, #4c1d95 100%) !important;
+    color: white !important;
+  }
+
+  /* Status-Badges (FD_STATUS-Pills wie "Offen", "Wartet") rundere Form */
+  body.theme-fresh .text-emerald-700.bg-emerald-100 {
+    background: linear-gradient(135deg, #d1fae5 0%, #a7f3d0 100%) !important;
+    color: #047857 !important;
+    border: none !important;
+  }
+
+  /* Modal-Backdrop mit blauem Tint + Blur */
   body.theme-fresh .fixed.inset-0.bg-black\/40 {
-    background: linear-gradient(180deg, rgba(15, 23, 42, 0.45) 0%, rgba(76, 29, 149, 0.35) 100%) !important;
-    backdrop-filter: blur(4px);
-    -webkit-backdrop-filter: blur(4px);
+    background: linear-gradient(180deg, rgba(15, 10, 46, 0.55) 0%, rgba(76, 29, 149, 0.5) 100%) !important;
+    backdrop-filter: blur(8px);
+    -webkit-backdrop-filter: blur(8px);
   }
-  /* Toasts: rounded + bigger */
+
+  /* Toasts: rounded + bigger, stärkerer Shadow */
   body.theme-fresh #toastContainer > div {
-    border-radius: 1.25rem !important;
-    box-shadow:
-      0 10px 32px -8px rgba(15, 23, 42, 0.25),
-      0 0 0 1px rgba(255, 255, 255, 0.1) !important;
+    border-radius: 1.5rem !important;
+    box-shadow: 0 16px 40px -12px rgba(15, 10, 46, 0.45), 0 0 0 1px rgba(255, 255, 255, 0.15) !important;
+    backdrop-filter: blur(8px);
   }
-  /* Inputs: rundere Ecken + Focus-Ring in violett */
+
+  /* Inputs: rundere Ecken + violet Focus-Ring */
   body.theme-fresh input[type="text"],
   body.theme-fresh input[type="email"],
   body.theme-fresh input[type="tel"],
@@ -257,17 +306,34 @@
   body.theme-fresh select:focus,
   body.theme-fresh textarea:focus {
     border-color: #a855f7 !important;
-    box-shadow: 0 0 0 3px rgba(168, 85, 247, 0.15) !important;
+    box-shadow: 0 0 0 4px rgba(168, 85, 247, 0.15) !important;
   }
-  /* Login-Screen: Hintergrund-Gradient */
+
+  /* Login-Screen: dramatischer Gradient */
   body.theme-fresh #loginScreen {
     background:
-      radial-gradient(800px 400px at 50% 0%, rgba(139, 92, 246, 0.12), transparent 70%),
-      linear-gradient(180deg, #f8fafc 0%, #ede9fe 100%);
+      radial-gradient(800px 500px at 50% 0%, rgba(139, 92, 246, 0.20), transparent 70%),
+      radial-gradient(600px 300px at 50% 100%, rgba(244, 63, 94, 0.10), transparent 70%),
+      linear-gradient(180deg, #1e1b4b 0%, #0f0a2e 100%) !important;
+    color: white !important;
   }
-  /* Account-Chip-Buttons rundere Form */
-  body.theme-fresh button.rounded-full {
-    border-radius: 9999px !important;
+  body.theme-fresh #loginScreen .bg-ink-100 {
+    background: rgba(255,255,255,0.05) !important;
+    border-color: rgba(255,255,255,0.1) !important;
+    color: rgba(255,255,255,0.85) !important;
+  }
+  body.theme-fresh #loginScreen .text-ink-600 { color: rgba(255,255,255,0.7) !important; }
+  body.theme-fresh #loginScreen .text-ink-900 { color: white !important; }
+  body.theme-fresh #loginScreen .bg-white { background: rgba(255,255,255,0.95) !important; }
+
+  /* H1/H2 in Page-Header bolder */
+  body.theme-fresh h1, body.theme-fresh h2 {
+    letter-spacing: -0.02em;
+  }
+  /* Account-Tab-Chips: weiße Karten mit subtilem Schatten statt einfacher Border */
+  body.theme-fresh button.rounded-full.bg-white {
+    box-shadow: 0 2px 6px -1px rgba(15, 23, 42, 0.05), 0 1px 0 rgba(15, 23, 42, 0.02);
+    border-color: transparent !important;
   }
 </style>
 </head>
@@ -451,7 +517,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.13';
+const APP_VERSION = 'v2.46.14';
 
 /* ============================================================
    GLOBAL THEME — v2.46.12
