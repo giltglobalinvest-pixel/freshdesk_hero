@@ -325,7 +325,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.44.3';
+const APP_VERSION = 'v2.45.0';
 // Read-Token absichtlich gesplittet, damit GitHub Secret-Scanning beim Push nicht blockt.
 // Der Token ist read-only und Base-scoped → bewusst eingebettet (Architektur-Entscheidung).
 const _RK = 'patu8KWM8aWB' + 'yxCGL.69fae5d9fa4b94c2' + '66b426dadd71a51f574945d840b33569058ab5e9d89ebef3';
@@ -1275,6 +1275,7 @@ const ACCESS_TABLE = 'AccountAccess';
 const WISSEN_TABLE = 'KI_Wissen';
 const KOSTEN_TABLE = 'KI_Kosten';
 const AUFGABEN_TABLE = 'MeineAufgaben';
+const REGELSTOPP_TABLE = 'RegelStopp';
 
 // Anthropic-Modell-Preise (USD je 1M Tokens). Stand 2026-Q1.
 // Beim Update einer neuen Modell-Version: hier eintragen, sonst wird Default-Eintrag genutzt.
@@ -1473,6 +1474,17 @@ async function ensureAppTables() {
     { name: 'created_by_name',         type: 'singleLineText' },
     { name: 'created',                 type: 'singleLineText' },
     { name: 'completed_at',            type: 'singleLineText' },
+  ]);
+  // Regel-Stopp: Tickets, auf die keine Auto-Regeln angewandt werden sollen.
+  // Wird gesetzt wenn der User das Ticket manuell zuweist (bewusste Entscheidung).
+  // User kann den Stopp im Detail-View per Icon aufheben.
+  await ensureTable(REGELSTOPP_TABLE, [
+    { name: 'account_id',   type: 'singleLineText' },
+    { name: 'ticket_id',    type: 'singleLineText' },
+    { name: 'reason',       type: 'singleLineText' },  // 'manual_assign' | 'manual'
+    { name: 'set_by_email', type: 'singleLineText' },
+    { name: 'set_by_name',  type: 'singleLineText' },
+    { name: 'created',      type: 'singleLineText' },
   ]);
   // Team-Wissen: jede Aktion (reply/assign/group/status/hide/spam/forward/note) wird hier
   // als Lern-Datensatz gespeichert. Wird von der Vorschlag-Engine + Indikator-Icons gelesen.
@@ -1769,6 +1781,100 @@ async function reopenAufgabe(recordId) {
 
 async function postponeAufgabe(recordId, days) {
   return await updateAufgabe(recordId, { due_date: _daysToFrist(days || 1, { morning: true }) });
+}
+
+/* === Regel-Stopp: User markiert Ticket dass keine Regeln drüber laufen sollen.
+   Wird beim manuellen Assign automatisch gesetzt; im Detail-View per Icon zu lösen.
+   Cache: APP_STATE.regelStoppMap (Map "accountId|ticketId" → { recordId, reason, ... }) */
+
+function _stoppKey(accountId, ticketId) { return accountId + '|' + ticketId; }
+
+async function loadRegelStopp() {
+  if (!APP_KEYS.user) return;
+  if (!APP_STATE.regelStoppMap) APP_STATE.regelStoppMap = new Map();
+  try {
+    var recs = await airtableRead(REGELSTOPP_TABLE, { pageSize: 100, maxRecords: 5000 });
+    APP_STATE.regelStoppMap.clear();
+    (recs || []).forEach(function (r) {
+      var f = r.fields || {};
+      if (!f.account_id || !f.ticket_id) return;
+      APP_STATE.regelStoppMap.set(_stoppKey(f.account_id, String(f.ticket_id)), {
+        recordId:     r.id,
+        reason:       f.reason || 'manual',
+        set_by_email: f.set_by_email || '',
+        set_by_name:  f.set_by_name  || '',
+        created:      f.created || '',
+      });
+    });
+  } catch (e) {
+    console.warn('loadRegelStopp (nicht kritisch):', e.message);
+  }
+}
+
+function isRulesSuppressed(accountId, ticketId) {
+  if (!APP_STATE.regelStoppMap) return false;
+  return APP_STATE.regelStoppMap.has(_stoppKey(accountId, String(ticketId)));
+}
+
+function getRegelStopp(accountId, ticketId) {
+  if (!APP_STATE.regelStoppMap) return null;
+  return APP_STATE.regelStoppMap.get(_stoppKey(accountId, String(ticketId))) || null;
+}
+
+async function setRegelStopp(accountId, ticketId, reason) {
+  if (!accountId || !ticketId) return;
+  if (!APP_KEYS.user?.api_key) return;
+  if (!APP_STATE.regelStoppMap) APP_STATE.regelStoppMap = new Map();
+  var key = _stoppKey(accountId, String(ticketId));
+  if (APP_STATE.regelStoppMap.has(key)) return; // schon gesetzt — idempotent
+  var me = APP_KEYS.user || {};
+  var fields = {
+    account_id:   accountId,
+    ticket_id:    String(ticketId),
+    reason:       reason || 'manual',
+    set_by_email: me.email || '',
+    set_by_name:  me.name  || '',
+    created:      nowIso(),
+  };
+  try {
+    var rec = await airtableWrite(REGELSTOPP_TABLE, fields);
+    APP_STATE.regelStoppMap.set(key, Object.assign({ recordId: rec.id }, fields));
+  } catch (e) {
+    console.warn('setRegelStopp fehlgeschlagen (nicht kritisch):', e.message);
+  }
+}
+
+async function clearRegelStopp(accountId, ticketId) {
+  if (!APP_STATE.regelStoppMap) return;
+  var key = _stoppKey(accountId, String(ticketId));
+  var rec = APP_STATE.regelStoppMap.get(key);
+  if (!rec) return;
+  try {
+    await airtableDelete(REGELSTOPP_TABLE, rec.recordId);
+  } catch (_) {}
+  APP_STATE.regelStoppMap.delete(key);
+}
+
+/* User-facing: hebt den Regel-Stopp für ein Ticket auf + re-rendert Detail-View. */
+async function reactivateRules(accountId, ticketId, btnEl) {
+  if (btnEl) setBusy(btnEl, true, '…');
+  try {
+    await clearRegelStopp(accountId, ticketId);
+    // _processed-Marker für dieses Ticket auch leeren, damit autoApply es re-evaluiert
+    try {
+      var m = _getProcessedMap();
+      delete m[accountId + '|' + String(ticketId)];
+      localStorage.setItem(PROCESSED_RULES_KEY, JSON.stringify(m));
+    } catch (_) {}
+    toast('Regeln für dieses Ticket wieder aktiv', 'success', 3000);
+    // Detail-View neu rendern damit Banner verschwindet
+    if (CURRENT_TICKET && CURRENT_TICKET._accountId === accountId && CURRENT_TICKET.id === ticketId) {
+      renderTicketDetailBody(CURRENT_TICKET);
+    }
+  } catch (e) {
+    if (btnEl) setBusy(btnEl, false);
+    toast('Fehler: ' + e.message, 'error', 6000);
+  }
 }
 
 /* ============================================================
@@ -8845,8 +8951,23 @@ function renderTicketDetailBody(ticket) {
   const _extractedPhones = [];
   try { extractPhoneNumbers(_detailText).forEach(n => { _extractedPhones.push(n); _addD('gefunden', n, false, true); }); } catch (_) {}
 
+  // Regel-Stopp-Banner: zeigt ob Auto-Regeln für dieses Ticket gestoppt sind
+  const _stopp = getRegelStopp(ticket._accountId, ticket.id);
+  const _stoppBanner = _stopp ? `
+    <div class="bg-amber-50 border border-amber-200 rounded-xl p-2.5 flex items-center gap-2">
+      <i data-lucide="shield-off" class="w-4 h-4 text-amber-700 shrink-0"></i>
+      <div class="flex-1 min-w-0 text-[11px]">
+        <p class="font-semibold text-amber-900">KI-Regeln gestoppt</p>
+        <p class="text-amber-700">Manuell zugewiesen von ${escapeHtml(_stopp.set_by_name || _stopp.set_by_email || 'jemand')}${_stopp.created ? ' · ' + escapeHtml(fmtDate(_stopp.created)) : ''}</p>
+      </div>
+      <button type="button" onclick="reactivateRules('${escapeAttr(ticket._accountId)}', ${ticket.id}, this)" class="shrink-0 inline-flex items-center gap-1 px-2.5 py-1.5 bg-white border border-amber-300 hover:bg-amber-100 text-amber-800 rounded-lg text-[11px] font-semibold" title="Regeln für dieses Ticket wieder aktivieren">
+        <i data-lucide="shield-check" class="w-3.5 h-3.5"></i> Regeln wieder aktiv
+      </button>
+    </div>` : '';
+
   $('ticketDetailBody').innerHTML = `
     <div class="space-y-3 max-w-2xl mx-auto">
+      ${_stoppBanner}
 
       <!-- Header-Karte -->
       <div class="bg-white rounded-2xl border border-ink-200 p-4">
@@ -9230,9 +9351,11 @@ async function assignAndClose(agentId) {
       body: JSON.stringify({ responder_id: agentId })
     });
     closeAssigneeModal();
-    toast(agentId ? 'Zugewiesen an ' + getAgentName(accountId, agentId) : 'Zuweisung entfernt', 'success');
+    toast(agentId ? 'Zugewiesen an ' + getAgentName(accountId, agentId) + ' · Regeln gestoppt' : 'Zuweisung entfernt', 'success');
     // Lokale Cache-Synchronisation (Detail + Übersicht)
     patchTicketInList(accountId, ticketId, { responder_id: agentId });
+    // Auto-Suppress: User hat bewusst zugewiesen → Regel-Stopp setzen (Idempotent)
+    if (agentId) setRegelStopp(accountId, ticketId, 'manual_assign').catch(() => {});
     if (CURRENT_TICKET && CURRENT_TICKET.id === ticketId) {
       renderTicketDetailBody(CURRENT_TICKET);
     }
@@ -12607,6 +12730,8 @@ async function executeSingleAssistantAction(ctx, a) {
     patchTicketInList(ctx.accountId, ctx.ticketId, { responder_id: a.agent_id });
     refreshTicketsListFromCache();
     recordKnowledge(ctx.accountId, _t, 'assign', { agent_id: a.agent_id, agent: getAgentName(ctx.accountId, a.agent_id) || '' }).catch(() => {});
+    // Auto-Suppress: explizite Zuweisung via KI-Assistent → Regeln auf diesem Ticket stoppen
+    setRegelStopp(ctx.accountId, ctx.ticketId, 'manual_assign').catch(() => {});
   } else if (a.type === 'group') {
     if (!a.group_id) throw new Error('Keine Gruppe ausgewählt');
     await proxyJson(base, { method: 'PUT', body: JSON.stringify({ group_id: a.group_id }) });
@@ -15909,8 +16034,12 @@ async function autoApplyRulesForTickets(tickets) {
   const activeRules = getActiveRules();
   if (!activeRules.length || !tickets.length) return;
   const hash = _ruleHash(activeRules);
-  // Nur unverarbeitete Tickets
-  const toProcess = tickets.filter(t => !_isProcessed(t._accountId, t.id, hash));
+  // Nur unverarbeitete Tickets — UND Tickets ohne Regel-Stopp (manuell zugewiesen)
+  const toProcess = tickets.filter(t => {
+    if (_isProcessed(t._accountId, t.id, hash)) return false;
+    if (isRulesSuppressed(t._accountId, t.id)) return false;
+    return true;
+  });
   if (!toProcess.length) return;
   AUTO_APPLY_RUNNING = true;
   console.log('Phase C: Anwenden von', activeRules.length, 'Regeln auf', toProcess.length, 'Tickets');
@@ -15970,6 +16099,15 @@ async function forceApplyRulesToTicket(accountId, ticketId, btnEl) {
   if (!accountId || !ticketId) return;
   if (btnEl) setBusy(btnEl, true, 'Prüfe…');
   try {
+    // Suppression-Check — Force-Apply soll trotzdem laufen können, aber User warnen
+    if (isRulesSuppressed(accountId, ticketId)) {
+      var stopp = getRegelStopp(accountId, ticketId);
+      var who = stopp ? (stopp.set_by_name || stopp.set_by_email || 'jemand') : 'jemand';
+      if (!confirm('Für dieses Ticket sind Regeln gestoppt (' + who + '). Trotzdem ausführen?\n\nKlick OK um Regeln einmalig anzuwenden — Stopp bleibt aktiv.')) {
+        if (btnEl) setBusy(btnEl, false);
+        return;
+      }
+    }
     const activeRules = getActiveRules();
     if (!activeRules.length) {
       toast('Keine aktiven Regeln vorhanden — nichts zu prüfen.', 'warn', 6000);
@@ -16937,6 +17075,7 @@ async function showApp() {
   // KI-Kosten-Log laden (im Hintergrund — fürs Dashboard)
   loadAiCostLog().catch(e => console.warn('AI-Cost-Load:', e.message));
   loadAufgaben().catch(e => console.warn('Aufgaben-Load:', e.message));
+  loadRegelStopp().catch(e => console.warn('RegelStopp-Load:', e.message));
   navTo('tickets');
   // Deep-Link: wenn URL-Hash auf ein Ticket zeigt, direkt öffnen
   handleDeepLink();
