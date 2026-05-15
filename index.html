@@ -325,7 +325,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.45.2';
+const APP_VERSION = 'v2.45.3';
 // Read-Token absichtlich gesplittet, damit GitHub Secret-Scanning beim Push nicht blockt.
 // Der Token ist read-only und Base-scoped → bewusst eingebettet (Architektur-Entscheidung).
 const _RK = 'patu8KWM8aWB' + 'yxCGL.69fae5d9fa4b94c2' + '66b426dadd71a51f574945d840b33569058ab5e9d89ebef3';
@@ -15119,6 +15119,9 @@ async function loadRules() {
 
 function getActiveRules() { return RULES_CACHE.filter(r => r.aktiv); }
 
+/* Legacy: löschte den GESAMTEN Processed-Cache → führte zu Doppel-Anwendung
+   bestehender Regeln nach Toggle/Edit (v2.45.1 Bug). Seit v2.45.3 nur noch
+   chirurgisch via _clearProcessedForRule(id) in den Callern. */
 function clearProcessedRulesCache() {
   try { localStorage.removeItem(PROCESSED_RULES_KEY); } catch (_) {}
 }
@@ -15134,24 +15137,30 @@ async function saveRule({ id, titel, beschreibung, action, aktiv }) {
   };
   if (id) {
     await airtableUpdate(REGELN_TABLE, id, fields);
+    // NUR für DIESE editierte Regel die Marker auf allen Tickets clearen
+    // (damit sie re-evaluiert wird) — andere Regeln bleiben „angewandt".
+    _clearProcessedForRule(id);
   } else {
     await airtableWrite(REGELN_TABLE, fields);
+    // CREATE: Regel-ID existiert noch nicht in der Processed-Map → nichts zu tun.
   }
-  // Bei jeder Regel-Änderung den Verarbeitet-Cache leeren, damit Tickets neu evaluiert werden
-  clearProcessedRulesCache();
 }
 
 async function toggleRule(id, active) {
   await airtableUpdate(REGELN_TABLE, id, { aktiv: active ? 'ja' : 'nein' });
   const r = RULES_CACHE.find(x => x.id === id);
   if (r) r.aktiv = active;
-  clearProcessedRulesCache();
+  // Bei „aktiv → an": Marker für DIESE Regel clearen, damit auf bereits
+  // prozessierten Tickets neu evaluiert wird. Bei „aktiv → aus" nichts tun.
+  if (active) _clearProcessedForRule(id);
 }
 
 async function deleteRule(id) {
   await airtableDelete(REGELN_TABLE, id);
   RULES_CACHE = RULES_CACHE.filter(r => r.id !== id);
-  clearProcessedRulesCache();
+  // Aus der Processed-Map entfernen — speicher-hygiene, keine funktionale
+  // Auswirkung (gelöschte Regel wird ohnehin nicht mehr evaluiert).
+  _clearProcessedForRule(id);
 }
 
 async function renderRulesPage() {
@@ -15667,11 +15676,21 @@ async function saveRuleAndClose(btnEl) {
   const title = ($('ruleTitleEdit')?.value || ctx.parsed.title || 'Unbenannte Regel').trim();
   setBusy(btnEl, true, 'Speichere…');
   try {
+    // Beispiel-Ticket aus dem Erstell-Kontext persistieren — der Eval-Prompt nutzt es
+    // als Anker („so sieht ein matchendes Ticket aus") für strukturelle Ähnlichkeitsprüfung.
+    const exampleTicket = ctx.ticketContext ? {
+      subject:        (ctx.ticketContext.subject || '').slice(0, 200),
+      description:    (ctx.ticketContext.description || '').slice(0, 1500),
+      requesterEmail: ctx.ticketContext.requesterEmail || null,
+      requesterName:  ctx.ticketContext.requesterName || null,
+    } : (ctx.parsed.exampleTicket || null);
+    const actionPayload = { ...ctx.parsed, title };
+    if (exampleTicket) actionPayload.exampleTicket = exampleTicket;
     await saveRule({
       id:           ctx.id,
       titel:        title,
       beschreibung: ctx.beschreibung,
-      action:       { ...ctx.parsed, title },
+      action:       actionPayload,
       aktiv:        ctx.aktiv,
     });
     // Bevor wir den Editor schließen: das Ticket merken aus dem die Regel kam — damit
@@ -16027,21 +16046,59 @@ async function applyRuleActions(rule, ticket) {
   return performed;
 }
 
+// Confidence-Schwelle: nur Matches ≥ diesem Wert werden angewendet.
+// 0.85 ist konservativ — false-positives wie „Angebot mit FLP-Absender" matched
+// die „Rechnungen an Buchhaltung"-Regel werden so gefiltert.
+const RULE_MATCH_CONFIDENCE_THRESHOLD = 0.85;
+
 // Claude (Haiku — schnell + günstig) entscheidet welche Tickets welche Regel matchen
 async function evaluateRulesForTickets(tickets, rules) {
   if (!tickets.length || !rules.length) return [];
+  // Pro Ticket: Betreff + Description + letzte Konversation + Absender + Anhänge.
+  // Description auf 1500 erhöht (war 600) — Schlüsselwörter wie „Angebot" stehen oft
+  // erst nach der Anrede oder im PS, nicht im Betreff.
   const ticketsBlob = tickets.map(t => {
-    const desc = htmlToText(t.description_text || t.description || '').slice(0, 600);
-    const lastConv = (t.conversations || []).slice(-1).map(c => htmlToText(c.body_text || c.body || '').slice(0, 300))[0] || '';
-    return '[TICKET ' + t.id + ']\nBetreff: ' + (t.subject || '') + '\nBeschreibung: ' + desc + (lastConv ? '\nLetzte Nachricht: ' + lastConv : '');
+    const desc = htmlToText(t.description_text || t.description || '').slice(0, 1500);
+    const lastConv = (t.conversations || []).slice(-1).map(c => htmlToText(c.body_text || c.body || '').slice(0, 400))[0] || '';
+    const reqName = t.requester?.name || '';
+    const reqEmail = t.requester?.email || '';
+    // Attachment-Filenames sind oft das stärkste Signal („Angebot Nr. 2018557778.pdf"!)
+    const atts = [];
+    (t.attachments || []).forEach(a => { if (a?.name) atts.push(a.name); });
+    (t.conversations || []).forEach(c => (c.attachments || []).forEach(a => { if (a?.name) atts.push(a.name); }));
+    const attsLine = atts.length ? '\nAnhänge: ' + Array.from(new Set(atts)).slice(0, 6).join(', ') : '';
+    const senderLine = (reqName || reqEmail) ? '\nAbsender: ' + reqName + (reqEmail ? ' <' + reqEmail + '>' : '') : '';
+    return '[TICKET ' + t.id + ']\nBetreff: ' + (t.subject || '') + senderLine + attsLine + '\nBeschreibung: ' + desc + (lastConv ? '\nLetzte Nachricht: ' + lastConv : '');
   }).join('\n\n---\n\n');
-  const rulesBlob = rules.map(r => '[REGEL ' + r.id + '] "' + r.titel + '"\nMatch-Kriterium: ' + (r.action?.matchCriteria || r.beschreibung || '')).join('\n\n');
-  const sysPrompt = 'Du analysierst Helpdesk-Tickets und entscheidest welche Regel auf welches Ticket passt. Sei zurückhaltend — match nur wenn ein Match-Kriterium klar zutrifft.\n\nREGELN:\n' + rulesBlob + '\n\nAntworte AUSSCHLIESSLICH mit JSON in diesem Format:\n{"matches":[{"ticketId":12345,"ruleIds":["reg_xxx"]}]}\n\nEin Ticket kann mehrere Regeln matchen oder gar keine. Liefere nur Matches die klar sind.';
+  // Regel-Blob inklusive optionalem Beispiel-Ticket als Anker.
+  const rulesBlob = rules.map(r => {
+    const a = r.action || {};
+    let block = '[REGEL ' + r.id + '] "' + r.titel + '"\nMatch-Kriterium: ' + (a.matchCriteria || r.beschreibung || '');
+    if (a.exampleTicket) {
+      const ex = a.exampleTicket;
+      const exDesc = (ex.description || '').slice(0, 600);
+      block += '\nBEISPIEL-TICKET (so sieht ein matchendes Ticket aus):\n  Betreff: ' + (ex.subject || '') + (ex.requesterEmail ? '\n  Absender: ' + ex.requesterEmail : '') + (exDesc ? '\n  Beschreibung: ' + exDesc : '');
+    }
+    return block;
+  }).join('\n\n');
+  const sysPrompt =
+    'Du analysierst Helpdesk-Tickets und entscheidest welche Regel auf welches Ticket passt.\n\n' +
+    'STRENGE MATCHING-LOGIK:\n' +
+    '1. Eine Regel passt NUR wenn das Match-Kriterium klar und vollständig zutrifft. Im Zweifel → KEIN Match.\n' +
+    '2. WORT-KONFLIKT-PRÜFUNG (kritisch!): Wenn das Match-Kriterium ein spezifisches Konzept nennt (z.B. „Rechnung", „Reklamation", „Bestellung", „Storno", „Mahnung", „Lieferung") UND im Ticket-Betreff oder den Anhängen ein widersprüchliches Konzept dominant ist (z.B. „Angebot" statt „Rechnung", „Bestellung" statt „Storno", „Anfrage" statt „Reklamation") → KEIN Match. Auch dann nicht matchen, wenn der Absender oder andere Metadaten zur Regel zu passen scheinen — der INHALT zählt mehr.\n' +
+    '3. Wenn ein BEISPIEL-TICKET zur Regel mitgegeben ist: vergleiche das aktuelle Ticket strukturell damit (gleicher Anfrage-Typ? gleiches Themenfeld? gleiche Dokument-Kategorie?). Strukturelle Ähnlichkeit ist Pflicht, nicht nur Absender-Match.\n' +
+    '4. Reines Absender-Match (z.B. „Email kommt von firma.de") reicht NICHT — es muss zusätzlich der Inhalt zum Match-Kriterium passen.\n' +
+    '5. Anhänge-Filenames sind starkes Signal: „Rechnung_xxx.pdf" → echt Rechnung; „Angebot_xxx.pdf" → echt Angebot. Nutze das zur Disambiguierung.\n\n' +
+    'REGELN:\n' + rulesBlob + '\n\n' +
+    'Antworte AUSSCHLIESSLICH mit JSON in diesem Format:\n' +
+    '{"matches":[{"ticketId":12345,"ruleId":"reg_xxx","confidence":0.95,"reason":"Kurze Begründung (max 80 Zeichen) — warum dieser Match sicher ist"}]}\n\n' +
+    'Ein Ticket kann mehrere Regeln matchen (dann mehrere Einträge mit derselben ticketId) oder gar keine. ' +
+    'confidence: 0.0–1.0 — wie sicher bist du? Bei Wort-Konflikt oder unklarer Lage: ≤ 0.7 oder ganz weglassen. Nur ≥ 0.85 wird vom System angewandt.';
   const data = await proxyJson('/anthropic/v1/messages', {
     method: 'POST',
     body: JSON.stringify({
       model: 'claude-haiku-4-5-20251001',
-      max_tokens: 1500,
+      max_tokens: 2000,
       system: sysPrompt,
       messages: [{ role: 'user', content: 'TICKETS:\n\n' + ticketsBlob }]
     })
@@ -16050,11 +16107,23 @@ async function evaluateRulesForTickets(tickets, rules) {
   try {
     const parsed = parseAIJson(text);
     const flat = [];
+    const rejected = []; // für Debug-Logging
     (parsed.matches || []).forEach(m => {
       const tId = parseInt(m.ticketId, 10);
+      // Backward-Compat: ältere Antworten könnten ruleIds (Array) liefern statt ruleId (string)
       const ruleIds = m.ruleIds || (m.ruleId ? [m.ruleId] : []);
-      ruleIds.forEach(rid => flat.push({ ticketId: tId, ruleId: rid }));
+      const conf = typeof m.confidence === 'number' ? m.confidence : 1.0; // alt: kein Score = volle Konfidenz
+      ruleIds.forEach(rid => {
+        if (conf >= RULE_MATCH_CONFIDENCE_THRESHOLD) {
+          flat.push({ ticketId: tId, ruleId: rid, confidence: conf, reason: m.reason || '' });
+        } else {
+          rejected.push({ ticketId: tId, ruleId: rid, confidence: conf, reason: m.reason || '' });
+        }
+      });
     });
+    if (rejected.length) {
+      console.log('[rule-eval] ' + rejected.length + ' Match(es) unterhalb Confidence-Threshold ' + RULE_MATCH_CONFIDENCE_THRESHOLD + ':', rejected);
+    }
     return flat;
   } catch (e) {
     console.warn('Rule eval JSON parse error:', text.slice(0, 300));
