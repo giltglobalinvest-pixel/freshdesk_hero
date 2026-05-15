@@ -325,7 +325,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.45.1';
+const APP_VERSION = 'v2.45.2';
 // Read-Token absichtlich gesplittet, damit GitHub Secret-Scanning beim Push nicht blockt.
 // Der Token ist read-only und Base-scoped → bewusst eingebettet (Architektur-Entscheidung).
 const _RK = 'patu8KWM8aWB' + 'yxCGL.69fae5d9fa4b94c2' + '66b426dadd71a51f574945d840b33569058ab5e9d89ebef3';
@@ -1860,12 +1860,8 @@ async function reactivateRules(accountId, ticketId, btnEl) {
   if (btnEl) setBusy(btnEl, true, '…');
   try {
     await clearRegelStopp(accountId, ticketId);
-    // _processed-Marker für dieses Ticket auch leeren, damit autoApply es re-evaluiert
-    try {
-      var m = _getProcessedMap();
-      delete m[accountId + '|' + String(ticketId)];
-      localStorage.setItem(PROCESSED_RULES_KEY, JSON.stringify(m));
-    } catch (_) {}
+    // _processed-Marker für dieses Ticket leeren — damit autoApply ALLE Regeln neu evaluiert.
+    _clearProcessedForTicket(accountId, String(ticketId));
     toast('Regeln für dieses Ticket wieder aktiv', 'success', 3000);
     // Detail-View neu rendern damit Banner verschwindet
     if (CURRENT_TICKET && CURRENT_TICKET._accountId === accountId && CURRENT_TICKET.id === ticketId) {
@@ -15716,12 +15712,10 @@ async function saveRuleAndClose(btnEl) {
         }
       }
       if (ticketsToCheck.length) {
-        // Processed-Map für genau diese Tickets leeren, damit autoApply sie erneut prüft
-        try {
-          const m = _getProcessedMap();
-          ticketsToCheck.forEach(t => { delete m[t._accountId + '|' + t.id]; });
-          localStorage.setItem(PROCESSED_RULES_KEY, JSON.stringify(m));
-        } catch (_) {}
+        // NUR die gerade gespeicherte/editierte Regel auf allen Tickets re-evaluierbar machen.
+        // Andere, bereits angewandte Regeln bleiben „geprozesst" → kein Re-Apply.
+        // Bei NEUER Regel (ctx.id ist leer/unbekannt): keine Action nötig — Marker existiert ohnehin nicht.
+        if (ctx.id) { try { _clearProcessedForRule(ctx.id); } catch (_) {} }
         toast('Wende neue Regel auf ' + ticketsToCheck.length + ' Ticket' + (ticketsToCheck.length === 1 ? '' : 's') + ' an…', 'info', 3500);
         try {
           await autoApplyRulesForTickets(ticketsToCheck);
@@ -15758,9 +15752,7 @@ function _getProcessedMap() {
   try { return JSON.parse(localStorage.getItem(PROCESSED_RULES_KEY) || '{}'); }
   catch (_) { return {}; }
 }
-function _setProcessed(accountId, ticketId, ruleHash) {
-  const m = _getProcessedMap();
-  m[accountId + '|' + ticketId] = { hash: ruleHash, at: Date.now() };
+function _saveProcessedMap(m) {
   try {
     // Cleanup: alles älter als 30 Tage rauswerfen, damit localStorage nicht explodiert
     const cutoff = Date.now() - 30 * 86400e3;
@@ -15768,13 +15760,56 @@ function _setProcessed(accountId, ticketId, ruleHash) {
     localStorage.setItem(PROCESSED_RULES_KEY, JSON.stringify(m));
   } catch (_) {}
 }
-function _isProcessed(accountId, ticketId, ruleHash) {
+/* Per-Rule-Tracking statt globalem Rule-Set-Hash (v2.45.2):
+   Storage-Shape: { "accId|ticketId": { rules: { "ruleId": ts, ... }, at: ts } }
+   Backward-Compat: Legacy-Einträge { hash, at } werden als „alle damaligen Regeln
+   schon angewandt" gewertet — d.h. keine Re-Application bestehender Regeln.
+   Migration ist lazy: wir mappen nur wenn nötig (in _isRuleProcessed). */
+function _isRuleProcessed(accountId, ticketId, ruleId) {
   const m = _getProcessedMap();
-  return m[accountId + '|' + ticketId]?.hash === ruleHash;
+  const e = m[accountId + '|' + ticketId];
+  if (!e) return false;
+  // Legacy { hash, at }: alle Regeln gelten als geprozesst — schützt vor Re-Apply
+  // historischer Regeln nach App-Update.
+  if (e.hash && !e.rules) return true;
+  return !!(e.rules && e.rules[ruleId]);
 }
-function _ruleHash(rules) {
-  // Hash über Regel-IDs und letztes-Update; ändert sich → Re-Processing
-  return rules.map(r => r.id).sort().join('|');
+function _setRuleProcessed(accountId, ticketId, ruleId) {
+  const m = _getProcessedMap();
+  const k = accountId + '|' + ticketId;
+  let e = m[k];
+  if (!e || !e.rules) {
+    // Legacy oder fehlend: neue Shape erzeugen
+    e = { rules: {}, at: Date.now() };
+    m[k] = e;
+  }
+  e.rules[ruleId] = Date.now();
+  e.at = Date.now();
+  _saveProcessedMap(m);
+}
+/* Wird nach Speichern/Editieren einer Regel aufgerufen — damit diese Regel auf
+   bereits prozessierten Tickets erneut evaluiert wird. Lässt alle anderen Regel-
+   Marker intakt → keine Re-Apply bestehender, schon angewandter Regeln. */
+function _clearProcessedForRule(ruleId) {
+  if (!ruleId) return;
+  const m = _getProcessedMap();
+  let changed = false;
+  for (const k of Object.keys(m)) {
+    const e = m[k];
+    if (e?.rules && e.rules[ruleId]) {
+      delete e.rules[ruleId];
+      changed = true;
+    }
+  }
+  if (changed) _saveProcessedMap(m);
+}
+function _clearProcessedForTicket(accountId, ticketId) {
+  const m = _getProcessedMap();
+  const k = accountId + '|' + ticketId;
+  if (m[k]) {
+    delete m[k];
+    _saveProcessedMap(m);
+  }
 }
 
 // Fuzzy-Matching: hint → ID
@@ -16033,16 +16068,20 @@ async function autoApplyRulesForTickets(tickets) {
   if (!APP_KEYS.user?.api_key) return;
   const activeRules = getActiveRules();
   if (!activeRules.length || !tickets.length) return;
-  const hash = _ruleHash(activeRules);
-  // Nur unverarbeitete Tickets — UND Tickets ohne Regel-Stopp (manuell zugewiesen)
+  // Pro Ticket: welche Regeln sind noch NICHT angewendet?
+  // Tickets mit Regel-Stopp werden komplett übersprungen.
+  const ticketUnappliedRules = new Map();
   const toProcess = tickets.filter(t => {
-    if (_isProcessed(t._accountId, t.id, hash)) return false;
+    if (!t || !t._accountId || !t.id) return false;
     if (isRulesSuppressed(t._accountId, t.id)) return false;
+    const unapplied = activeRules.filter(r => !_isRuleProcessed(t._accountId, t.id, r.id));
+    if (!unapplied.length) return false;
+    ticketUnappliedRules.set(t._accountId + '|' + t.id, unapplied);
     return true;
   });
   if (!toProcess.length) return;
   AUTO_APPLY_RUNNING = true;
-  console.log('Phase C: Anwenden von', activeRules.length, 'Regeln auf', toProcess.length, 'Tickets');
+  console.log('Phase C: Anwenden von Regeln auf', toProcess.length, 'Tickets (per-Rule-Deduplizierung)');
   try {
     // In Chunks von 5 Tickets pro Claude-Call
     const CHUNK = 5;
@@ -16058,17 +16097,39 @@ async function autoApplyRulesForTickets(tickets) {
           try { const full = await fetchTicketDetail(t._accountId, t.id); return { ...t, ...full }; }
           catch (_) { return t; }
         }));
-        const matches = await evaluateRulesForTickets(enriched, activeRules);
-        // Aktionen pro Match anwenden
+        // Union der noch-nicht-angewandten Regeln über den Chunk
+        const unionRuleIds = new Set();
+        chunk.forEach(t => {
+          const key = t._accountId + '|' + t.id;
+          (ticketUnappliedRules.get(key) || []).forEach(r => unionRuleIds.add(r.id));
+        });
+        const evalRules = activeRules.filter(r => unionRuleIds.has(r.id));
+        if (!evalRules.length) continue;
+        const matches = await evaluateRulesForTickets(enriched, evalRules);
+        // Aktionen pro Match anwenden — pro (Ticket × Regel) max. einmal
         for (const m of matches) {
           const rule   = activeRules.find(r => r.id === m.ruleId);
           const ticket = enriched.find(t => t.id === m.ticketId);
-          if (rule && ticket) {
-            const performed = await applyRuleActions(rule, ticket);
-            if (performed.length) totalActions += performed.length;
-          }
+          if (!rule || !ticket) continue;
+          // Race-Schutz: Falls zwischenzeitlich schon angewendet → skip
+          if (_isRuleProcessed(ticket._accountId, ticket.id, rule.id)) continue;
+          const performed = await applyRuleActions(rule, ticket);
+          if (performed.length) totalActions += performed.length;
+          // DIESE Regel als für DIESES Ticket geprozesst markieren — verhindert Re-Apply
+          _setRuleProcessed(ticket._accountId, ticket.id, rule.id);
         }
-        chunk.forEach(t => { _setProcessed(t._accountId, t.id, hash); processedTickets++; });
+        // Alle evaluierten Regeln (auch Nicht-Matches) als „geprüft" markieren — verhindert,
+        // dass der KI-Eval beim nächsten Lauf nochmal dieselbe negative Bewertung macht.
+        chunk.forEach(t => {
+          const key = t._accountId + '|' + t.id;
+          const unapplied = ticketUnappliedRules.get(key) || [];
+          unapplied.forEach(r => {
+            if (!_isRuleProcessed(t._accountId, t.id, r.id)) {
+              _setRuleProcessed(t._accountId, t.id, r.id);
+            }
+          });
+          processedTickets++;
+        });
       } catch (e) {
         console.warn('Phase C chunk failed:', e);
       } finally {
@@ -16128,11 +16189,7 @@ async function forceApplyRulesToTicket(accountId, ticketId, btnEl) {
     ticket._accountId = accountId;
 
     // _processed-Marker für DIESES Ticket leeren — sonst skippt autoApply es als „schon prozessiert"
-    try {
-      const m = _getProcessedMap();
-      delete m[accountId + '|' + ticketId];
-      localStorage.setItem(PROCESSED_RULES_KEY, JSON.stringify(m));
-    } catch (_) {}
+    _clearProcessedForTicket(accountId, ticketId);
 
     // Direkter Eval-Call statt autoApply — wir wollen das Resultat sehen
     const matches = await evaluateRulesForTickets([ticket], activeRules);
@@ -16140,6 +16197,9 @@ async function forceApplyRulesToTicket(accountId, ticketId, btnEl) {
 
     if (!matches.length) {
       const ruleTitles = activeRules.map(r => '„' + r.titel + '"').join(', ');
+      // Alle evaluierten Regeln als „geprüft" markieren — sonst evaluiert autoApply
+      // gleich wieder dasselbe Negativ-Resultat.
+      activeRules.forEach(r => _setRuleProcessed(accountId, ticketId, r.id));
       toast('Keine Regel matched dieses Ticket. Aktive Regeln geprüft: ' + ruleTitles + '. Tipp: Regel zu eng formuliert? In der Regel-Bearbeitung das Beispiel-Ticket anpassen.', 'warn', 12000);
       return;
     }
@@ -16154,8 +16214,9 @@ async function forceApplyRulesToTicket(accountId, ticketId, btnEl) {
       totalActions += performed.length;
       performedByRule.push({ title: rule.titel, actions: performed });
     }
-    // _processed-Marker neu setzen damit es nicht beim nächsten Auto-Apply erneut läuft
-    try { _setProcessed(accountId, ticketId, _ruleHash(activeRules)); } catch (_) {}
+    // Alle aktiven Regeln als für dieses Ticket geprozesst markieren —
+    // verhindert Re-Apply beim nächsten Auto-Apply.
+    activeRules.forEach(r => _setRuleProcessed(accountId, ticketId, r.id));
     refreshTicketsListFromCache();
 
     // Detaillierter Toast: Welche Regel + welche Aktionen?
