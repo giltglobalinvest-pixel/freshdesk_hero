@@ -517,7 +517,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.16';
+const APP_VERSION = 'v2.46.17';
 
 /* ============================================================
    GLOBAL THEME — v2.46.12
@@ -8091,6 +8091,39 @@ function _ticketStackNav(delta) {
   renderTicketList(APP_STATE.pageState?.tickets || []);
 }
 
+/* v2.46.17: Schnell-Schließen aus dem Stack-View. PUT status=5 (Geschlossen),
+   Fallback auf status=4 (Gelöst) wenn FD wegen Pflichtfeldern blockt.
+   Bei Erfolg: lokale Liste filtern + nächste Karte zeigen. */
+async function quickCloseTicketFromStack(accountId, ticketId) {
+  const ok = await confirmDialog('Ticket schließen?', '#' + ticketId + ' direkt schließen?', { okText: 'Schließen' });
+  if (!ok) return;
+  const base = '/freshdesk/' + encodeURIComponent(accountId) + '/api/v2/tickets/' + ticketId;
+  try {
+    await proxyJson(base, { method: 'PUT', body: JSON.stringify({ status: 5 }) });
+    patchTicketInList(accountId, ticketId, { status: 5 });
+    toast('Ticket #' + ticketId + ' geschlossen', 'success', 3000);
+  } catch (e1) {
+    // Fallback: Gelöst (4) — Freshdesk schließt das dann automatisch nach X Tagen
+    if (/validat|required|missing|mandatory/i.test(e1.message || '')) {
+      try {
+        await proxyJson(base, { method: 'PUT', body: JSON.stringify({ status: 4 }) });
+        patchTicketInList(accountId, ticketId, { status: 4 });
+        toast('Ticket #' + ticketId + ' auf Gelöst gesetzt (Schließen blockiert)', 'warn', 5000);
+      } catch (e2) {
+        toast('Schließen fehlgeschlagen: ' + (e2.message || e1.message), 'error', 6000);
+        return;
+      }
+    } else {
+      toast('Schließen fehlgeschlagen: ' + e1.message, 'error', 6000);
+      return;
+    }
+  }
+  // Nach Status-Patch ist das Ticket je nach Status-Filter automatisch aus der visible-Liste
+  // raus → renderTicketList macht den Re-Render und filtert. Aktueller Index bleibt → zeigt
+  // automatisch die nächste Karte (oder rendert leer wenn keine mehr da).
+  renderTicketList(APP_STATE.pageState?.tickets || []);
+}
+
 function _attachTicketStackSwipe() {
   const card = document.querySelector('[data-ticket-stack-current]');
   if (!card || card._stackSwipeAttached) return;
@@ -8182,16 +8215,23 @@ function _renderTicketStackCard(t, isTop) {
       }).join('') + '</div>'
     : '';
 
-  // Action-Row: 2 große (Antworten + KI), 4 kleine (Email, Notiz, Wiedervorlage, Detail)
+  // Action-Row: 3 große Hauptaktionen + 4 kleine Sekundär
   const ticketRefArgs = "'" + escapeAttr(accountId) + "', " + ticketId;
+  // Schließen-Button nur wenn Ticket nicht schon geschlossen (Status 4 oder 5)
+  const isAlreadyClosed = t.status === 4 || t.status === 5;
   const actionsHtml =
-    '<div class="grid grid-cols-2 gap-2.5 mt-4">' +
-      '<button onclick="event.stopPropagation(); openDirectReplyComposer(' + ticketRefArgs + ')" class="bg-gradient-to-br from-emerald-500 to-green-600 hover:opacity-90 text-white rounded-2xl py-4 font-bold inline-flex items-center justify-center gap-2 shadow-md shadow-emerald-200 active:scale-95 transition">' +
-        '<i data-lucide="reply" class="w-5 h-5"></i> <span class="text-[15px]">Antworten</span>' +
+    '<div class="grid grid-cols-3 gap-2 mt-4">' +
+      '<button onclick="event.stopPropagation(); openDirectReplyComposer(' + ticketRefArgs + ')" class="bg-gradient-to-br from-emerald-500 to-green-600 hover:opacity-90 text-white rounded-2xl py-3.5 font-bold inline-flex flex-col items-center justify-center gap-0.5 shadow-md shadow-emerald-200 active:scale-95 transition">' +
+        '<i data-lucide="reply" class="w-5 h-5"></i> <span class="text-[12px]">Antworten</span>' +
       '</button>' +
-      '<button onclick="event.stopPropagation(); openTicketDetail(' + ticketRefArgs + ')" class="bg-gradient-to-br from-violet-500 via-purple-500 to-fuchsia-500 hover:opacity-90 text-white rounded-2xl py-4 font-bold inline-flex items-center justify-center gap-2 shadow-md shadow-purple-200 active:scale-95 transition">' +
-        '<i data-lucide="sparkles" class="w-5 h-5"></i> <span class="text-[15px]">KI-Assistent</span>' +
+      '<button onclick="event.stopPropagation(); openTicketDetail(' + ticketRefArgs + ')" class="bg-gradient-to-br from-violet-500 via-purple-500 to-fuchsia-500 hover:opacity-90 text-white rounded-2xl py-3.5 font-bold inline-flex flex-col items-center justify-center gap-0.5 shadow-md shadow-purple-200 active:scale-95 transition">' +
+        '<i data-lucide="sparkles" class="w-5 h-5"></i> <span class="text-[12px]">KI</span>' +
       '</button>' +
+      (isAlreadyClosed
+        ? '<div class="bg-ink-100 text-ink-400 rounded-2xl py-3.5 font-bold inline-flex flex-col items-center justify-center gap-0.5"><i data-lucide="check-circle-2" class="w-5 h-5"></i><span class="text-[12px]">' + escapeHtml(st.label) + '</span></div>'
+        : '<button onclick="event.stopPropagation(); quickCloseTicketFromStack(' + ticketRefArgs + ')" class="bg-gradient-to-br from-slate-700 via-slate-800 to-slate-900 hover:opacity-90 text-white rounded-2xl py-3.5 font-bold inline-flex flex-col items-center justify-center gap-0.5 shadow-md shadow-slate-300 active:scale-95 transition">' +
+            '<i data-lucide="check-circle-2" class="w-5 h-5"></i> <span class="text-[12px]">Schließen</span>' +
+          '</button>') +
     '</div>' +
     '<div class="grid grid-cols-4 gap-1.5 mt-2">' +
       (reqEmail ? '<a href="mailto:' + escapeAttr(reqEmail) + '" onclick="event.stopPropagation()" class="inline-flex flex-col items-center justify-center gap-0.5 px-1 py-2 bg-ink-50 hover:bg-brand-50 border border-ink-200 text-ink-700 rounded-xl text-[10px] font-medium"><i data-lucide="mail" class="w-4 h-4"></i>Email</a>' : '<div></div>') +
