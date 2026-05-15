@@ -325,7 +325,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.44.2';
+const APP_VERSION = 'v2.44.3';
 // Read-Token absichtlich gesplittet, damit GitHub Secret-Scanning beim Push nicht blockt.
 // Der Token ist read-only und Base-scoped → bewusst eingebettet (Architektur-Entscheidung).
 const _RK = 'patu8KWM8aWB' + 'yxCGL.69fae5d9fa4b94c2' + '66b426dadd71a51f574945d840b33569058ab5e9d89ebef3';
@@ -1468,6 +1468,7 @@ async function ensureAppTables() {
     { name: 'related_email',           type: 'singleLineText' },
     { name: 'related_phone',           type: 'singleLineText' },
     { name: 'related_mobile',          type: 'singleLineText' },
+    { name: 'related_fs_contact_id',   type: 'singleLineText' },
     { name: 'created_by_user_api_key', type: 'singleLineText' },
     { name: 'created_by_name',         type: 'singleLineText' },
     { name: 'created',                 type: 'singleLineText' },
@@ -1688,6 +1689,7 @@ function _normalizeAufgabe(r) {
     related_email:           f.related_email || '',
     related_phone:           f.related_phone || '',
     related_mobile:          f.related_mobile || '',
+    related_fs_contact_id:   f.related_fs_contact_id || '',
     created_by_user_api_key: f.created_by_user_api_key || '',
     created_by_name:         f.created_by_name || '',
     created:                 f.created || '',
@@ -1729,6 +1731,7 @@ async function createAufgabe(opts) {
     related_email:           opts.related_email || '',
     related_phone:           opts.related_phone || '',
     related_mobile:          opts.related_mobile || '',
+    related_fs_contact_id:   opts.related_fs_contact_id || '',
     created_by_user_api_key: me.api_key || '',
     created_by_name:         me.name || '',
     created:                 nowIso(),
@@ -1754,6 +1757,14 @@ async function updateAufgabe(recordId, fields) {
 
 async function completeAufgabe(recordId) {
   return await updateAufgabe(recordId, { status: 'done', completed_at: nowIso() });
+}
+
+async function cancelAufgabe(recordId) {
+  return await updateAufgabe(recordId, { status: 'cancelled', completed_at: nowIso() });
+}
+
+async function reopenAufgabe(recordId) {
+  return await updateAufgabe(recordId, { status: 'open', completed_at: '' });
 }
 
 async function postponeAufgabe(recordId, days) {
@@ -3373,6 +3384,45 @@ async function fetchFreshsalesSalesAccountById(accountId, saId) {
   } catch (e) {
     console.warn('Freshsales-Sales-Account-Fetch fehlgeschlagen für #' + saId + ':', e.message);
     return null;
+  }
+}
+
+/* Suche FS-Kontakte per Name oder Email — wird im Neue-Aufgabe-Modal genutzt
+   damit der User eine Aufgabe einem konkreten FS-Kontakt zuordnen kann. */
+async function searchFreshsalesContacts(accountId, term) {
+  if (!accountId || !term || term.length < 2) return [];
+  try {
+    // Erst nach Name, dann nach Email — beides kombiniert (dedupliziert per ID)
+    var found = {};
+    try {
+      var byName = await proxyJson('/freshsales/' + encodeURIComponent(accountId) + '/api/lookup?q=' + encodeURIComponent(term) + '&f=name&entities=contact');
+      var listN = byName?.contacts?.contacts || byName?.contacts || [];
+      (Array.isArray(listN) ? listN : []).forEach(function (c) { if (c.id) found[c.id] = c; });
+    } catch (_) {}
+    if (/\S+@\S+/.test(term)) {
+      try {
+        var byEmail = await proxyJson('/freshsales/' + encodeURIComponent(accountId) + '/api/lookup?q=' + encodeURIComponent(term) + '&f=email&entities=contact');
+        var listE = byEmail?.contacts?.contacts || byEmail?.contacts || [];
+        (Array.isArray(listE) ? listE : []).forEach(function (c) { if (c.id) found[c.id] = c; });
+      } catch (_) {}
+    }
+    return Object.values(found).map(function (c) {
+      var phoneNumbers = c.phone_numbers || [];
+      var findPhone = function (re) {
+        var hit = phoneNumbers.find(function (p) { return re.test(String(p.label || '').toLowerCase()); });
+        return hit ? hit.value : '';
+      };
+      return {
+        id: c.id,
+        name: c.display_name || [c.first_name, c.last_name].filter(Boolean).join(' ') || c.email || '(ohne Name)',
+        email: c.email || '',
+        phone: c.work_number || findPhone(/work|büro|buero|fest/) || c.phone || '',
+        mobile: c.mobile_number || findPhone(/mobile|mobil|cell|handy/) || '',
+      };
+    });
+  } catch (e) {
+    console.warn('searchFreshsalesContacts:', e.message);
+    return [];
   }
 }
 
@@ -13705,7 +13755,7 @@ function _renderTasksHeader() {
   var all = APP_STATE.aufgaben || [];
   var myKey = APP_KEYS.user && APP_KEYS.user.api_key || '';
   var visible = all.filter(function (a) {
-    if (a.status === 'done') return false;
+    if (a.status !== 'open') return false;
     if (TASKS_STATE.accountId !== 'all' && a.account_id !== TASKS_STATE.accountId) return false;
     if (TASKS_STATE.mine === 'mine' && a.assignee_user_api_key !== myKey) return false;
     return true;
@@ -13777,7 +13827,7 @@ function _renderTasksList() {
   var todayEnd = todayMs + 86400e3;
   var weekEnd = todayMs + 7 * 86400e3;
   var visible = all.filter(function (a) {
-    if (a.status === 'done') return false;
+    if (a.status !== 'open') return false;
     if (TASKS_STATE.accountId !== 'all' && a.account_id !== TASKS_STATE.accountId) return false;
     if (TASKS_STATE.mine === 'mine' && a.assignee_user_api_key !== myKey) return false;
     return true;
@@ -13810,6 +13860,7 @@ function _renderTasksList() {
   }
   host.innerHTML = '<div class="space-y-2">' + visible.map(_renderAufgabeCard).join('') + '</div>';
   if (window.lucide) lucide.createIcons();
+  _attachTaskSwipe();
 }
 
 function _renderAufgabeCard(a) {
@@ -13859,30 +13910,40 @@ function _renderAufgabeCard(a) {
         '</a>';
       }).join('') + '</div>';
   }
-  return '<div class="bg-white rounded-2xl border border-ink-200 p-3 shadow-sm">' +
-    '<div class="flex items-start gap-2.5 mb-1.5">' +
-      '<div class="w-9 h-9 rounded-xl bg-' + typeColor + '-50 border border-' + typeColor + '-200 flex items-center justify-center text-' + typeColor + '-700 shrink-0">' +
-        '<i data-lucide="' + typeIcon + '" class="w-4 h-4"></i>' +
-      '</div>' +
-      '<div class="flex-1 min-w-0">' +
-        '<div class="flex items-center gap-1.5 flex-wrap">' +
-          '<p class="font-semibold text-ink-900 text-sm leading-snug">' + escapeHtml(a.title || '(ohne Titel)') + '</p>' +
-          prioBadge +
-        '</div>' +
-        (a.related_name ? '<p class="text-[11px] text-ink-600 truncate mt-0.5"><i data-lucide="user" class="w-3 h-3 inline mr-0.5"></i>' + escapeHtml(a.related_name) + (a.related_email ? ' · ' + escapeHtml(a.related_email) : '') + '</p>' : '') +
-      '</div>' +
-      '<span class="text-[10px] uppercase tracking-wider px-2 py-0.5 rounded-full font-semibold border shrink-0 ' + dueClass + '">' + escapeHtml(dueLabel) + '</span>' +
+  var rid = escapeAttr(a.recordId);
+  // Aufgabe-Karte als Swipe-Wrapper: links-swipe = KI / rechts-swipe = Erledigt-oder-Entfallen
+  // Hint-Backgrounds darunter, content liegt drüber und wird per touchmove verschoben.
+  return '<div data-task-swipe-card data-task-id="' + rid + '" class="relative bg-white rounded-2xl border border-ink-200 shadow-sm overflow-hidden">' +
+    // Hint links (sichtbar bei Rechts-Swipe → Erledigt/Entfallen)
+    '<div class="absolute inset-y-0 left-0 flex items-center pl-4 pr-2 text-emerald-700 font-bold pointer-events-none">' +
+      '<i data-lucide="check-circle-2" class="w-5 h-5 mr-1"></i><span class="text-sm">Erledigen…</span>' +
     '</div>' +
-    (a.description ? '<p class="text-[11px] text-ink-600 leading-snug mt-1 line-clamp-2 whitespace-pre-line break-words">' + escapeHtml(a.description) + '</p>' : '') +
-    phonesHtml +
-    '<div class="flex items-center gap-2 mt-2 pt-2 border-t border-ink-100 flex-wrap">' +
-      (accountName ? '<span class="text-[10px] text-ink-500 inline-flex items-center gap-1 truncate min-w-0"><span class="w-1.5 h-1.5 rounded-full shrink-0" style="background:' + escapeAttr(accountColor) + '"></span><span class="truncate">' + escapeHtml(accountName) + '</span></span>' : '') +
-      sourceBtn +
-      (showAssignee ? '<span class="text-[10px] text-purple-700 bg-purple-50 border border-purple-200 px-1.5 py-0.5 rounded inline-flex items-center gap-1"><i data-lucide="user-check" class="w-2.5 h-2.5"></i>' + escapeHtml(a.assignee_name || 'Andere') + '</span>' : '') +
-      '<div class="ml-auto flex gap-1.5">' +
-        '<button onclick="taskPostpone(\'' + escapeAttr(a.recordId) + '\', 1, this)" class="inline-flex items-center gap-1 px-2 py-1 bg-white border border-ink-200 hover:bg-ink-50 text-ink-700 rounded-lg text-[11px] font-medium" title="Auf morgen verschieben"><i data-lucide="clock" class="w-3 h-3"></i> +1d</button>' +
-        '<button onclick="taskPostpone(\'' + escapeAttr(a.recordId) + '\', 7, this)" class="inline-flex items-center gap-1 px-2 py-1 bg-white border border-ink-200 hover:bg-ink-50 text-ink-700 rounded-lg text-[11px] font-medium" title="Auf nächste Woche verschieben"><i data-lucide="calendar-clock" class="w-3 h-3"></i> +7d</button>' +
-        '<button onclick="taskCompleteLocal(\'' + escapeAttr(a.recordId) + '\', this)" class="inline-flex items-center gap-1 px-2.5 py-1 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-[11px] font-semibold"><i data-lucide="check" class="w-3 h-3"></i> Erledigt</button>' +
+    // Hint rechts (sichtbar bei Links-Swipe → KI-Assistent)
+    '<div class="absolute inset-y-0 right-0 flex items-center pl-2 pr-4 text-purple-700 font-bold pointer-events-none">' +
+      '<span class="text-sm mr-1">KI-Assistent</span><i data-lucide="sparkles" class="w-5 h-5"></i>' +
+    '</div>' +
+    // Content (verschiebbar)
+    '<div data-task-swipe-content onclick="openTaskActionSheet(\'' + rid + '\')" class="relative bg-white p-3 cursor-pointer" style="transition: transform .22s ease; will-change: transform; touch-action: pan-y;">' +
+      '<div class="flex items-start gap-2.5 mb-1.5">' +
+        '<div class="w-9 h-9 rounded-xl bg-' + typeColor + '-50 border border-' + typeColor + '-200 flex items-center justify-center text-' + typeColor + '-700 shrink-0">' +
+          '<i data-lucide="' + typeIcon + '" class="w-4 h-4"></i>' +
+        '</div>' +
+        '<div class="flex-1 min-w-0">' +
+          '<div class="flex items-center gap-1.5 flex-wrap">' +
+            '<p class="font-semibold text-ink-900 text-sm leading-snug">' + escapeHtml(a.title || '(ohne Titel)') + '</p>' +
+            prioBadge +
+          '</div>' +
+          (a.related_name ? '<p class="text-[11px] text-ink-600 truncate mt-0.5"><i data-lucide="user" class="w-3 h-3 inline mr-0.5"></i>' + escapeHtml(a.related_name) + (a.related_email ? ' · ' + escapeHtml(a.related_email) : '') + '</p>' : '') +
+        '</div>' +
+        '<span class="text-[10px] uppercase tracking-wider px-2 py-0.5 rounded-full font-semibold border shrink-0 ' + dueClass + '">' + escapeHtml(dueLabel) + '</span>' +
+      '</div>' +
+      (a.description ? '<p class="text-[11px] text-ink-600 leading-snug mt-1 line-clamp-2 whitespace-pre-line break-words">' + escapeHtml(a.description) + '</p>' : '') +
+      phonesHtml +
+      '<div class="flex items-center gap-2 mt-2 pt-2 border-t border-ink-100 flex-wrap">' +
+        (accountName ? '<span class="text-[10px] text-ink-500 inline-flex items-center gap-1 truncate min-w-0"><span class="w-1.5 h-1.5 rounded-full shrink-0" style="background:' + escapeAttr(accountColor) + '"></span><span class="truncate">' + escapeHtml(accountName) + '</span></span>' : '') +
+        sourceBtn +
+        (showAssignee ? '<span class="text-[10px] text-purple-700 bg-purple-50 border border-purple-200 px-1.5 py-0.5 rounded inline-flex items-center gap-1"><i data-lucide="user-check" class="w-2.5 h-2.5"></i>' + escapeHtml(a.assignee_name || 'Andere') + '</span>' : '') +
+        '<span class="ml-auto text-[10px] text-ink-400 inline-flex items-center gap-1"><i data-lucide="hand" class="w-3 h-3"></i>Wische ← KI · Erledigt →</span>' +
       '</div>' +
     '</div>' +
   '</div>';
@@ -13926,6 +13987,300 @@ async function taskPostpone(recordId, days, btn) {
   }
 }
 
+async function taskCancel(recordId) {
+  try {
+    await cancelAufgabe(recordId);
+    _renderTasksList();
+    _renderTasksHeader();
+    toast('Aufgabe entfallen', 'success', 2500);
+  } catch (e) {
+    toast('Fehler: ' + e.message, 'error', 6000);
+  }
+}
+
+/* === Swipe-Handler für Task-Cards =========================================
+   Links-Swipe → KI-Mini-Modal · Rechts-Swipe → Action-Sheet (Erledigt/Entfallen).
+   Wird nach jedem _renderTasksList aufgerufen. */
+function _attachTaskSwipe() {
+  var cards = document.querySelectorAll('[data-task-swipe-card]');
+  cards.forEach(function (card) {
+    if (card._taskSwipeAttached) return;
+    card._taskSwipeAttached = true;
+    var content = card.querySelector('[data-task-swipe-content]');
+    if (!content) return;
+    var startX = 0, startY = 0, dx = 0, horiz = null, drag = false;
+    var tap = true; // wird auf false gesetzt bei movement → onclick wird unterdrückt
+
+    content.addEventListener('touchstart', function (e) {
+      _resetAllTaskSwipes();
+      startX = e.touches[0].clientX;
+      startY = e.touches[0].clientY;
+      dx = 0;
+      horiz = null;
+      drag = true;
+      tap = true;
+      content.style.transition = 'none';
+    }, { passive: true });
+
+    content.addEventListener('touchmove', function (e) {
+      if (!drag) return;
+      var cx = e.touches[0].clientX - startX;
+      var cy = Math.abs(e.touches[0].clientY - startY);
+      if (horiz === null) {
+        if (Math.abs(cx) < 8 && cy < 8) return;
+        horiz = Math.abs(cx) > cy;
+        if (!horiz) { drag = false; return; }
+      }
+      tap = false;
+      dx = Math.max(-200, Math.min(200, cx));
+      content.style.transform = 'translateX(' + dx + 'px)';
+    }, { passive: true });
+
+    content.addEventListener('touchend', function () {
+      if (!drag) return;
+      drag = false;
+      content.style.transition = 'transform .22s ease';
+      var taskId = card.dataset.taskId;
+      if (dx > 100) {
+        // Rechts-Swipe weit → direkt Erledigt (häufigster Fall)
+        content.style.transform = 'translateX(110%)';
+        setTimeout(function () { taskCompleteLocal(taskId); }, 200);
+      } else if (dx > 50) {
+        // Mittlerer Rechts-Swipe → Action-Sheet (Erledigt / Entfallen)
+        content.style.transform = 'translateX(0)';
+        openTaskRightActionSheet(taskId);
+      } else if (dx < -50) {
+        // Links-Swipe → KI-Mini-Modal
+        content.style.transform = 'translateX(0)';
+        openTaskAiMini(taskId);
+      } else {
+        content.style.transform = 'translateX(0)';
+      }
+      // Tap-Suppression: wenn movement war, kein Click-Handler ausführen
+      if (!tap) {
+        content._suppressClickUntil = Date.now() + 500;
+      }
+    }, { passive: true });
+
+    // Click nur durchlassen wenn kein swipe
+    content.addEventListener('click', function (e) {
+      if (content._suppressClickUntil && Date.now() < content._suppressClickUntil) {
+        e.stopPropagation();
+        e.preventDefault();
+      }
+    }, true);
+  });
+}
+
+function _resetAllTaskSwipes() {
+  document.querySelectorAll('[data-task-swipe-content]').forEach(function (c) {
+    c.style.transition = 'transform .22s ease';
+    c.style.transform = 'translateX(0)';
+  });
+}
+
+/* Action-Sheet bei mittlerem Rechts-Swipe ODER beim Tap auf die Card. */
+function openTaskActionSheet(recordId) {
+  var task = (APP_STATE.aufgaben || []).find(function (a) { return a.recordId === recordId; });
+  if (!task) return;
+  var phones = [];
+  if (task.related_phone)  phones.push({ label: 'Festnetz', num: task.related_phone });
+  if (task.related_mobile) phones.push({ label: 'Mobil', num: task.related_mobile });
+  var phonesHtml = '';
+  if (phones.length) {
+    phonesHtml = '<div class="flex flex-wrap gap-1.5 mb-3">' +
+      phones.map(function (p) {
+        var tel = _cleanPhoneForTel(p.num);
+        return '<a href="tel:' + escapeAttr(tel) + '" class="inline-flex items-center gap-1.5 px-3 py-2 bg-emerald-50 border border-emerald-300 text-emerald-800 rounded-lg active:bg-emerald-100 font-semibold">' +
+          '<i data-lucide="phone-call" class="w-4 h-4"></i>' +
+          '<span class="text-[12px] font-mono">' + escapeHtml(p.num) + '</span>' +
+          '<span class="text-[9px] uppercase tracking-wider opacity-70">' + escapeHtml(p.label) + '</span>' +
+        '</a>';
+      }).join('') + '</div>';
+  }
+  var host = document.getElementById('subModalHost');
+  if (!host) { host = document.createElement('div'); host.id = 'subModalHost'; document.body.appendChild(host); }
+  host.innerHTML =
+    '<div class="fixed inset-0 z-[60] flex items-end justify-center bg-black/40" onclick="if(event.target===this)closeTaskActionSheet()">' +
+      '<div class="bg-white w-full max-w-md rounded-t-2xl shadow-2xl flex flex-col safe-bottom" style="max-height:90vh">' +
+        '<div class="px-4 py-3 border-b border-ink-200 flex items-center justify-between gap-2">' +
+          '<h3 class="font-bold text-ink-900 inline-flex items-center gap-2 truncate"><i data-lucide="phone-call" class="w-4 h-4 text-emerald-600 shrink-0"></i><span class="truncate">' + escapeHtml(task.title || 'Aufgabe') + '</span></h3>' +
+          '<button onclick="closeTaskActionSheet()" class="w-9 h-9 rounded-lg hover:bg-ink-100 flex items-center justify-center shrink-0"><i data-lucide="x" class="w-5 h-5 text-ink-700"></i></button>' +
+        '</div>' +
+        '<div class="flex-1 overflow-y-auto p-4 space-y-2">' +
+          (task.related_name ? '<p class="text-[11px] text-ink-600"><i data-lucide="user" class="w-3 h-3 inline mr-0.5"></i><b>' + escapeHtml(task.related_name) + '</b>' + (task.related_email ? ' · ' + escapeHtml(task.related_email) : '') + '</p>' : '') +
+          phonesHtml +
+          '<button onclick="taskCompleteLocal(\'' + escapeAttr(recordId) + '\'); closeTaskActionSheet()" class="w-full bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg px-3 py-3 text-sm font-semibold inline-flex items-center justify-center gap-2"><i data-lucide="check" class="w-4 h-4"></i> Erledigt</button>' +
+          '<button onclick="taskCancel(\'' + escapeAttr(recordId) + '\'); closeTaskActionSheet()" class="w-full bg-white border border-red-300 text-red-700 hover:bg-red-50 rounded-lg px-3 py-3 text-sm font-semibold inline-flex items-center justify-center gap-2"><i data-lucide="x-circle" class="w-4 h-4"></i> Entfallen</button>' +
+          '<div class="grid grid-cols-3 gap-1.5 pt-2">' +
+            '<button onclick="taskPostpone(\'' + escapeAttr(recordId) + '\', 1); closeTaskActionSheet()" class="bg-white border border-ink-200 hover:bg-ink-50 text-ink-700 rounded-lg px-2 py-2 text-xs font-medium">+1d</button>' +
+            '<button onclick="taskPostpone(\'' + escapeAttr(recordId) + '\', 7); closeTaskActionSheet()" class="bg-white border border-ink-200 hover:bg-ink-50 text-ink-700 rounded-lg px-2 py-2 text-xs font-medium">+7d</button>' +
+            '<button onclick="taskPostpone(\'' + escapeAttr(recordId) + '\', 30); closeTaskActionSheet()" class="bg-white border border-ink-200 hover:bg-ink-50 text-ink-700 rounded-lg px-2 py-2 text-xs font-medium">+30d</button>' +
+          '</div>' +
+          '<button onclick="closeTaskActionSheet(); openTaskAiMini(\'' + escapeAttr(recordId) + '\')" class="w-full bg-gradient-to-br from-purple-500 to-brand-600 text-white rounded-lg px-3 py-3 text-sm font-semibold inline-flex items-center justify-center gap-2 mt-1"><i data-lucide="sparkles" class="w-4 h-4"></i> KI-Assistent</button>' +
+        '</div>' +
+      '</div>' +
+    '</div>';
+  if (window.lucide) lucide.createIcons();
+  document.body.style.overflow = 'hidden';
+}
+
+function closeTaskActionSheet() {
+  var host = document.getElementById('subModalHost');
+  if (host) host.innerHTML = '';
+  document.body.style.overflow = '';
+}
+
+/* Mini-Action-Sheet bei mittlerem Rechts-Swipe — nur Erledigt / Entfallen. */
+function openTaskRightActionSheet(recordId) {
+  var host = document.getElementById('subModalHost');
+  if (!host) { host = document.createElement('div'); host.id = 'subModalHost'; document.body.appendChild(host); }
+  host.innerHTML =
+    '<div class="fixed inset-0 z-[60] flex items-end justify-center bg-black/40" onclick="if(event.target===this)closeTaskActionSheet()">' +
+      '<div class="bg-white w-full max-w-md rounded-t-2xl shadow-2xl p-4 safe-bottom space-y-2">' +
+        '<p class="text-[11px] uppercase tracking-wider text-ink-500 font-semibold text-center pb-1">Was tun?</p>' +
+        '<button onclick="taskCompleteLocal(\'' + escapeAttr(recordId) + '\'); closeTaskActionSheet()" class="w-full bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg px-3 py-3 text-sm font-semibold inline-flex items-center justify-center gap-2"><i data-lucide="check" class="w-4 h-4"></i> Erledigt</button>' +
+        '<button onclick="taskCancel(\'' + escapeAttr(recordId) + '\'); closeTaskActionSheet()" class="w-full bg-white border border-red-300 text-red-700 hover:bg-red-50 rounded-lg px-3 py-3 text-sm font-semibold inline-flex items-center justify-center gap-2"><i data-lucide="x-circle" class="w-4 h-4"></i> Entfallen</button>' +
+        '<button onclick="closeTaskActionSheet()" class="w-full bg-ink-100 hover:bg-ink-200 text-ink-700 rounded-lg px-3 py-2 text-xs font-medium">Abbrechen</button>' +
+      '</div>' +
+    '</div>';
+  if (window.lucide) lucide.createIcons();
+  document.body.style.overflow = 'hidden';
+}
+
+/* KI-Mini-Modal für eine Aufgabe — User tippt eine Anweisung, Claude schlägt
+   eine konkrete Action vor (z.B. „in 3 Tagen erneut", „erledigt nach Anruf", etc.) */
+let TASK_AI_CTX = null;
+function openTaskAiMini(recordId) {
+  var task = (APP_STATE.aufgaben || []).find(function (a) { return a.recordId === recordId; });
+  if (!task) return;
+  TASK_AI_CTX = { task: task };
+  var host = document.getElementById('subModalHost');
+  if (!host) { host = document.createElement('div'); host.id = 'subModalHost'; document.body.appendChild(host); }
+  host.innerHTML =
+    '<div class="fixed inset-0 z-[60] flex items-end justify-center bg-black/40" onclick="if(event.target===this)closeTaskAiMini()">' +
+      '<div class="bg-white w-full max-w-md rounded-t-2xl shadow-2xl flex flex-col safe-bottom" style="max-height:90vh">' +
+        '<div class="px-4 py-3 border-b border-ink-200 flex items-center justify-between gap-2">' +
+          '<h3 class="font-bold text-ink-900 inline-flex items-center gap-2"><i data-lucide="sparkles" class="w-4 h-4 text-purple-600"></i> KI für Aufgabe</h3>' +
+          '<button onclick="closeTaskAiMini()" class="w-9 h-9 rounded-lg hover:bg-ink-100 flex items-center justify-center"><i data-lucide="x" class="w-5 h-5 text-ink-700"></i></button>' +
+        '</div>' +
+        '<div class="flex-1 overflow-y-auto p-4 space-y-3">' +
+          '<div class="bg-ink-50 rounded-xl p-3 text-[11px]">' +
+            '<p class="text-ink-500 uppercase tracking-wider text-[10px] font-semibold">Aufgabe</p>' +
+            '<p class="font-semibold text-ink-900 mt-0.5">' + escapeHtml(task.title) + '</p>' +
+            (task.related_name ? '<p class="text-ink-600 mt-0.5">' + escapeHtml(task.related_name) + '</p>' : '') +
+          '</div>' +
+          '<label class="text-xs font-semibold text-ink-700 uppercase tracking-wider">Was soll passieren?</label>' +
+          '<textarea id="taskAiCmd" rows="3" placeholder="z.B. „Erledigt nach Anruf — Kunde bestellt Mo nächste Woche" oder „In 3 Tagen erneut anrufen, hat Mailbox" oder „Entfallen, falsche Nummer"" class="w-full px-3 py-2 border border-purple-200 bg-purple-50/30 rounded-lg text-sm focus:ring-2 focus:ring-purple-500/30 focus:border-purple-500 resize-y"></textarea>' +
+          '<div class="grid grid-cols-2 gap-2">' +
+            '<button onclick="taskAiQuick(\'erledigt-anruf\')" class="bg-white border border-emerald-300 hover:bg-emerald-50 text-emerald-700 rounded-lg px-2 py-2 text-[11px] font-medium">✓ Erledigt nach Anruf</button>' +
+            '<button onclick="taskAiQuick(\'mailbox\')" class="bg-white border border-amber-300 hover:bg-amber-50 text-amber-700 rounded-lg px-2 py-2 text-[11px] font-medium">📞 Mailbox, +1d</button>' +
+            '<button onclick="taskAiQuick(\'kein-interesse\')" class="bg-white border border-red-300 hover:bg-red-50 text-red-700 rounded-lg px-2 py-2 text-[11px] font-medium">🚫 Kein Interesse</button>' +
+            '<button onclick="taskAiQuick(\'erneut-woche\')" class="bg-white border border-brand-300 hover:bg-brand-50 text-brand-700 rounded-lg px-2 py-2 text-[11px] font-medium">🔁 Erneut +7d</button>' +
+          '</div>' +
+          '<div id="taskAiErr" class="hidden text-xs text-red-700 bg-red-50 border border-red-200 rounded px-2 py-1.5"></div>' +
+        '</div>' +
+        '<div class="border-t border-ink-200 p-3 flex gap-2">' +
+          '<button onclick="closeTaskAiMini()" class="flex-1 bg-ink-100 hover:bg-ink-200 text-ink-700 rounded-lg px-3 py-2.5 text-sm font-semibold">Abbrechen</button>' +
+          '<button onclick="taskAiRun(this)" class="flex-[2] bg-gradient-to-br from-purple-500 to-brand-600 text-white rounded-lg px-3 py-2.5 text-sm font-semibold inline-flex items-center justify-center gap-1.5"><i data-lucide="sparkles" class="w-4 h-4"></i> Ausführen</button>' +
+        '</div>' +
+      '</div>' +
+    '</div>';
+  if (window.lucide) lucide.createIcons();
+  document.body.style.overflow = 'hidden';
+  setTimeout(function () { var el = $('taskAiCmd'); if (el) el.focus(); }, 80);
+}
+
+function closeTaskAiMini() {
+  TASK_AI_CTX = null;
+  var host = document.getElementById('subModalHost');
+  if (host) host.innerHTML = '';
+  document.body.style.overflow = '';
+}
+
+/* Schnell-Aktionen ohne KI-Call — direkte Mapping. */
+function taskAiQuick(kind) {
+  var ctx = TASK_AI_CTX;
+  if (!ctx?.task) return;
+  var rid = ctx.task.recordId;
+  closeTaskAiMini();
+  if (kind === 'erledigt-anruf') {
+    taskCompleteLocal(rid);
+  } else if (kind === 'mailbox') {
+    taskPostpone(rid, 1);
+  } else if (kind === 'kein-interesse') {
+    taskCancel(rid);
+  } else if (kind === 'erneut-woche') {
+    taskPostpone(rid, 7);
+  }
+}
+
+/* Volle KI-Auswertung: User-Befehl + Aufgabe-Kontext → Claude wählt Action. */
+async function taskAiRun(btnEl) {
+  var ctx = TASK_AI_CTX;
+  if (!ctx?.task) return;
+  var cmd = ($('taskAiCmd')?.value || '').trim();
+  if (!cmd) return toast('Bitte etwas eintippen oder einen Quick-Button nutzen', 'warn');
+  var errEl = $('taskAiErr');
+  if (errEl) errEl.classList.add('hidden');
+  setBusy(btnEl, true, 'KI denkt…');
+  try {
+    var task = ctx.task;
+    var sysPrompt = 'Du bist ein präziser AI-Assistent für eine deutschsprachige Aufgaben-Verwaltung. Der User hat eine offene Aufgabe und gibt dir einen kurzen Befehl wie der Status der Aufgabe weiter geht. Du entscheidest:\n' +
+      '- "done" → Aufgabe als erledigt markieren\n' +
+      '- "cancel" → Aufgabe als entfallen markieren\n' +
+      '- "postpone" → Aufgabe verschieben (Feld "days" mit Anzahl Tage, Default 1)\n' +
+      '- "edit" → Titel/Beschreibung anpassen (Felder "title" und/oder "description")\n' +
+      'Antworte AUSSCHLIESSLICH mit JSON. Kein Markdown, keine Erklärung außerhalb des JSON.\n' +
+      'Format: {"action":"done|cancel|postpone|edit","days":7,"title":"...","description":"...","summary":"kurze Begründung"}';
+    var userPrompt = 'AUFGABE:\nTitel: ' + task.title + '\nBeschreibung: ' + (task.description || '(keine)') + '\nFällig: ' + (task.due_date || '?') + '\nVerknüpft: ' + (task.related_name || '(kein Kontakt)') + '\n\nUSER-BEFEHL:\n' + cmd;
+    var data = await proxyJson('/anthropic/v1/messages', {
+      method: 'POST',
+      body: JSON.stringify({
+        model: 'claude-haiku-4-5-20251001',
+        max_tokens: 800,
+        system: sysPrompt,
+        messages: [{ role: 'user', content: userPrompt }],
+      }),
+    });
+    var text = (data.content && data.content[0] && data.content[0].text) || '';
+    var parsed = null;
+    try {
+      var m = text.match(/\{[\s\S]*\}/);
+      if (m) parsed = JSON.parse(m[0]);
+    } catch (_) {}
+    if (!parsed || !parsed.action) throw new Error('KI-Antwort unklar');
+
+    if (parsed.action === 'done') {
+      await completeAufgabe(task.recordId);
+      toast('Erledigt' + (parsed.summary ? ' · ' + parsed.summary : ''), 'success', 4000);
+    } else if (parsed.action === 'cancel') {
+      await cancelAufgabe(task.recordId);
+      toast('Entfallen' + (parsed.summary ? ' · ' + parsed.summary : ''), 'success', 4000);
+    } else if (parsed.action === 'postpone') {
+      var days = Math.max(1, Math.min(365, parseInt(parsed.days, 10) || 1));
+      await postponeAufgabe(task.recordId, days);
+      toast('Verschoben um ' + days + ' Tag' + (days === 1 ? '' : 'e') + (parsed.summary ? ' · ' + parsed.summary : ''), 'success', 4000);
+    } else if (parsed.action === 'edit') {
+      var patch = {};
+      if (parsed.title) patch.title = parsed.title;
+      if (parsed.description) patch.description = parsed.description;
+      if (Object.keys(patch).length) {
+        await updateAufgabe(task.recordId, patch);
+        toast('Aufgabe aktualisiert' + (parsed.summary ? ' · ' + parsed.summary : ''), 'success', 4000);
+      }
+    } else {
+      throw new Error('Unbekannte Aktion: ' + parsed.action);
+    }
+    _renderTasksList();
+    _renderTasksHeader();
+    closeTaskAiMini();
+  } catch (e) {
+    setBusy(btnEl, false);
+    if (errEl) { errEl.textContent = e.message; errEl.classList.remove('hidden'); }
+  }
+}
+
 /* === Neue-Aufgabe-Modal ===================================================
    Manuell anlegen ODER per Prefill aus Kontakt/Ticket (KI-Workflows). */
 function openNewAufgabeModal(prefill) {
@@ -13958,16 +14313,38 @@ function openNewAufgabeModal(prefill) {
     prioOpts += '<option value="' + p + '"' + sel + '>' + lbl + '</option>';
   });
 
-  var relatedBlock = '';
-  if (pre.related_name) {
-    relatedBlock =
-      '<div class="bg-brand-50/50 border border-brand-200 rounded-lg p-2.5 text-[11px]">' +
-        '<p class="text-[10px] uppercase tracking-wider text-brand-700 font-semibold">Verknüpft mit</p>' +
-        '<p class="text-ink-800 truncate mt-0.5"><b>' + escapeHtml(pre.related_name) + '</b>' + (pre.related_email ? ' · ' + escapeHtml(pre.related_email) : '') + '</p>' +
-        (pre.related_phone  ? '<p class="text-emerald-700 font-mono mt-0.5">📞 ' + escapeHtml(pre.related_phone)  + '</p>' : '') +
-        (pre.related_mobile ? '<p class="text-emerald-700 font-mono">📱 ' + escapeHtml(pre.related_mobile) + '</p>' : '') +
-      '</div>';
-  }
+  // FS-Kontakt-Picker (oder vorbefüllte Anzeige bei Prefill)
+  var fsContactBlock =
+    '<div>' +
+      '<label class="text-xs font-semibold text-ink-700 uppercase tracking-wider">Freshsales-Kontakt</label>' +
+      '<input id="newAufFsSearch" type="search" placeholder="Name oder Email suchen…" value="' + escapeAttr(pre.related_name || '') + '" autocomplete="off" class="w-full mt-1 px-3 py-2 border border-ink-200 rounded-lg text-sm focus:ring-2 focus:ring-emerald-500/30 focus:border-emerald-500">' +
+      '<div id="newAufFsResults" class="hidden mt-1 max-h-48 overflow-y-auto bg-white border border-ink-200 rounded-lg shadow-sm divide-y divide-ink-100"></div>' +
+      '<div id="newAufFsSelected" class="' + (pre.related_name ? '' : 'hidden ') + 'mt-2 bg-emerald-50/60 border border-emerald-200 rounded-lg p-2.5 text-[11px]">' +
+        '<div class="flex items-start gap-2">' +
+          '<div class="flex-1 min-w-0">' +
+            '<p class="text-[10px] uppercase tracking-wider text-emerald-700 font-semibold">Verknüpfter Kontakt</p>' +
+            '<p class="text-ink-800 truncate mt-0.5"><b id="newAufFsName">' + escapeHtml(pre.related_name || '') + '</b><span id="newAufFsEmail">' + (pre.related_email ? ' · ' + escapeHtml(pre.related_email) : '') + '</span></p>' +
+            '<p id="newAufFsPhones" class="text-emerald-700 font-mono mt-0.5 text-[10px]">' +
+              (pre.related_phone ? '📞 ' + escapeHtml(pre.related_phone) : '') +
+              (pre.related_phone && pre.related_mobile ? ' · ' : '') +
+              (pre.related_mobile ? '📱 ' + escapeHtml(pre.related_mobile) : '') +
+            '</p>' +
+          '</div>' +
+          '<button type="button" onclick="_clearAufFsContact()" class="w-7 h-7 rounded-lg hover:bg-emerald-100 text-emerald-700 flex items-center justify-center shrink-0" title="Verknüpfung entfernen"><i data-lucide="x" class="w-3.5 h-3.5"></i></button>' +
+        '</div>' +
+      '</div>' +
+      '<p class="text-[10px] text-ink-500 mt-1">Aus dem FS-Kontakt werden Name + Telefonnummern übernommen — bequemer Anruf-Pill direkt aus der Aufgabe.</p>' +
+    '</div>';
+
+  // Versteckte Felder für Phone/Email/ID des gewählten Kontakts
+  var hiddenBlock =
+    '<input type="hidden" id="newAufRelEmail" value="' + escapeAttr(pre.related_email || '') + '">' +
+    '<input type="hidden" id="newAufRelPhone" value="' + escapeAttr(pre.related_phone || '') + '">' +
+    '<input type="hidden" id="newAufRelMobile" value="' + escapeAttr(pre.related_mobile || '') + '">' +
+    '<input type="hidden" id="newAufRelName" value="' + escapeAttr(pre.related_name || '') + '">' +
+    '<input type="hidden" id="newAufRelFsId" value="' + escapeAttr(pre.related_fs_contact_id || '') + '">';
+
+  var relatedBlock = fsContactBlock + hiddenBlock;
 
   host.innerHTML =
     '<div class="fixed inset-0 z-[60] flex items-end justify-center bg-black/40" onclick="if(event.target===this)closeNewAufgabeModal()">' +
@@ -14011,6 +14388,20 @@ function openNewAufgabeModal(prefill) {
   document.body.style.overflow = 'hidden';
   setTimeout(function () { var el = $('newAufTitle'); if (el) el.focus(); }, 80);
 
+  // FS-Kontakt-Suche: input-Handler + Result-List
+  var searchInput = $('newAufFsSearch');
+  if (searchInput) {
+    var searchTimer = null;
+    searchInput.addEventListener('input', function (e) {
+      if (searchTimer) clearTimeout(searchTimer);
+      var q = (e.target.value || '').trim();
+      var results = $('newAufFsResults');
+      if (!results) return;
+      if (q.length < 2) { results.classList.add('hidden'); results.innerHTML = ''; return; }
+      searchTimer = setTimeout(function () { _runFsContactSearch(q); }, 250);
+    });
+  }
+
   // Team-Liste asynchron in die Assignee-Dropdown laden
   fetchUsers().then(function (users) {
     var sel = $('newAufAssignee');
@@ -14037,6 +14428,104 @@ function closeNewAufgabeModal() {
   document.body.style.overflow = '';
 }
 
+/* FS-Kontakt-Suche im Neue-Aufgabe-Modal — Live-Search bei Eingabe. */
+async function _runFsContactSearch(q) {
+  var results = $('newAufFsResults');
+  if (!results) return;
+  var accId = $('newAufAccount')?.value;
+  if (!accId) {
+    // Wenn kein konkreter Account: über alle FS-Accounts suchen, mergen
+    var fsAccs = (APP_STATE.accounts || []).filter(function (a) { return accountHasFreshsales(a); });
+    if (!fsAccs.length) {
+      results.innerHTML = '<div class="p-2 text-[11px] text-ink-500">Kein Freshsales-Account konfiguriert.</div>';
+      results.classList.remove('hidden');
+      return;
+    }
+    results.innerHTML = '<div class="p-2 text-[11px] text-ink-500">Suche…</div>';
+    results.classList.remove('hidden');
+    var arr = [];
+    try {
+      var perAcc = await Promise.all(fsAccs.map(function (a) {
+        return searchFreshsalesContacts(a.id, q).then(function (list) {
+          return list.map(function (c) { c._accountId = a.id; c._accountName = a.name; c._accountColor = a.color; return c; });
+        }).catch(function () { return []; });
+      }));
+      perAcc.forEach(function (list) { arr = arr.concat(list); });
+    } catch (_) {}
+    _renderFsContactResults(arr);
+    return;
+  }
+  results.innerHTML = '<div class="p-2 text-[11px] text-ink-500">Suche…</div>';
+  results.classList.remove('hidden');
+  var contacts = await searchFreshsalesContacts(accId, q).catch(function () { return []; });
+  var acc = (APP_STATE.accounts || []).find(function (a) { return a.id === accId; });
+  contacts.forEach(function (c) { c._accountId = accId; c._accountName = acc ? acc.name : ''; c._accountColor = acc ? acc.color : ''; });
+  _renderFsContactResults(contacts);
+}
+
+function _renderFsContactResults(contacts) {
+  var results = $('newAufFsResults');
+  if (!results) return;
+  if (!contacts.length) {
+    results.innerHTML = '<div class="p-2 text-[11px] text-ink-500">Keine Treffer.</div>';
+    return;
+  }
+  results.innerHTML = contacts.map(function (c) {
+    var phones = [];
+    if (c.phone)  phones.push(c.phone);
+    if (c.mobile) phones.push(c.mobile);
+    var data = JSON.stringify({ id: c.id, name: c.name, email: c.email, phone: c.phone, mobile: c.mobile, account_id: c._accountId, account_name: c._accountName });
+    return '<button type="button" onclick=\'_pickFsContact(' + escapeAttr(data).replace(/"/g, '&quot;') + ')\' class="w-full text-left p-2 hover:bg-emerald-50 active:bg-emerald-100 text-[12px]">' +
+      '<div class="font-semibold text-ink-900 truncate">' + escapeHtml(c.name) + '</div>' +
+      '<div class="text-[10px] text-ink-500 truncate">' + (c.email ? escapeHtml(c.email) : '') + (c.email && phones.length ? ' · ' : '') + (phones.length ? '📞 ' + escapeHtml(phones.join(' / ')) : '') + '</div>' +
+      (c._accountName ? '<div class="text-[10px] text-ink-400 mt-0.5"><span class="inline-block w-1.5 h-1.5 rounded-full mr-1 align-middle" style="background:' + escapeAttr(c._accountColor || '#cbd5e1') + '"></span>' + escapeHtml(c._accountName) + '</div>' : '') +
+    '</button>';
+  }).join('');
+}
+
+function _pickFsContact(data) {
+  var setVal = function (id, v) { var el = $(id); if (el) el.value = v || ''; };
+  setVal('newAufRelName',   data.name || '');
+  setVal('newAufRelEmail',  data.email || '');
+  setVal('newAufRelPhone',  data.phone || '');
+  setVal('newAufRelMobile', data.mobile || '');
+  setVal('newAufRelFsId',   data.id ? String(data.id) : '');
+  // Falls Account-Field leer war oder unterschiedlich → setzen
+  var accSel = $('newAufAccount');
+  if (accSel && data.account_id) accSel.value = data.account_id;
+  // Verknüpft-Anzeige aufblenden
+  var sel = $('newAufFsSelected'); if (sel) sel.classList.remove('hidden');
+  var nameEl = $('newAufFsName'); if (nameEl) nameEl.textContent = data.name || '';
+  var emailEl = $('newAufFsEmail'); if (emailEl) emailEl.textContent = data.email ? ' · ' + data.email : '';
+  var phonesEl = $('newAufFsPhones');
+  if (phonesEl) {
+    var p = '';
+    if (data.phone)  p += '📞 ' + data.phone;
+    if (data.phone && data.mobile) p += ' · ';
+    if (data.mobile) p += '📱 ' + data.mobile;
+    phonesEl.textContent = p;
+  }
+  // Suche schließen
+  var results = $('newAufFsResults'); if (results) { results.classList.add('hidden'); results.innerHTML = ''; }
+  var input = $('newAufFsSearch'); if (input) input.value = data.name || '';
+  // Titel ergänzen wenn leer
+  var titleEl = $('newAufTitle');
+  if (titleEl && !titleEl.value.trim()) {
+    var typ = $('newAufType')?.value || 'call';
+    var verb = typ === 'call' ? 'Anrufen' : (typ === 'email' ? 'Email an' : (typ === 'meeting' ? 'Termin mit' : 'Aufgabe für'));
+    titleEl.value = verb + ' ' + (data.name || '');
+  }
+  if (window.lucide) lucide.createIcons();
+}
+
+function _clearAufFsContact() {
+  ['newAufRelName', 'newAufRelEmail', 'newAufRelPhone', 'newAufRelMobile', 'newAufRelFsId'].forEach(function (id) {
+    var el = $(id); if (el) el.value = '';
+  });
+  var sel = $('newAufFsSelected'); if (sel) sel.classList.add('hidden');
+  var input = $('newAufFsSearch'); if (input) input.value = '';
+}
+
 async function saveNewAufgabe(btnEl) {
   var title = ($('newAufTitle')?.value || '').trim();
   var description = ($('newAufDesc')?.value || '').trim();
@@ -14045,6 +14534,11 @@ async function saveNewAufgabe(btnEl) {
   var account_id = ($('newAufAccount')?.value || '');
   var priority = ($('newAufPriority')?.value || 'normal');
   var assignVal = ($('newAufAssignee')?.value || '');
+  var related_name   = ($('newAufRelName')?.value || '').trim();
+  var related_email  = ($('newAufRelEmail')?.value || '').trim();
+  var related_phone  = ($('newAufRelPhone')?.value || '').trim();
+  var related_mobile = ($('newAufRelMobile')?.value || '').trim();
+  var related_fs_id  = ($('newAufRelFsId')?.value || '').trim();
   var errEl = $('newAufErr');
   if (errEl) errEl.classList.add('hidden');
   if (!title) {
@@ -14067,12 +14561,13 @@ async function saveNewAufgabe(btnEl) {
       priority: priority,
       assignee_user_api_key: assignee_user_api_key,
       assignee_name: assignee_name,
-      source_type: pre.source_type || 'manual',
+      source_type: pre.source_type || (related_fs_id ? 'fs_contact' : 'manual'),
       source_id: pre.source_id || '',
-      related_name: pre.related_name || '',
-      related_email: pre.related_email || '',
-      related_phone: pre.related_phone || '',
-      related_mobile: pre.related_mobile || '',
+      related_name: related_name,
+      related_email: related_email,
+      related_phone: related_phone,
+      related_mobile: related_mobile,
+      related_fs_contact_id: related_fs_id,
     });
     closeNewAufgabeModal();
     var msg = 'Aufgabe angelegt';
