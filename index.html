@@ -325,7 +325,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.8';
+const APP_VERSION = 'v2.46.9';
 // Read-Token absichtlich gesplittet, damit GitHub Secret-Scanning beim Push nicht blockt.
 // Der Token ist read-only und Base-scoped → bewusst eingebettet (Architektur-Entscheidung).
 const _RK = 'patu8KWM8aWB' + 'yxCGL.69fae5d9fa4b94c2' + '66b426dadd71a51f574945d840b33569058ab5e9d89ebef3';
@@ -6605,46 +6605,78 @@ async function copyLastError(btn) {
 }
 
 async function loadMoreTickets(btnEl) {
+  // v2.46.9: Auto-Multi-Page-Load. Wenn die geladene Seite nur Tickets enthält die
+  // client-seitig wieder rausgefiltert werden (Aufgaben-Gruppen, Wiedervorlagen, etc.),
+  // dann automatisch nächste Seite nachladen — bis was Sichtbares dazukommt ODER
+  // max 3 Seiten pro Klick erreicht sind (Schutz vor Endlos-Loops).
   const acc = APP_STATE.currentAccount;
   const accountsAll = acc === 'all' ? APP_STATE.accounts : APP_STATE.accounts.filter(a => a.id === acc);
-  const accountsToFetch = accountsAll.filter(a => !APP_STATE.pageState.exhausted.has(a.id));
-  if (!accountsToFetch.length) { APP_STATE.pageState.hasMore = false; renderTicketList(APP_STATE.pageState.tickets); return; }
   if (btnEl) setBusy(btnEl, true, 'Lade weitere…');
-  const nextPage = APP_STATE.pageState.page + 1;
-  // Search-API erlaubt max page=10
-  if (nextPage > 10) {
-    if (btnEl) setBusy(btnEl, false);
-    toast('Maximale Seitenzahl der Suche erreicht (300 Tickets). Filter enger ziehen, um mehr zu sehen.', 'warn', 6000);
-    APP_STATE.pageState.hasMore = false;
-    renderTicketList(APP_STATE.pageState.tickets);
-    return;
-  }
-  const opts = { perPage: TICKETS_PER_PAGE, filters: APP_STATE.filters, page: nextPage, skipAccountSpecific: (acc === 'all') };
-  const results = await Promise.allSettled(accountsToFetch.map(a => fetchTicketsForAccount(a.id, opts)));
-  const newTickets = [];
-  results.forEach((r, i) => {
-    const aid = accountsToFetch[i].id;
-    if (r.status === 'fulfilled') {
-      newTickets.push(...r.value);
-      if ((r.value._rawCount || 0) < TICKETS_PER_PAGE) APP_STATE.pageState.exhausted.add(aid);
-    } else {
-      console.warn('LoadMore fehlgeschlagen für', aid, r.reason);
-      APP_STATE.pageState.exhausted.add(aid);
+  const sizeBefore = APP_STATE.pageState.tickets.length;
+  const MAX_AUTO_PAGES = 3;
+  let pagesLoaded = 0;
+  let stopReason = null;
+  while (pagesLoaded < MAX_AUTO_PAGES) {
+    const accountsToFetch = accountsAll.filter(a => !APP_STATE.pageState.exhausted.has(a.id));
+    if (!accountsToFetch.length) {
+      APP_STATE.pageState.hasMore = false;
+      stopReason = 'all_accounts_exhausted';
+      break;
     }
-  });
-  // Dedupe gegen bisherige Tickets, dann mergen + sortieren
-  const existingKeys = new Set(APP_STATE.pageState.tickets.map(t => t._accountId + '|' + t.id));
-  for (const t of newTickets) {
-    const k = t._accountId + '|' + t.id;
-    if (!existingKeys.has(k)) {
-      APP_STATE.pageState.tickets.push(t);
-      existingKeys.add(k);
+    const nextPage = APP_STATE.pageState.page + 1;
+    if (nextPage > 10) {
+      APP_STATE.pageState.hasMore = false;
+      stopReason = 'max_pages';
+      break;
     }
+    if (btnEl && pagesLoaded > 0) setBusy(btnEl, true, 'Lade Seite ' + nextPage + '…');
+    const opts = { perPage: TICKETS_PER_PAGE, filters: APP_STATE.filters, page: nextPage, skipAccountSpecific: (acc === 'all') };
+    const results = await Promise.allSettled(accountsToFetch.map(a => fetchTicketsForAccount(a.id, opts)));
+    const newTickets = [];
+    results.forEach((r, i) => {
+      const aid = accountsToFetch[i].id;
+      if (r.status === 'fulfilled') {
+        newTickets.push(...r.value);
+        if ((r.value._rawCount || 0) < TICKETS_PER_PAGE) APP_STATE.pageState.exhausted.add(aid);
+      } else {
+        console.warn('LoadMore fehlgeschlagen für', aid, r.reason);
+        APP_STATE.pageState.exhausted.add(aid);
+      }
+    });
+    // Dedupe gegen bisherige Tickets
+    const existingKeys = new Set(APP_STATE.pageState.tickets.map(t => t._accountId + '|' + t.id));
+    let visibleAdded = 0;
+    for (const t of newTickets) {
+      const k = t._accountId + '|' + t.id;
+      if (!existingKeys.has(k)) {
+        APP_STATE.pageState.tickets.push(t);
+        existingKeys.add(k);
+        visibleAdded++;
+      }
+    }
+    APP_STATE.pageState.page = nextPage;
+    APP_STATE.pageState.hasMore = APP_STATE.pageState.exhausted.size < accountsAll.length && nextPage < 10;
+    pagesLoaded++;
+    // Stop wenn was Sichtbares dazu kam ODER kein hasMore mehr
+    if (visibleAdded > 0) { stopReason = 'visible_added'; break; }
+    if (!APP_STATE.pageState.hasMore) { stopReason = 'no_more_pages'; break; }
+    // Sonst: nächste Iteration — automatisch nächste Seite probieren
+    console.log('[loadMore] Seite ' + nextPage + ': ' + newTickets.length + ' raw, 0 sichtbar nach Filter — versuche nächste Seite');
   }
   APP_STATE.pageState.tickets.sort((a, b) => new Date(b.updated_at || 0) - new Date(a.updated_at || 0));
-  APP_STATE.pageState.page = nextPage;
-  APP_STATE.pageState.hasMore = APP_STATE.pageState.exhausted.size < accountsAll.length && nextPage < 10;
+  const sizeAfter = APP_STATE.pageState.tickets.length;
+  const added = sizeAfter - sizeBefore;
   renderTicketList(APP_STATE.pageState.tickets);
+  // Toast-Feedback wenn auch nach Auto-Load nichts kam
+  if (added === 0) {
+    if (stopReason === 'max_pages') {
+      toast('Maximale Seitenzahl der Suche erreicht (300 Tickets). Filter enger ziehen, um mehr zu sehen.', 'warn', 6000);
+    } else if (stopReason === 'all_accounts_exhausted' || stopReason === 'no_more_pages') {
+      toast('Keine weiteren Tickets vorhanden', 'info', 3500);
+    } else if (pagesLoaded >= MAX_AUTO_PAGES) {
+      toast(MAX_AUTO_PAGES + ' Seiten geladen, aber alle Tickets wurden durch Filter ausgeblendet. Nochmal klicken für weitere Seiten.', 'warn', 7000);
+    }
+  }
 }
 
 function setCurrentAccount(id) {
