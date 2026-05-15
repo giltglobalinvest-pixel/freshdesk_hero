@@ -143,6 +143,132 @@
       font-size: 16px !important;
     }
   }
+
+  /* ============================================================
+     v2.46.12 — FRESH THEME OVERRIDES
+     Aktiviert via <body class="theme-fresh"> + localStorage 'fdh_design'.
+     Strategie: kein Re-Render der HTML, sondern CSS-Override-Layer der
+     wichtige Komponenten-Klassen umstyled. Funktioniert mit dem
+     existierenden Tailwind-Markup.
+     ============================================================ */
+  body.theme-fresh {
+    background:
+      radial-gradient(1200px 600px at 10% -10%, rgba(168, 85, 247, 0.08), transparent 60%),
+      radial-gradient(900px 500px at 90% 5%, rgba(20, 184, 166, 0.06), transparent 60%),
+      linear-gradient(180deg, #fafbfc 0%, #f4f6f8 100%);
+    background-attachment: fixed;
+  }
+  /* App-Shell: dezenter Schatten-Gradient hinter dem Content */
+  body.theme-fresh #appShell {
+    background: transparent;
+  }
+  /* Top-Bar mit Gradient (Version + User) */
+  body.theme-fresh #versionBar:not(.update-banner) {
+    background: linear-gradient(90deg, #ede9fe 0%, #fae8ff 50%, #e0e7ff 100%);
+    border-color: rgba(167, 139, 250, 0.3);
+  }
+  /* Sticky Page-Header (Pageheader-Bereich) */
+  body.theme-fresh header.sticky,
+  body.theme-fresh > header {
+    backdrop-filter: blur(12px) saturate(140%);
+    -webkit-backdrop-filter: blur(12px) saturate(140%);
+    background: rgba(255, 255, 255, 0.75) !important;
+  }
+  /* Karten: deutlich rundere Ecken + softer Shadow */
+  body.theme-fresh .rounded-2xl { border-radius: 1.5rem !important; }
+  body.theme-fresh .rounded-xl  { border-radius: 1rem !important; }
+  body.theme-fresh .shadow-sm {
+    box-shadow:
+      0 2px 4px -1px rgba(15, 23, 42, 0.04),
+      0 4px 12px -2px rgba(15, 23, 42, 0.06),
+      0 0 0 1px rgba(15, 23, 42, 0.02) !important;
+  }
+  /* Brand-Buttons → Gradient */
+  body.theme-fresh button.bg-brand-500,
+  body.theme-fresh .bg-brand-500 {
+    background: linear-gradient(135deg, #6366f1 0%, #8b5cf6 50%, #a855f7 100%) !important;
+    border-color: transparent !important;
+    box-shadow: 0 4px 14px -2px rgba(139, 92, 246, 0.4);
+  }
+  body.theme-fresh button.bg-brand-500:hover,
+  body.theme-fresh .bg-brand-500:hover {
+    filter: brightness(1.05);
+  }
+  body.theme-fresh button.bg-brand-600 {
+    background: linear-gradient(135deg, #4f46e5 0%, #7c3aed 50%, #9333ea 100%) !important;
+    border-color: transparent !important;
+  }
+  body.theme-fresh button.bg-emerald-600,
+  body.theme-fresh button.bg-emerald-500 {
+    background: linear-gradient(135deg, #10b981 0%, #14b8a6 100%) !important;
+    border-color: transparent !important;
+    box-shadow: 0 4px 14px -2px rgba(16, 185, 129, 0.35);
+  }
+  body.theme-fresh button.bg-red-600 {
+    background: linear-gradient(135deg, #ef4444 0%, #f43f5e 100%) !important;
+    border-color: transparent !important;
+  }
+  /* Bottom-Nav-Bar: gradient + glasmorphism */
+  body.theme-fresh nav#bottomNav,
+  body.theme-fresh nav.fixed.bottom-0 {
+    backdrop-filter: blur(20px) saturate(180%);
+    -webkit-backdrop-filter: blur(20px) saturate(180%);
+    background: rgba(255, 255, 255, 0.85) !important;
+    border-top: 1px solid rgba(167, 139, 250, 0.15) !important;
+    box-shadow: 0 -8px 24px -8px rgba(15, 23, 42, 0.08);
+  }
+  /* Aktiver Nav-Tab in Brand-Gradient */
+  body.theme-fresh nav .text-brand-600,
+  body.theme-fresh nav .text-brand-500 {
+    color: #7c3aed !important;
+  }
+  /* Toggle-Active für Filter-Chips */
+  body.theme-fresh button.bg-ink-900 {
+    background: linear-gradient(135deg, #1e1b4b 0%, #312e81 50%, #4338ca 100%) !important;
+    border-color: transparent !important;
+  }
+  /* Modal-Backdrop softer */
+  body.theme-fresh .fixed.inset-0.bg-black\/40 {
+    background: linear-gradient(180deg, rgba(15, 23, 42, 0.45) 0%, rgba(76, 29, 149, 0.35) 100%) !important;
+    backdrop-filter: blur(4px);
+    -webkit-backdrop-filter: blur(4px);
+  }
+  /* Toasts: rounded + bigger */
+  body.theme-fresh #toastContainer > div {
+    border-radius: 1.25rem !important;
+    box-shadow:
+      0 10px 32px -8px rgba(15, 23, 42, 0.25),
+      0 0 0 1px rgba(255, 255, 255, 0.1) !important;
+  }
+  /* Inputs: rundere Ecken + Focus-Ring in violett */
+  body.theme-fresh input[type="text"],
+  body.theme-fresh input[type="email"],
+  body.theme-fresh input[type="tel"],
+  body.theme-fresh input[type="search"],
+  body.theme-fresh input[type="password"],
+  body.theme-fresh input[type="datetime-local"],
+  body.theme-fresh input[type="number"],
+  body.theme-fresh select,
+  body.theme-fresh textarea {
+    border-radius: 0.875rem !important;
+    transition: all 0.18s ease;
+  }
+  body.theme-fresh input:focus,
+  body.theme-fresh select:focus,
+  body.theme-fresh textarea:focus {
+    border-color: #a855f7 !important;
+    box-shadow: 0 0 0 3px rgba(168, 85, 247, 0.15) !important;
+  }
+  /* Login-Screen: Hintergrund-Gradient */
+  body.theme-fresh #loginScreen {
+    background:
+      radial-gradient(800px 400px at 50% 0%, rgba(139, 92, 246, 0.12), transparent 70%),
+      linear-gradient(180deg, #f8fafc 0%, #ede9fe 100%);
+  }
+  /* Account-Chip-Buttons rundere Form */
+  body.theme-fresh button.rounded-full {
+    border-radius: 9999px !important;
+  }
 </style>
 </head>
 <body class="text-ink-900">
@@ -325,7 +451,47 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.11';
+const APP_VERSION = 'v2.46.12';
+
+/* ============================================================
+   GLOBAL THEME — v2.46.12
+   'classic' (Standard) | 'fresh' (Gradient, rundere Ecken, glasmorphisch)
+   Persistiert in localStorage. Wird beim Boot + bei Toggle angewendet
+   indem die Body-Klasse 'theme-fresh' gesetzt/entfernt wird. Der
+   gesamte Look der App ändert sich dadurch live (CSS-Override-Layer).
+   ============================================================ */
+function getDesignTheme() {
+  try { return localStorage.getItem('fdh_design') || 'classic'; } catch (_) { return 'classic'; }
+}
+function applyDesignTheme(theme) {
+  document.body.classList.toggle('theme-fresh', theme === 'fresh');
+}
+function setDesignTheme(theme) {
+  try { localStorage.setItem('fdh_design', theme); } catch (_) {}
+  applyDesignTheme(theme);
+  // Aufgaben-Card-Stil mit dem globalen Theme synchronisieren — bei „fresh" auch
+  // die Task-Cards in Fresh-Variante zeigen, sonst Classic.
+  try {
+    if (typeof TASKS_STATE !== 'undefined') {
+      TASKS_STATE.cardStyle = theme === 'fresh' ? 'fresh' : 'classic';
+      try { localStorage.setItem('fdh_task_card_style', TASKS_STATE.cardStyle); } catch (_) {}
+    }
+  } catch (_) {}
+  toast('Design „' + (theme === 'fresh' ? 'Fresh' : 'Classic') + '" aktiv', 'success', 2500);
+  // Aktuelle Seite neu rendern damit alle Komponenten den neuen Stil zeigen.
+  // (Reine CSS-Overrides greifen sofort, aber inline-rendered Cards brauchen Re-Render.)
+  if (typeof APP_STATE !== 'undefined' && APP_STATE.page) {
+    var p = APP_STATE.page;
+    setTimeout(function () {
+      try {
+        if (p === 'tasks') { _renderTasksHeader(); _renderTasksList(); }
+        else if (p === 'profile' && typeof renderProfilePage === 'function') renderProfilePage();
+      } catch (_) {}
+    }, 50);
+  }
+}
+// Theme beim allerersten Skript-Lauf anwenden (vor Login auch schon sichtbar)
+try { applyDesignTheme(getDesignTheme()); } catch (_) {}
 // Read-Token absichtlich gesplittet, damit GitHub Secret-Scanning beim Push nicht blockt.
 // Der Token ist read-only und Base-scoped → bewusst eingebettet (Architektur-Entscheidung).
 const _RK = 'patu8KWM8aWB' + 'yxCGL.69fae5d9fa4b94c2' + '66b426dadd71a51f574945d840b33569058ab5e9d89ebef3';
@@ -13620,6 +13786,46 @@ function renderProfilePage() {
         <button onclick="openMyProfileEditModal()" class="w-full mt-3 bg-white border border-brand-200 hover:bg-brand-50 text-brand-700 rounded-lg py-2 text-sm font-semibold inline-flex items-center justify-center gap-1.5">
           <i data-lucide="user-cog" class="w-4 h-4"></i> Mein Profil bearbeiten
         </button>
+      </div>
+
+      <!-- v2.46.12: globaler Design-Switch -->
+      <div class="bg-white rounded-2xl border border-ink-200 p-4">
+        <div class="flex items-center gap-2 mb-2">
+          <i data-lucide="palette" class="w-4 h-4 text-purple-600"></i>
+          <h3 class="font-semibold text-ink-900 text-sm">App-Design</h3>
+        </div>
+        <p class="text-[11px] text-ink-500 leading-snug mb-3">Wechsle zwischen klassischem Look und modernem „Fresh"-Design (Gradienten, weichere Ecken, frische Farben).</p>
+        ${(function() {
+          var current = getDesignTheme();
+          return `
+            <div class="grid grid-cols-2 gap-2">
+              <button onclick="setDesignTheme('classic')" class="${current === 'classic' ? 'ring-2 ring-brand-500 bg-brand-50' : 'bg-white hover:bg-ink-50'} border border-ink-200 rounded-xl p-3 text-left transition">
+                <div class="flex items-center justify-between mb-1">
+                  <span class="font-bold text-sm text-ink-900">Classic</span>
+                  ${current === 'classic' ? '<i data-lucide="check-circle-2" class="w-4 h-4 text-brand-600"></i>' : ''}
+                </div>
+                <div class="flex gap-1">
+                  <span class="w-4 h-4 rounded bg-white border border-ink-300"></span>
+                  <span class="w-4 h-4 rounded bg-brand-500"></span>
+                  <span class="w-4 h-4 rounded bg-emerald-500"></span>
+                </div>
+                <p class="text-[10px] text-ink-500 mt-1.5">Klar, kompakt, sachlich</p>
+              </button>
+              <button onclick="setDesignTheme('fresh')" class="${current === 'fresh' ? 'ring-2 ring-purple-500 bg-purple-50' : 'bg-white hover:bg-ink-50'} border border-ink-200 rounded-xl p-3 text-left transition">
+                <div class="flex items-center justify-between mb-1">
+                  <span class="font-bold text-sm text-ink-900">Fresh</span>
+                  ${current === 'fresh' ? '<i data-lucide="check-circle-2" class="w-4 h-4 text-purple-600"></i>' : ''}
+                </div>
+                <div class="flex gap-1">
+                  <span class="w-4 h-4 rounded-full bg-gradient-to-br from-violet-500 to-purple-600"></span>
+                  <span class="w-4 h-4 rounded-full bg-gradient-to-br from-emerald-500 to-teal-500"></span>
+                  <span class="w-4 h-4 rounded-full bg-gradient-to-br from-rose-500 to-pink-500"></span>
+                </div>
+                <p class="text-[10px] text-ink-500 mt-1.5">Gradienten, runde Formen</p>
+              </button>
+            </div>
+          `;
+        })()}
       </div>
 
       <div class="bg-white rounded-2xl border border-ink-200 divide-y divide-ink-100">
