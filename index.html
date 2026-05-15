@@ -325,7 +325,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.44.1';
+const APP_VERSION = 'v2.44.2';
 // Read-Token absichtlich gesplittet, damit GitHub Secret-Scanning beim Push nicht blockt.
 // Der Token ist read-only und Base-scoped → bewusst eingebettet (Architektur-Entscheidung).
 const _RK = 'patu8KWM8aWB' + 'yxCGL.69fae5d9fa4b94c2' + '66b426dadd71a51f574945d840b33569058ab5e9d89ebef3';
@@ -1274,6 +1274,7 @@ const NOTIZEN_TABLE = 'MeineNotizen';
 const ACCESS_TABLE = 'AccountAccess';
 const WISSEN_TABLE = 'KI_Wissen';
 const KOSTEN_TABLE = 'KI_Kosten';
+const AUFGABEN_TABLE = 'MeineAufgaben';
 
 // Anthropic-Modell-Preise (USD je 1M Tokens). Stand 2026-Q1.
 // Beim Update einer neuen Modell-Version: hier eintragen, sonst wird Default-Eintrag genutzt.
@@ -1448,6 +1449,29 @@ async function ensureAppTables() {
     { name: 'agent_email',    type: 'singleLineText' },
     { name: 'agent_name',     type: 'singleLineText' },
     { name: 'created',        type: 'singleLineText' },
+  ]);
+  // Eigene Aufgaben — Ersatz für Freshsales-Tasks (Growth-Plan hat keinen Tasks-API-Zugriff).
+  // Pro Account, multi-user-team-fähig (assignee_user_api_key).
+  await ensureTable(AUFGABEN_TABLE, [
+    { name: 'account_id',              type: 'singleLineText' },
+    { name: 'assignee_user_api_key',   type: 'singleLineText' },
+    { name: 'assignee_name',           type: 'singleLineText' },
+    { name: 'title',                   type: 'singleLineText' },
+    { name: 'description',             type: 'multilineText'  },
+    { name: 'due_date',                type: 'singleLineText' },
+    { name: 'priority',                type: 'singleLineText' },
+    { name: 'status',                  type: 'singleLineText' },
+    { name: 'task_type',               type: 'singleLineText' },
+    { name: 'source_type',             type: 'singleLineText' },
+    { name: 'source_id',               type: 'singleLineText' },
+    { name: 'related_name',            type: 'singleLineText' },
+    { name: 'related_email',           type: 'singleLineText' },
+    { name: 'related_phone',           type: 'singleLineText' },
+    { name: 'related_mobile',          type: 'singleLineText' },
+    { name: 'created_by_user_api_key', type: 'singleLineText' },
+    { name: 'created_by_name',         type: 'singleLineText' },
+    { name: 'created',                 type: 'singleLineText' },
+    { name: 'completed_at',            type: 'singleLineText' },
   ]);
   // Team-Wissen: jede Aktion (reply/assign/group/status/hide/spam/forward/note) wird hier
   // als Lern-Datensatz gespeichert. Wird von der Vorschlag-Engine + Indikator-Icons gelesen.
@@ -1639,6 +1663,101 @@ async function recordMyNote(accountId, ticketId, body, typ) {
 
 function getMyNotesForTicket(accountId, ticketId) {
   return APP_STATE.myNotesMap?.get(accountId + '|' + ticketId) || [];
+}
+
+/* === Meine Aufgaben — App-eigene Aufgaben-Verwaltung (FS-Tasks-Ersatz) ====
+   Per-User-Assignee, Multi-Account. Wird vom Aufgaben-Tab + KI-Assistent
+   genutzt. */
+
+function _normalizeAufgabe(r) {
+  const f = r.fields || {};
+  return {
+    recordId:                r.id,
+    account_id:              f.account_id || '',
+    assignee_user_api_key:   f.assignee_user_api_key || '',
+    assignee_name:           f.assignee_name || '',
+    title:                   f.title || '',
+    description:             f.description || '',
+    due_date:                f.due_date || '',
+    priority:                f.priority || 'normal',
+    status:                  f.status || 'open',
+    task_type:               f.task_type || 'other',
+    source_type:             f.source_type || 'manual',
+    source_id:               f.source_id || '',
+    related_name:            f.related_name || '',
+    related_email:           f.related_email || '',
+    related_phone:           f.related_phone || '',
+    related_mobile:          f.related_mobile || '',
+    created_by_user_api_key: f.created_by_user_api_key || '',
+    created_by_name:         f.created_by_name || '',
+    created:                 f.created || '',
+    completed_at:            f.completed_at || '',
+  };
+}
+
+async function loadAufgaben() {
+  if (!APP_KEYS.user?.api_key) return;
+  try {
+    const myKey = APP_KEYS.user.api_key.replace(/'/g, "\\'");
+    const cutoff = new Date(Date.now() - 365 * 86400e3).toISOString();
+    const formula = "AND(OR({assignee_user_api_key}='" + myKey + "',{created_by_user_api_key}='" + myKey + "'),{created}>='" + cutoff + "')";
+    const recs = await airtableRead(AUFGABEN_TABLE, { filter: formula, pageSize: 100, maxRecords: 2000 });
+    APP_STATE.aufgaben = (recs || []).map(_normalizeAufgabe);
+  } catch (e) {
+    console.warn('loadAufgaben (nicht kritisch):', e.message);
+    APP_STATE.aufgaben = [];
+  }
+}
+
+async function createAufgabe(opts) {
+  const me = APP_KEYS.user || {};
+  const title = String(opts?.title || '').trim();
+  if (!title) throw new Error('Titel fehlt');
+  const fields = {
+    account_id:              opts.account_id || '',
+    assignee_user_api_key:   opts.assignee_user_api_key || me.api_key || '',
+    assignee_name:           opts.assignee_name || me.name || '',
+    title:                   title,
+    description:             String(opts.description || '').trim(),
+    due_date:                opts.due_date || _daysToFrist(1, { morning: true }),
+    priority:                opts.priority || 'normal',
+    status:                  'open',
+    task_type:               opts.task_type || 'other',
+    source_type:             opts.source_type || 'manual',
+    source_id:               String(opts.source_id || ''),
+    related_name:            opts.related_name || '',
+    related_email:           opts.related_email || '',
+    related_phone:           opts.related_phone || '',
+    related_mobile:          opts.related_mobile || '',
+    created_by_user_api_key: me.api_key || '',
+    created_by_name:         me.name || '',
+    created:                 nowIso(),
+    completed_at:            '',
+  };
+  const rec = await airtableWrite(AUFGABEN_TABLE, fields);
+  const item = _normalizeAufgabe(rec);
+  if (!APP_STATE.aufgaben) APP_STATE.aufgaben = [];
+  APP_STATE.aufgaben.unshift(item);
+  return item;
+}
+
+async function updateAufgabe(recordId, fields) {
+  if (!recordId) throw new Error('Aufgabe-ID fehlt');
+  const rec = await airtableUpdate(AUFGABEN_TABLE, recordId, fields);
+  const item = _normalizeAufgabe(rec);
+  if (Array.isArray(APP_STATE.aufgaben)) {
+    const i = APP_STATE.aufgaben.findIndex(a => a.recordId === recordId);
+    if (i >= 0) APP_STATE.aufgaben[i] = item;
+  }
+  return item;
+}
+
+async function completeAufgabe(recordId) {
+  return await updateAufgabe(recordId, { status: 'done', completed_at: nowIso() });
+}
+
+async function postponeAufgabe(recordId, days) {
+  return await updateAufgabe(recordId, { due_date: _daysToFrist(days || 1, { morning: true }) });
 }
 
 /* ============================================================
@@ -3626,6 +3745,9 @@ function renderContactPreviewBody() {
           <i data-lucide="external-link" class="w-4 h-4"></i> Freshdesk
         </button>` : ''}
       </div>
+      <button type="button" onclick="closeContactPreviewModal(); openAufgabeFromContact('${escapeAttr(ctx.accountId)}', ${ctx.contactId})" class="w-full bg-gradient-to-br from-emerald-500 to-emerald-600 hover:opacity-90 text-white px-3 py-2.5 rounded-lg text-sm font-semibold inline-flex items-center justify-center gap-1.5 mt-1">
+        <i data-lucide="phone-call" class="w-4 h-4"></i> Aufgabe für diesen Kontakt
+      </button>
     </div>`;
   if (window.lucide) lucide.createIcons();
 }
@@ -11701,6 +11823,7 @@ async function aiInterpretCommand(ticket, command, accountId) {
     '- "group": Ticket einer Gruppe/Team zuweisen (group_id setzen) — Feld "group_id"\n' +
     '- "status": Freshdesk-Status setzen — verändert das Ticket für ALLE (Kunde, andere Agents, Workflows). Werte: 2=offen, 3=wartet, 4=gelöst, 5=geschlossen.\n' +
     '- "hide": Ticket NUR aus der persönlichen App-Sicht DES USERS ausblenden (lokale Wiedervorlage). Ändert den Freshdesk-Status NICHT, andere Agents/Kunde merken nichts. Feld "days" = Dauer in Tagen (Default 3, max 365 für "für immer").\n' +
+    '- "aufgabe": EIGENE Aufgabe/To-Do im internen Aufgaben-Tab anlegen (NICHT in Freshdesk, NICHT in Freshsales). Felder: "title" (Pflicht, kurz), "description" (optional), "task_type" (call|email|meeting|other, default other), "priority" (low|normal|high, default normal), "dueInDays" (Default 1), "assigneeHint" (Vorname/Name des Kollegen wenn an anderen User zugewiesen, sonst leer = mir selbst). Nutze diesen Typ wenn User sagt: „Aufgabe für mich/X anlegen", „Müller in 3 Tagen anrufen", „Erinnerung an Sandra in 1 Woche". WICHTIG: „auf Wiedervorlage" allein ohne Kontext = type="hide" (Ticket bei mir ausblenden); aber „Aufgabe für X anlegen" oder „Müller in 3 Tagen anrufen" = type="aufgabe".\n' +
     '- "unknown": Befehl ist unklar oder mehrdeutig\n\n' +
     '############### KRITISCHE UNTERSCHEIDUNG: "status" vs "hide" ###############\n' +
     'Diese zwei Aktionen sind NICHT austauschbar.\n\n' +
@@ -11763,7 +11886,7 @@ async function aiInterpretCommand(ticket, command, accountId) {
     'KORREKT: type="reply" mit „...wir können bis Freitag liefern...". HIER ist reply richtig, weil der User EXPLIZIT sagt „antworte dem Kunden".\n\n' +
     'JSON-FORMAT:\n' +
     '{"overall_summary":"Kurz auf Deutsch was insgesamt passieren soll","actions":[\n' +
-    '  {"type":"reply|note|forward|assign|group|status|hide|unknown","body":"...","forward_to":["..."],"agent_id":12345,"group_id":67,"status":4,"days":3,"summary":"Kurze deutsche Beschreibung dieses Schritts"}\n' +
+    '  {"type":"reply|note|forward|assign|group|status|hide|aufgabe|unknown","body":"...","forward_to":["..."],"agent_id":12345,"group_id":67,"status":4,"days":3,"title":"...","description":"...","task_type":"call","priority":"normal","dueInDays":3,"assigneeHint":"Sandra","summary":"Kurze deutsche Beschreibung dieses Schritts"}\n' +
     ']}';
 
   const userPrompt = 'TICKET:\n' +
@@ -11852,6 +11975,7 @@ function renderAssistantPreview() {
     group:   { icon: 'users',         color: 'brand',   label: 'Gruppe zuweisen' },
     status:  { icon: 'flag',          color: 'purple',  label: 'Freshdesk-Status setzen (für alle sichtbar)' },
     hide:    { icon: 'eye-off',       color: 'indigo',  label: 'Bei mir ausblenden (lokal)' },
+    aufgabe: { icon: 'phone-call',    color: 'emerald', label: 'Aufgabe anlegen (Aufgaben-Tab)' },
     unknown: { icon: 'help-circle',   color: 'amber',   label: 'Befehl unklar' },
   };
   // Vorab-Caches für die Dropdowns
@@ -12003,6 +12127,44 @@ function renderAssistantPreview() {
           </div>`;
       } else {
         body = `<p class="text-sm"><span class="text-ink-500">→</span> <span class="font-semibold text-ink-900">${defaultDays} Tag${defaultDays===1?'':'e'} lokal ausgeblendet</span></p>`;
+      }
+    } else if (a.type === 'aufgabe') {
+      const aufDays = Math.max(0, Math.min(365, parseInt(a.dueInDays, 10) || 1));
+      const aufHint = a.assigneeHint || '';
+      if (isActive && isPending) {
+        const tCall    = a.task_type === 'call'    ? 'selected' : '';
+        const tEmail   = a.task_type === 'email'   ? 'selected' : '';
+        const tMeeting = a.task_type === 'meeting' ? 'selected' : '';
+        const tOther   = (!a.task_type || a.task_type === 'other') ? 'selected' : '';
+        const pLow     = a.priority === 'low'    ? 'selected' : '';
+        const pNorm    = (!a.priority || a.priority === 'normal') ? 'selected' : '';
+        const pHigh    = a.priority === 'high'   ? 'selected' : '';
+        const hintMsg  = aufHint ? '<p class="text-[10px] text-emerald-700 mt-1">KI-Vorschlag: für <b>' + escapeHtml(aufHint) + '</b> — Standardmäßig wird dir zugewiesen. Im Tasks-Tab kannst du den Bearbeiter ändern.</p>' : '';
+        body =
+          '<label class="text-[10px] uppercase font-semibold text-emerald-800 block">Titel</label>' +
+          '<input id="stepAufTitle_' + i + '" type="text" value="' + escapeAttr(a.title || a.body || '') + '" placeholder="z.B. Müller anrufen" class="w-full text-sm px-3 py-2 border border-emerald-300 bg-white rounded-lg mt-1 mb-2">' +
+          '<label class="text-[10px] uppercase font-semibold text-emerald-800 block">Beschreibung</label>' +
+          '<textarea id="stepAufDesc_' + i + '" class="w-full text-sm px-3 py-2 border border-emerald-300 bg-white rounded-lg whitespace-pre-line mt-1 mb-2" rows="3">' + escapeHtml(a.description || '') + '</textarea>' +
+          '<div class="grid grid-cols-3 gap-2">' +
+            '<div><label class="text-[10px] uppercase font-semibold text-emerald-800 block">Fällig in</label>' +
+              '<div class="flex items-center gap-1 mt-1"><input id="stepAufDays_' + i + '" type="number" min="0" max="365" value="' + aufDays + '" class="w-full text-sm px-2 py-2 border border-emerald-300 bg-white rounded-lg"><span class="text-[11px] text-ink-700">d</span></div></div>' +
+            '<div><label class="text-[10px] uppercase font-semibold text-emerald-800 block">Typ</label>' +
+              '<select id="stepAufType_' + i + '" class="w-full text-sm px-2 py-2 border border-emerald-300 bg-white rounded-lg mt-1">' +
+                '<option value="call" ' + tCall + '>📞 Anruf</option>' +
+                '<option value="email" ' + tEmail + '>✉ Email</option>' +
+                '<option value="meeting" ' + tMeeting + '>📅 Termin</option>' +
+                '<option value="other" ' + tOther + '>📋 Sonst.</option>' +
+              '</select></div>' +
+            '<div><label class="text-[10px] uppercase font-semibold text-emerald-800 block">Priorität</label>' +
+              '<select id="stepAufPrio_' + i + '" class="w-full text-sm px-2 py-2 border border-emerald-300 bg-white rounded-lg mt-1">' +
+                '<option value="low" ' + pLow + '>Niedrig</option>' +
+                '<option value="normal" ' + pNorm + '>Normal</option>' +
+                '<option value="high" ' + pHigh + '>Hoch</option>' +
+              '</select></div>' +
+          '</div>' + hintMsg;
+      } else {
+        const lbl = a.title || a.body || '(ohne Titel)';
+        body = '<p class="text-sm"><span class="text-ink-500">→</span> <span class="font-semibold text-ink-900">' + escapeHtml(lbl) + '</span> · in ' + aufDays + ' Tag' + (aufDays === 1 ? '' : 'en') + (aufHint ? ' für ' + escapeHtml(aufHint) : '') + '</p>';
       }
     } else {
       // unknown: dem User trotzdem nützliche Picker geben
@@ -12234,6 +12396,25 @@ async function confirmAssistantStep(idx, btnEl) {
     if (!a.days || a.days < 1) a.days = 3;
     if (a.days > 365) a.days = 365;
   }
+  if (a.type === 'aufgabe') {
+    const t = ($('stepAufTitle_' + idx)?.value || a.title || a.body || '').trim();
+    if (t) a.title = t;
+    const d = ($('stepAufDesc_' + idx)?.value || a.description || '').trim();
+    a.description = d;
+    const days = parseInt($('stepAufDays_' + idx)?.value, 10);
+    if (!isNaN(days)) a.dueInDays = Math.max(0, Math.min(365, days));
+    const tt = $('stepAufType_' + idx)?.value;
+    if (tt) a.task_type = tt;
+    const pp = $('stepAufPrio_' + idx)?.value;
+    if (pp) a.priority = pp;
+    const av = $('stepAufAssignee_' + idx)?.value || '';
+    if (av && av.indexOf('|') >= 0) {
+      const parts = av.split('|');
+      a._assigneeKey = parts[0];
+      a._assigneeName = parts[1];
+    }
+    if (!a.title) return toast('Aufgabe braucht einen Titel', 'warn');
+  }
 
   a._state = 'running';
   renderAssistantPreview();
@@ -12413,6 +12594,27 @@ async function executeSingleAssistantAction(ctx, a) {
         setTimeout(() => { try { wrapper.remove(); } catch (_) {} }, 220);
       }
     } catch (_) {}
+  } else if (a.type === 'aufgabe') {
+    // App-eigene Aufgabe anlegen — landet im Tasks-Tab, ändert kein FD/FS
+    const days = Math.max(0, Math.min(365, parseInt(a.dueInDays, 10) || 1));
+    const req = ctx.ticket?.requester || {};
+    await createAufgabe({
+      account_id:             ctx.accountId,
+      title:                  a.title || a.body || 'Aufgabe',
+      description:            a.description || '',
+      due_date:               _daysToFrist(days, { morning: true }),
+      priority:               a.priority || 'normal',
+      task_type:              a.task_type || 'other',
+      assignee_user_api_key:  a._assigneeKey || (APP_KEYS.user && APP_KEYS.user.api_key) || '',
+      assignee_name:          a._assigneeName || (APP_KEYS.user && APP_KEYS.user.name) || '',
+      source_type:            'ticket',
+      source_id:              String(ctx.ticketId),
+      related_name:           req.name || '',
+      related_email:          req.email || '',
+      related_phone:          req.phone || '',
+      related_mobile:         req.mobile || '',
+    });
+    recordKnowledge(ctx.accountId, _t, 'aufgabe', { title: a.title, dueInDays: days }).catch(() => {});
   } else {
     throw new Error('Unbekannter Aktionstyp: ' + a.type);
   }
@@ -13474,421 +13676,223 @@ function renderCostsPage() {
 }
 
 /* ===================== FRESHSALES-TASKS PAGE ===================== */
-let TASKS_STATE = { accountId: 'all', filter: 'today', tasks: [], loading: false };
+let TASKS_STATE = { accountId: 'all', filter: 'today', mine: 'mine' };
 
 async function renderTasksPage() {
-  setPageTitle('Aufgaben', 'Anrufe + To-Dos aus Freshsales');
+  setPageTitle('Aufgaben', 'Anrufe + To-Dos');
   setActiveNav('tasks');
-
-  // Nur Accounts mit FS-Anbindung sind relevant
-  const fsAccounts = (APP_STATE.accounts || []).filter(a => accountHasFreshsales(a));
-  if (!fsAccounts.length) {
-    $('pageContent').innerHTML = `
-      <div class="space-y-3 max-w-2xl mx-auto">
-        <div class="bg-white rounded-2xl border border-ink-200 p-6 text-center">
-          <div class="w-14 h-14 mx-auto rounded-2xl bg-amber-50 flex items-center justify-center mb-3">
-            <i data-lucide="info" class="w-7 h-7 text-amber-600"></i>
-          </div>
-          <h3 class="font-semibold text-ink-900">Kein Freshsales-Account konfiguriert</h3>
-          <p class="text-sm text-ink-500 mt-1 leading-relaxed">Aufgaben kommen aus Freshsales. Trag deinen Freshsales-API-Key in mindestens einem Account ein, um Tasks zu sehen.</p>
-          ${APP_KEYS.user?.is_admin ? `
-            <button onclick="navTo('accounts')" class="mt-4 inline-flex items-center gap-2 bg-brand-500 hover:bg-brand-600 text-white rounded-lg px-4 py-2 text-sm font-medium">
-              <i data-lucide="building-2" class="w-4 h-4"></i> Account konfigurieren
-            </button>` : ''}
-        </div>
-      </div>`;
-    if (window.lucide) lucide.createIcons();
-    return;
+  $('pageContent').innerHTML =
+    '<div class="space-y-3 max-w-2xl mx-auto">' +
+      '<div id="tasksHeader"></div>' +
+      '<div id="tasksList">' +
+        '<div class="bg-white rounded-2xl border border-ink-200 p-6 text-center">' +
+          '<div class="spinner inline-block w-7 h-7 border-[3px] text-brand-500"></div>' +
+          '<p class="text-sm text-ink-500 mt-2">Lade Aufgaben…</p>' +
+        '</div>' +
+      '</div>' +
+    '</div>';
+  if (!APP_STATE.aufgaben) {
+    try { await loadAufgaben(); } catch (_) {}
   }
-
-  // Header rendern (Account-Tabs + Filter-Chips)
-  $('pageContent').innerHTML = `
-    <div class="space-y-3 max-w-2xl mx-auto">
-      <div id="tasksHeader"></div>
-      <div id="tasksList">
-        <div class="bg-white rounded-2xl border border-ink-200 p-6 text-center">
-          <div class="spinner inline-block w-7 h-7 border-[3px] text-brand-500"></div>
-          <p class="text-sm text-ink-500 mt-2">Lade Aufgaben…</p>
-        </div>
-      </div>
-    </div>`;
-  _renderTasksHeader(fsAccounts);
-
-  // Tasks laden für gewählten Account (oder alle)
-  TASKS_STATE.loading = true;
-  const accs = TASKS_STATE.accountId === 'all' ? fsAccounts : fsAccounts.filter(a => a.id === TASKS_STATE.accountId);
-  if (!accs.length) {
-    TASKS_STATE.accountId = 'all';
-    return renderTasksPage();
-  }
-  try {
-    const results = await Promise.all(accs.map(a => fetchFsTasks(a.id).catch(e => {
-      console.warn('Tasks fetch failed für', a.id, e.message);
-      return [];
-    })));
-    let merged = [];
-    accs.forEach((a, i) => {
-      results[i].forEach(t => merged.push({ ...t, _accountName: a.name, _accountColor: a.color }));
-    });
-    // Nach Fälligkeit sortieren (überfällig zuerst, dann nach Datum)
-    merged.sort((a, b) => {
-      const ta = a.due_date ? new Date(a.due_date).getTime() : Infinity;
-      const tb = b.due_date ? new Date(b.due_date).getTime() : Infinity;
-      return ta - tb;
-    });
-    TASKS_STATE.tasks = merged;
-    TASKS_STATE.loading = false;
-    _renderTasksList();
-    _renderTasksHeader(fsAccounts);  // Counter aktualisieren
-  } catch (e) {
-    console.error('Tasks Page error:', e);
-    $('tasksList').innerHTML = `<div class="bg-red-50 border border-red-200 rounded-2xl p-4 text-sm text-red-800">Tasks-Fehler: ${escapeHtml(e.message)}</div>`;
-  }
+  _renderTasksHeader();
+  _renderTasksList();
 }
 
-function _renderTasksHeader(fsAccounts) {
-  const host = $('tasksHeader');
+function _renderTasksHeader() {
+  var host = $('tasksHeader');
   if (!host) return;
-  const tasks = TASKS_STATE.tasks || [];
-  // Counters pro Filter
-  const now = Date.now();
-  const today = new Date(); today.setHours(0,0,0,0);
-  const todayEnd = today.getTime() + 86400e3;
-  const weekEnd = today.getTime() + 7 * 86400e3;
-  const cntOverdue = tasks.filter(t => t.due_date && new Date(t.due_date).getTime() < today.getTime()).length;
-  const cntToday   = tasks.filter(t => t.due_date && new Date(t.due_date).getTime() >= today.getTime() && new Date(t.due_date).getTime() < todayEnd).length;
-  const cntWeek    = tasks.filter(t => t.due_date && new Date(t.due_date).getTime() < weekEnd).length;
-  const cntAll     = tasks.length;
-  const filterChip = (key, label, count, active) => `
-    <button onclick="TASKS_STATE.filter='${key}'; _renderTasksHeader(window._tasksFsAccountsCache || []); _renderTasksList()" class="shrink-0 inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full text-[12px] font-semibold border ${active ? 'bg-brand-600 text-white border-brand-600 shadow-sm' : 'bg-white text-ink-700 border-ink-200'}">
-      ${escapeHtml(label)}
-      ${count > 0 ? `<span class="text-[10px] font-mono ${active ? 'bg-white/30' : 'bg-ink-100'} px-1.5 rounded-full">${count}</span>` : ''}
-    </button>`;
-  window._tasksFsAccountsCache = fsAccounts;
-  host.innerHTML = `
-    <div class="bg-white/95 backdrop-blur sticky top-0 z-10 -mx-1 px-1 py-2 border-b border-ink-100">
-      <!-- Account-Tabs (analog Tickets-Page) -->
-      <div class="flex gap-1.5 overflow-x-auto scrollbar-hidden -mx-1 px-1 mb-2">
-        <button onclick="TASKS_STATE.accountId='all'; renderTasksPage()" class="shrink-0 inline-flex items-center gap-1 px-3 py-1.5 rounded-full text-[12px] font-semibold ${TASKS_STATE.accountId === 'all' ? 'bg-ink-900 text-white' : 'bg-white text-ink-700 border border-ink-200'}">
-          <i data-lucide="layers" class="w-3.5 h-3.5"></i> Alle (${fsAccounts.length})
-        </button>
-        ${fsAccounts.map(a => `
-          <button onclick="TASKS_STATE.accountId='${escapeAttr(a.id)}'; renderTasksPage()" class="shrink-0 inline-flex items-center gap-1 px-3 py-1.5 rounded-full text-[12px] font-semibold ${TASKS_STATE.accountId === a.id ? 'bg-ink-900 text-white' : 'bg-white text-ink-700 border border-ink-200'}">
-            <span class="w-2 h-2 rounded-full" style="background:${escapeAttr(a.color)}"></span>
-            <span class="truncate max-w-32">${escapeHtml(a.name)}</span>
-          </button>`).join('')}
-        <button onclick="diagnoseTasks()" class="shrink-0 inline-flex items-center gap-1 px-2.5 py-1.5 rounded-full text-[11px] font-medium bg-amber-50 text-amber-700 border border-amber-200 hover:bg-amber-100" title="FS-Tasks-Diagnose ausführen">
-          <i data-lucide="bug" class="w-3 h-3"></i> Diagnose
-        </button>
-      </div>
-      <!-- Filter-Chips -->
-      <div class="flex gap-1.5 overflow-x-auto scrollbar-hidden -mx-1 px-1">
-        ${filterChip('overdue', 'Überfällig', cntOverdue, TASKS_STATE.filter === 'overdue')}
-        ${filterChip('today',   'Heute',     cntToday,   TASKS_STATE.filter === 'today')}
-        ${filterChip('week',    'Woche',     cntWeek,    TASKS_STATE.filter === 'week')}
-        ${filterChip('all',     'Alle Offen', cntAll,    TASKS_STATE.filter === 'all')}
-      </div>
-    </div>`;
+  var accounts = APP_STATE.accounts || [];
+  var all = APP_STATE.aufgaben || [];
+  var myKey = APP_KEYS.user && APP_KEYS.user.api_key || '';
+  var visible = all.filter(function (a) {
+    if (a.status === 'done') return false;
+    if (TASKS_STATE.accountId !== 'all' && a.account_id !== TASKS_STATE.accountId) return false;
+    if (TASKS_STATE.mine === 'mine' && a.assignee_user_api_key !== myKey) return false;
+    return true;
+  });
+  var today = new Date(); today.setHours(0,0,0,0);
+  var todayMs = today.getTime();
+  var todayEnd = todayMs + 86400e3;
+  var weekEnd = todayMs + 7 * 86400e3;
+  var cntOverdue = visible.filter(function (a) { return a.due_date && new Date(a.due_date).getTime() < todayMs; }).length;
+  var cntToday   = visible.filter(function (a) { var t = a.due_date ? new Date(a.due_date).getTime() : 0; return t >= todayMs && t < todayEnd; }).length;
+  var cntWeek    = visible.filter(function (a) { return a.due_date && new Date(a.due_date).getTime() < weekEnd; }).length;
+  var cntAll     = visible.length;
+  var myAssigned = all.filter(function (a) { return a.status === 'open' && a.assignee_user_api_key === myKey; }).length;
+  var allOpen    = all.filter(function (a) { return a.status === 'open'; }).length;
+
+  function chip(key, label, count, active) {
+    return '<button onclick="TASKS_STATE.filter=\'' + key + '\'; _renderTasksHeader(); _renderTasksList()" class="shrink-0 inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full text-[12px] font-semibold border ' +
+      (active ? 'bg-brand-600 text-white border-brand-600 shadow-sm' : 'bg-white text-ink-700 border-ink-200') + '">' +
+      escapeHtml(label) +
+      (count > 0 ? ' <span class="text-[10px] font-mono ' + (active ? 'bg-white/30' : 'bg-ink-100') + ' px-1.5 rounded-full">' + count + '</span>' : '') +
+      '</button>';
+  }
+  var accTabs = accounts.map(function (a) {
+    return '<button onclick="TASKS_STATE.accountId=\'' + escapeAttr(a.id) + '\'; renderTasksPage()" class="shrink-0 inline-flex items-center gap-1 px-3 py-1.5 rounded-full text-[12px] font-semibold ' +
+      (TASKS_STATE.accountId === a.id ? 'bg-ink-900 text-white' : 'bg-white text-ink-700 border border-ink-200') + '">' +
+      '<span class="w-2 h-2 rounded-full" style="background:' + escapeAttr(a.color) + '"></span>' +
+      '<span class="truncate max-w-32">' + escapeHtml(a.name) + '</span>' +
+    '</button>';
+  }).join('');
+  host.innerHTML =
+    '<div class="bg-white/95 backdrop-blur sticky top-0 z-10 -mx-1 px-1 py-2 border-b border-ink-100">' +
+      '<div class="flex gap-1.5 overflow-x-auto scrollbar-hidden -mx-1 px-1 mb-2">' +
+        '<button onclick="TASKS_STATE.accountId=\'all\'; renderTasksPage()" class="shrink-0 inline-flex items-center gap-1 px-3 py-1.5 rounded-full text-[12px] font-semibold ' +
+          (TASKS_STATE.accountId === 'all' ? 'bg-ink-900 text-white' : 'bg-white text-ink-700 border border-ink-200') + '">' +
+          '<i data-lucide="layers" class="w-3.5 h-3.5"></i> Alle (' + accounts.length + ')' +
+        '</button>' +
+        accTabs +
+        '<button onclick="openNewAufgabeModal()" class="shrink-0 inline-flex items-center gap-1 px-2.5 py-1.5 rounded-full text-[11px] font-semibold bg-emerald-500 text-white hover:bg-emerald-600">' +
+          '<i data-lucide="plus" class="w-3 h-3"></i> Neu' +
+        '</button>' +
+      '</div>' +
+      '<div class="flex gap-1.5 mb-2">' +
+        '<button onclick="TASKS_STATE.mine=\'mine\'; _renderTasksHeader(); _renderTasksList()" class="flex-1 px-2.5 py-1.5 rounded-lg text-[11px] font-semibold border ' +
+          (TASKS_STATE.mine === 'mine' ? 'bg-brand-500 text-white border-brand-500' : 'bg-white text-ink-700 border-ink-200') + '">' +
+          'Mir zugewiesen' + (myAssigned > 0 ? ' · ' + myAssigned : '') +
+        '</button>' +
+        '<button onclick="TASKS_STATE.mine=\'all\'; _renderTasksHeader(); _renderTasksList()" class="flex-1 px-2.5 py-1.5 rounded-lg text-[11px] font-semibold border ' +
+          (TASKS_STATE.mine === 'all' ? 'bg-brand-500 text-white border-brand-500' : 'bg-white text-ink-700 border-ink-200') + '">' +
+          'Alle (auch eigene)' + (allOpen > 0 ? ' · ' + allOpen : '') +
+        '</button>' +
+      '</div>' +
+      '<div class="flex gap-1.5 overflow-x-auto scrollbar-hidden -mx-1 px-1">' +
+        chip('overdue', 'Überfällig', cntOverdue, TASKS_STATE.filter === 'overdue') +
+        chip('today',   'Heute',     cntToday,   TASKS_STATE.filter === 'today') +
+        chip('week',    'Woche',     cntWeek,    TASKS_STATE.filter === 'week') +
+        chip('all',     'Alle Offen', cntAll,    TASKS_STATE.filter === 'all') +
+      '</div>' +
+    '</div>';
   if (window.lucide) lucide.createIcons();
 }
 
 function _renderTasksList() {
-  const host = $('tasksList');
+  var host = $('tasksList');
   if (!host) return;
-  const tasks = TASKS_STATE.tasks || [];
-  const today = new Date(); today.setHours(0,0,0,0);
-  const todayEnd = today.getTime() + 86400e3;
-  const weekEnd = today.getTime() + 7 * 86400e3;
-  let filtered = tasks;
+  var all = APP_STATE.aufgaben || [];
+  var myKey = APP_KEYS.user && APP_KEYS.user.api_key || '';
+  var today = new Date(); today.setHours(0,0,0,0);
+  var todayMs = today.getTime();
+  var todayEnd = todayMs + 86400e3;
+  var weekEnd = todayMs + 7 * 86400e3;
+  var visible = all.filter(function (a) {
+    if (a.status === 'done') return false;
+    if (TASKS_STATE.accountId !== 'all' && a.account_id !== TASKS_STATE.accountId) return false;
+    if (TASKS_STATE.mine === 'mine' && a.assignee_user_api_key !== myKey) return false;
+    return true;
+  });
   if (TASKS_STATE.filter === 'overdue') {
-    filtered = tasks.filter(t => t.due_date && new Date(t.due_date).getTime() < today.getTime());
+    visible = visible.filter(function (a) { return a.due_date && new Date(a.due_date).getTime() < todayMs; });
   } else if (TASKS_STATE.filter === 'today') {
-    filtered = tasks.filter(t => t.due_date && new Date(t.due_date).getTime() >= today.getTime() && new Date(t.due_date).getTime() < todayEnd);
+    visible = visible.filter(function (a) { var t = a.due_date ? new Date(a.due_date).getTime() : 0; return t >= todayMs && t < todayEnd; });
   } else if (TASKS_STATE.filter === 'week') {
-    filtered = tasks.filter(t => t.due_date && new Date(t.due_date).getTime() < weekEnd);
+    visible = visible.filter(function (a) { return a.due_date && new Date(a.due_date).getTime() < weekEnd; });
   }
-
-  if (!filtered.length) {
-    const filterLabel = { overdue:'überfällige', today:'für heute', week:'in dieser Woche', all:'offene' }[TASKS_STATE.filter] || '';
-    const diagnoseHint = tasks.length === 0
-      ? `<p class="text-[11px] text-ink-600 mt-2 leading-relaxed">Im aktuellen Account-Filter wurden gar keine Tasks gefunden. Mögliche Ursachen:</p>
-         <ul class="text-[11px] text-ink-600 text-left mt-1 mx-auto max-w-sm space-y-0.5 list-disc pl-5">
-           <li>Email in App ≠ Email in Freshsales (Owner-Match scheitert)</li>
-           <li>Freshsales-API-Key hat keine Tasks-Lese-Rechte</li>
-           <li>Tasks-Filter-View ist im FS-Tenant nicht eingerichtet</li>
-         </ul>
-         <button onclick="diagnoseTasks()" class="mt-3 inline-flex items-center gap-1.5 px-3 py-1.5 bg-amber-100 hover:bg-amber-200 text-amber-800 rounded-lg text-[11px] font-semibold">
-           <i data-lucide="bug" class="w-3.5 h-3.5"></i> Diagnose ausführen
-         </button>`
-      : `<p class="text-[11px] text-ink-500 mt-1">Du bist auf dem Stand. ✨ <span class="text-ink-400">(${tasks.length} insgesamt offen, aber keine ${escapeHtml(filterLabel)})</span></p>`;
-    host.innerHTML = `
-      <div class="bg-white rounded-2xl border border-ink-200 p-8 text-center">
-        <i data-lucide="check-circle-2" class="w-10 h-10 mx-auto text-emerald-400"></i>
-        <p class="text-sm text-ink-700 mt-2 font-semibold">Keine ${escapeHtml(filterLabel)} Aufgaben${TASKS_STATE.accountId === 'all' ? '' : ' in diesem Account'}.</p>
-        ${diagnoseHint}
-      </div>`;
+  visible.sort(function (a, b) {
+    var ta = a.due_date ? new Date(a.due_date).getTime() : Infinity;
+    var tb = b.due_date ? new Date(b.due_date).getTime() : Infinity;
+    return ta - tb;
+  });
+  if (!visible.length) {
+    var fLabel = { overdue:'überfällige', today:'für heute', week:'in dieser Woche', all:'offene' }[TASKS_STATE.filter] || '';
+    host.innerHTML =
+      '<div class="bg-white rounded-2xl border border-ink-200 p-8 text-center">' +
+        '<i data-lucide="check-circle-2" class="w-10 h-10 mx-auto text-emerald-400"></i>' +
+        '<p class="text-sm text-ink-700 mt-2 font-semibold">Keine ' + escapeHtml(fLabel) + ' Aufgaben.</p>' +
+        '<p class="text-[11px] text-ink-500 mt-1">Du bist auf dem Stand.</p>' +
+        '<button onclick="openNewAufgabeModal()" class="mt-4 inline-flex items-center gap-1.5 px-3 py-2 bg-emerald-500 hover:bg-emerald-600 text-white rounded-lg text-xs font-semibold">' +
+          '<i data-lucide="plus" class="w-3.5 h-3.5"></i> Neue Aufgabe' +
+        '</button>' +
+      '</div>';
     if (window.lucide) lucide.createIcons();
     return;
   }
-
-  host.innerHTML = '<div class="space-y-2">' + filtered.map(_renderTaskCard).join('') + '</div>';
+  host.innerHTML = '<div class="space-y-2">' + visible.map(_renderAufgabeCard).join('') + '</div>';
   if (window.lucide) lucide.createIcons();
 }
 
-/* Diagnose-Modus: testet alle relevanten Freshsales-Endpoints einzeln und zeigt
-   detailliert ob jeder Endpoint lesbar ist + welche Daten er liefert.
-   Ziel: User sofort erkennen lassen ob's an Permissions/Owner-Match/leeren Tasks liegt. */
-async function diagnoseTasks() {
-  window._fsTasksDebug = true;
-  const fsAccounts = (APP_STATE.accounts || []).filter(a => accountHasFreshsales(a));
-  if (!fsAccounts.length) {
-    alert('Kein Freshsales-Account konfiguriert.');
-    return;
+function _renderAufgabeCard(a) {
+  var due = a.due_date ? new Date(a.due_date) : null;
+  var today = new Date(); today.setHours(0,0,0,0);
+  var todayMs = today.getTime();
+  var isOverdue = due && due.getTime() < todayMs;
+  var isToday   = due && due.getTime() >= todayMs && due.getTime() < todayMs + 86400e3;
+  var dueLabel  = due ? _fmtDueDate(due) : 'kein Termin';
+  var dueClass  = isOverdue ? 'text-red-700 bg-red-50 border-red-200'
+                : (isToday  ? 'text-amber-700 bg-amber-50 border-amber-200'
+                            : 'text-ink-600 bg-ink-50 border-ink-200');
+  var phones = [];
+  if (a.related_phone)  phones.push({ label: 'Festnetz', num: a.related_phone });
+  if (a.related_mobile) phones.push({ label: 'Mobil', num: a.related_mobile });
+  var typeIcon = a.task_type === 'call' ? 'phone-call'
+              : a.task_type === 'email' ? 'mail'
+              : a.task_type === 'meeting' ? 'calendar'
+              : 'check-square';
+  var typeColor = a.task_type === 'call' ? 'emerald' : (a.priority === 'high' ? 'red' : 'brand');
+  var prioBadge = '';
+  if (a.priority === 'high') prioBadge = '<span class="text-[9px] uppercase tracking-wider bg-red-100 text-red-700 px-1.5 py-0.5 rounded font-bold">Hoch</span>';
+  else if (a.priority === 'low') prioBadge = '<span class="text-[9px] uppercase tracking-wider bg-ink-100 text-ink-500 px-1.5 py-0.5 rounded font-medium">Niedrig</span>';
+  var accs = APP_STATE.accounts || [];
+  var acc = accs.find(function (x) { return x.id === a.account_id; });
+  var accountName  = acc ? acc.name  : '';
+  var accountColor = acc ? acc.color : '#cbd5e1';
+  var myKey = APP_KEYS.user && APP_KEYS.user.api_key || '';
+  var showAssignee = a.assignee_user_api_key !== myKey;
+  var sourceBtn = '';
+  if (a.source_type === 'ticket' && a.source_id) {
+    var tid = parseInt(a.source_id, 10) || 0;
+    sourceBtn = '<button onclick="openTicketDetail(\'' + escapeAttr(a.account_id) + '\', ' + tid + ')" class="text-[10px] inline-flex items-center gap-1 px-1.5 py-0.5 bg-brand-50 text-brand-700 border border-brand-200 rounded font-mono hover:bg-brand-100"><i data-lucide="ticket" class="w-3 h-3"></i>#' + escapeHtml(a.source_id) + '</button>';
+  } else if (a.source_type === 'contact' && a.source_id) {
+    var cid = parseInt(a.source_id, 10) || 0;
+    sourceBtn = '<button onclick="openContactPreviewModal(\'' + escapeAttr(a.account_id) + '\', ' + cid + ')" class="text-[10px] inline-flex items-center gap-1 px-1.5 py-0.5 bg-purple-50 text-purple-700 border border-purple-200 rounded hover:bg-purple-100"><i data-lucide="user" class="w-3 h-3"></i>Kontakt</button>';
   }
-
-  // Detail-Tests pro Account
-  const myEmail = String(APP_KEYS.user?.email || '').toLowerCase().trim();
-  const fullReport = [];
-
-  for (const acc of fsAccounts) {
-    const report = { name: acc.name, accountId: acc.id, tests: {} };
-    const base = '/freshsales/' + encodeURIComponent(acc.id) + '/api';
-
-    // Test 1: Owners-Endpoint (Basis-Permission-Check)
-    // Wichtig: pro Account die spezifische Email nutzen (User kann in jedem FS-Tenant
-    // unter einer anderen Adresse angelegt sein).
-    const emailForThisAccount = _getFsEmailForAccount(acc.id).toLowerCase();
-    try {
-      const data = await proxyJson(base + '/selector/owners');
-      const owners = data?.users || data?.owners || [];
-      const meRec = owners.find(o => String(o.email || '').toLowerCase().trim() === emailForThisAccount);
-      report.tests.owners = {
-        status: '✓ OK',
-        count: owners.length,
-        emailUsed: emailForThisAccount || '(keine gesetzt)',
-        emailSource: APP_STATE.accessByAccount?.[acc.id]?.freshsales_owner_email
-          ? 'Account-Access (eigene FS-Email)'
-          : acc.freshsales_owner_email
-            ? 'Account-Global'
-            : 'Standard-Email',
-        meFound: !!meRec,
-        meId: meRec?.id || null,
-        meName: meRec?.display_name || meRec?.name || '(unbekannt)',
-      };
-      // Wenn User nicht in der Owner-Liste: alle Owner zur Diagnose zeigen
-      if (!meRec && owners.length) {
-        report.tests.owners.allOwners = owners.slice(0, 10).map(o => o.email + ' → ' + (o.display_name || o.name || o.id));
-      }
-    } catch (e) {
-      report.tests.owners = { status: '✗ FEHLER', error: e.message };
-    }
-
-    // Test 2: Tasks-Filters (welche Views gibt's)
-    try {
-      const data = await proxyJson(base + '/tasks/filters');
-      const filters = data?.filters || data || [];
-      const list = Array.isArray(filters) ? filters : [];
-      report.tests.taskFilters = {
-        status: list.length ? '✓ OK' : '⚠ Keine Views',
-        count: list.length,
-        views: list.slice(0, 8).map(f => f.id + ': ' + f.name),
-      };
-    } catch (e) {
-      report.tests.taskFilters = { status: '✗ FEHLER', error: e.message };
-    }
-
-    // Test 3: Direkter Tasks-Endpoint (ohne View)
-    try {
-      const data = await proxyJson(base + '/tasks?include=targetable,owner&per_page=20');
-      const tasks = data?.tasks || data?.items || (Array.isArray(data) ? data : []);
-      report.tests.tasksDirect = {
-        status: tasks.length ? '✓ OK' : '⚠ Leer',
-        count: tasks.length,
-        sample: tasks.slice(0, 3).map(t => ({
-          id: t.id,
-          title: t.title || t.subject || '(leer)',
-          status: t.status,
-          owner_id: t.owner_id || t.owner?.id || null,
-          owner_email: t.owner?.email || '(?)',
-          due: t.due_date || t.due_on || null,
-        })),
-      };
-    } catch (e) {
-      report.tests.tasksDirect = { status: '✗ FEHLER', error: e.message };
-    }
-
-    // Test 4: Tasks-via-View (erste verfügbare View)
-    const firstViewId = report.tests.taskFilters?.views?.[0]?.split(':')?.[0]?.trim();
-    if (firstViewId) {
-      try {
-        const data = await proxyJson(base + '/tasks/view/' + firstViewId + '?include=targetable,owner&per_page=20');
-        const tasks = data?.tasks || data?.items || [];
-        report.tests.tasksView = {
-          status: tasks.length ? '✓ OK' : '⚠ Leer',
-          viewId: firstViewId,
-          count: tasks.length,
-        };
-      } catch (e) {
-        report.tests.tasksView = { status: '✗ FEHLER', error: e.message };
-      }
-    }
-
-    // Zusammenfassung: was sollte funktionieren?
-    const meId = report.tests.owners?.meId;
-    const directTasks = report.tests.tasksDirect?.sample || [];
-    const mine = directTasks.filter(t => meId && String(t.owner_id) === String(meId));
-    report.summary = {
-      meEmailInFs: report.tests.owners?.meFound ? '✓ ja' : '✗ NEIN — Email-Mismatch!',
-      tasksReadable: (report.tests.tasksDirect?.status?.includes('OK') || report.tests.tasksView?.status?.includes('OK')) ? '✓ ja' : '✗ NEIN — Permission?',
-      mineInSample: mine.length,
-    };
-    fullReport.push(report);
+  var phonesHtml = '';
+  if (phones.length) {
+    phonesHtml = '<div class="flex flex-wrap gap-1.5 mt-2">' +
+      phones.map(function (p) {
+        var tel = _cleanPhoneForTel(p.num);
+        return '<a href="tel:' + escapeAttr(tel) + '" class="inline-flex items-center gap-1.5 px-3 py-2 bg-emerald-50 border border-emerald-300 text-emerald-800 rounded-lg active:bg-emerald-100 font-semibold">' +
+          '<i data-lucide="phone-call" class="w-4 h-4"></i>' +
+          '<span class="text-[12px] font-mono">' + escapeHtml(p.num) + '</span>' +
+          '<span class="text-[9px] uppercase tracking-wider opacity-70">' + escapeHtml(p.label) + '</span>' +
+        '</a>';
+      }).join('') + '</div>';
   }
-
-  console.log('=== FS-TASKS DIAGNOSE ===');
-  console.log('User-Email:', myEmail);
-  fullReport.forEach(r => console.log(r.name, r));
-
-  // Sichtbarer Bericht als Modal
-  const html = fullReport.map(r => {
-    const t = r.tests;
-    return `
-      <div class="bg-white border border-ink-200 rounded-xl p-3 space-y-2">
-        <p class="font-semibold text-ink-900">${escapeHtml(r.name)}</p>
-        <div class="text-[11px] space-y-1">
-          <div class="bg-ink-50 rounded p-2">
-            <p class="font-mono"><b>Owners-Endpoint:</b> ${escapeHtml(t.owners?.status || '?')}</p>
-            ${t.owners?.error ? `<p class="text-red-600 mt-1">${escapeHtml(t.owners.error)}</p>` : ''}
-            ${t.owners?.emailUsed !== undefined ? `<p class="text-[10px] mt-1">Match-Email: <span class="font-mono">${escapeHtml(t.owners.emailUsed)}</span> <span class="text-ink-400">(${escapeHtml(t.owners.emailSource || '?')})</span></p>` : ''}
-            ${t.owners?.meFound !== undefined ? `<p>${t.owners.meFound ? '✓' : '✗'} Du im FS-Owner-Pool: <b>${escapeHtml(t.owners.meName || '–')}</b> (ID ${escapeHtml(String(t.owners.meId || '?'))})</p>` : ''}
-            ${t.owners?.allOwners ? `<details class="mt-1"><summary class="cursor-pointer text-brand-600">Alle ${escapeHtml(String(t.owners.count))} Owner zeigen</summary><div class="mt-1 font-mono text-[10px] whitespace-pre-line">${escapeHtml(t.owners.allOwners.join('\\n'))}</div></details>` : ''}
-          </div>
-          <div class="bg-ink-50 rounded p-2">
-            <p class="font-mono"><b>Tasks-Filters-Endpoint:</b> ${escapeHtml(t.taskFilters?.status || '?')}</p>
-            ${t.taskFilters?.error ? `<p class="text-red-600 mt-1">${escapeHtml(t.taskFilters.error)}</p>` : ''}
-            ${t.taskFilters?.views?.length ? `<p class="font-mono text-[10px] mt-1">${escapeHtml(t.taskFilters.views.join(' / '))}</p>` : ''}
-          </div>
-          <div class="bg-ink-50 rounded p-2">
-            <p class="font-mono"><b>Direkter Tasks-Call:</b> ${escapeHtml(t.tasksDirect?.status || '?')} (${escapeHtml(String(t.tasksDirect?.count ?? '?'))})</p>
-            ${t.tasksDirect?.error ? `<p class="text-red-600 mt-1">${escapeHtml(t.tasksDirect.error)}</p>` : ''}
-            ${t.tasksDirect?.sample?.length ? `<details class="mt-1"><summary class="cursor-pointer text-brand-600">Sample anzeigen</summary><pre class="mt-1 text-[10px] overflow-x-auto bg-white p-1 rounded">${escapeHtml(JSON.stringify(t.tasksDirect.sample, null, 2))}</pre></details>` : ''}
-          </div>
-          ${t.tasksView ? `
-            <div class="bg-ink-50 rounded p-2">
-              <p class="font-mono"><b>Tasks-via-View ${escapeHtml(String(t.tasksView.viewId))}:</b> ${escapeHtml(t.tasksView.status)} (${escapeHtml(String(t.tasksView.count ?? '?'))})</p>
-              ${t.tasksView.error ? `<p class="text-red-600 mt-1">${escapeHtml(t.tasksView.error)}</p>` : ''}
-            </div>` : ''}
-          <div class="bg-${r.summary.meEmailInFs.includes('ja') && r.summary.tasksReadable.includes('ja') ? 'emerald' : 'amber'}-50 border border-${r.summary.meEmailInFs.includes('ja') && r.summary.tasksReadable.includes('ja') ? 'emerald' : 'amber'}-200 rounded p-2 font-semibold">
-            <p>Du in FS: ${escapeHtml(r.summary.meEmailInFs)}</p>
-            <p>Tasks lesbar: ${escapeHtml(r.summary.tasksReadable)}</p>
-            <p>Deine Tasks im Sample: ${r.summary.mineInSample}</p>
-          </div>
-        </div>
-      </div>`;
-  }).join('');
-
-  // Modal anzeigen
-  let host = document.getElementById('subModalHost');
-  if (!host) { host = document.createElement('div'); host.id = 'subModalHost'; document.body.appendChild(host); }
-  host.innerHTML = `
-    <div class="fixed inset-0 z-[60] bg-white flex flex-col">
-      <header class="sticky top-0 z-10 bg-white border-b border-ink-200 safe-top">
-        <div class="px-2 py-2.5 flex items-center gap-1.5">
-          <button onclick="document.getElementById('subModalHost').innerHTML=''; document.body.style.overflow=''" class="w-9 h-9 rounded-lg hover:bg-ink-100 flex items-center justify-center">
-            <i data-lucide="arrow-left" class="w-5 h-5 text-ink-700"></i>
-          </button>
-          <h1 class="font-bold text-ink-900 flex-1 inline-flex items-center gap-1.5"><i data-lucide="bug" class="w-4 h-4 text-amber-600"></i> Freshsales-Diagnose</h1>
-        </div>
-      </header>
-      <div class="flex-1 overflow-y-auto p-3 space-y-3">
-        <div class="bg-amber-50 border border-amber-200 rounded-xl p-3 text-[12px] text-amber-900">
-          <p class="font-semibold">Eingeloggter User-Email:</p>
-          <p class="font-mono text-[11px] mt-1">${escapeHtml(myEmail || '(nicht gesetzt)')}</p>
-          <p class="text-[10px] mt-2 opacity-80">Wenn deine Email NICHT in der „Alle Owner zeigen"-Liste auftaucht → das ist der Bug. Lösung: in Freshsales den Owner mit deiner App-Email anlegen, ODER deine User-Email in der App-Master-Base auf die FS-Email anpassen.</p>
-        </div>
-        ${html}
-        <button onclick="document.getElementById('subModalHost').innerHTML=''; document.body.style.overflow=''" class="w-full bg-ink-100 hover:bg-ink-200 text-ink-700 rounded-lg py-2.5 font-semibold">Schließen</button>
-      </div>
-    </div>`;
-  document.body.style.overflow = 'hidden';
-  if (window.lucide) lucide.createIcons();
-}
-
-function _renderTaskCard(t) {
-  const due = t.due_date ? new Date(t.due_date) : null;
-  const today = new Date(); today.setHours(0,0,0,0);
-  const isOverdue = due && due.getTime() < today.getTime();
-  const isToday   = due && due.getTime() >= today.getTime() && due.getTime() < today.getTime() + 86400e3;
-  const dueLabel  = due ? _fmtDueDate(due) : 'kein Termin';
-  const dueColor  = isOverdue ? 'text-red-700' : (isToday ? 'text-amber-700' : 'text-ink-600');
-  const dueBg     = isOverdue ? 'bg-red-50 border-red-200' : (isToday ? 'bg-amber-50 border-amber-200' : 'bg-ink-50 border-ink-200');
-
-  // Telefonnummern aus Target
-  const phones = [];
-  if (t.target?.phone) phones.push({ label: 'Festnetz', num: t.target.phone });
-  if (t.target?.mobile) phones.push({ label: 'Mobil', num: t.target.mobile });
-
-  // Task-Typ-Icon (Call = phone-call, sonst stickynote)
-  // Freshsales gibt task_type_id zurück — Standardwerte: 1=call, 2=email, 3=meeting, ...
-  const typeIcon = t.task_type_id === 1 ? 'phone-call' : (t.task_type_id === 2 ? 'mail' : (t.task_type_id === 3 ? 'calendar' : 'check-square'));
-  const typeColor = t.task_type_id === 1 ? 'emerald' : 'brand';
-
-  const targetName = t.target?.name?.trim() || ([t.target?.first_name, t.target?.last_name].filter(Boolean).join(' ').trim()) || '';
-
-  return `
-    <div class="bg-white rounded-2xl border border-ink-200 p-3 shadow-sm">
-      <!-- Header: Type-Icon + Title + Due-Pill -->
-      <div class="flex items-start gap-2.5 mb-1.5">
-        <div class="w-9 h-9 rounded-xl bg-${typeColor}-50 border border-${typeColor}-200 flex items-center justify-center text-${typeColor}-700 shrink-0">
-          <i data-lucide="${typeIcon}" class="w-4 h-4"></i>
-        </div>
-        <div class="flex-1 min-w-0">
-          <p class="font-semibold text-ink-900 text-sm leading-snug">${escapeHtml(t.title || '(ohne Titel)')}</p>
-          ${targetName ? `<p class="text-[11px] text-ink-600 truncate mt-0.5"><i data-lucide="user" class="w-3 h-3 inline mr-0.5"></i>${escapeHtml(targetName)}${t.target?.email ? ' · ' + escapeHtml(t.target.email) : ''}</p>` : ''}
-        </div>
-        <span class="text-[10px] uppercase tracking-wider px-2 py-0.5 rounded-full font-semibold border ${dueColor} ${dueBg} shrink-0">${escapeHtml(dueLabel)}</span>
-      </div>
-
-      <!-- Optional: Description -->
-      ${t.description ? `<p class="text-[11px] text-ink-600 leading-snug mt-1 line-clamp-2 whitespace-pre-line break-words">${escapeHtml(t.description)}</p>` : ''}
-
-      <!-- Telefonnummern als große anrufbare Pills -->
-      ${phones.length ? `
-        <div class="flex flex-wrap gap-1.5 mt-2">
-          ${phones.map(p => {
-            const tel = _cleanPhoneForTel(p.num);
-            return `<a href="tel:${escapeAttr(tel)}" class="inline-flex items-center gap-1.5 px-3 py-2 bg-emerald-50 border border-emerald-300 text-emerald-800 rounded-lg active:bg-emerald-100 font-semibold">
-              <i data-lucide="phone-call" class="w-4 h-4"></i>
-              <span class="text-[12px] font-mono">${escapeHtml(p.num)}</span>
-              <span class="text-[9px] uppercase tracking-wider opacity-70">${escapeHtml(p.label)}</span>
-            </a>`;
-          }).join('')}
-        </div>` : ''}
-
-      <!-- Accent-Footer: Account + Aktionen -->
-      <div class="flex items-center gap-2 mt-2 pt-2 border-t border-ink-100">
-        <span class="text-[10px] text-ink-500 inline-flex items-center gap-1 truncate min-w-0">
-          <span class="w-1.5 h-1.5 rounded-full shrink-0" style="background:${escapeAttr(t._accountColor)}"></span>
-          <span class="truncate">${escapeHtml(t._accountName || '')}</span>
-        </span>
-        <button onclick="taskPostpone('${escapeAttr(t._accountId)}', ${t.id}, 1, this)" class="ml-auto inline-flex items-center gap-1 px-2 py-1 bg-white border border-ink-200 hover:bg-ink-50 text-ink-700 rounded-lg text-[11px] font-medium" title="Auf morgen verschieben">
-          <i data-lucide="clock" class="w-3 h-3"></i> +1d
-        </button>
-        <button onclick="taskPostpone('${escapeAttr(t._accountId)}', ${t.id}, 7, this)" class="inline-flex items-center gap-1 px-2 py-1 bg-white border border-ink-200 hover:bg-ink-50 text-ink-700 rounded-lg text-[11px] font-medium" title="Auf nächste Woche verschieben">
-          <i data-lucide="calendar-clock" class="w-3 h-3"></i> +7d
-        </button>
-        <button onclick="taskComplete('${escapeAttr(t._accountId)}', ${t.id}, this)" class="inline-flex items-center gap-1 px-2.5 py-1 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-[11px] font-semibold">
-          <i data-lucide="check" class="w-3 h-3"></i> Erledigt
-        </button>
-      </div>
-    </div>`;
+  return '<div class="bg-white rounded-2xl border border-ink-200 p-3 shadow-sm">' +
+    '<div class="flex items-start gap-2.5 mb-1.5">' +
+      '<div class="w-9 h-9 rounded-xl bg-' + typeColor + '-50 border border-' + typeColor + '-200 flex items-center justify-center text-' + typeColor + '-700 shrink-0">' +
+        '<i data-lucide="' + typeIcon + '" class="w-4 h-4"></i>' +
+      '</div>' +
+      '<div class="flex-1 min-w-0">' +
+        '<div class="flex items-center gap-1.5 flex-wrap">' +
+          '<p class="font-semibold text-ink-900 text-sm leading-snug">' + escapeHtml(a.title || '(ohne Titel)') + '</p>' +
+          prioBadge +
+        '</div>' +
+        (a.related_name ? '<p class="text-[11px] text-ink-600 truncate mt-0.5"><i data-lucide="user" class="w-3 h-3 inline mr-0.5"></i>' + escapeHtml(a.related_name) + (a.related_email ? ' · ' + escapeHtml(a.related_email) : '') + '</p>' : '') +
+      '</div>' +
+      '<span class="text-[10px] uppercase tracking-wider px-2 py-0.5 rounded-full font-semibold border shrink-0 ' + dueClass + '">' + escapeHtml(dueLabel) + '</span>' +
+    '</div>' +
+    (a.description ? '<p class="text-[11px] text-ink-600 leading-snug mt-1 line-clamp-2 whitespace-pre-line break-words">' + escapeHtml(a.description) + '</p>' : '') +
+    phonesHtml +
+    '<div class="flex items-center gap-2 mt-2 pt-2 border-t border-ink-100 flex-wrap">' +
+      (accountName ? '<span class="text-[10px] text-ink-500 inline-flex items-center gap-1 truncate min-w-0"><span class="w-1.5 h-1.5 rounded-full shrink-0" style="background:' + escapeAttr(accountColor) + '"></span><span class="truncate">' + escapeHtml(accountName) + '</span></span>' : '') +
+      sourceBtn +
+      (showAssignee ? '<span class="text-[10px] text-purple-700 bg-purple-50 border border-purple-200 px-1.5 py-0.5 rounded inline-flex items-center gap-1"><i data-lucide="user-check" class="w-2.5 h-2.5"></i>' + escapeHtml(a.assignee_name || 'Andere') + '</span>' : '') +
+      '<div class="ml-auto flex gap-1.5">' +
+        '<button onclick="taskPostpone(\'' + escapeAttr(a.recordId) + '\', 1, this)" class="inline-flex items-center gap-1 px-2 py-1 bg-white border border-ink-200 hover:bg-ink-50 text-ink-700 rounded-lg text-[11px] font-medium" title="Auf morgen verschieben"><i data-lucide="clock" class="w-3 h-3"></i> +1d</button>' +
+        '<button onclick="taskPostpone(\'' + escapeAttr(a.recordId) + '\', 7, this)" class="inline-flex items-center gap-1 px-2 py-1 bg-white border border-ink-200 hover:bg-ink-50 text-ink-700 rounded-lg text-[11px] font-medium" title="Auf nächste Woche verschieben"><i data-lucide="calendar-clock" class="w-3 h-3"></i> +7d</button>' +
+        '<button onclick="taskCompleteLocal(\'' + escapeAttr(a.recordId) + '\', this)" class="inline-flex items-center gap-1 px-2.5 py-1 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-[11px] font-semibold"><i data-lucide="check" class="w-3 h-3"></i> Erledigt</button>' +
+      '</div>' +
+    '</div>' +
+  '</div>';
 }
 
 function _fmtDueDate(d) {
-  const today = new Date(); today.setHours(0,0,0,0);
-  const dDay = new Date(d); dDay.setHours(0,0,0,0);
-  const diff = Math.round((dDay.getTime() - today.getTime()) / 86400e3);
-  const time = d.getHours() || d.getMinutes() ? d.toLocaleTimeString('de-DE', { hour: '2-digit', minute: '2-digit' }) : '';
+  var today = new Date(); today.setHours(0,0,0,0);
+  var dDay = new Date(d); dDay.setHours(0,0,0,0);
+  var diff = Math.round((dDay.getTime() - today.getTime()) / 86400e3);
+  var time = (d.getHours() || d.getMinutes()) ? d.toLocaleTimeString('de-DE', { hour: '2-digit', minute: '2-digit' }) : '';
   if (diff < 0) return Math.abs(diff) + 'd überfällig' + (time ? ' · ' + time : '');
   if (diff === 0) return 'Heute' + (time ? ' ' + time : '');
   if (diff === 1) return 'Morgen' + (time ? ' ' + time : '');
@@ -13896,14 +13900,12 @@ function _fmtDueDate(d) {
   return d.toLocaleDateString('de-DE', { day:'2-digit', month:'2-digit' }) + (time ? ' · ' + time : '');
 }
 
-async function taskComplete(accountId, taskId, btn) {
+async function taskCompleteLocal(recordId, btn) {
   if (btn) setBusy(btn, true, '…');
   try {
-    await completeFsTask(accountId, taskId);
-    // Aus dem lokalen Cache entfernen + Re-Render
-    TASKS_STATE.tasks = (TASKS_STATE.tasks || []).filter(t => !(t._accountId === accountId && t.id === taskId));
+    await completeAufgabe(recordId);
     _renderTasksList();
-    _renderTasksHeader(window._tasksFsAccountsCache || []);
+    _renderTasksHeader();
     toast('Aufgabe erledigt', 'success', 2500);
   } catch (e) {
     if (btn) setBusy(btn, false);
@@ -13911,19 +13913,211 @@ async function taskComplete(accountId, taskId, btn) {
   }
 }
 
-async function taskPostpone(accountId, taskId, days, btn) {
+async function taskPostpone(recordId, days, btn) {
   if (btn) setBusy(btn, true, '…');
   try {
-    await postponeFsTask(accountId, taskId, days);
-    // Aus lokalem Cache nehmen + Re-Render (nicht mehr „heute"/„überfällig")
-    TASKS_STATE.tasks = (TASKS_STATE.tasks || []).filter(t => !(t._accountId === accountId && t.id === taskId));
+    await postponeAufgabe(recordId, days);
     _renderTasksList();
-    _renderTasksHeader(window._tasksFsAccountsCache || []);
+    _renderTasksHeader();
     toast('Verschoben um ' + days + ' Tag' + (days === 1 ? '' : 'e'), 'success', 2500);
   } catch (e) {
     if (btn) setBusy(btn, false);
     toast('Fehler: ' + e.message, 'error', 6000);
   }
+}
+
+/* === Neue-Aufgabe-Modal ===================================================
+   Manuell anlegen ODER per Prefill aus Kontakt/Ticket (KI-Workflows). */
+function openNewAufgabeModal(prefill) {
+  var pre = prefill || {};
+  window._newAufPrefill = pre;
+  var accounts = APP_STATE.accounts || [];
+  var defaultAcc = pre.account_id || (TASKS_STATE.accountId !== 'all' ? TASKS_STATE.accountId : (accounts[0] ? accounts[0].id : ''));
+  var myKey = (APP_KEYS.user && APP_KEYS.user.api_key) || '';
+  var myName = (APP_KEYS.user && APP_KEYS.user.name) || 'Ich';
+  var defaultDue = pre.due_date || _daysToFrist(1, { morning: true });
+  var host = document.getElementById('subModalHost');
+  if (!host) { host = document.createElement('div'); host.id = 'subModalHost'; document.body.appendChild(host); }
+
+  var accOpts = '<option value="">— Account-übergreifend —</option>';
+  accounts.forEach(function (a) {
+    accOpts += '<option value="' + escapeAttr(a.id) + '"' + (a.id === defaultAcc ? ' selected' : '') + '>' + escapeHtml(a.name) + '</option>';
+  });
+
+  var typeOpts = '';
+  ['call', 'email', 'meeting', 'other'].forEach(function (t) {
+    var lbl = { call:'📞 Anruf', email:'✉ Email', meeting:'📅 Termin', other:'📋 Sonstiges' }[t];
+    var sel = (pre.task_type === t || (!pre.task_type && t === 'other')) ? ' selected' : '';
+    typeOpts += '<option value="' + t + '"' + sel + '>' + lbl + '</option>';
+  });
+
+  var prioOpts = '';
+  ['low','normal','high'].forEach(function (p) {
+    var lbl = { low:'Niedrig', normal:'Normal', high:'Hoch' }[p];
+    var sel = (pre.priority === p || (!pre.priority && p === 'normal')) ? ' selected' : '';
+    prioOpts += '<option value="' + p + '"' + sel + '>' + lbl + '</option>';
+  });
+
+  var relatedBlock = '';
+  if (pre.related_name) {
+    relatedBlock =
+      '<div class="bg-brand-50/50 border border-brand-200 rounded-lg p-2.5 text-[11px]">' +
+        '<p class="text-[10px] uppercase tracking-wider text-brand-700 font-semibold">Verknüpft mit</p>' +
+        '<p class="text-ink-800 truncate mt-0.5"><b>' + escapeHtml(pre.related_name) + '</b>' + (pre.related_email ? ' · ' + escapeHtml(pre.related_email) : '') + '</p>' +
+        (pre.related_phone  ? '<p class="text-emerald-700 font-mono mt-0.5">📞 ' + escapeHtml(pre.related_phone)  + '</p>' : '') +
+        (pre.related_mobile ? '<p class="text-emerald-700 font-mono">📱 ' + escapeHtml(pre.related_mobile) + '</p>' : '') +
+      '</div>';
+  }
+
+  host.innerHTML =
+    '<div class="fixed inset-0 z-[60] flex items-end justify-center bg-black/40" onclick="if(event.target===this)closeNewAufgabeModal()">' +
+      '<div class="bg-white w-full max-w-md rounded-t-2xl shadow-2xl flex flex-col safe-bottom" style="max-height:92vh">' +
+        '<div class="px-4 py-3 border-b border-ink-200 flex items-center justify-between gap-2">' +
+          '<h3 class="font-bold text-ink-900 inline-flex items-center gap-2"><i data-lucide="phone-call" class="w-4 h-4 text-emerald-600"></i> Neue Aufgabe</h3>' +
+          '<button onclick="closeNewAufgabeModal()" class="w-9 h-9 rounded-lg hover:bg-ink-100 flex items-center justify-center"><i data-lucide="x" class="w-5 h-5 text-ink-700"></i></button>' +
+        '</div>' +
+        '<div class="flex-1 overflow-y-auto p-4 space-y-3">' +
+          '<div><label class="text-xs font-semibold text-ink-700 uppercase tracking-wider">Titel</label>' +
+            '<input id="newAufTitle" type="text" placeholder="z.B. Müller anrufen wegen Angebot" value="' + escapeAttr(pre.title || '') + '" class="w-full mt-1 px-3 py-2 border border-ink-200 rounded-lg text-sm focus:ring-2 focus:ring-emerald-500/30 focus:border-emerald-500"></div>' +
+          '<div><label class="text-xs font-semibold text-ink-700 uppercase tracking-wider">Beschreibung <span class="text-ink-400 normal-case font-normal">(optional)</span></label>' +
+            '<textarea id="newAufDesc" rows="3" placeholder="Worum geht es konkret?" class="w-full mt-1 px-3 py-2 border border-ink-200 rounded-lg text-sm focus:ring-2 focus:ring-emerald-500/30 focus:border-emerald-500 resize-y">' + escapeHtml(pre.description || '') + '</textarea></div>' +
+          '<div class="grid grid-cols-2 gap-2">' +
+            '<div><label class="text-xs font-semibold text-ink-700 uppercase tracking-wider">Fälligkeit</label>' +
+              '<input id="newAufDue" type="datetime-local" value="' + escapeAttr(_isoToLocalInput(defaultDue)) + '" class="w-full mt-1 px-2 py-2 border border-ink-200 rounded-lg text-sm focus:ring-2 focus:ring-emerald-500/30 focus:border-emerald-500"></div>' +
+            '<div><label class="text-xs font-semibold text-ink-700 uppercase tracking-wider">Typ</label>' +
+              '<select id="newAufType" class="w-full mt-1 px-2 py-2 border border-ink-200 rounded-lg text-sm bg-white focus:ring-2 focus:ring-emerald-500/30 focus:border-emerald-500">' + typeOpts + '</select></div>' +
+          '</div>' +
+          '<div class="grid grid-cols-2 gap-2">' +
+            '<div><label class="text-xs font-semibold text-ink-700 uppercase tracking-wider">Account</label>' +
+              '<select id="newAufAccount" class="w-full mt-1 px-2 py-2 border border-ink-200 rounded-lg text-sm bg-white focus:ring-2 focus:ring-emerald-500/30 focus:border-emerald-500">' + accOpts + '</select></div>' +
+            '<div><label class="text-xs font-semibold text-ink-700 uppercase tracking-wider">Priorität</label>' +
+              '<select id="newAufPriority" class="w-full mt-1 px-2 py-2 border border-ink-200 rounded-lg text-sm bg-white focus:ring-2 focus:ring-emerald-500/30 focus:border-emerald-500">' + prioOpts + '</select></div>' +
+          '</div>' +
+          '<div><label class="text-xs font-semibold text-ink-700 uppercase tracking-wider">Zuweisen an</label>' +
+            '<select id="newAufAssignee" class="w-full mt-1 px-2 py-2 border border-ink-200 rounded-lg text-sm bg-white focus:ring-2 focus:ring-emerald-500/30 focus:border-emerald-500">' +
+              '<option value="' + escapeAttr(myKey) + '|' + escapeAttr(myName) + '">Mich selbst (' + escapeHtml(myName) + ')</option>' +
+              '<option value="__loading__" disabled>Lade Team…</option>' +
+            '</select></div>' +
+          relatedBlock +
+          '<div id="newAufErr" class="hidden text-xs text-red-700 bg-red-50 border border-red-200 rounded px-2 py-1.5"></div>' +
+        '</div>' +
+        '<div class="border-t border-ink-200 p-3 flex gap-2">' +
+          '<button onclick="closeNewAufgabeModal()" class="flex-1 bg-ink-100 hover:bg-ink-200 text-ink-700 rounded-lg px-3 py-2.5 text-sm font-semibold">Abbrechen</button>' +
+          '<button onclick="saveNewAufgabe(this)" class="flex-[2] bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg px-3 py-2.5 text-sm font-semibold inline-flex items-center justify-center gap-1.5"><i data-lucide="plus" class="w-4 h-4"></i> Anlegen</button>' +
+        '</div>' +
+      '</div>' +
+    '</div>';
+  if (window.lucide) lucide.createIcons();
+  document.body.style.overflow = 'hidden';
+  setTimeout(function () { var el = $('newAufTitle'); if (el) el.focus(); }, 80);
+
+  // Team-Liste asynchron in die Assignee-Dropdown laden
+  fetchUsers().then(function (users) {
+    var sel = $('newAufAssignee');
+    if (!sel) return;
+    var active = (users || []).filter(function (u) {
+      return (((u.fields && u.fields.status) || 'aktiv').toLowerCase()) === 'aktiv';
+    });
+    var html = '<option value="' + escapeAttr(myKey) + '|' + escapeAttr(myName) + '">Mich selbst (' + escapeHtml(myName) + ')</option>' +
+               '<option disabled>──────────</option>';
+    active.forEach(function (u) {
+      var k = (u.fields && u.fields.api_key) || '';
+      var n = (u.fields && u.fields.name) || '?';
+      if (k === myKey) return;
+      html += '<option value="' + escapeAttr(k) + '|' + escapeAttr(n) + '">' + escapeHtml(n) + '</option>';
+    });
+    sel.innerHTML = html;
+  }).catch(function () {});
+}
+
+function closeNewAufgabeModal() {
+  window._newAufPrefill = null;
+  var host = document.getElementById('subModalHost');
+  if (host) host.innerHTML = '';
+  document.body.style.overflow = '';
+}
+
+async function saveNewAufgabe(btnEl) {
+  var title = ($('newAufTitle')?.value || '').trim();
+  var description = ($('newAufDesc')?.value || '').trim();
+  var dueRaw = ($('newAufDue')?.value || '').trim();
+  var task_type = ($('newAufType')?.value || 'other');
+  var account_id = ($('newAufAccount')?.value || '');
+  var priority = ($('newAufPriority')?.value || 'normal');
+  var assignVal = ($('newAufAssignee')?.value || '');
+  var errEl = $('newAufErr');
+  if (errEl) errEl.classList.add('hidden');
+  if (!title) {
+    if (errEl) { errEl.textContent = 'Titel fehlt'; errEl.classList.remove('hidden'); }
+    return;
+  }
+  var parts = assignVal.split('|');
+  var assignee_user_api_key = parts[0] || (APP_KEYS.user && APP_KEYS.user.api_key) || '';
+  var assignee_name = parts[1] || (APP_KEYS.user && APP_KEYS.user.name) || '';
+  var pre = window._newAufPrefill || {};
+  var due_date = dueRaw ? new Date(dueRaw).toISOString() : _daysToFrist(1, { morning: true });
+  setBusy(btnEl, true, 'Lege an…');
+  try {
+    await createAufgabe({
+      title: title,
+      description: description,
+      due_date: due_date,
+      task_type: task_type,
+      account_id: account_id,
+      priority: priority,
+      assignee_user_api_key: assignee_user_api_key,
+      assignee_name: assignee_name,
+      source_type: pre.source_type || 'manual',
+      source_id: pre.source_id || '',
+      related_name: pre.related_name || '',
+      related_email: pre.related_email || '',
+      related_phone: pre.related_phone || '',
+      related_mobile: pre.related_mobile || '',
+    });
+    closeNewAufgabeModal();
+    var msg = 'Aufgabe angelegt';
+    if (assignee_name && assignee_user_api_key !== (APP_KEYS.user && APP_KEYS.user.api_key)) msg += ' für ' + assignee_name;
+    toast(msg, 'success', 4000);
+    if (APP_STATE.page === 'tasks') {
+      _renderTasksList();
+      _renderTasksHeader();
+    }
+  } catch (e) {
+    setBusy(btnEl, false);
+    if (errEl) { errEl.textContent = e.message || String(e); errEl.classList.remove('hidden'); }
+  }
+}
+
+function _isoToLocalInput(iso) {
+  if (!iso) return '';
+  var d = new Date(iso);
+  if (isNaN(d)) return '';
+  var pad = function (n) { return String(n).padStart(2, '0'); };
+  return d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate()) + 'T' + pad(d.getHours()) + ':' + pad(d.getMinutes());
+}
+
+/* Öffnet das Neue-Aufgabe-Modal mit den Daten des aktuellen Kontakts vorbefüllt
+   (Anruf-Vorschlag, Telefonnummern, Verknüpfung zum Contact). */
+async function openAufgabeFromContact(accountId, contactId) {
+  if (!accountId || !contactId) return;
+  var contact = null;
+  try { contact = getCachedRequester(accountId, contactId); } catch (_) {}
+  if (!contact) {
+    try { contact = await fetchContact(accountId, contactId); } catch (_) {}
+  }
+  if (!contact) { toast('Kontakt konnte nicht geladen werden', 'error'); return; }
+  var fullName = contact.name || [contact.first_name, contact.last_name].filter(Boolean).join(' ').trim();
+  openNewAufgabeModal({
+    title: 'Anruf ' + (fullName || '–'),
+    task_type: 'call',
+    account_id: accountId,
+    source_type: 'contact',
+    source_id: String(contactId),
+    related_name: fullName,
+    related_email: contact.email || '',
+    related_phone: contact.phone || '',
+    related_mobile: contact.mobile || '',
+  });
 }
 
 /* ===================== USERS PAGE (Admin) ===================== */
@@ -16247,6 +16441,7 @@ async function showApp() {
   loadKnowledge().catch(e => console.warn('Wissen-Load:', e.message));
   // KI-Kosten-Log laden (im Hintergrund — fürs Dashboard)
   loadAiCostLog().catch(e => console.warn('AI-Cost-Load:', e.message));
+  loadAufgaben().catch(e => console.warn('Aufgaben-Load:', e.message));
   navTo('tickets');
   // Deep-Link: wenn URL-Hash auf ein Ticket zeigt, direkt öffnen
   handleDeepLink();
