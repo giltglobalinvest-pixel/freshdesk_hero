@@ -325,7 +325,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.0';
+const APP_VERSION = 'v2.46.2';
 // Read-Token absichtlich gesplittet, damit GitHub Secret-Scanning beim Push nicht blockt.
 // Der Token ist read-only und Base-scoped → bewusst eingebettet (Architektur-Entscheidung).
 const _RK = 'patu8KWM8aWB' + 'yxCGL.69fae5d9fa4b94c2' + '66b426dadd71a51f574945d840b33569058ab5e9d89ebef3';
@@ -532,17 +532,34 @@ function toast(msg, kind = 'info', ttl = 3500, action = null) {
   };
   const ic = { success:'check-circle-2', error:'alert-circle', warn:'alert-triangle', info:'info' }[kind] || 'info';
   const el = document.createElement('div');
-  el.className = `toast-enter pointer-events-auto rounded-xl px-4 py-2.5 shadow-lg flex items-center gap-2 text-sm max-w-md ${palettes[kind] || palettes.info}`;
+  // v2.46.2: wenn onClick gesetzt ist → ganze Box klickbar (cursor + hover-ring)
+  const clickableCls = (action && (action.onClick || action.onWholeClick)) ? ' cursor-pointer hover:ring-2 hover:ring-white/40' : '';
+  el.className = `toast-enter pointer-events-auto rounded-xl px-4 py-2.5 shadow-lg flex items-center gap-2 text-sm max-w-md ${palettes[kind] || palettes.info}${clickableCls}`;
   let actionHtml = '';
   if (action && action.label) {
     actionHtml = `<button class="ml-2 bg-white/20 hover:bg-white/30 active:bg-white/40 px-2 py-1 rounded font-semibold text-xs whitespace-nowrap">${escapeHtml(action.label)}</button>`;
   }
   el.innerHTML = `<i data-lucide="${ic}" class="w-4 h-4 shrink-0"></i><span class="flex-1">${escapeHtml(msg)}</span>${actionHtml}`;
+  // Toast dismissen-Helper
+  const dismiss = () => { el.style.transition = 'opacity .2s'; el.style.opacity = '0'; setTimeout(() => el.remove(), 200); };
+  // Action-Button-Click (legacy)
   if (action && action.onClick) {
-    el.querySelector('button')?.addEventListener('click', () => {
+    el.querySelector('button')?.addEventListener('click', (ev) => {
+      ev.stopPropagation();
       try { action.onClick(); } catch (_) {}
-      el.style.transition = 'opacity .2s'; el.style.opacity = '0';
-      setTimeout(() => el.remove(), 200);
+      dismiss();
+    });
+  }
+  // v2.46.2: ganze Toast-Box klickbar — onWholeClick. Falls nicht gesetzt aber onClick da
+  // ist (legacy mit Button), wird der Whole-Click auch der onClick getriggert — bequemer
+  // für Mobile (Daumen muss nicht exakt den kleinen Button treffen).
+  const wholeHandler = action && (action.onWholeClick || action.onClick);
+  if (wholeHandler) {
+    el.addEventListener('click', (ev) => {
+      // Klicks auf den Action-Button selber laufen schon via dessen Handler — Whole-Click ignorieren
+      if (ev.target.closest('button')) return;
+      try { wholeHandler(); } catch (_) {}
+      dismiss();
     });
   }
   c.appendChild(el);
@@ -16641,10 +16658,16 @@ async function applyRuleActions(rule, ticket) {
     recordMyNote(accountId, ticketId, trackingBody, 'regel').catch(() => {});
   }
 
-  // User-Toast bei Fehlern, damit sie nicht still in der Console verschwinden
+  // User-Toast bei Fehlern, damit sie nicht still in der Console verschwinden.
+  // v2.46.2: ganzer Toast klickbar → öffnet Ticket-Detail mit der Regel-Notiz.
+  // 30s TTL (statt 12s) + „Öffnen"-Button für Touch-Genauigkeit.
   if (failures.length) {
     const msg = 'Regel „' + rule.titel + '" Ticket #' + ticketId + ' — ' + failures.length + ' Aktion' + (failures.length === 1 ? '' : 'en') + ' fehlgeschlagen: ' + failures.map(f => f.what + ' (' + f.error.slice(0, 90) + ')').join(' | ');
-    toast(msg, 'warn', 12000);
+    toast(msg, 'warn', 30000, {
+      label: 'Öffnen',
+      onClick:      () => openTicketDetail(accountId, ticketId),
+      onWholeClick: () => openTicketDetail(accountId, ticketId),
+    });
   }
 
   return performed;
