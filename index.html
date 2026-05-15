@@ -325,7 +325,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.4';
+const APP_VERSION = 'v2.46.5';
 // Read-Token absichtlich gesplittet, damit GitHub Secret-Scanning beim Push nicht blockt.
 // Der Token ist read-only und Base-scoped → bewusst eingebettet (Architektur-Entscheidung).
 const _RK = 'patu8KWM8aWB' + 'yxCGL.69fae5d9fa4b94c2' + '66b426dadd71a51f574945d840b33569058ab5e9d89ebef3';
@@ -14083,6 +14083,29 @@ let TASKS_STATE = { accountId: 'all', filter: 'today', mine: 'mine' };
    auf den korrekten Kunden umbiegen (statt z.B. den App-User oder ein FS-System-
    Konto). */
 const FS_CONTACT_LINK_RE = /freshworks\.com\/crm\/sales\/contacts\/(\d+)/i;
+
+/* v2.46.5: Repair-Marker in localStorage. Sobald ein Ticket einmal repariert wurde
+   (oder festgestellt wurde dass es schon korrekt ist), speichern wir das. Beim
+   nächsten Aufgaben-Tab-Aufruf wird der ganze Repair-Pfad für dieses Ticket
+   übersprungen — keine Detail-Fetches, keine FS-Lookups. Spart pro Tab-Öffnen
+   3-4 API-Calls × Anzahl-Aufgaben. TTL 90 Tage (Cleanup-Loop). */
+const TASK_REPAIR_DONE_KEY = 'fdh_task_repair_done_' + APP_CONFIG.PROJECT_ID;
+function _getRepairedMap() {
+  try { return JSON.parse(localStorage.getItem(TASK_REPAIR_DONE_KEY) || '{}'); }
+  catch (_) { return {}; }
+}
+function _markTaskRepaired(accountId, ticketId) {
+  const m = _getRepairedMap();
+  m[accountId + '|' + ticketId] = Date.now();
+  // Cleanup älter als 90 Tage
+  const cutoff = Date.now() - 90 * 86400e3;
+  Object.keys(m).forEach(k => { if ((m[k] || 0) < cutoff) delete m[k]; });
+  try { localStorage.setItem(TASK_REPAIR_DONE_KEY, JSON.stringify(m)); } catch (_) {}
+}
+function _isTaskRepaired(accountId, ticketId) {
+  const m = _getRepairedMap();
+  return !!m[accountId + '|' + ticketId];
+}
 function _extractFsContactIdFromTicket(t) {
   const html = String(t?.description || t?.description_text || '');
   const m = html.match(FS_CONTACT_LINK_RE);
@@ -14115,10 +14138,14 @@ async function repairTaskTicketRequester(accountId, ticketId) {
     fsContact = data?.contact || data;
   } catch (e) { return { error: 'fs_lookup_failed', message: e.message }; }
   if (!fsContact?.email) return { skipped: true, reason: 'no_fs_email', fsContactId: fsId };
-  // 4. Wenn aktueller Requester schon der FS-Kontakt (Email-Match) → nichts tun
+  // 4. Wenn aktueller Requester schon der FS-Kontakt (Email-Match) → nichts tun.
+  // Marker setzen damit zukünftige Tab-Aufrufe diesen Check komplett überspringen.
   const currentEmail = String(t.requester?.email || '').toLowerCase();
   const fsEmail = String(fsContact.email).toLowerCase();
-  if (currentEmail === fsEmail) return { skipped: true, reason: 'already_correct' };
+  if (currentEmail === fsEmail) {
+    _markTaskRepaired(accountId, ticketId);
+    return { skipped: true, reason: 'already_correct' };
+  }
   // 5. FD-Kontakt finden oder anlegen
   const phoneNumbers = fsContact.phone_numbers || [];
   const _phByLbl = (re) => { const hit = phoneNumbers.find(p => re.test(String(p.label || '').toLowerCase())); return hit ? hit.value : ''; };
@@ -14147,6 +14174,9 @@ async function repairTaskTicketRequester(accountId, ticketId) {
     }
   }
   cacheRequester(accountId, newRequester);
+  // Marker setzen damit dieses Ticket bei zukünftigen Tab-Aufrufen NICHT mehr
+  // durch den Repair-Pfad muss (spart 3-4 API-Calls pro Ticket pro Tab-Öffnen)
+  _markTaskRepaired(accountId, ticketId);
   return { repaired: true, fdContactId: fdContact.id, name: newRequester.name, email: fsEmail };
 }
 
@@ -14155,9 +14185,20 @@ async function repairTaskTicketRequester(accountId, ticketId) {
 const TASK_REPAIR_IN_PROGRESS = new Set();
 async function autoRepairTaskTickets() {
   const all = APP_STATE.taskTickets || [];
-  const candidates = all.filter(_looksLikeFsAutoTask);
-  if (!candidates.length) return;
-  console.log('[auto-repair] ' + candidates.length + ' Kandidat(en) für Requester-Reparatur');
+  // Filter: nur FS-Auto-Tasks die NOCH NICHT repariert wurden (lokaler Marker).
+  // Spart pro Tab-Aufruf alle API-Calls für bereits-fertige Tickets.
+  const candidates = all.filter(t => {
+    if (!_looksLikeFsAutoTask(t)) return false;
+    if (_isTaskRepaired(t._accountId, t.id)) return false;
+    return true;
+  });
+  const totalCandidatesEverDetected = all.filter(_looksLikeFsAutoTask).length;
+  const skippedAlreadyDone = totalCandidatesEverDetected - candidates.length;
+  if (!candidates.length) {
+    if (skippedAlreadyDone) console.log('[auto-repair] alle ' + skippedAlreadyDone + ' Kandidaten bereits repariert — keine API-Calls nötig');
+    return;
+  }
+  console.log('[auto-repair] ' + candidates.length + ' neu' + (skippedAlreadyDone ? ' (' + skippedAlreadyDone + ' bereits markiert — übersprungen)' : '') + ' für Requester-Reparatur');
   const CHUNK = 5;
   let stats = { repaired: 0, skipped: 0, errors: 0 };
   for (let i = 0; i < candidates.length; i += CHUNK) {
