@@ -325,7 +325,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.45.3';
+const APP_VERSION = 'v2.45.4';
 // Read-Token absichtlich gesplittet, damit GitHub Secret-Scanning beim Push nicht blockt.
 // Der Token ist read-only und Base-scoped → bewusst eingebettet (Architektur-Entscheidung).
 const _RK = 'patu8KWM8aWB' + 'yxCGL.69fae5d9fa4b94c2' + '66b426dadd71a51f574945d840b33569058ab5e9d89ebef3';
@@ -9084,11 +9084,28 @@ function renderTicketDetailBody(ticket) {
             const bodyPlain = c.body_text || htmlToText(rawHtml);  // für Übersetzungs-KI
             const cAtts = (c.attachments || []);
             const convId = 'conv-' + idx;
+            // KI-Regel-Detection: bei internen Notizen prüfen ob Header „🤖 KI-Regel „Titel""
+            // erkennbar ist → klickbarer Pill zum Regel-Editor.
+            const ruleHit = isPrivate ? _detectAiRuleNoteHeader(bodyPlain) : null;
             // Bevorzugt HTML-Body anzeigen (Signatur-Formatierung + Inline-Bilder).
             // Fallback auf escaped Plain-Text wenn kein HTML vorhanden.
             const bodyRender = (rawHtml && /<[a-z]/i.test(rawHtml))
               ? `<div class="email-body">${sanitizeHtml(rawHtml)}</div>`
               : `<div class="text-sm text-ink-700 whitespace-pre-line break-words">${escapeHtml(bodyPlain.slice(0, 5000))}${bodyPlain.length > 5000 ? '…' : ''}</div>`;
+            // Rule-Pill: wenn Regel im Cache existiert → Edit-Button, sonst Hinweis dass Regel gelöscht/unbekannt
+            const rulePill = ruleHit ? (() => {
+              if (ruleHit.rule) {
+                return `<button onclick="openRuleEditor('${escapeAttr(String(ruleHit.rule.id))}')" class="inline-flex items-center gap-1.5 mb-2 px-2 py-1 bg-purple-100 hover:bg-purple-200 border border-purple-300 rounded-lg text-[11px] font-semibold text-purple-800 active:opacity-80">
+                  <i data-lucide="sparkles" class="w-3 h-3"></i>
+                  Regel „${escapeHtml(ruleHit.title)}" öffnen
+                  <i data-lucide="edit-3" class="w-3 h-3"></i>
+                </button>`;
+              }
+              return `<div class="inline-flex items-center gap-1.5 mb-2 px-2 py-1 bg-ink-100 border border-ink-200 rounded-lg text-[11px] text-ink-600">
+                <i data-lucide="sparkles" class="w-3 h-3"></i>
+                Regel „${escapeHtml(ruleHit.title)}" (nicht mehr im Cache)
+              </div>`;
+            })() : '';
             return `
               <div class="border-l-2 ${align} pl-3 py-2 rounded-r">
                 <div class="flex items-baseline justify-between gap-2 text-[11px] mb-1">
@@ -9096,6 +9113,7 @@ function renderTicketDetailBody(ticket) {
                   <span class="text-ink-400 shrink-0">${escapeHtml(fmtDate(c.created_at))}</span>
                   ${_renderTranslateButton(bodyPlain, convId)}
                 </div>
+                ${rulePill}
                 <div data-translatable-area="${convId}">
                   ${bodyRender}
                 </div>
@@ -15118,6 +15136,35 @@ async function loadRules() {
 }
 
 function getActiveRules() { return RULES_CACHE.filter(r => r.aktiv); }
+
+/* Findet die Regel-ID anhand ihres Titels — case-insensitive, trim. Wird genutzt um
+   den Titel in „KI-Regel „xxx" angewandt"-Notizen klickbar zu machen → Sprung zum
+   Regel-Editor. Liefert null wenn nicht eindeutig zuordenbar (z.B. Regel gelöscht
+   nach Anwendung, oder zwei gleichnamige Regeln existieren). */
+function findRuleByTitle(title) {
+  if (!title) return null;
+  const h = String(title).toLowerCase().trim();
+  const hits = RULES_CACHE.filter(r => String(r.titel || '').toLowerCase().trim() === h);
+  return hits.length === 1 ? hits[0] : null;
+}
+
+/* Erkennt im Note-Body das Pattern „KI-Regel „<Titel>" angewandt" (oder ohne „angewandt")
+   und liefert {title, rule, rest}. Robuster Quote-Match: verschiedene Anführungszeichen-
+   Varianten werden toleriert (deutsch, englisch, ASCII). */
+function _detectAiRuleNoteHeader(body) {
+  if (!body) return null;
+  const firstLine = (String(body).split(/\r?\n/)[0] || '').trim();
+  if (!/KI-Regel/i.test(firstLine)) return null;
+  // Match: „KI-Regel" gefolgt von Inhalt bis „automatisch angewandt" oder Zeilenende
+  const m = firstLine.match(/KI-Regel\s+(.+?)(?:\s+automatisch\s+angewandt\b|\s*$)/i);
+  if (!m) return null;
+  // Quotes (deutsch/englisch/ASCII) am Anfang+Ende abschneiden
+  const title = m[1].trim().replace(/^[„"'`«»“”‘’]+/, '').replace(/[„""'`«»“”‘’]+$/, '').trim();
+  if (!title) return null;
+  const rule = findRuleByTitle(title);
+  const rest = String(body).slice(firstLine.length).trimStart();
+  return { title, rule, rest };
+}
 
 /* Legacy: löschte den GESAMTEN Processed-Cache → führte zu Doppel-Anwendung
    bestehender Regeln nach Toggle/Edit (v2.45.1 Bug). Seit v2.45.3 nur noch
