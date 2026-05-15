@@ -517,7 +517,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.18';
+const APP_VERSION = 'v2.46.19';
 
 /* ============================================================
    GLOBAL THEME — v2.46.12
@@ -8124,6 +8124,263 @@ async function quickCloseTicketFromStack(accountId, ticketId) {
   renderTicketList(APP_STATE.pageState?.tickets || []);
 }
 
+/* v2.46.19: Bottom-Sheet zum Status-Wechsel direkt aus der Stack-Card. */
+function openStackStatusPicker(accountId, ticketId) {
+  const options = [
+    { id: 2, label: 'Offen',       color: 'sky',    icon: 'circle' },
+    { id: 3, label: 'Wartet',      color: 'amber',  icon: 'pause-circle' },
+    { id: 4, label: 'Gelöst',      color: 'emerald',icon: 'check-circle-2' },
+    { id: 5, label: 'Geschlossen', color: 'slate',  icon: 'x-circle' },
+  ];
+  let host = document.getElementById('subModalHost');
+  if (!host) { host = document.createElement('div'); host.id = 'subModalHost'; document.body.appendChild(host); }
+  host.innerHTML =
+    '<div class="fixed inset-0 z-[60] flex items-end justify-center bg-black/40" onclick="if(event.target===this)closeStackPicker()">' +
+      '<div class="bg-white w-full max-w-md rounded-t-2xl shadow-2xl p-4 safe-bottom space-y-2">' +
+        '<p class="text-[11px] uppercase tracking-wider text-ink-500 font-semibold text-center pb-1">Status wählen</p>' +
+        options.map(o =>
+          '<button onclick="_setTicketStatusFromStack(\'' + escapeAttr(accountId) + '\', ' + ticketId + ', ' + o.id + ')" class="w-full bg-' + o.color + '-50 hover:bg-' + o.color + '-100 border border-' + o.color + '-200 text-' + o.color + '-800 rounded-lg px-3 py-3 text-sm font-semibold inline-flex items-center gap-2">' +
+            '<i data-lucide="' + o.icon + '" class="w-4 h-4"></i> ' + escapeHtml(o.label) +
+          '</button>'
+        ).join('') +
+        '<button onclick="closeStackPicker()" class="w-full bg-ink-100 hover:bg-ink-200 text-ink-700 rounded-lg px-3 py-2 text-xs font-medium">Abbrechen</button>' +
+      '</div>' +
+    '</div>';
+  if (window.lucide) lucide.createIcons();
+  document.body.style.overflow = 'hidden';
+}
+async function _setTicketStatusFromStack(accountId, ticketId, statusId) {
+  closeStackPicker();
+  try {
+    await proxyJson('/freshdesk/' + encodeURIComponent(accountId) + '/api/v2/tickets/' + ticketId, {
+      method: 'PUT', body: JSON.stringify({ status: statusId }),
+    });
+    patchTicketInList(accountId, ticketId, { status: statusId });
+    toast('Status geändert → ' + (FD_STATUS[statusId]?.label || statusId), 'success', 2500);
+    renderTicketList(APP_STATE.pageState?.tickets || []);
+  } catch (e) {
+    toast('Status-Änderung fehlgeschlagen: ' + e.message, 'error', 6000);
+  }
+}
+
+/* v2.46.19: Bottom-Sheet zum Gruppe-Wechsel. */
+async function openStackGroupPicker(accountId, ticketId) {
+  await ensureGroupsLoaded(accountId);
+  const cache = APP_STATE.groupsCache?.[accountId] || { groups: [] };
+  const groups = cache.groups || [];
+  let host = document.getElementById('subModalHost');
+  if (!host) { host = document.createElement('div'); host.id = 'subModalHost'; document.body.appendChild(host); }
+  host.innerHTML =
+    '<div class="fixed inset-0 z-[60] flex items-end justify-center bg-black/40" onclick="if(event.target===this)closeStackPicker()">' +
+      '<div class="bg-white w-full max-w-md rounded-t-2xl shadow-2xl p-4 safe-bottom flex flex-col" style="max-height:80vh">' +
+        '<p class="text-[11px] uppercase tracking-wider text-ink-500 font-semibold text-center pb-2 shrink-0">Gruppe wählen</p>' +
+        '<div class="flex-1 overflow-y-auto space-y-1.5">' +
+          '<button onclick="_setTicketGroupFromStack(\'' + escapeAttr(accountId) + '\', ' + ticketId + ', null)" class="w-full bg-ink-50 hover:bg-ink-100 border border-ink-200 text-ink-700 rounded-lg px-3 py-2.5 text-sm font-medium text-left">— keine Gruppe —</button>' +
+          (groups.length
+            ? groups.map(g =>
+                '<button onclick="_setTicketGroupFromStack(\'' + escapeAttr(accountId) + '\', ' + ticketId + ', ' + g.id + ')" class="w-full bg-white hover:bg-brand-50 border border-ink-200 hover:border-brand-300 text-ink-800 rounded-lg px-3 py-2.5 text-sm font-medium text-left">' + escapeHtml(g.name) + '</button>'
+              ).join('')
+            : '<p class="text-[12px] text-ink-500 italic text-center py-4">Keine Gruppen geladen.</p>') +
+        '</div>' +
+        '<button onclick="closeStackPicker()" class="w-full mt-2 bg-ink-100 hover:bg-ink-200 text-ink-700 rounded-lg px-3 py-2 text-xs font-medium shrink-0">Abbrechen</button>' +
+      '</div>' +
+    '</div>';
+  if (window.lucide) lucide.createIcons();
+  document.body.style.overflow = 'hidden';
+}
+async function _setTicketGroupFromStack(accountId, ticketId, groupId) {
+  closeStackPicker();
+  try {
+    await proxyJson('/freshdesk/' + encodeURIComponent(accountId) + '/api/v2/tickets/' + ticketId, {
+      method: 'PUT', body: JSON.stringify({ group_id: groupId }),
+    });
+    patchTicketInList(accountId, ticketId, { group_id: groupId });
+    toast(groupId ? ('Gruppe → ' + (getGroupName(accountId, groupId) || '#' + groupId)) : 'Gruppe entfernt', 'success', 2500);
+    renderTicketList(APP_STATE.pageState?.tickets || []);
+  } catch (e) {
+    toast('Gruppen-Änderung fehlgeschlagen: ' + e.message, 'error', 6000);
+  }
+}
+
+/* v2.46.19: Bottom-Sheet zum Bearbeiter-Wechsel. */
+async function openStackAssigneePicker(accountId, ticketId) {
+  await ensureAgentsLoaded(accountId);
+  const cache = APP_STATE.agentsCache?.[accountId] || { agents: [] };
+  const agents = cache.agents || [];
+  // „Mich selbst" via fetchAgentMe (bevorzugt)
+  let me = null;
+  try { me = await fetchAgentMe(accountId); } catch (_) {}
+  let host = document.getElementById('subModalHost');
+  if (!host) { host = document.createElement('div'); host.id = 'subModalHost'; document.body.appendChild(host); }
+  host.innerHTML =
+    '<div class="fixed inset-0 z-[60] flex items-end justify-center bg-black/40" onclick="if(event.target===this)closeStackPicker()">' +
+      '<div class="bg-white w-full max-w-md rounded-t-2xl shadow-2xl p-4 safe-bottom flex flex-col" style="max-height:80vh">' +
+        '<p class="text-[11px] uppercase tracking-wider text-ink-500 font-semibold text-center pb-2 shrink-0">Bearbeiter wählen</p>' +
+        '<div class="flex-1 overflow-y-auto space-y-1.5">' +
+          '<button onclick="_setTicketAssigneeFromStack(\'' + escapeAttr(accountId) + '\', ' + ticketId + ', null)" class="w-full bg-ink-50 hover:bg-ink-100 border border-ink-200 text-ink-700 rounded-lg px-3 py-2.5 text-sm font-medium text-left">— unzugewiesen —</button>' +
+          (me?.id ? '<button onclick="_setTicketAssigneeFromStack(\'' + escapeAttr(accountId) + '\', ' + ticketId + ', ' + me.id + ')" class="w-full bg-purple-50 hover:bg-purple-100 border border-purple-300 text-purple-800 rounded-lg px-3 py-2.5 text-sm font-bold text-left inline-flex items-center gap-2"><i data-lucide="user" class="w-4 h-4"></i>Mich selbst' + (me.name ? ' (' + escapeHtml(me.name) + ')' : '') + '</button>' : '') +
+          (agents.length
+            ? agents.filter(a => a.id !== me?.id).map(a =>
+                '<button onclick="_setTicketAssigneeFromStack(\'' + escapeAttr(accountId) + '\', ' + ticketId + ', ' + a.id + ')" class="w-full bg-white hover:bg-brand-50 border border-ink-200 hover:border-brand-300 text-ink-800 rounded-lg px-3 py-2.5 text-sm font-medium text-left">' + escapeHtml(a.name) + '</button>'
+              ).join('')
+            : '<p class="text-[12px] text-ink-500 italic text-center py-4">Keine Agents geladen.</p>') +
+        '</div>' +
+        '<button onclick="closeStackPicker()" class="w-full mt-2 bg-ink-100 hover:bg-ink-200 text-ink-700 rounded-lg px-3 py-2 text-xs font-medium shrink-0">Abbrechen</button>' +
+      '</div>' +
+    '</div>';
+  if (window.lucide) lucide.createIcons();
+  document.body.style.overflow = 'hidden';
+}
+async function _setTicketAssigneeFromStack(accountId, ticketId, agentId) {
+  closeStackPicker();
+  try {
+    await proxyJson('/freshdesk/' + encodeURIComponent(accountId) + '/api/v2/tickets/' + ticketId, {
+      method: 'PUT', body: JSON.stringify({ responder_id: agentId }),
+    });
+    patchTicketInList(accountId, ticketId, { responder_id: agentId });
+    toast(agentId ? ('Bearbeiter → ' + (getAgentName(accountId, agentId) || '#' + agentId)) : 'Bearbeiter entfernt', 'success', 2500);
+    // Bei manueller Zuweisung: Regel-Stopp setzen (analog assignAndClose)
+    if (agentId) { try { setRegelStopp(accountId, ticketId, 'manual_assign'); } catch (_) {} }
+    renderTicketList(APP_STATE.pageState?.tickets || []);
+  } catch (e) {
+    toast('Bearbeiter-Änderung fehlgeschlagen: ' + e.message, 'error', 6000);
+  }
+}
+
+function closeStackPicker() {
+  const host = document.getElementById('subModalHost');
+  if (host) host.innerHTML = '';
+  document.body.style.overflow = '';
+}
+
+/* v2.46.19: Direktes KI-Assistent-Modal für Stack-View. Text + optionaler Voice-Input.
+   Submit reicht den Befehl an processAssistantCommand weiter (gleicher Flow wie in
+   der Ticket-Detail-View, aber als Stack-overlay). */
+let STACK_AI_REC = null;
+async function openStackAiModal(accountId, ticketId) {
+  let host = document.getElementById('subModalHost');
+  if (!host) { host = document.createElement('div'); host.id = 'subModalHost'; document.body.appendChild(host); }
+  // Ticket-Daten holen — entweder aus Cache oder fetchen für Kontext
+  let ticket = APP_STATE.ticketCache?.get?.(accountId + '|' + ticketId);
+  if (!ticket || !ticket.subject) {
+    try { ticket = await fetchTicketDetail(accountId, ticketId); } catch (_) {}
+  }
+  const subj = ticket?.subject || ('#' + ticketId);
+  const reqName = ticket?.requester?.name || '';
+  const speechAvailable = !!(window.SpeechRecognition || window.webkitSpeechRecognition);
+  // CURRENT_TICKET temporär für processAssistantCommand setzen (Voraussetzung)
+  window._STACK_AI_PREV_CURRENT = CURRENT_TICKET;
+  CURRENT_TICKET = ticket;
+  host.innerHTML =
+    '<div class="fixed inset-0 z-[60] flex items-end justify-center bg-black/50" onclick="if(event.target===this)closeStackAiModal()">' +
+      '<div class="bg-white w-full max-w-md rounded-t-3xl shadow-2xl flex flex-col safe-bottom" style="max-height:90vh">' +
+        '<div class="px-4 py-3 border-b border-ink-200 flex items-center justify-between gap-2 shrink-0">' +
+          '<h3 class="font-bold text-ink-900 inline-flex items-center gap-2"><i data-lucide="sparkles" class="w-5 h-5 text-purple-600"></i> KI-Assistent</h3>' +
+          '<button onclick="closeStackAiModal()" class="w-9 h-9 rounded-lg hover:bg-ink-100 flex items-center justify-center"><i data-lucide="x" class="w-5 h-5 text-ink-700"></i></button>' +
+        '</div>' +
+        '<div class="flex-1 overflow-y-auto p-4 space-y-3">' +
+          '<div class="bg-ink-50 rounded-xl p-2.5 text-[11px]">' +
+            '<p class="text-ink-500 uppercase tracking-wider text-[9px] font-bold">Ticket</p>' +
+            '<p class="font-semibold text-ink-900 mt-0.5 line-clamp-2">' + escapeHtml(subj) + '</p>' +
+            (reqName ? '<p class="text-ink-600 mt-0.5">' + escapeHtml(reqName) + '</p>' : '') +
+          '</div>' +
+          '<label class="text-xs font-bold text-ink-700 uppercase tracking-wider block">Was möchtest du tun?</label>' +
+          (speechAvailable ? '<button id="stackAiMicBtn" onclick="toggleStackAiVoice()" class="w-full py-4 rounded-2xl bg-gradient-to-br from-purple-500 to-brand-600 text-white font-semibold flex items-center justify-center gap-2 active:opacity-80 shadow-md shadow-brand-500/30">' +
+            '<div id="stackAiMicIcon" class="w-9 h-9 rounded-full bg-white/20 flex items-center justify-center"><i data-lucide="mic" class="w-5 h-5"></i></div>' +
+            '<span id="stackAiMicLabel">Tippe und sprich</span>' +
+          '</button>' : '<p class="text-[11px] text-ink-500 italic">Sprach-Eingabe in diesem Browser nicht verfügbar — nutze das Textfeld.</p>') +
+          '<textarea id="stackAiCmd" rows="4" placeholder="z.B. „Antworte freundlich dass wir bis Freitag Bescheid geben" / „Weise Mergim zu" / „Notiz: mit Lager abstimmen" / „Auf gelöst setzen""' +
+            ' class="w-full px-3 py-3 border border-purple-200 bg-purple-50/30 rounded-xl text-sm focus:ring-2 focus:ring-purple-500/30 focus:border-purple-500 resize-y"></textarea>' +
+          '<div class="bg-white border border-ink-200 rounded-xl p-3">' +
+            '<p class="text-[10px] font-semibold text-ink-500 uppercase tracking-wider mb-1.5">Beispiele</p>' +
+            '<div class="space-y-1 text-[11px] text-ink-700 leading-relaxed">' +
+              '<p>📨 „Antworte, dass wir den Auftrag bis Freitag bestätigen"</p>' +
+              '<p>📝 „Interne Notiz: mit Lager abstimmen"</p>' +
+              '<p>👤 „Weise Mergim zu"</p>' +
+              '<p>🏷 „Auf Gelöst setzen"</p>' +
+            '</div>' +
+          '</div>' +
+        '</div>' +
+        '<div class="border-t border-ink-200 p-3 flex gap-2 shrink-0">' +
+          '<button onclick="closeStackAiModal()" class="flex-1 bg-ink-100 hover:bg-ink-200 text-ink-700 rounded-xl px-3 py-3 text-sm font-bold">Abbrechen</button>' +
+          '<button onclick="processStackAi(this)" class="flex-[2] bg-gradient-to-br from-purple-500 to-brand-600 hover:opacity-90 text-white rounded-xl px-3 py-3 text-sm font-bold inline-flex items-center justify-center gap-1.5 shadow-md shadow-purple-200">' +
+            '<i data-lucide="sparkles" class="w-4 h-4"></i> Verarbeiten' +
+          '</button>' +
+        '</div>' +
+      '</div>' +
+    '</div>';
+  if (window.lucide) lucide.createIcons();
+  document.body.style.overflow = 'hidden';
+  setTimeout(() => { $('stackAiCmd')?.focus(); }, 80);
+}
+
+function toggleStackAiVoice() {
+  if (STACK_AI_REC) { try { STACK_AI_REC.stop(); } catch (_) {} STACK_AI_REC = null; _updateStackAiMicUI(false); return; }
+  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if (!SR) return toast('Sprach-Eingabe nicht verfügbar', 'warn', 6000);
+  ensureMicPermission().then(() => {
+    const rec = new SR();
+    rec.lang = 'de-DE';
+    rec.continuous = true;
+    rec.interimResults = true;
+    const ta = $('stackAiCmd');
+    let baseText = (ta?.value || '');
+    if (baseText && !/\s$/.test(baseText)) baseText += ' ';
+    rec.onresult = (event) => {
+      let final = '', interim = '';
+      for (let i = event.resultIndex; i < event.results.length; i++) {
+        const tr = event.results[i][0].transcript;
+        if (event.results[i].isFinal) final += tr; else interim += tr;
+      }
+      if (ta) ta.value = baseText + final + interim;
+      if (final) baseText += final;
+    };
+    rec.onerror = (e) => { console.warn('Voice error:', e); STACK_AI_REC = null; _updateStackAiMicUI(false); };
+    rec.onend = () => { if (STACK_AI_REC === rec) { STACK_AI_REC = null; _updateStackAiMicUI(false); } };
+    rec.start();
+    STACK_AI_REC = rec;
+    _updateStackAiMicUI(true);
+  }).catch(e => toast(e.message, 'error', 10000));
+}
+function _updateStackAiMicUI(isOn) {
+  const icon = $('stackAiMicIcon');
+  const label = $('stackAiMicLabel');
+  if (icon) icon.innerHTML = isOn ? '<span class="spinner" style="width:18px;height:18px;border-color:white;border-right-color:transparent"></span>' : '<i data-lucide="mic" class="w-5 h-5"></i>';
+  if (label) label.textContent = isOn ? 'Höre zu — nochmal tippen zum Stoppen' : 'Tippe und sprich';
+  if (window.lucide) lucide.createIcons();
+}
+async function processStackAi(btn) {
+  if (STACK_AI_REC) { try { STACK_AI_REC.stop(); } catch (_) {} STACK_AI_REC = null; }
+  const cmd = ($('stackAiCmd')?.value || '').trim();
+  if (!cmd) return toast('Bitte etwas eintippen oder sprechen', 'warn');
+  // processAssistantCommand erwartet das Eingabefeld id="assistantCommand" — wir setzen
+  // einen temporären verstecktes Textfeld, oder wir leiten direkt durch.
+  // Pragmatisch: temporäres Element injizieren.
+  const tmpInput = document.createElement('textarea');
+  tmpInput.id = 'assistantCommand';
+  tmpInput.value = cmd;
+  tmpInput.style.display = 'none';
+  document.body.appendChild(tmpInput);
+  setBusy(btn, true, 'Verarbeite…');
+  try {
+    await processAssistantCommand(btn);
+    closeStackAiModal();
+  } catch (e) {
+    setBusy(btn, false);
+    toast('KI-Fehler: ' + (e.message || e), 'error', 8000);
+  } finally {
+    tmpInput.remove();
+  }
+}
+function closeStackAiModal() {
+  if (STACK_AI_REC) { try { STACK_AI_REC.stop(); } catch (_) {} STACK_AI_REC = null; }
+  // CURRENT_TICKET zurücksetzen
+  if (window._STACK_AI_PREV_CURRENT !== undefined) { CURRENT_TICKET = window._STACK_AI_PREV_CURRENT; delete window._STACK_AI_PREV_CURRENT; }
+  const host = document.getElementById('subModalHost');
+  if (host) host.innerHTML = '';
+  document.body.style.overflow = '';
+}
+
 function _attachTicketStackSwipe() {
   const card = document.querySelector('[data-ticket-stack-current]');
   if (!card || card._stackSwipeAttached) return;
@@ -8215,13 +8472,12 @@ function _renderTicketStackCard(t, isTop) {
       }).join('') + '</div>'
     : '';
 
-  // Action-Row (v2.46.18): KI + Schließen prominent. Antworten / Regel / WV / Detail als sekundär.
+  // Action-Row (v2.46.19): KI + Schließen oben gross, 3 Sekundärbuttons unten breit verteilt
   const ticketRefArgs = "'" + escapeAttr(accountId) + "', " + ticketId;
   const isAlreadyClosed = t.status === 4 || t.status === 5;
   const actionsHtml =
-    // Hauptaktionen: KI + Schließen (2 cols, groß)
     '<div class="grid grid-cols-2 gap-2 mt-4">' +
-      '<button onclick="event.stopPropagation(); openTicketDetail(' + ticketRefArgs + ')" class="bg-gradient-to-br from-violet-500 via-purple-500 to-fuchsia-500 hover:opacity-90 text-white rounded-2xl py-4 font-bold inline-flex items-center justify-center gap-2 shadow-md shadow-purple-200 active:scale-95 transition">' +
+      '<button onclick="event.stopPropagation(); openStackAiModal(' + ticketRefArgs + ')" class="bg-gradient-to-br from-violet-500 via-purple-500 to-fuchsia-500 hover:opacity-90 text-white rounded-2xl py-4 font-bold inline-flex items-center justify-center gap-2 shadow-md shadow-purple-200 active:scale-95 transition">' +
         '<i data-lucide="sparkles" class="w-5 h-5"></i> <span class="text-[15px]">KI-Assistent</span>' +
       '</button>' +
       (isAlreadyClosed
@@ -8230,12 +8486,10 @@ function _renderTicketStackCard(t, isTop) {
             '<i data-lucide="check-circle-2" class="w-5 h-5"></i> <span class="text-[15px]">Schließen</span>' +
           '</button>') +
     '</div>' +
-    // Sekundär: Antworten + Regel + WV + Detail (4 cols, klein)
-    '<div class="grid grid-cols-4 gap-1.5 mt-2">' +
-      '<button onclick="event.stopPropagation(); openDirectReplyComposer(' + ticketRefArgs + ')" class="inline-flex flex-col items-center justify-center gap-0.5 px-1 py-2 bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 text-emerald-700 rounded-xl text-[10px] font-medium" title="Antworten"><i data-lucide="reply" class="w-4 h-4"></i>Antworten</button>' +
-      '<button onclick="event.stopPropagation(); openRuleFromTicket(' + ticketRefArgs + ')" class="inline-flex flex-col items-center justify-center gap-0.5 px-1 py-2 bg-purple-50 hover:bg-purple-100 border border-purple-200 text-purple-700 rounded-xl text-[10px] font-medium" title="Regel aus Ticket lernen"><i data-lucide="wand-2" class="w-4 h-4"></i>Regel</button>' +
-      '<button onclick="event.stopPropagation(); openWiedervorlagePicker(' + ticketRefArgs + ', true)" class="inline-flex flex-col items-center justify-center gap-0.5 px-1 py-2 bg-ink-50 hover:bg-ink-100 border border-ink-200 text-ink-700 rounded-xl text-[10px] font-medium" title="Wiedervorlage"><i data-lucide="clock" class="w-4 h-4"></i>WV</button>' +
-      '<button onclick="event.stopPropagation(); openTicketDetail(' + ticketRefArgs + ')" class="inline-flex flex-col items-center justify-center gap-0.5 px-1 py-2 bg-ink-50 hover:bg-ink-100 border border-ink-200 text-ink-700 rounded-xl text-[10px] font-medium" title="Detail-Ansicht"><i data-lucide="external-link" class="w-4 h-4"></i>Detail</button>' +
+    '<div class="grid grid-cols-3 gap-2 mt-2">' +
+      '<button onclick="event.stopPropagation(); openRuleFromTicket(' + ticketRefArgs + ')" class="inline-flex items-center justify-center gap-1.5 px-2 py-2.5 bg-purple-50 hover:bg-purple-100 border border-purple-200 text-purple-700 rounded-xl text-[12px] font-semibold" title="Regel aus Ticket lernen"><i data-lucide="wand-2" class="w-4 h-4"></i>Regel</button>' +
+      '<button onclick="event.stopPropagation(); openWiedervorlagePicker(' + ticketRefArgs + ', true)" class="inline-flex items-center justify-center gap-1.5 px-2 py-2.5 bg-ink-50 hover:bg-ink-100 border border-ink-200 text-ink-700 rounded-xl text-[12px] font-semibold" title="Wiedervorlage"><i data-lucide="clock" class="w-4 h-4"></i>WV</button>' +
+      '<button onclick="event.stopPropagation(); openTicketDetail(' + ticketRefArgs + ')" class="inline-flex items-center justify-center gap-1.5 px-2 py-2.5 bg-ink-50 hover:bg-ink-100 border border-ink-200 text-ink-700 rounded-xl text-[12px] font-semibold" title="Detail-Ansicht"><i data-lucide="external-link" class="w-4 h-4"></i>Detail</button>' +
     '</div>';
 
   return '<div class="bg-white rounded-3xl overflow-hidden shadow-xl border border-ink-100">' +
@@ -8245,6 +8499,10 @@ function _renderTicketStackCard(t, isTop) {
         '<span class="inline-flex items-center gap-1 text-[10px] tracking-widest px-2.5 py-1 rounded-full bg-white/20 backdrop-blur-sm font-bold">' + escapeHtml(st.label.toUpperCase()) + '</span>' +
         (onWv ? '<span class="inline-flex items-center gap-1 text-[10px] tracking-wider px-2.5 py-1 rounded-full bg-white/25 backdrop-blur-sm font-bold"><i data-lucide="clock" class="w-3 h-3"></i>' + escapeHtml(_fmtFrist(wv.frist_am)) + '</span>' : '') +
         '<span class="inline-flex items-center gap-1 text-[10px] tracking-wider px-2.5 py-1 rounded-full bg-white/20 backdrop-blur-sm font-mono">#' + ticketId + '</span>' +
+        // v2.46.19: KI-Zusammenfassungs-Button im Header
+        '<button onclick="event.stopPropagation(); openTicketSummaryModal(\'' + escapeAttr(accountId) + '\', ' + ticketId + ')" class="ml-auto inline-flex items-center gap-1 text-[10px] tracking-wider px-2.5 py-1 rounded-full bg-white/25 hover:bg-white/35 backdrop-blur-sm font-bold active:scale-95 transition" title="KI-Zusammenfassung">' +
+          '<i data-lucide="sparkles" class="w-3 h-3"></i>Zusammenfassung' +
+        '</button>' +
       '</div>' +
       // Subject
       '<p class="text-xl font-extrabold leading-tight tracking-tight">' + escapeHtml(subj) + '</p>' +
@@ -8257,23 +8515,20 @@ function _renderTicketStackCard(t, isTop) {
     '</div>' +
     // Body
     '<div class="px-5 pb-5 pt-4">' +
-      // Meta-Badges: Status + Gruppe + Bearbeiter (v2.46.18: prominenter)
+      // Meta-Badges: Status + Gruppe + Bearbeiter (v2.46.19: jetzt klickbar → ändern)
       '<div class="grid grid-cols-3 gap-1.5 mb-3">' +
-        // Status
-        '<div class="bg-ink-50 border border-ink-200 rounded-xl px-2 py-2 flex flex-col items-center justify-center gap-0.5 min-h-[60px]">' +
-          '<span class="text-[9px] uppercase tracking-wider font-bold text-ink-400">Status</span>' +
+        '<button onclick="event.stopPropagation(); openStackStatusPicker(' + ticketRefArgs + ')" class="bg-ink-50 hover:bg-ink-100 border border-ink-200 rounded-xl px-2 py-2 flex flex-col items-center justify-center gap-0.5 min-h-[60px] active:scale-95 transition">' +
+          '<span class="text-[9px] uppercase tracking-wider font-bold text-ink-400 inline-flex items-center gap-0.5">Status <i data-lucide="chevron-down" class="w-2.5 h-2.5"></i></span>' +
           '<span class="text-[12px] font-bold text-ink-900 text-center leading-tight">' + escapeHtml(st.label) + '</span>' +
-        '</div>' +
-        // Gruppe
-        '<div class="bg-ink-50 border border-ink-200 rounded-xl px-2 py-2 flex flex-col items-center justify-center gap-0.5 min-h-[60px]">' +
-          '<span class="text-[9px] uppercase tracking-wider font-bold text-ink-400">Gruppe</span>' +
+        '</button>' +
+        '<button onclick="event.stopPropagation(); openStackGroupPicker(' + ticketRefArgs + ')" class="bg-ink-50 hover:bg-ink-100 border border-ink-200 rounded-xl px-2 py-2 flex flex-col items-center justify-center gap-0.5 min-h-[60px] active:scale-95 transition">' +
+          '<span class="text-[9px] uppercase tracking-wider font-bold text-ink-400 inline-flex items-center gap-0.5">Gruppe <i data-lucide="chevron-down" class="w-2.5 h-2.5"></i></span>' +
           '<span class="text-[12px] font-bold text-ink-900 text-center leading-tight truncate w-full">' + (groupName ? escapeHtml(groupName) : '<span class="font-normal text-ink-400 italic">keine</span>') + '</span>' +
-        '</div>' +
-        // Bearbeiter
-        '<div class="bg-purple-50 border border-purple-200 rounded-xl px-2 py-2 flex flex-col items-center justify-center gap-0.5 min-h-[60px]">' +
-          '<span class="text-[9px] uppercase tracking-wider font-bold text-purple-500">Bearbeiter</span>' +
+        '</button>' +
+        '<button onclick="event.stopPropagation(); openStackAssigneePicker(' + ticketRefArgs + ')" class="bg-purple-50 hover:bg-purple-100 border border-purple-200 rounded-xl px-2 py-2 flex flex-col items-center justify-center gap-0.5 min-h-[60px] active:scale-95 transition">' +
+          '<span class="text-[9px] uppercase tracking-wider font-bold text-purple-500 inline-flex items-center gap-0.5">Bearbeiter <i data-lucide="chevron-down" class="w-2.5 h-2.5"></i></span>' +
           '<span class="text-[12px] font-bold text-purple-900 text-center leading-tight truncate w-full">' + (assigneeName ? escapeHtml(assigneeName) : '<span class="font-normal text-purple-400 italic">offen</span>') + '</span>' +
-        '</div>' +
+        '</button>' +
       '</div>' +
       // Description
       (descTxt
