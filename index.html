@@ -325,7 +325,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.6';
+const APP_VERSION = 'v2.46.7';
 // Read-Token absichtlich gesplittet, damit GitHub Secret-Scanning beim Push nicht blockt.
 // Der Token ist read-only und Base-scoped → bewusst eingebettet (Architektur-Entscheidung).
 const _RK = 'patu8KWM8aWB' + 'yxCGL.69fae5d9fa4b94c2' + '66b426dadd71a51f574945d840b33569058ab5e9d89ebef3';
@@ -14380,6 +14380,44 @@ function _renderTasksHeader() {
   if (window.lucide) lucide.createIcons();
 }
 
+/* v2.46.7: Repair für EIN Ticket erneut ausführen — Marker löschen + sofort Repair-Lauf.
+   Aufruf via kleinen 🔄-Button in der Karten-Sekundär-Zeile. */
+async function retrySingleTaskRepair(ref) {
+  var p = _parseTaskRef(ref);
+  if (!p) return toast('Aufgabe konnte nicht gefunden werden', 'error');
+  // Marker löschen
+  var m = _getRepairedMap();
+  var key = p.accountId + '|' + p.ticketId;
+  if (m[key]) {
+    delete m[key];
+    try { localStorage.setItem(TASK_REPAIR_DONE_KEY, JSON.stringify(m)); } catch (_) {}
+  }
+  // Sofort Repair-Lauf für dieses eine Ticket
+  TASK_REPAIR_IN_PROGRESS.add(key);
+  if (APP_STATE.page === 'tasks') _renderTasksList();
+  toast('Hole Kontakt aus Freshsales…', 'info', 2000);
+  try {
+    var result = await repairTaskTicketRequester(p.accountId, p.ticketId);
+    TASK_REPAIR_IN_PROGRESS.delete(key);
+    if (APP_STATE.page === 'tasks') _renderTasksList();
+    if (result?.repaired) {
+      toast('Kontakt aktualisiert: ' + (result.name || result.email || 'OK'), 'success', 4000);
+    } else if (result?.skipped) {
+      var reasonText = {
+        no_fs_link:     'Kein Freshsales-Link im Ticket gefunden',
+        no_fs_email:    'Freshsales-Kontakt hat keine Email',
+        already_correct:'Kontakt ist bereits korrekt — kein Update nötig',
+      }[result.reason] || ('übersprungen (' + result.reason + ')');
+      toast(reasonText, 'info', 5000);
+    } else if (result?.error) {
+      toast('Fehler: ' + (result.message || result.error), 'error', 8000);
+    }
+  } catch (e) {
+    TASK_REPAIR_IN_PROGRESS.delete(key);
+    toast('Repair fehlgeschlagen: ' + e.message, 'error', 8000);
+  }
+}
+
 /* v2.46.6: Löscht den Repair-Marker. Beim nächsten Aufgaben-Tab-Aufruf wird der
    gesamte Repair-Pfad für alle FS-Auto-Tickets neu durchlaufen. */
 async function resetTaskRepairCache() {
@@ -14535,10 +14573,13 @@ function _renderTaskTicketCard(t) {
     '</div>';
 
   // Email-Button + Verschieben kompakt darunter
+  // Plus kleiner 🔄-Button für „Kontakt aus FS neu holen" (per-Ticket-Repair-Reset)
+  var canRetryRepair = _looksLikeFsAutoTask(t);
   var secondaryRow =
     '<div class="flex gap-1.5 mt-2 flex-wrap">' +
       (reqEmail ? '<a href="mailto:' + escapeAttr(reqEmail) + '" onclick="event.stopPropagation()" class="flex-1 inline-flex items-center justify-center gap-1.5 px-2 py-1.5 bg-white hover:bg-brand-50 border border-brand-300 text-brand-700 rounded-lg text-[11px] font-medium"><i data-lucide="mail" class="w-3.5 h-3.5"></i> Email</a>' : '') +
       '<button onclick="event.stopPropagation(); openTaskRightActionSheet(\'' + escapeAttr(ticketRef) + '\')" class="flex-1 inline-flex items-center justify-center gap-1.5 px-2 py-1.5 bg-white hover:bg-ink-50 border border-ink-300 text-ink-700 rounded-lg text-[11px] font-medium"><i data-lucide="clock" class="w-3.5 h-3.5"></i> Verschieben</button>' +
+      (canRetryRepair ? '<button onclick="event.stopPropagation(); retrySingleTaskRepair(\'' + escapeAttr(ticketRef) + '\')" class="inline-flex items-center justify-center gap-1.5 px-2 py-1.5 bg-white hover:bg-purple-50 border border-purple-300 text-purple-700 rounded-lg text-[11px] font-medium" title="Kontakt aus Freshsales neu holen"><i data-lucide="refresh-ccw" class="w-3.5 h-3.5"></i></button>' : '') +
       '<button onclick="event.stopPropagation(); openTicketDetail(\'' + escapeAttr(accountId) + '\', ' + ticketId + ')" class="inline-flex items-center justify-center gap-1.5 px-2 py-1.5 bg-white hover:bg-ink-50 border border-ink-300 text-ink-700 rounded-lg text-[11px] font-medium" title="Ticket öffnen"><i data-lucide="arrow-up-right" class="w-3.5 h-3.5"></i></button>' +
     '</div>';
 
