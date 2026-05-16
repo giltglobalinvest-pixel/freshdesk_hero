@@ -170,7 +170,7 @@
   /* v2.46.31: Floating-Button entfernt — Exit ist jetzt eine ordentliche Reihe
      im Sticky-Footer (unter Ausblenden-Button), keine schwebende Action mehr. */
 
-  /* v2.46.32: Im Vollbild — Karte streckt sich auf ganze verfügbare Höhe.
+  /* v2.46.32 / v2.46.33: Im Vollbild — Karte streckt sich auf ganze verfügbare Höhe.
      Keine ungenutzte weiße Fläche zwischen Karte und Footer. */
   body.fullscreen-stack #ticketList > div.relative {
     min-height: calc(100vh - 200px) !important;
@@ -190,11 +190,35 @@
     flex-direction: column !important;
     width: 100% !important;
   }
+  /* v2.46.33: Gradient-Header bekommt mehr Padding oben (für iPhone-Statusbar +
+     visuelle Luft) — Pills/Titel klebt nicht mehr direkt am Rand */
+  body.fullscreen-stack [data-ticket-stack-current] > div.bg-white > div.bg-gradient-to-br,
+  body.fullscreen-stack [data-ticket-stack-current] > div.bg-white > div[class*="bg-gradient"] {
+    padding-top: calc(env(safe-area-inset-top, 0px) + 1.25rem) !important;
+    padding-bottom: 1.25rem !important;
+  }
   /* Body-Bereich (zweites Kind nach Gradient-Header) wächst, sodass Footer-Aktionen am Karten-Boden kleben */
   body.fullscreen-stack [data-ticket-stack-current] > div.bg-white > div:last-child {
     flex: 1 !important;
     display: flex !important;
     flex-direction: column !important;
+    padding-top: 1.25rem !important;
+    padding-bottom: 1.25rem !important;
+  }
+  /* v2.46.33: Description-Block (Erste Anfrage) streckt sich und füllt die Leere
+     zwischen Action-Buttons und Mini-Footer */
+  body.fullscreen-stack [data-ticket-stack-current] > div.bg-white > div:last-child > button.bg-ink-50 {
+    flex: 1 !important;
+    min-height: 5rem !important;
+    display: flex !important;
+    flex-direction: column !important;
+  }
+  /* line-clamp aufheben damit mehr Text sichtbar wird wenn Platz da ist */
+  body.fullscreen-stack [data-ticket-stack-current] > div.bg-white > div:last-child > button.bg-ink-50 p.line-clamp-6 {
+    -webkit-line-clamp: unset !important;
+    line-clamp: unset !important;
+    overflow: hidden !important;
+    flex: 1 !important;
   }
   /* Mini-Footer der Karte (Account · Swipe-Hint) wird an den Karten-Boden gedrückt */
   body.fullscreen-stack [data-ticket-stack-current] > div.bg-white > div:last-child > div.border-t {
@@ -652,7 +676,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.32';
+const APP_VERSION = 'v2.46.33';
 
 /* ============================================================
    GLOBAL THEME — v2.46.12
