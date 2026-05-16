@@ -170,6 +170,44 @@
   /* v2.46.31: Floating-Button entfernt — Exit ist jetzt eine ordentliche Reihe
      im Sticky-Footer (unter Ausblenden-Button), keine schwebende Action mehr. */
 
+  /* v2.46.32: Im Vollbild — Karte streckt sich auf ganze verfügbare Höhe.
+     Keine ungenutzte weiße Fläche zwischen Karte und Footer. */
+  body.fullscreen-stack #ticketList > div.relative {
+    min-height: calc(100vh - 200px) !important;
+    display: flex !important;
+    flex-direction: column !important;
+    padding-bottom: 12px !important;
+  }
+  body.fullscreen-stack [data-ticket-stack-current] {
+    flex: 1 !important;
+    min-height: 0 !important;
+    display: flex !important;
+  }
+  /* Die Karte (bg-white-Wrapper INNERHALB der current-card-div) wächst auf 100% */
+  body.fullscreen-stack [data-ticket-stack-current] > div.bg-white {
+    flex: 1 !important;
+    display: flex !important;
+    flex-direction: column !important;
+    width: 100% !important;
+  }
+  /* Body-Bereich (zweites Kind nach Gradient-Header) wächst, sodass Footer-Aktionen am Karten-Boden kleben */
+  body.fullscreen-stack [data-ticket-stack-current] > div.bg-white > div:last-child {
+    flex: 1 !important;
+    display: flex !important;
+    flex-direction: column !important;
+  }
+  /* Mini-Footer der Karte (Account · Swipe-Hint) wird an den Karten-Boden gedrückt */
+  body.fullscreen-stack [data-ticket-stack-current] > div.bg-white > div:last-child > div.border-t {
+    margin-top: auto !important;
+  }
+  /* Hintergrund-Stack (next Card) im Vollbild auch strecken */
+  body.fullscreen-stack #ticketList > div.relative > div.absolute {
+    height: 100% !important;
+  }
+  body.fullscreen-stack #ticketList > div.relative > div.absolute > div.bg-white {
+    height: 100% !important;
+  }
+
   /* ============================================================
      v2.46.27 — FRESH THEME (Clean, ERP-Hero-inspired)
      Cyan/Hellblau-Brand-Palette (#1FA8D6), clean cards mit dezenten
@@ -614,7 +652,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.31';
+const APP_VERSION = 'v2.46.32';
 
 /* ============================================================
    GLOBAL THEME — v2.46.12
