@@ -517,7 +517,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.23';
+const APP_VERSION = 'v2.46.24';
 
 /* ============================================================
    GLOBAL THEME — v2.46.12
@@ -8525,17 +8525,8 @@ async function openQuickContactModal(accountId, ticketId) {
     } else {
       html += '<div class="bg-ink-50 border border-ink-200 rounded-2xl px-4 py-3 text-center mb-4"><p class="text-[12px] text-ink-500"><i data-lucide="phone-off" class="w-4 h-4 inline mr-1"></i>Keine Telefonnummer hinterlegt</p></div>';
     }
-    // Email
-    if (contact.email) {
-      html += '<a href="mailto:' + escapeAttr(contact.email) + '" class="flex items-center gap-3 px-4 py-3.5 bg-white border-2 border-brand-200 hover:border-brand-400 hover:bg-brand-50 text-ink-800 rounded-2xl font-semibold">' +
-        '<div class="w-10 h-10 rounded-xl bg-brand-100 flex items-center justify-center text-brand-700 shrink-0"><i data-lucide="mail" class="w-5 h-5"></i></div>' +
-        '<div class="flex-1 min-w-0">' +
-          '<div class="text-[10px] uppercase tracking-widest text-ink-400">Email</div>' +
-          '<div class="text-[14px] font-medium truncate">' + escapeHtml(contact.email) + '</div>' +
-        '</div>' +
-        '<i data-lucide="arrow-up-right" class="w-5 h-5 text-brand-600 shrink-0"></i>' +
-      '</a>';
-    }
+    // v2.46.24: Email-Button entfernt — User möchte primär anrufen, Email wird in der
+    // Ticket-Detail-View bzw. via mailto separat behandelt
     // Adresse (wenn vorhanden)
     if (contact.address) {
       html += '<div class="mt-2 px-4 py-3 bg-ink-50 border border-ink-200 rounded-2xl">' +
@@ -8552,6 +8543,106 @@ async function openQuickContactModal(accountId, ticketId) {
   }
 }
 function closeQuickContactModal() {
+  const host = document.getElementById('subModalHost');
+  if (host) host.innerHTML = '';
+  document.body.style.overflow = '';
+}
+
+/* v2.46.24: Reines Inhalts-Modal — zeigt Erste Anfrage + alle Konversationen
+   readable, OHNE Antwort/Action-Buttons. Für schnellen Durchlesen aus Stack-Card. */
+async function openTicketContentModal(accountId, ticketId) {
+  let host = document.getElementById('subModalHost');
+  if (!host) { host = document.createElement('div'); host.id = 'subModalHost'; document.body.appendChild(host); }
+  host.innerHTML =
+    '<div class="fixed inset-0 z-[60] flex items-end justify-center bg-black/50" onclick="if(event.target===this)closeTicketContentModal()">' +
+      '<div class="bg-white w-full max-w-2xl rounded-t-3xl shadow-2xl flex flex-col safe-bottom" style="max-height:92vh">' +
+        '<div class="px-4 py-3 border-b border-ink-200 flex items-center justify-between gap-2 shrink-0">' +
+          '<h3 class="font-bold text-ink-900 inline-flex items-center gap-2 truncate">' +
+            '<i data-lucide="file-text" class="w-5 h-5 text-brand-600 shrink-0"></i>' +
+            '<span class="truncate">Inhalt · #' + ticketId + '</span>' +
+          '</h3>' +
+          '<button onclick="closeTicketContentModal()" class="w-9 h-9 rounded-lg hover:bg-ink-100 flex items-center justify-center" title="Schließen"><i data-lucide="x" class="w-5 h-5 text-ink-700"></i></button>' +
+        '</div>' +
+        '<div id="ticketContentBody" class="flex-1 overflow-y-auto p-4">' +
+          '<div class="text-center py-8"><span class="spinner inline-block w-7 h-7 border-[3px] text-brand-500"></span><p class="text-sm text-ink-500 mt-3">Lade Verlauf…</p></div>' +
+        '</div>' +
+        '<div class="border-t border-ink-200 p-3 shrink-0">' +
+          '<button onclick="closeTicketContentModal()" class="w-full bg-ink-900 hover:bg-ink-800 text-white rounded-xl px-3 py-3 text-sm font-bold inline-flex items-center justify-center gap-1.5"><i data-lucide="check" class="w-4 h-4"></i> Schließen</button>' +
+        '</div>' +
+      '</div>' +
+    '</div>';
+  if (window.lucide) lucide.createIcons();
+  document.body.style.overflow = 'hidden';
+  try {
+    const ticket = await fetchTicketDetail(accountId, ticketId);
+    const body = $('ticketContentBody');
+    if (!body) return;
+    const subj = ticket?.subject || ('#' + ticketId);
+    const reqName = ticket?.requester?.name || ticket?.email || 'Kunde';
+    const firstRequestHtml = ticket?.description || '';
+    const firstRequestText = htmlToText(ticket?.description_text || ticket?.description || '');
+    const conversations = ticket?.conversations || [];
+    const atts = (typeof collectTicketAttachments === 'function') ? collectTicketAttachments(ticket) : [];
+
+    let html = '<p class="text-[10px] uppercase tracking-wider font-bold text-ink-400 mb-1">Betreff</p>' +
+      '<p class="text-[15px] font-bold text-ink-900 mb-4 leading-snug">' + escapeHtml(subj) + '</p>';
+
+    // Erste Anfrage
+    html += '<div class="border-l-2 border-brand-300 bg-brand-50/40 pl-3 py-2 pr-2 rounded-r mb-3">' +
+      '<div class="flex items-baseline justify-between gap-2 text-[11px] mb-1.5">' +
+        '<span class="font-semibold text-ink-700">← ' + escapeHtml(reqName) + '</span>' +
+        '<span class="text-ink-400 shrink-0">' + escapeHtml(fmtDate(ticket?.created_at)) + '</span>' +
+      '</div>';
+    if (firstRequestHtml && /<[a-z]/i.test(firstRequestHtml)) {
+      html += '<div class="email-body text-[13px] text-ink-800 leading-relaxed">' + sanitizeHtml(firstRequestHtml) + '</div>';
+    } else {
+      html += '<div class="text-[13px] text-ink-800 whitespace-pre-line break-words leading-relaxed">' + escapeHtml(firstRequestText.slice(0, 8000)) + (firstRequestText.length > 8000 ? '…' : '') + '</div>';
+    }
+    html += '</div>';
+
+    // Konversationen
+    conversations.forEach(c => {
+      const isIncoming = c.incoming === true;
+      const isPrivate  = c.private === true;
+      const who = isPrivate ? 'Interne Notiz' : (isIncoming ? (c.from_email || 'Kunde') : 'Agent');
+      const align = isIncoming ? 'border-brand-300 bg-brand-50/40' : (isPrivate ? 'border-amber-300 bg-amber-50/40' : 'border-ink-200 bg-ink-50/40');
+      const arrow = isPrivate ? '⊙' : (isIncoming ? '←' : '→');
+      const rawHtml = c.body || '';
+      const bodyTxt = htmlToText(c.body_text || rawHtml);
+      const bodyRender = (rawHtml && /<[a-z]/i.test(rawHtml))
+        ? '<div class="email-body text-[13px] text-ink-800 leading-relaxed">' + sanitizeHtml(rawHtml) + '</div>'
+        : '<div class="text-[13px] text-ink-800 whitespace-pre-line break-words leading-relaxed">' + escapeHtml(bodyTxt.slice(0, 6000)) + (bodyTxt.length > 6000 ? '…' : '') + '</div>';
+      html += '<div class="border-l-2 ' + align + ' pl-3 py-2 pr-2 rounded-r mb-3">' +
+        '<div class="flex items-baseline justify-between gap-2 text-[11px] mb-1.5">' +
+          '<span class="font-semibold text-ink-700 truncate">' + escapeHtml(arrow + ' ' + who) + '</span>' +
+          '<span class="text-ink-400 shrink-0">' + escapeHtml(fmtDate(c.created_at)) + '</span>' +
+        '</div>' +
+        bodyRender +
+      '</div>';
+    });
+
+    // Anhänge — als einfache Liste mit Download-Link
+    if (atts.length) {
+      html += '<div class="mt-4 bg-ink-50 rounded-2xl p-3">' +
+        '<p class="text-[10px] uppercase tracking-wider font-bold text-ink-500 mb-2">Anhänge (' + atts.length + ')</p>' +
+        '<div class="space-y-1.5">' +
+        atts.map(a => '<a href="' + escapeAttr(a.attachment_url || '#') + '" target="_blank" rel="noopener" class="flex items-center gap-2 px-2 py-2 bg-white border border-ink-200 hover:border-brand-300 rounded-lg text-[12px] text-ink-800">' +
+          '<i data-lucide="paperclip" class="w-4 h-4 text-ink-500 shrink-0"></i>' +
+          '<span class="flex-1 truncate">' + escapeHtml(a.name || 'Datei') + '</span>' +
+          '<i data-lucide="download" class="w-4 h-4 text-brand-600 shrink-0"></i>' +
+        '</a>').join('') +
+        '</div>' +
+      '</div>';
+    }
+
+    body.innerHTML = html;
+    if (window.lucide) lucide.createIcons();
+  } catch (e) {
+    const body = $('ticketContentBody');
+    if (body) body.innerHTML = '<div class="bg-red-50 border border-red-200 rounded-xl p-3 text-sm text-red-800">Konnte Inhalt nicht laden: ' + escapeHtml(e.message || String(e)) + '</div>';
+  }
+}
+function closeTicketContentModal() {
   const host = document.getElementById('subModalHost');
   if (host) host.innerHTML = '';
   document.body.style.overflow = '';
@@ -8753,12 +8844,15 @@ function _renderTicketStackCard(t, isTop) {
           '<span class="text-[12px] font-bold text-purple-900 text-center leading-tight truncate w-full">' + (assigneeName ? escapeHtml(assigneeName) : '<span class="font-normal text-purple-400 italic">offen</span>') + '</span>' +
         '</button>' +
       '</div>' +
-      // Description
+      // Description — klickbar (öffnet Inhalts-Modal mit ganzem Verlauf)
       (descTxt
-        ? '<div class="bg-ink-50 rounded-2xl p-3.5">' +
-            '<p class="text-[10px] uppercase tracking-wider font-bold text-ink-500 mb-1">Erste Anfrage</p>' +
+        ? '<button onclick="event.stopPropagation(); openTicketContentModal(\'' + escapeAttr(accountId) + '\', ' + ticketId + ')" class="block w-full text-left bg-ink-50 hover:bg-ink-100 active:bg-ink-200 rounded-2xl p-3.5 transition">' +
+            '<div class="flex items-center justify-between gap-2 mb-1">' +
+              '<p class="text-[10px] uppercase tracking-wider font-bold text-ink-500">Erste Anfrage</p>' +
+              '<i data-lucide="maximize-2" class="w-3.5 h-3.5 text-ink-400"></i>' +
+            '</div>' +
             '<p class="text-[13px] text-ink-800 leading-snug whitespace-pre-line break-words line-clamp-6">' + escapeHtml(descTxt) + '</p>' +
-          '</div>'
+          '</button>'
         : '') +
       phonesHtml +
       actionsHtml +
