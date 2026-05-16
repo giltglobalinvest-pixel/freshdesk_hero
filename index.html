@@ -713,7 +713,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.42';
+const APP_VERSION = 'v2.46.43';
 
 /* ============================================================
    GLOBAL THEME — v2.46.12
@@ -7547,6 +7547,8 @@ function renderTicketList(tickets) {
     // v2.46.8: Auch im leeren Zustand „Mehr laden"-Button zeigen wenn der Server noch mehr
     // Tickets hat. Häufiger Fall: User hat alle aktuellen Tickets abgearbeitet, aber auf
     // Page 2/3 wartet noch was. Vorher: leerer Zustand → keine Möglichkeit nachzuladen.
+    // v2.46.43: Im Vollbild-Stack-Modus zusätzlich „Vollbild verlassen"-Button anzeigen,
+    // sonst ist der User gefangen (Bottom-Nav + Filter sind versteckt).
     const hasMore = !!APP_STATE.pageState?.hasMore;
     $('ticketList').innerHTML = `
       <div class="bg-white rounded-2xl border border-ink-200 p-8 text-center">
@@ -7557,6 +7559,11 @@ function renderTicketList(tickets) {
       ${hasMore ? `
         <button onclick="loadMoreTickets(this)" class="w-full bg-white border border-brand-300 rounded-2xl py-3 text-sm font-semibold text-brand-600 hover:bg-brand-50 mt-2 inline-flex items-center justify-center gap-2 active:opacity-70">
           <i data-lucide="chevron-down" class="w-4 h-4"></i> Weitere ${TICKETS_PER_PAGE} laden
+        </button>
+      ` : ''}
+      ${TICKETS_STACK_FULLSCREEN ? `
+        <button onclick="exitTicketsStackFullscreen()" class="w-full bg-ink-900 hover:bg-ink-800 text-white rounded-2xl py-3 text-sm font-semibold mt-2 inline-flex items-center justify-center gap-2 shadow-md active:scale-95" style="margin-bottom: calc(env(safe-area-inset-bottom, 8px) + 8px);">
+          <i data-lucide="x" class="w-4 h-4"></i> Vollbild verlassen
         </button>
       ` : ''}`;
     if (window.lucide) lucide.createIcons();
