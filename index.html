@@ -145,151 +145,134 @@
   }
 
   /* ============================================================
-     v2.46.14 — FRESH THEME OVERRIDES (BOLD redesign)
-     Dark Bottom-Nav, Gradient-Stat-Pills, große Typo, vibrant Akzente.
-     Inspiriert von modernen Dashboard-Designs (gradient cards, dark nav).
+     v2.46.27 — FRESH THEME (Clean, ERP-Hero-inspired)
+     Cyan/Hellblau-Brand-Palette (#1FA8D6), clean cards mit dezenten
+     Schatten, klare Linien, weniger bunt. Kein Purple/Lila mehr.
      ============================================================ */
   body.theme-fresh {
-    background:
-      radial-gradient(1200px 600px at 10% -10%, rgba(168, 85, 247, 0.10), transparent 60%),
-      radial-gradient(900px 500px at 95% 0%, rgba(244, 63, 94, 0.06), transparent 60%),
-      radial-gradient(700px 400px at 50% 100%, rgba(20, 184, 166, 0.05), transparent 70%),
-      linear-gradient(180deg, #f8fafc 0%, #eef2f7 100%);
+    background: #F8FAFC;
     background-attachment: fixed;
   }
   body.theme-fresh #appShell { background: transparent; }
 
-  /* Top-Bar: dunkler Gradient (statt pastell), helle Schrift */
+  /* Top-Bar: clean weiss mit subtilem Bottom-Border (ERP-Hero-Stil) */
   body.theme-fresh #versionBar:not(.update-banner) {
-    background: linear-gradient(90deg, #0f0a2e 0%, #1e1b4b 40%, #4c1d95 100%) !important;
-    border-color: transparent !important;
-    color: #fff !important;
+    background: #ffffff !important;
+    border-color: #E2E8F0 !important;
+    color: #334155 !important;
   }
   body.theme-fresh #versionBar:not(.update-banner) * {
-    color: #fff !important;
+    color: #334155 !important;
   }
-  body.theme-fresh #versionBar .text-brand-600 { color: #c4b5fd !important; }
-  body.theme-fresh #versionBar .text-ink-600,
-  body.theme-fresh #versionBar .text-ink-700,
-  body.theme-fresh #versionBar .text-ink-500 { color: rgba(255,255,255,0.85) !important; }
+  body.theme-fresh #versionBar .text-brand-600 { color: #1B8FB7 !important; }
+  body.theme-fresh #versionBar .text-ink-600 { color: #64748B !important; }
+  body.theme-fresh #versionBar .text-ink-700 { color: #334155 !important; }
+  body.theme-fresh #versionBar .text-ink-500 { color: #64748B !important; }
 
-  /* Page-Header (sticky) — clean white glass mit Schatten */
+  /* Page-Header (sticky) — clean white mit dezentem Shadow */
   body.theme-fresh header.sticky,
   body.theme-fresh > header {
-    backdrop-filter: blur(20px) saturate(160%);
-    -webkit-backdrop-filter: blur(20px) saturate(160%);
-    background: rgba(255, 255, 255, 0.92) !important;
-    box-shadow: 0 1px 0 rgba(15, 23, 42, 0.05);
+    background: #ffffff !important;
+    box-shadow: 0 1px 0 #E2E8F0 !important;
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
   }
-  body.theme-fresh header.sticky h1,
-  body.theme-fresh header.sticky h2 {
-    font-weight: 800 !important;
-    letter-spacing: -0.02em;
+  body.theme-fresh header.sticky h1 {
+    font-weight: 700 !important;
+    letter-spacing: -0.01em;
+    color: #0F172A !important;
   }
 
-  /* Cards: deutlich rundere Ecken + 3D-Schatten */
-  body.theme-fresh .rounded-2xl { border-radius: 1.75rem !important; }
-  body.theme-fresh .rounded-xl  { border-radius: 1.25rem !important; }
-  body.theme-fresh .rounded-lg  { border-radius: 0.875rem !important; }
+  /* Cards: clean, klare Linien, dezenter Schatten (Card-Shadow ähnlich ERP-Hero) */
+  body.theme-fresh .rounded-2xl { border-radius: 1rem !important; }
+  body.theme-fresh .rounded-xl  { border-radius: 0.75rem !important; }
+  body.theme-fresh .rounded-lg  { border-radius: 0.5rem !important; }
   body.theme-fresh .shadow-sm {
-    box-shadow:
-      0 2px 8px -2px rgba(15, 23, 42, 0.06),
-      0 8px 24px -8px rgba(15, 23, 42, 0.08),
-      0 0 0 1px rgba(15, 23, 42, 0.02) !important;
+    box-shadow: 0 1px 2px 0 rgba(0, 0, 0, 0.04), 0 1px 3px 0 rgba(0, 0, 0, 0.06) !important;
   }
 
-  /* Brand-Buttons → kräftiger Gradient mit Glow */
+  /* Brand-Buttons → ERP-Hero Cyan-Blue (#1FA8D6) statt Purple */
   body.theme-fresh button.bg-brand-500,
   body.theme-fresh .bg-brand-500 {
-    background: linear-gradient(135deg, #6366f1 0%, #8b5cf6 50%, #a855f7 100%) !important;
+    background: #1FA8D6 !important;
     border-color: transparent !important;
-    box-shadow: 0 8px 20px -4px rgba(139, 92, 246, 0.45), 0 2px 4px rgba(139, 92, 246, 0.2);
+    box-shadow: 0 1px 2px 0 rgba(0, 0, 0, 0.05);
+    transition: background-color 0.15s ease;
   }
-  body.theme-fresh button.bg-brand-500:hover { filter: brightness(1.08); transform: translateY(-1px); }
-  body.theme-fresh button.bg-brand-500 { transition: all 0.2s ease; }
+  body.theme-fresh button.bg-brand-500:hover { background: #1B8FB7 !important; }
   body.theme-fresh button.bg-brand-600 {
-    background: linear-gradient(135deg, #4f46e5 0%, #7c3aed 50%, #9333ea 100%) !important;
-    border-color: transparent !important;
-    box-shadow: 0 8px 20px -4px rgba(124, 58, 237, 0.45);
-  }
-  body.theme-fresh button.bg-emerald-600,
-  body.theme-fresh button.bg-emerald-500 {
-    background: linear-gradient(135deg, #10b981 0%, #14b8a6 100%) !important;
-    border-color: transparent !important;
-    box-shadow: 0 8px 20px -4px rgba(16, 185, 129, 0.4);
-  }
-  body.theme-fresh button.bg-red-600 {
-    background: linear-gradient(135deg, #ef4444 0%, #f43f5e 100%) !important;
+    background: #1B8FB7 !important;
     border-color: transparent !important;
   }
+  body.theme-fresh button.bg-brand-600:hover { background: #157699 !important; }
 
-  /* BOTTOM-NAV: dunkler Gradient (statt weiß-glass) — wie eine schwebende dark pill */
+  /* Brand-Border-Cards subtler */
+  body.theme-fresh .border-brand-200 { border-color: #9DDDEF !important; }
+  body.theme-fresh .border-brand-300 { border-color: #6CCBE7 !important; }
+  body.theme-fresh .bg-brand-50 { background-color: #EAF7FC !important; }
+  body.theme-fresh .bg-brand-100 { background-color: #CFEEF7 !important; }
+  body.theme-fresh .text-brand-500 { color: #1FA8D6 !important; }
+  body.theme-fresh .text-brand-600 { color: #1B8FB7 !important; }
+  body.theme-fresh .text-brand-700 { color: #157699 !important; }
+  body.theme-fresh .text-brand-800 { color: #105D7A !important; }
+
+  /* Emerald (Anruf-Buttons) bleibt — aber Solid statt Gradient */
+  body.theme-fresh button.bg-emerald-600 { background: #059669 !important; box-shadow: 0 1px 2px 0 rgba(0, 0, 0, 0.05); }
+  body.theme-fresh button.bg-emerald-500 { background: #10b981 !important; box-shadow: 0 1px 2px 0 rgba(0, 0, 0, 0.05); }
+  body.theme-fresh button.bg-emerald-600:hover { background: #047857 !important; }
+
+  /* Red bleibt — solid */
+  body.theme-fresh button.bg-red-600 { background: #dc2626 !important; box-shadow: 0 1px 2px 0 rgba(0, 0, 0, 0.05); }
+
+  /* BOTTOM-NAV: dunkel-ink, dezent — wie ERP-Hero-Sidebar */
   body.theme-fresh nav.fixed.bottom-0 {
-    background: linear-gradient(135deg, #0f0a2e 0%, #1e1b4b 50%, #2e1065 100%) !important;
+    background: #0F172A !important;
     border: none !important;
-    border-top: 1px solid rgba(167, 139, 250, 0.2) !important;
-    box-shadow: 0 -12px 32px -8px rgba(15, 23, 42, 0.3) !important;
+    border-top: 1px solid #1E293B !important;
+    box-shadow: 0 -2px 8px -2px rgba(15, 23, 42, 0.15) !important;
   }
   body.theme-fresh nav.fixed.bottom-0 button {
-    color: rgba(255,255,255,0.55) !important;
-    transition: all 0.2s ease;
+    color: rgba(255, 255, 255, 0.55) !important;
+    transition: color 0.15s ease;
   }
   body.theme-fresh nav.fixed.bottom-0 button.text-brand-600,
-  body.theme-fresh nav.fixed.bottom-0 button.text-brand-500,
-  body.theme-fresh nav.fixed.bottom-0 button[data-nav-active="true"] {
-    color: #fff !important;
-  }
-  body.theme-fresh nav.fixed.bottom-0 button.text-brand-600 i,
-  body.theme-fresh nav.fixed.bottom-0 button.text-brand-500 i {
-    filter: drop-shadow(0 0 8px rgba(167, 139, 250, 0.6));
+  body.theme-fresh nav.fixed.bottom-0 button.text-brand-500 {
+    color: #6CCBE7 !important;
   }
   body.theme-fresh nav.fixed.bottom-0 button .text-\[10px\] {
-    font-weight: 600 !important;
+    font-weight: 500 !important;
   }
 
-  /* Filter-Chips: aktive (bg-ink-900) → dark gradient pill */
+  /* Filter-Chips: aktive (bg-ink-900) → solid ink */
   body.theme-fresh button.bg-ink-900 {
-    background: linear-gradient(135deg, #1e1b4b 0%, #312e81 50%, #4338ca 100%) !important;
+    background: #0F172A !important;
     border-color: transparent !important;
-    box-shadow: 0 4px 12px -2px rgba(67, 56, 202, 0.4);
+    box-shadow: 0 1px 2px 0 rgba(0, 0, 0, 0.06);
   }
+  body.theme-fresh button.bg-ink-900:hover { background: #1E293B !important; }
 
-  /* Gradient-Stat-Cards: Klassen für Coral / Orange / Purple / Dark-Red, applizierbar via
-     classList von rendering-Code wenn gewünscht (Phase 2). Aktuell nicht aktiv eingesetzt. */
-  body.theme-fresh .stat-card-dark    { background: linear-gradient(135deg, #1e1b4b 0%, #4c1d95 100%) !important; color: white !important; }
-  body.theme-fresh .stat-card-coral   { background: linear-gradient(135deg, #f87171 0%, #fb923c 100%) !important; color: white !important; }
-  body.theme-fresh .stat-card-purple  { background: linear-gradient(135deg, #a78bfa 0%, #7c3aed 100%) !important; color: white !important; }
-  body.theme-fresh .stat-card-violet  { background: linear-gradient(135deg, #ec4899 0%, #be185d 100%) !important; color: white !important; }
-
-  /* Account-Tabs Chips: aktive Pille schöner */
+  /* Account-Tab-Chips */
   body.theme-fresh button[data-account-tab].active,
   body.theme-fresh button.bg-ink-900.rounded-full {
-    background: linear-gradient(135deg, #0f0a2e 0%, #4c1d95 100%) !important;
+    background: #0F172A !important;
     color: white !important;
   }
 
-  /* Status-Badges (FD_STATUS-Pills wie "Offen", "Wartet") rundere Form */
-  body.theme-fresh .text-emerald-700.bg-emerald-100 {
-    background: linear-gradient(135deg, #d1fae5 0%, #a7f3d0 100%) !important;
-    color: #047857 !important;
-    border: none !important;
-  }
-
-  /* Modal-Backdrop mit blauem Tint + Blur */
+  /* Modal-Backdrop: einfacher dunkler Tint, weniger Blur */
   body.theme-fresh .fixed.inset-0.bg-black\/40 {
-    background: linear-gradient(180deg, rgba(15, 10, 46, 0.55) 0%, rgba(76, 29, 149, 0.5) 100%) !important;
-    backdrop-filter: blur(8px);
-    -webkit-backdrop-filter: blur(8px);
+    background: rgba(15, 23, 42, 0.45) !important;
+    backdrop-filter: blur(4px);
+    -webkit-backdrop-filter: blur(4px);
   }
 
-  /* Toasts: rounded + bigger, stärkerer Shadow */
+  /* Toasts: clean mit dezentem Shadow */
   body.theme-fresh #toastContainer > div {
-    border-radius: 1.5rem !important;
-    box-shadow: 0 16px 40px -12px rgba(15, 10, 46, 0.45), 0 0 0 1px rgba(255, 255, 255, 0.15) !important;
-    backdrop-filter: blur(8px);
+    border-radius: 0.75rem !important;
+    box-shadow: 0 4px 12px -2px rgba(15, 23, 42, 0.15), 0 2px 4px rgba(15, 23, 42, 0.08) !important;
+    backdrop-filter: none;
   }
 
-  /* Inputs: rundere Ecken + violet Focus-Ring */
+  /* Inputs: blau-cyan Focus-Ring (statt purple) */
   body.theme-fresh input[type="text"],
   body.theme-fresh input[type="email"],
   body.theme-fresh input[type="tel"],
@@ -299,42 +282,130 @@
   body.theme-fresh input[type="number"],
   body.theme-fresh select,
   body.theme-fresh textarea {
-    border-radius: 0.875rem !important;
-    transition: all 0.18s ease;
+    border-radius: 0.5rem !important;
+    transition: border-color 0.15s ease, box-shadow 0.15s ease;
   }
   body.theme-fresh input:focus,
   body.theme-fresh select:focus,
   body.theme-fresh textarea:focus {
-    border-color: #a855f7 !important;
-    box-shadow: 0 0 0 4px rgba(168, 85, 247, 0.15) !important;
+    border-color: #1FA8D6 !important;
+    box-shadow: 0 0 0 3px rgba(31, 168, 214, 0.15) !important;
+    outline: none;
   }
 
-  /* Login-Screen: dramatischer Gradient */
+  /* Login-Screen: clean white mit subtilem Cyan-Tint */
   body.theme-fresh #loginScreen {
-    background:
-      radial-gradient(800px 500px at 50% 0%, rgba(139, 92, 246, 0.20), transparent 70%),
-      radial-gradient(600px 300px at 50% 100%, rgba(244, 63, 94, 0.10), transparent 70%),
-      linear-gradient(180deg, #1e1b4b 0%, #0f0a2e 100%) !important;
-    color: white !important;
+    background: linear-gradient(180deg, #EAF7FC 0%, #F8FAFC 60%) !important;
   }
-  body.theme-fresh #loginScreen .bg-ink-100 {
-    background: rgba(255,255,255,0.05) !important;
-    border-color: rgba(255,255,255,0.1) !important;
-    color: rgba(255,255,255,0.85) !important;
-  }
-  body.theme-fresh #loginScreen .text-ink-600 { color: rgba(255,255,255,0.7) !important; }
-  body.theme-fresh #loginScreen .text-ink-900 { color: white !important; }
-  body.theme-fresh #loginScreen .bg-white { background: rgba(255,255,255,0.95) !important; }
 
-  /* H1/H2 in Page-Header bolder */
+  /* H1/H2 sauber */
   body.theme-fresh h1, body.theme-fresh h2 {
-    letter-spacing: -0.02em;
+    letter-spacing: -0.01em;
+    color: #0F172A;
   }
-  /* Account-Tab-Chips: weiße Karten mit subtilem Schatten statt einfacher Border */
+
+  /* Account-Tab-Chips weiß */
   body.theme-fresh button.rounded-full.bg-white {
-    box-shadow: 0 2px 6px -1px rgba(15, 23, 42, 0.05), 0 1px 0 rgba(15, 23, 42, 0.02);
-    border-color: transparent !important;
+    box-shadow: 0 1px 2px 0 rgba(0, 0, 0, 0.04) !important;
+    border-color: #E2E8F0 !important;
   }
+
+  /* === Purple/Violet-Akzente ersetzen durch Cyan === */
+  /* Buttons mit purple/violet Hintergrund → cyan */
+  body.theme-fresh button.bg-purple-500,
+  body.theme-fresh .bg-purple-500,
+  body.theme-fresh button.bg-violet-500,
+  body.theme-fresh .bg-violet-500 {
+    background: #1FA8D6 !important;
+  }
+  body.theme-fresh button.bg-purple-600,
+  body.theme-fresh button.bg-violet-600 {
+    background: #1B8FB7 !important;
+  }
+  body.theme-fresh .bg-purple-50 { background-color: #EAF7FC !important; }
+  body.theme-fresh .bg-purple-100 { background-color: #CFEEF7 !important; }
+  body.theme-fresh .border-purple-200 { border-color: #9DDDEF !important; }
+  body.theme-fresh .border-purple-300 { border-color: #6CCBE7 !important; }
+  body.theme-fresh .text-purple-600,
+  body.theme-fresh .text-violet-600 { color: #1B8FB7 !important; }
+  body.theme-fresh .text-purple-700,
+  body.theme-fresh .text-violet-700 { color: #157699 !important; }
+  body.theme-fresh .text-purple-800,
+  body.theme-fresh .text-violet-800 { color: #105D7A !important; }
+  body.theme-fresh .text-purple-900 { color: #0B445B !important; }
+
+  /* KI-Assistent / Sparkles Buttons (waren purple gradient) → cyan */
+  body.theme-fresh button.bg-gradient-to-br.from-violet-500,
+  body.theme-fresh button.bg-gradient-to-br.from-purple-500 {
+    background: #1FA8D6 !important;
+    background-image: none !important;
+    box-shadow: 0 1px 2px 0 rgba(0, 0, 0, 0.05);
+  }
+  body.theme-fresh button.bg-gradient-to-br.from-violet-500:hover,
+  body.theme-fresh button.bg-gradient-to-br.from-purple-500:hover { background: #1B8FB7 !important; }
+
+  /* Schließen-Button (war Slate-Gradient) → solid ink-800 */
+  body.theme-fresh button.bg-gradient-to-br.from-slate-700 {
+    background: #1E293B !important;
+    background-image: none !important;
+    box-shadow: 0 1px 2px 0 rgba(0, 0, 0, 0.05);
+  }
+  body.theme-fresh button.bg-gradient-to-br.from-slate-700:hover { background: #0F172A !important; }
+
+  /* Emerald-Gradient Phone-Buttons → solid emerald */
+  body.theme-fresh a.bg-gradient-to-r.from-emerald-500 {
+    background: #10b981 !important;
+    background-image: none !important;
+    box-shadow: 0 1px 2px 0 rgba(0, 0, 0, 0.05);
+  }
+  body.theme-fresh a.bg-gradient-to-r.from-emerald-500:hover { background: #059669 !important; }
+  body.theme-fresh a.bg-gradient-to-r.from-emerald-500 .shadow-emerald-200 { box-shadow: none !important; }
+
+  /* Stack-Card Header-Gradient (war coral/amber/purple je nach Status) — bleibt
+     mit Status-Farbe, aber dezenter und ohne extreme Gradients */
+  body.theme-fresh .bg-gradient-to-br.from-violet-500.via-purple-500,
+  body.theme-fresh .bg-gradient-to-br.from-violet-400.to-purple-500,
+  body.theme-fresh .bg-gradient-to-br.from-violet-500.to-violet-600 {
+    background: #1FA8D6 !important;
+    background-image: none !important;
+  }
+  body.theme-fresh .bg-gradient-to-br.from-rose-500 {
+    background: #dc2626 !important;
+    background-image: none !important;
+  }
+  body.theme-fresh .bg-gradient-to-br.from-amber-400 {
+    background: #f59e0b !important;
+    background-image: none !important;
+  }
+  body.theme-fresh .bg-gradient-to-br.from-sky-400,
+  body.theme-fresh .bg-gradient-to-br.from-sky-500 {
+    background: #1FA8D6 !important;
+    background-image: none !important;
+  }
+  body.theme-fresh .bg-gradient-to-br.from-emerald-500.to-green-600 {
+    background: #10b981 !important;
+    background-image: none !important;
+  }
+
+  /* Stack-Card Status-Akzent-Bar (vertikal links): vereinfacht zu solid */
+  body.theme-fresh .bg-gradient-to-b.from-rose-500 { background: #dc2626 !important; background-image: none !important; }
+  body.theme-fresh .bg-gradient-to-b.from-amber-400 { background: #f59e0b !important; background-image: none !important; }
+  body.theme-fresh .bg-gradient-to-b.from-sky-400 { background: #1FA8D6 !important; background-image: none !important; }
+  body.theme-fresh .bg-gradient-to-b.from-violet-400 { background: #1FA8D6 !important; background-image: none !important; }
+
+  /* Buttons mit shadow-purple/violet-Glow → entfernt */
+  body.theme-fresh .shadow-purple-200,
+  body.theme-fresh .shadow-purple-300,
+  body.theme-fresh .shadow-violet-200 { box-shadow: 0 1px 2px 0 rgba(0, 0, 0, 0.05) !important; }
+  body.theme-fresh .shadow-emerald-200 { box-shadow: 0 1px 2px 0 rgba(0, 0, 0, 0.05) !important; }
+  body.theme-fresh .shadow-amber-200 { box-shadow: 0 1px 2px 0 rgba(0, 0, 0, 0.05) !important; }
+
+  /* Ring-Akzente (purple) → cyan */
+  body.theme-fresh .ring-purple-300,
+  body.theme-fresh .ring-purple-500 { --tw-ring-color: #6CCBE7 !important; }
+
+  /* Active scale Animationen behalten — aber Transitions klarer */
+  body.theme-fresh button { transition: background-color 0.15s ease, transform 0.1s ease, border-color 0.15s ease, color 0.15s ease; }
 </style>
 </head>
 <body class="text-ink-900">
@@ -517,7 +588,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.26';
+const APP_VERSION = 'v2.46.27';
 
 /* ============================================================
    GLOBAL THEME — v2.46.12
