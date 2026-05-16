@@ -713,7 +713,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.43';
+const APP_VERSION = 'v2.46.44';
 
 /* ============================================================
    GLOBAL THEME — v2.46.12
@@ -1678,24 +1678,60 @@ async function logout() {
    PROXY FETCH (für Freshdesk + Anthropic via val.town)
    ============================================================ */
 
-/* v2.46.42: Globale Concurrency-Drossel für ALLE Freshdesk-Calls. Max 3 gleichzeitig
-   in-flight — verhindert dass die Parallelausführung von hydrateMissingRequesters,
-   autoApplyRulesForTickets, validatePhones, etc. ZUSAMMEN das Rate-Limit triggert.
-   Freshdesks Rate-Limit-Fenster ist 60s — wenn man es einmal sprengt, dauert es lange. */
-const _FD_MAX_CONCURRENT = 3;
-let _FD_INFLIGHT = 0;
-const _FD_WAIT_QUEUE = [];
+/* v2.46.44: PER-ACCOUNT-Concurrency-Drossel für Freshdesk-Calls. Freshdesks
+   Rate-Limit gilt PRO ACCOUNT (pro Subdomain), nicht global — bei kleinen Plänen
+   (Sprout=100/h, Blossom=200/min) ist der Limit deutlich enger. Daher:
+   - max 2 in-flight pro Account (statt 3 global)
+   - bei 429: 30s Pause für DIESEN Account, andere Accounts laufen normal weiter */
+const _FD_MAX_PER_ACCOUNT = 2;
+const _FD_429_PAUSE_MS = 30000;
+const _FD_ACCOUNT_INFLIGHT = {};       // accountId → count
+const _FD_ACCOUNT_QUEUE = {};          // accountId → resolve-array
+const _FD_ACCOUNT_PAUSED_UNTIL = {};   // accountId → ms-timestamp
 function _isFreshdeskPath(path) { return typeof path === 'string' && path.startsWith('/freshdesk/'); }
-async function _fdAcquireSlot() {
-  if (_FD_INFLIGHT < _FD_MAX_CONCURRENT) { _FD_INFLIGHT++; return; }
-  // Warten bis ein Slot frei wird
-  await new Promise(resolve => _FD_WAIT_QUEUE.push(resolve));
-  _FD_INFLIGHT++;
+function _extractAccountIdFromPath(path) {
+  const m = String(path).match(/^\/freshdesk\/([^\/]+)\//);
+  return m ? decodeURIComponent(m[1]) : null;
 }
-function _fdReleaseSlot() {
-  _FD_INFLIGHT = Math.max(0, _FD_INFLIGHT - 1);
-  const next = _FD_WAIT_QUEUE.shift();
-  if (next) next();
+async function _fdAcquireSlot(accountId) {
+  const key = accountId || '_global';
+  // 1. Pause-Check (wenn dieser Account kürzlich 429 hatte)
+  const pausedUntil = _FD_ACCOUNT_PAUSED_UNTIL[key] || 0;
+  if (pausedUntil > Date.now()) {
+    const remaining = pausedUntil - Date.now();
+    console.warn('[FD-Throttle] Account ' + key + ' pausiert — warte ' + remaining + 'ms');
+    await new Promise(r => setTimeout(r, Math.min(remaining, _FD_429_PAUSE_MS)));
+  }
+  // 2. Slot reservieren
+  if (!_FD_ACCOUNT_QUEUE[key]) _FD_ACCOUNT_QUEUE[key] = [];
+  if ((_FD_ACCOUNT_INFLIGHT[key] || 0) < _FD_MAX_PER_ACCOUNT) {
+    _FD_ACCOUNT_INFLIGHT[key] = (_FD_ACCOUNT_INFLIGHT[key] || 0) + 1;
+    return;
+  }
+  await new Promise(resolve => _FD_ACCOUNT_QUEUE[key].push(resolve));
+  _FD_ACCOUNT_INFLIGHT[key] = (_FD_ACCOUNT_INFLIGHT[key] || 0) + 1;
+}
+function _fdReleaseSlot(accountId) {
+  const key = accountId || '_global';
+  _FD_ACCOUNT_INFLIGHT[key] = Math.max(0, (_FD_ACCOUNT_INFLIGHT[key] || 0) - 1);
+  const q = _FD_ACCOUNT_QUEUE[key];
+  if (q && q.length) {
+    const next = q.shift();
+    if (next) next();
+  }
+}
+function _fdMarkAccountRateLimited(accountId) {
+  if (!accountId) return;
+  const until = Date.now() + _FD_429_PAUSE_MS;
+  _FD_ACCOUNT_PAUSED_UNTIL[accountId] = until;
+  console.warn('[FD-Throttle] Account ' + accountId + ' Rate-Limit getriggert — pausiert für ' + Math.round(_FD_429_PAUSE_MS / 1000) + 's. Andere Accounts laufen weiter.');
+  // User-Toast (einmalig pro Account-Pause-Phase)
+  if (typeof toast === 'function' && !_FD_ACCOUNT_PAUSED_UNTIL['_toastSent_' + accountId]) {
+    _FD_ACCOUNT_PAUSED_UNTIL['_toastSent_' + accountId] = until;
+    const acc = (APP_STATE.accounts || []).find(a => a.id === accountId);
+    const name = acc?.name || accountId.slice(0, 8);
+    toast('Freshdesk-Rate-Limit für „' + name + '" — App pausiert API-Calls für 30s. Vermutlich kleiner FD-Plan (Sprout/Blossom).', 'warn', 8000);
+  }
 }
 
 async function proxyFetch(path, init = {}) {
@@ -1704,14 +1740,16 @@ async function proxyFetch(path, init = {}) {
   if (!token) throw new Error('Nicht eingeloggt');
   const headers = Object.assign({}, init.headers || {}, { 'Authorization': 'Bearer ' + token });
   if (init.body && !headers['Content-Type']) headers['Content-Type'] = 'application/json';
-  // v2.46.42: Concurrency-Drossel nur für Freshdesk (nicht für Anthropic/etc.)
   const throttled = _isFreshdeskPath(path);
-  if (throttled) await _fdAcquireSlot();
+  const accountId = throttled ? _extractAccountIdFromPath(path) : null;
+  if (throttled) await _fdAcquireSlot(accountId);
   try {
     const res = await fetch(_proxyBase() + (path.startsWith('/') ? path : '/' + path), Object.assign({}, init, { headers }));
+    // 429 detection — pausiere DIESEN Account
+    if (res.status === 429 && accountId) _fdMarkAccountRateLimited(accountId);
     return res;
   } finally {
-    if (throttled) _fdReleaseSlot();
+    if (throttled) _fdReleaseSlot(accountId);
   }
 }
 
