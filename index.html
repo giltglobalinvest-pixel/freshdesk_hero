@@ -691,7 +691,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.34';
+const APP_VERSION = 'v2.46.35';
 
 /* ============================================================
    GLOBAL THEME — v2.46.12
@@ -8498,6 +8498,8 @@ let STACK_AI_REC = null;
 async function openStackAiModal(accountId, ticketId) {
   let host = document.getElementById('subModalHost');
   if (!host) { host = document.createElement('div'); host.id = 'subModalHost'; document.body.appendChild(host); }
+  // v2.46.35: Ticket-Ref persistieren damit processStackAi später weiß welches Ticket
+  window._STACK_AI_CURRENT_REF = { accountId, ticketId };
   // Ticket-Daten holen — entweder aus Cache oder fetchen für Kontext
   let ticket = APP_STATE.ticketCache?.get?.(accountId + '|' + ticketId);
   if (!ticket || !ticket.subject) {
@@ -8591,24 +8593,33 @@ async function processStackAi(btn) {
   if (STACK_AI_REC) { try { STACK_AI_REC.stop(); } catch (_) {} STACK_AI_REC = null; }
   const cmd = ($('stackAiCmd')?.value || '').trim();
   if (!cmd) return toast('Bitte etwas eintippen oder sprechen', 'warn');
-  // processAssistantCommand erwartet das Eingabefeld id="assistantCommand" — wir setzen
-  // einen temporären verstecktes Textfeld, oder wir leiten direkt durch.
-  // Pragmatisch: temporäres Element injizieren.
-  const tmpInput = document.createElement('textarea');
-  tmpInput.id = 'assistantCommand';
-  tmpInput.value = cmd;
-  tmpInput.style.display = 'none';
-  document.body.appendChild(tmpInput);
-  setBusy(btn, true, 'Verarbeite…');
-  try {
-    await processAssistantCommand(btn);
+  // v2.46.35 BUG-FIX: Stack-AI-Flow korrekt verdrahten.
+  // processAssistantCommand braucht ASSISTANT_CTX UND eine voll initialisierte
+  // Assistant-Modal-DOM für die Preview-Rendering. Vorher fehlten beide → nichts passierte.
+  // Lösung: Stack-Modal zumachen, dann das vollständige openAssistantModal aufrufen
+  // mit dem Command pre-fillen und automatisch verarbeiten.
+  const ref = window._STACK_AI_CURRENT_REF;
+  if (!ref) {
+    toast('Ticket-Kontext verloren', 'error');
     closeStackAiModal();
-  } catch (e) {
-    setBusy(btn, false);
-    toast('KI-Fehler: ' + (e.message || e), 'error', 8000);
-  } finally {
-    tmpInput.remove();
+    return;
   }
+  closeStackAiModal();
+  // Voll-Screen Assistant-Modal öffnen
+  await openAssistantModal(ref.accountId, ref.ticketId);
+  // Kurz warten bis das DOM steht, dann Command einfügen + Verarbeiten triggern
+  setTimeout(() => {
+    const ta = $('assistantCommand');
+    if (ta) {
+      ta.value = cmd;
+      // „Verarbeiten"-Button suchen + klicken
+      const submitBtn = document.querySelector('[onclick*="processAssistantCommand"]');
+      if (submitBtn) submitBtn.click();
+      else toast('Konnte Verarbeiten-Button nicht finden', 'warn');
+    } else {
+      toast('Konnte Textfeld nicht öffnen', 'warn');
+    }
+  }, 250);
 }
 function closeStackAiModal() {
   if (STACK_AI_REC) { try { STACK_AI_REC.stop(); } catch (_) {} STACK_AI_REC = null; }
