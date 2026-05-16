@@ -167,23 +167,24 @@
   body.fullscreen-stack .sticky.bottom-20 {
     bottom: env(safe-area-inset-bottom, 12px) !important;
   }
-  /* Floating Exit-Button (über alles, top-right) */
+  /* Floating Exit-Button (über alles, rechts mittig — gut mit dem Daumen erreichbar,
+     genug Abstand zur Status-Bar des iPhones, nicht über den Karten-Aktionen) */
   .fullscreen-exit-btn {
     position: fixed;
-    top: calc(env(safe-area-inset-top, 0px) + 0.75rem);
-    right: 0.75rem;
+    top: calc(env(safe-area-inset-top, 0px) + 6rem);
+    right: 0.875rem;
     z-index: 100;
-    width: 44px;
-    height: 44px;
+    width: 56px;
+    height: 56px;
     border-radius: 9999px;
     background: rgba(255, 255, 255, 0.95);
-    box-shadow: 0 4px 12px -2px rgba(15, 23, 42, 0.25), 0 0 0 1px rgba(15, 23, 42, 0.08);
+    box-shadow: 0 6px 16px -3px rgba(15, 23, 42, 0.3), 0 0 0 1px rgba(15, 23, 42, 0.08);
     display: flex;
     align-items: center;
     justify-content: center;
     color: #0F172A;
-    backdrop-filter: blur(8px);
-    -webkit-backdrop-filter: blur(8px);
+    backdrop-filter: blur(10px);
+    -webkit-backdrop-filter: blur(10px);
     transition: transform 0.15s ease, background 0.15s ease;
   }
   .fullscreen-exit-btn:active { transform: scale(0.92); background: #f1f5f9; }
@@ -633,7 +634,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.28';
+const APP_VERSION = 'v2.46.29';
 
 /* ============================================================
    GLOBAL THEME — v2.46.12
@@ -6909,10 +6910,9 @@ async function renderTicketsPage() {
           const tvIcon = tvMode === 'stack' ? 'layers' : 'list';
           const tvLabel = tvMode === 'stack' ? 'Stack' : 'Liste';
           html += `<button onclick="setTicketsViewMode('${tvNext}')" class="shrink-0 px-2 py-1 rounded-md text-[11px] font-medium bg-white text-ink-700 border border-ink-200 inline-flex items-center gap-1" title="Ansicht: ${tvLabel} (klick um zu wechseln)"><i data-lucide="${tvIcon}" class="w-3.5 h-3.5"></i>${tvLabel}</button>`;
-          // v2.46.28: Vollbild-Stack-Button (nur sichtbar wenn schon im Stack-Modus)
-          if (tvMode === 'stack') {
-            html += `<button onclick="enterTicketsStackFullscreen()" class="shrink-0 px-2 py-1 rounded-md text-[11px] font-semibold bg-brand-500 text-white border border-brand-500 inline-flex items-center gap-1" title="Karten im Vollbild zeigen (alle anderen UI-Elemente ausblenden)"><i data-lucide="maximize" class="w-3.5 h-3.5"></i>Vollbild</button>`;
-          }
+          // v2.46.29: Vollbild-Schnell-Button — IMMER sichtbar (auch in Listenansicht).
+          // Klick → wechselt automatisch in Stack-Modus + Vollbild in einem Schritt.
+          html += `<button onclick="enterTicketsStackFullscreen()" class="shrink-0 px-2.5 py-1 rounded-md text-[11px] font-semibold bg-brand-500 text-white border border-brand-500 inline-flex items-center gap-1 shadow-sm" title="Direkt in Vollbild-Karten-Modus wechseln"><i data-lucide="maximize" class="w-3.5 h-3.5"></i>Vollbild</button>`;
           return html;
         })()}
       </div>
@@ -8203,7 +8203,7 @@ function _renderTicketStack(tickets) {
   const minH = TICKETS_STACK_FULLSCREEN ? 'calc(100vh - 200px)' : 'calc(100vh - 320px)';
   // Floating Exit-Button HTML (nur wenn fullscreen)
   const exitBtnHtml = TICKETS_STACK_FULLSCREEN
-    ? '<button onclick="exitTicketsStackFullscreen()" class="fullscreen-exit-btn" title="Vollbild verlassen" aria-label="Vollbild verlassen"><i data-lucide="x" class="w-6 h-6"></i></button>'
+    ? '<button onclick="exitTicketsStackFullscreen()" class="fullscreen-exit-btn" title="Vollbild verlassen" aria-label="Vollbild verlassen"><i data-lucide="x" class="w-7 h-7"></i></button>'
     : '';
   $('ticketList').innerHTML =
     exitBtnHtml +
