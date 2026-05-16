@@ -713,7 +713,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.38';
+const APP_VERSION = 'v2.46.39';
 
 /* ============================================================
    GLOBAL THEME — v2.46.12
@@ -9007,7 +9007,14 @@ function _renderTicketStackCard(t, isTop) {
   const reqPhone = requester.phone || '';
   const reqMobile = requester.mobile || '';
   // Description-Preview (für Quote)
-  const descTxt = htmlToText(t.description_text || t.description || '').slice(0, 300);
+  // v2.46.39: Whitespace kollabieren — sonst zeigt eine 10-Zeilen-Begrenzung bei
+  // Pipedrive-/Mailchimp-Templates oft nur eine echte Zeile + 9 leere Lines.
+  let _rawDesc = htmlToText(t.description_text || t.description || '');
+  // Leere Zeilen (nur Whitespace) entfernen, 3+ Newlines auf max 2 reduzieren
+  _rawDesc = _rawDesc.replace(/^[\s ​]+$/gm, '').replace(/\n{3,}/g, '\n\n').trim();
+  // Mehrere Spaces in einer Zeile auch kollabieren
+  _rawDesc = _rawDesc.replace(/[ \t ]{2,}/g, ' ');
+  const descTxt = _rawDesc.slice(0, 600);
   // Group + Assignee
   const groupName = getGroupName(accountId, t.group_id) || '';
   const assigneeName = getAgentFirstName(accountId, t.responder_id) || '';
