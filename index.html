@@ -713,7 +713,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.41';
+const APP_VERSION = 'v2.46.42';
 
 /* ============================================================
    GLOBAL THEME — v2.46.12
@@ -1677,28 +1677,55 @@ async function logout() {
 /* ============================================================
    PROXY FETCH (für Freshdesk + Anthropic via val.town)
    ============================================================ */
+
+/* v2.46.42: Globale Concurrency-Drossel für ALLE Freshdesk-Calls. Max 3 gleichzeitig
+   in-flight — verhindert dass die Parallelausführung von hydrateMissingRequesters,
+   autoApplyRulesForTickets, validatePhones, etc. ZUSAMMEN das Rate-Limit triggert.
+   Freshdesks Rate-Limit-Fenster ist 60s — wenn man es einmal sprengt, dauert es lange. */
+const _FD_MAX_CONCURRENT = 3;
+let _FD_INFLIGHT = 0;
+const _FD_WAIT_QUEUE = [];
+function _isFreshdeskPath(path) { return typeof path === 'string' && path.startsWith('/freshdesk/'); }
+async function _fdAcquireSlot() {
+  if (_FD_INFLIGHT < _FD_MAX_CONCURRENT) { _FD_INFLIGHT++; return; }
+  // Warten bis ein Slot frei wird
+  await new Promise(resolve => _FD_WAIT_QUEUE.push(resolve));
+  _FD_INFLIGHT++;
+}
+function _fdReleaseSlot() {
+  _FD_INFLIGHT = Math.max(0, _FD_INFLIGHT - 1);
+  const next = _FD_WAIT_QUEUE.shift();
+  if (next) next();
+}
+
 async function proxyFetch(path, init = {}) {
   if (!APP_KEYS.apiProxyUrl) throw new Error('Val.town-Proxy nicht eingerichtet — Admin → Einstellungen');
   const token = APP_KEYS.sessionToken || _getStoredToken();
   if (!token) throw new Error('Nicht eingeloggt');
   const headers = Object.assign({}, init.headers || {}, { 'Authorization': 'Bearer ' + token });
   if (init.body && !headers['Content-Type']) headers['Content-Type'] = 'application/json';
-  const res = await fetch(_proxyBase() + (path.startsWith('/') ? path : '/' + path), Object.assign({}, init, { headers }));
-  return res;
+  // v2.46.42: Concurrency-Drossel nur für Freshdesk (nicht für Anthropic/etc.)
+  const throttled = _isFreshdeskPath(path);
+  if (throttled) await _fdAcquireSlot();
+  try {
+    const res = await fetch(_proxyBase() + (path.startsWith('/') ? path : '/' + path), Object.assign({}, init, { headers }));
+    return res;
+  } finally {
+    if (throttled) _fdReleaseSlot();
+  }
 }
 
 async function proxyJson(path, init = {}) {
-  // v2.46.40: 429-Retry mit exponentiellem Backoff. Freshdesk gibt manchmal HTTP 429
-  // (Rate-Limit) zurück wenn zu viele Requests in kurzer Zeit kommen. Vorher: Error
-  // direkt in die UI — Ticket konnte nicht geladen werden. Jetzt: bis zu 3 Retries mit
-  // 1s, 2s, 4s Wartezeit (respektiert Retry-After-Header wenn gesetzt).
+  // v2.46.40 / v2.46.42: 429-Retry mit exponentiellem Backoff. Freshdesk-Rate-Limit-
+  // Fenster ist 60 Sekunden — Retries müssen länger warten als der typische Reset.
+  // Wartezeiten: 5s, 15s, 30s (statt 1s, 2s, 4s). Respektiert Retry-After-Header.
   let res = await proxyFetch(path, init);
   for (let attempt = 1; attempt <= 3 && res.status === 429; attempt++) {
-    // Retry-After-Header lesen (Sekunden oder HTTP-Date)
     const retryAfter = res.headers.get('Retry-After') || res.headers.get('retry-after') || '';
-    let waitMs = Math.pow(2, attempt - 1) * 1000; // 1s, 2s, 4s
+    const defaultMs = [5000, 15000, 30000][attempt - 1];
+    let waitMs = defaultMs;
     const n = parseInt(retryAfter, 10);
-    if (Number.isFinite(n) && n > 0 && n < 60) waitMs = Math.max(waitMs, n * 1000);
+    if (Number.isFinite(n) && n > 0 && n < 120) waitMs = Math.max(waitMs, n * 1000);
     console.warn('[proxyJson] HTTP 429 für ' + path + ' — Retry ' + attempt + '/3 in ' + waitMs + 'ms');
     await new Promise(r => setTimeout(r, waitMs));
     try { res = await proxyFetch(path, init); } catch (e) { console.warn('Retry fetch failed:', e); break; }
