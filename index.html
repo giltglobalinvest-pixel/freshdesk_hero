@@ -517,7 +517,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.21';
+const APP_VERSION = 'v2.46.22';
 
 /* ============================================================
    GLOBAL THEME — v2.46.12
@@ -8443,6 +8443,112 @@ function closeQuickSummaryModal() {
   document.body.style.overflow = '';
 }
 
+/* v2.46.22: Sauberes Kontakt-Modal für Schnellanruf aus der Stack-Card.
+   Lädt Kontakt-Daten + Firma async, zeigt grosse Click-to-Call-Buttons. */
+async function openQuickContactModal(accountId, ticketId) {
+  let host = document.getElementById('subModalHost');
+  if (!host) { host = document.createElement('div'); host.id = 'subModalHost'; document.body.appendChild(host); }
+  // Initial: Spinner + Kerndaten aus Cache wenn vorhanden
+  const ticket = (APP_STATE.pageState?.tickets || []).find(x => x._accountId === accountId && x.id === ticketId)
+    || APP_STATE.ticketCache?.get?.(accountId + '|' + ticketId);
+  const contactId = ticket?.requester_id;
+  let cached = contactId ? getCachedRequester(accountId, contactId) : null;
+  const reqName = cached?.name || ticket?.requester?.name || ticket?.email || '';
+  const reqEmail = cached?.email || ticket?.requester?.email || ticket?.email || '';
+  const initial = (reqName || reqEmail || '?').trim().charAt(0).toUpperCase();
+  host.innerHTML =
+    '<div class="fixed inset-0 z-[60] flex items-end justify-center bg-black/50" onclick="if(event.target===this)closeQuickContactModal()">' +
+      '<div class="bg-white w-full max-w-md rounded-t-3xl shadow-2xl flex flex-col safe-bottom" style="max-height:88vh">' +
+        '<div class="px-4 py-3 border-b border-ink-200 flex items-center justify-between gap-2 shrink-0">' +
+          '<h3 class="font-bold text-ink-900 inline-flex items-center gap-2"><i data-lucide="user" class="w-5 h-5 text-brand-600"></i> Kontakt</h3>' +
+          '<button onclick="closeQuickContactModal()" class="w-9 h-9 rounded-lg hover:bg-ink-100 flex items-center justify-center" title="Schließen"><i data-lucide="x" class="w-5 h-5 text-ink-700"></i></button>' +
+        '</div>' +
+        '<div id="quickContactBody" class="flex-1 overflow-y-auto px-4 py-5">' +
+          // Avatar + Name initial-Render
+          '<div class="flex flex-col items-center text-center mb-5">' +
+            '<div class="w-20 h-20 rounded-3xl bg-gradient-to-br from-brand-500 to-purple-600 flex items-center justify-center text-white text-3xl font-extrabold shadow-lg shadow-brand-200 mb-3">' + escapeHtml(initial) + '</div>' +
+            (reqName ? '<p class="text-2xl font-extrabold text-ink-900 leading-tight tracking-tight">' + escapeHtml(reqName) + '</p>' : '<p class="text-lg italic text-ink-400">Lade Kontakt…</p>') +
+            '<p id="quickContactFirma" class="text-[14px] text-ink-500 mt-1"></p>' +
+          '</div>' +
+          // Body (Telefonnummern + Email) — wird dynamisch befüllt
+          '<div id="quickContactActions"><div class="text-center py-4"><span class="spinner inline-block w-6 h-6 border-[2px] text-brand-500"></span><p class="text-[11px] text-ink-500 mt-2">Lade Telefonnummern + Firma…</p></div></div>' +
+        '</div>' +
+        '<div class="border-t border-ink-200 p-3 shrink-0">' +
+          '<button onclick="closeQuickContactModal()" class="w-full bg-ink-100 hover:bg-ink-200 text-ink-700 rounded-xl px-3 py-3 text-sm font-bold">Schließen</button>' +
+        '</div>' +
+      '</div>' +
+    '</div>';
+  if (window.lucide) lucide.createIcons();
+  document.body.style.overflow = 'hidden';
+  // Async laden: voller Kontakt + Firma
+  try {
+    let contact = cached;
+    if (contactId && (!contact || !contact.phone && !contact.mobile)) {
+      contact = await ensureRequesterLoaded(accountId, contactId, { requirePhones: true });
+    }
+    contact = contact || { name: reqName, email: reqEmail, phone: '', mobile: '' };
+    let companyName = '';
+    if (contact?.company_id) {
+      try {
+        const co = await fetchCompanyById(accountId, contact.company_id);
+        companyName = co?.name || '';
+      } catch (_) {}
+    }
+    // Render body
+    const firmaEl = $('quickContactFirma');
+    if (firmaEl && companyName) firmaEl.innerHTML = '<i data-lucide="building-2" class="w-4 h-4 inline mr-1 -mt-0.5"></i>' + escapeHtml(companyName);
+    const phones = [];
+    if (contact.phone)  phones.push({ label: 'Festnetz', num: contact.phone,  icon: 'phone' });
+    if (contact.mobile) phones.push({ label: 'Mobil',     num: contact.mobile, icon: 'smartphone' });
+    let html = '';
+    // Phone-Buttons
+    if (phones.length) {
+      html += '<div class="space-y-2.5 mb-4">' + phones.map(p => {
+        const tel = _cleanPhoneForTel(p.num);
+        return '<a href="tel:' + escapeAttr(tel) + '" class="flex items-center gap-3 px-4 py-4 bg-gradient-to-r from-emerald-500 to-teal-500 hover:from-emerald-600 hover:to-teal-600 active:from-emerald-700 active:to-teal-700 text-white rounded-2xl font-semibold shadow-md shadow-emerald-200">' +
+          '<div class="w-12 h-12 rounded-xl bg-white/20 flex items-center justify-center backdrop-blur-sm shrink-0"><i data-lucide="' + p.icon + '" class="w-6 h-6"></i></div>' +
+          '<div class="flex-1 min-w-0">' +
+            '<div class="text-[10px] uppercase tracking-widest opacity-80">' + escapeHtml(p.label) + '</div>' +
+            '<div class="text-[22px] font-mono font-bold leading-tight">' + escapeHtml(p.num) + '</div>' +
+          '</div>' +
+          '<i data-lucide="phone-call" class="w-6 h-6 opacity-80"></i>' +
+        '</a>';
+      }).join('') + '</div>';
+    } else {
+      html += '<div class="bg-ink-50 border border-ink-200 rounded-2xl px-4 py-3 text-center mb-4"><p class="text-[12px] text-ink-500"><i data-lucide="phone-off" class="w-4 h-4 inline mr-1"></i>Keine Telefonnummer hinterlegt</p></div>';
+    }
+    // Email
+    if (contact.email) {
+      html += '<a href="mailto:' + escapeAttr(contact.email) + '" class="flex items-center gap-3 px-4 py-3.5 bg-white border-2 border-brand-200 hover:border-brand-400 hover:bg-brand-50 text-ink-800 rounded-2xl font-semibold">' +
+        '<div class="w-10 h-10 rounded-xl bg-brand-100 flex items-center justify-center text-brand-700 shrink-0"><i data-lucide="mail" class="w-5 h-5"></i></div>' +
+        '<div class="flex-1 min-w-0">' +
+          '<div class="text-[10px] uppercase tracking-widest text-ink-400">Email</div>' +
+          '<div class="text-[14px] font-medium truncate">' + escapeHtml(contact.email) + '</div>' +
+        '</div>' +
+        '<i data-lucide="arrow-up-right" class="w-5 h-5 text-brand-600 shrink-0"></i>' +
+      '</a>';
+    }
+    // Adresse (wenn vorhanden)
+    if (contact.address) {
+      html += '<div class="mt-2 px-4 py-3 bg-ink-50 border border-ink-200 rounded-2xl">' +
+        '<div class="text-[10px] uppercase tracking-widest text-ink-400 mb-0.5">Adresse</div>' +
+        '<p class="text-[13px] text-ink-700 whitespace-pre-line break-words leading-snug">' + escapeHtml(contact.address) + '</p>' +
+      '</div>';
+    }
+    const body = $('quickContactActions');
+    if (body) body.innerHTML = html;
+    if (window.lucide) lucide.createIcons();
+  } catch (e) {
+    const body = $('quickContactActions');
+    if (body) body.innerHTML = '<div class="bg-red-50 border border-red-200 rounded-xl p-3 text-sm text-red-800">Kontakt konnte nicht geladen werden: ' + escapeHtml(e.message || String(e)) + '</div>';
+  }
+}
+function closeQuickContactModal() {
+  const host = document.getElementById('subModalHost');
+  if (host) host.innerHTML = '';
+  document.body.style.overflow = '';
+}
+
 /* v2.46.21: Reloadet ein Ticket im Stack-View → frische Daten + frische Anhang-URLs.
    Freshdesk-Anhang-URLs sind signiert und haben TTL — daher PDFs nach längerer Zeit
    nicht mehr abrufbar. Nach Reload sind sie wieder gültig. */
@@ -8609,10 +8715,10 @@ function _renderTicketStackCard(t, isTop) {
       '</div>' +
       // Subject
       '<p class="text-xl font-extrabold leading-tight tracking-tight">' + escapeHtml(subj) + '</p>' +
-      // Customer + Email (klickbar)
+      // Customer + Email (klickbar — öffnet Quick-Contact-Modal mit Anruf-Buttons)
       (reqName
         ? (t.requester_id
-            ? '<button onclick="event.stopPropagation(); openContactPreviewModal(\'' + escapeAttr(accountId) + '\', ' + t.requester_id + ')" class="text-left mt-2 inline-flex items-center gap-1.5 text-[14px] hover:opacity-90 active:opacity-80 max-w-full"><i data-lucide="user" class="w-4 h-4"></i><span class="truncate font-semibold">' + escapeHtml(reqName) + '</span>' + (reqEmail ? '<span class="opacity-80 truncate">· ' + escapeHtml(reqEmail) + '</span>' : '') + '<i data-lucide="external-link" class="w-3.5 h-3.5 opacity-70"></i></button>'
+            ? '<button onclick="event.stopPropagation(); openQuickContactModal(\'' + escapeAttr(accountId) + '\', ' + ticketId + ')" class="text-left mt-2 inline-flex items-center gap-1.5 text-[14px] hover:opacity-90 active:opacity-80 max-w-full"><i data-lucide="user" class="w-4 h-4"></i><span class="truncate font-semibold">' + escapeHtml(reqName) + '</span>' + (reqEmail ? '<span class="opacity-80 truncate">· ' + escapeHtml(reqEmail) + '</span>' : '') + '<i data-lucide="phone-call" class="w-3.5 h-3.5 opacity-90"></i></button>'
             : '<p class="mt-2 inline-flex items-center gap-1.5 text-[14px]"><i data-lucide="user" class="w-4 h-4"></i><span class="font-semibold">' + escapeHtml(reqName) + '</span>' + (reqEmail ? '<span class="opacity-80">· ' + escapeHtml(reqEmail) + '</span>' : '') + '</p>')
         : '') +
     '</div>' +
