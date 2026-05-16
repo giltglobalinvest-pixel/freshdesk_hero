@@ -170,76 +170,95 @@
   /* v2.46.31: Floating-Button entfernt — Exit ist jetzt eine ordentliche Reihe
      im Sticky-Footer (unter Ausblenden-Button), keine schwebende Action mehr. */
 
-  /* v2.46.34: Vollbild — sauberes Flex-Layout das Karte + Footer korrekt
-     trennt (kein Überlappen mehr). #ticketList wird ein flex-column-Container
-     mit voller Viewport-Höhe. Card-Wrapper bekommt flex:1, Footer ist ganz
-     unten in normaler Flow-Position (nicht mehr sticky-overlapping). */
+  /* v2.46.36: Vollbild — sauberes Flex-Layout. Karte füllt verfügbaren Platz
+     genau, ohne über den Bildschirm zu wachsen. Description-Text bleibt
+     line-clamped (mehr Zeilen) und scrollt NICHT — Card hat feste Höhe. */
   body.fullscreen-stack #ticketList {
     display: flex !important;
     flex-direction: column !important;
     min-height: 100vh !important;
+    max-height: 100vh !important;       /* HARTE Grenze — verhindert overflow */
     padding-top: env(safe-area-inset-top, 0px) !important;
     padding-bottom: 0 !important;
+    overflow: hidden !important;
   }
   body.fullscreen-stack #ticketList > div.relative {
     flex: 1 !important;
-    min-height: 0 !important;
+    min-height: 0 !important;            /* erlaubt flex-shrinking */
     display: flex !important;
     flex-direction: column !important;
     padding-bottom: 0 !important;
+    overflow: hidden !important;
   }
-  /* Sticky-Footer wird in normalen Flow gehoben — bleibt am Ende von ticketList,
-     also unten am Bildschirm dank flex-column auf ticketList */
+  /* Sticky-Footer wird in normalen Flow gehoben */
   body.fullscreen-stack #ticketList > .sticky.bottom-20 {
     position: relative !important;
     bottom: auto !important;
     margin-bottom: 0 !important;
     padding-bottom: calc(env(safe-area-inset-bottom, 8px) + 8px) !important;
+    flex-shrink: 0 !important;            /* footer behält volle Höhe */
   }
-  /* Aktive Karte streckt sich auf 100% des Card-Wrappers */
+  /* Aktive Karte: füllt verfügbaren Platz, aber wächst NIE darüber hinaus */
   body.fullscreen-stack [data-ticket-stack-current] {
     flex: 1 !important;
     min-height: 0 !important;
     display: flex !important;
+    overflow: hidden !important;          /* harte Grenze */
   }
   body.fullscreen-stack [data-ticket-stack-current] > div.bg-white {
     flex: 1 !important;
+    min-height: 0 !important;
+    max-height: 100% !important;          /* darf NICHT größer als Parent werden */
     display: flex !important;
     flex-direction: column !important;
     width: 100% !important;
+    overflow: hidden !important;          /* alles innere bleibt drin */
   }
-  /* Gradient-Header: extra Padding oben für Statusbar-Luft */
+  /* Gradient-Header: extra Padding oben für Luft */
   body.fullscreen-stack [data-ticket-stack-current] > div.bg-white > div.bg-gradient-to-br,
   body.fullscreen-stack [data-ticket-stack-current] > div.bg-white > div[class*="bg-gradient"] {
     padding-top: 1.5rem !important;
     padding-bottom: 1.5rem !important;
+    flex-shrink: 0 !important;            /* Header behält Höhe */
   }
-  /* Body-Bereich wächst — Inhalte sind verteilt */
+  /* Body-Bereich: füllt Rest des Karten-Raums */
   body.fullscreen-stack [data-ticket-stack-current] > div.bg-white > div:last-child {
     flex: 1 !important;
+    min-height: 0 !important;
     display: flex !important;
     flex-direction: column !important;
     padding-top: 1.25rem !important;
     padding-bottom: 1.25rem !important;
+    overflow: hidden !important;
   }
-  /* Description-Block streckt sich + line-clamp weg */
+  /* Description-Block: flex:1 mit MEHR line-clamp-Zeilen (10 statt 6),
+     KEIN unset — sonst Card explodiert bei langem Text */
   body.fullscreen-stack [data-ticket-stack-current] > div.bg-white > div:last-child > button.bg-ink-50 {
     flex: 1 !important;
     min-height: 5rem !important;
     display: flex !important;
     flex-direction: column !important;
+    overflow: hidden !important;
   }
   body.fullscreen-stack [data-ticket-stack-current] > div.bg-white > div:last-child > button.bg-ink-50 p.line-clamp-6 {
-    -webkit-line-clamp: unset !important;
-    line-clamp: unset !important;
-    overflow: hidden !important;
     flex: 1 !important;
+    min-height: 0 !important;
+    overflow: hidden !important;
+    -webkit-line-clamp: 10 !important;
+    line-clamp: 10 !important;
+    display: -webkit-box !important;
+    -webkit-box-orient: vertical !important;
   }
-  /* Mini-Footer der Karte (Account · Swipe-Hint) wird an den Karten-Boden gedrückt */
+  /* Mini-Footer der Karte wird an den Boden gedrückt */
   body.fullscreen-stack [data-ticket-stack-current] > div.bg-white > div:last-child > div.border-t {
     margin-top: auto !important;
+    flex-shrink: 0 !important;
   }
-  /* Hintergrund-Stack (next Card) im Vollbild auch strecken */
+  /* Action-Rows bleiben in voller Höhe (nicht shrinken) */
+  body.fullscreen-stack [data-ticket-stack-current] > div.bg-white > div:last-child > div.grid {
+    flex-shrink: 0 !important;
+  }
+  /* Hintergrund-Stack (next Card) auch strecken */
   body.fullscreen-stack #ticketList > div.relative > div.absolute {
     height: 100% !important;
   }
@@ -691,7 +710,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.35';
+const APP_VERSION = 'v2.46.36';
 
 /* ============================================================
    GLOBAL THEME — v2.46.12
