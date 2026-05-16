@@ -517,7 +517,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.24';
+const APP_VERSION = 'v2.46.25';
 
 /* ============================================================
    GLOBAL THEME — v2.46.12
@@ -8069,17 +8069,24 @@ function _renderTicketStack(tickets) {
         _renderTicketStackCard(current, true) +
       '</div>' +
     '</div>' +
-    '<div class="sticky bottom-20 z-10 flex items-center justify-between gap-2 px-2 mt-3 mb-2">' +
-      '<button onclick="_ticketStackNav(-1)" class="w-12 h-12 rounded-full bg-white border border-ink-200 shadow-md flex items-center justify-center text-ink-700 hover:bg-ink-50 active:scale-95" title="Voriges Ticket">' +
-        '<i data-lucide="chevron-left" class="w-5 h-5"></i>' +
-      '</button>' +
-      '<div class="flex-1 text-center">' +
-        '<span class="inline-flex items-center gap-1 px-3 py-1.5 bg-white border border-ink-200 rounded-full text-[12px] font-bold text-ink-700 shadow-sm">' +
-          '<i data-lucide="layers" class="w-3.5 h-3.5"></i> ' + (idx + 1) + ' / ' + tickets.length +
-        '</span>' +
+    '<div class="sticky bottom-20 z-10 flex flex-col gap-2 px-2 mt-3 mb-2">' +
+      // Reihe 1: Prev/Counter/Next
+      '<div class="flex items-center justify-between gap-2">' +
+        '<button onclick="_ticketStackNav(-1)" class="w-12 h-12 rounded-full bg-white border border-ink-200 shadow-md flex items-center justify-center text-ink-700 hover:bg-ink-50 active:scale-95" title="Voriges Ticket">' +
+          '<i data-lucide="chevron-left" class="w-5 h-5"></i>' +
+        '</button>' +
+        '<div class="flex-1 text-center">' +
+          '<span class="inline-flex items-center gap-1 px-3 py-1.5 bg-white border border-ink-200 rounded-full text-[12px] font-bold text-ink-700 shadow-sm">' +
+            '<i data-lucide="layers" class="w-3.5 h-3.5"></i> ' + (idx + 1) + ' / ' + tickets.length +
+          '</span>' +
+        '</div>' +
+        '<button onclick="_ticketStackNav(1)" class="w-12 h-12 rounded-full bg-white border border-ink-200 shadow-md flex items-center justify-center text-ink-700 hover:bg-ink-50 active:scale-95" title="Nächstes Ticket">' +
+          '<i data-lucide="chevron-right" class="w-5 h-5"></i>' +
+        '</button>' +
       '</div>' +
-      '<button onclick="_ticketStackNav(1)" class="w-12 h-12 rounded-full bg-white border border-ink-200 shadow-md flex items-center justify-center text-ink-700 hover:bg-ink-50 active:scale-95" title="Nächstes Ticket">' +
-        '<i data-lucide="chevron-right" class="w-5 h-5"></i>' +
+      // Reihe 2: Ausblenden für mich (v2.46.25)
+      '<button onclick="quickHideTicketFromStack(\'' + escapeAttr(current._accountId) + '\', ' + current.id + ')" class="bg-white hover:bg-amber-50 border border-amber-200 text-amber-800 rounded-full px-4 py-2 text-[12px] font-semibold inline-flex items-center justify-center gap-1.5 shadow-md active:scale-95" title="30 Tage aus meiner Sicht ausblenden">' +
+        '<i data-lucide="eye-off" class="w-4 h-4"></i> Ticket für mich ausblenden (30d)' +
       '</button>' +
     '</div>';
   if (window.lucide) lucide.createIcons();
@@ -8097,6 +8104,23 @@ function _renderTicketStack(tickets) {
 function _ticketStackNav(delta) {
   TICKETS_STACK_INDEX += delta;
   renderTicketList(APP_STATE.pageState?.tickets || []);
+}
+
+/* v2.46.25: Schnell-Ausblenden für Stack-View. Setzt Wiedervorlage 30d in die Zukunft
+   (Standard-Ausblende-Dauer wie bei rule.hide). Ticket verschwindet sofort aus der
+   Stack-View (über visibility=active Filter), nächste Karte rückt nach. */
+async function quickHideTicketFromStack(accountId, ticketId) {
+  try {
+    const frist = _daysToFrist(30, { morning: true });
+    await addWiedervorlage(accountId, ticketId, frist, 'manuell');
+    toast('Ticket #' + ticketId + ' für 30 Tage ausgeblendet', 'success', 3000);
+    // Re-Render — der visibility-Filter in renderTicketList entfernt das Ticket
+    // jetzt aus der Liste, da isOnWiedervorlage()=true. Aktueller Stack-Index bleibt,
+    // also schiebt sich automatisch die nächste Karte vor.
+    renderTicketList(APP_STATE.pageState?.tickets || []);
+  } catch (e) {
+    toast('Ausblenden fehlgeschlagen: ' + (e.message || e), 'error', 6000);
+  }
 }
 
 /* v2.46.17: Schnell-Schließen aus dem Stack-View. PUT status=5 (Geschlossen),
