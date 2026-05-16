@@ -167,28 +167,8 @@
   body.fullscreen-stack .sticky.bottom-20 {
     bottom: env(safe-area-inset-bottom, 12px) !important;
   }
-  /* Floating Exit-Button (UNTEN rechts — gut mit dem Daumen erreichbar, weit
-     weg von der iPhone-Status-Bar und über dem Sticky-Footer der Stack-Card) */
-  .fullscreen-exit-btn {
-    position: fixed;
-    bottom: calc(env(safe-area-inset-bottom, 0px) + 8rem);
-    right: 1rem;
-    z-index: 100;
-    width: 60px;
-    height: 60px;
-    border-radius: 9999px;
-    background: rgba(15, 23, 42, 0.92);
-    box-shadow: 0 8px 24px -4px rgba(15, 23, 42, 0.4), 0 0 0 1px rgba(255, 255, 255, 0.1);
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    color: #ffffff;
-    backdrop-filter: blur(10px);
-    -webkit-backdrop-filter: blur(10px);
-    transition: transform 0.15s ease, background 0.15s ease;
-  }
-  .fullscreen-exit-btn:active { transform: scale(0.92); background: rgba(15, 23, 42, 1); }
-  body:not(.fullscreen-stack) .fullscreen-exit-btn { display: none !important; }
+  /* v2.46.31: Floating-Button entfernt — Exit ist jetzt eine ordentliche Reihe
+     im Sticky-Footer (unter Ausblenden-Button), keine schwebende Action mehr. */
 
   /* ============================================================
      v2.46.27 — FRESH THEME (Clean, ERP-Hero-inspired)
@@ -634,7 +614,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.30';
+const APP_VERSION = 'v2.46.31';
 
 /* ============================================================
    GLOBAL THEME — v2.46.12
@@ -8201,12 +8181,7 @@ function _renderTicketStack(tickets) {
   const nextOne = tickets[(idx + 1) % tickets.length];
   // v2.46.28: Im Vollbild — etwas mehr min-height da kein Bottom-Nav drunter ist
   const minH = TICKETS_STACK_FULLSCREEN ? 'calc(100vh - 200px)' : 'calc(100vh - 320px)';
-  // Floating Exit-Button HTML (nur wenn fullscreen)
-  const exitBtnHtml = TICKETS_STACK_FULLSCREEN
-    ? '<button onclick="exitTicketsStackFullscreen()" class="fullscreen-exit-btn" title="Vollbild verlassen" aria-label="Vollbild verlassen"><i data-lucide="x" class="w-7 h-7"></i></button>'
-    : '';
   $('ticketList').innerHTML =
-    exitBtnHtml +
     '<div class="relative" style="min-height: ' + minH + '; padding-bottom: 80px;">' +
       (tickets.length > 1
         ? '<div class="absolute inset-x-0 top-3 mx-1 transform scale-[0.95] opacity-50 pointer-events-none">' + _renderTicketStackCard(nextOne, false) + '</div>'
@@ -8234,6 +8209,12 @@ function _renderTicketStack(tickets) {
       '<button onclick="quickHideTicketFromStack(\'' + escapeAttr(current._accountId) + '\', ' + current.id + ')" class="bg-white hover:bg-amber-50 border border-amber-200 text-amber-800 rounded-full px-4 py-2 text-[12px] font-semibold inline-flex items-center justify-center gap-1.5 shadow-md active:scale-95" title="30 Tage aus meiner Sicht ausblenden">' +
         '<i data-lucide="eye-off" class="w-4 h-4"></i> Ticket für mich ausblenden (30d)' +
       '</button>' +
+      // v2.46.31: Reihe 3 — Vollbild verlassen (nur sichtbar im Fullscreen-Modus)
+      (TICKETS_STACK_FULLSCREEN
+        ? '<button onclick="exitTicketsStackFullscreen()" class="bg-ink-900 hover:bg-ink-800 text-white rounded-full px-4 py-2.5 text-[12px] font-semibold inline-flex items-center justify-center gap-1.5 shadow-md active:scale-95" title="Vollbild verlassen — zurück zur Listen-Ansicht mit Filtern">' +
+            '<i data-lucide="x" class="w-4 h-4"></i> Vollbild verlassen' +
+          '</button>'
+        : '') +
     '</div>';
   if (window.lucide) lucide.createIcons();
   _attachTicketStackSwipe();
