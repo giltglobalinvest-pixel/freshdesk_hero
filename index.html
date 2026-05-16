@@ -517,7 +517,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.25';
+const APP_VERSION = 'v2.46.26';
 
 /* ============================================================
    GLOBAL THEME — v2.46.12
@@ -8091,12 +8091,14 @@ function _renderTicketStack(tickets) {
     '</div>';
   if (window.lucide) lucide.createIcons();
   _attachTicketStackSwipe();
-  // v2.46.23: Requester-Daten nachladen damit Name/Email/Telefon in der Kontakt-Zeile
-  // erscheinen (Search-API liefert keinen vollen requester-Block).
+  // v2.46.23 / v2.46.26 BUG-FIX: Hydration nachladen damit Name/Email/Telefon erscheinen.
+  // Nach Hydration MUSS renderTicketList (statt _renderTicketStack direkt) aufgerufen
+  // werden — sonst läuft der WV/Sichtbarkeits-Filter NICHT, und gerade ausgeblendete
+  // Tickets erscheinen wieder. Das hat den 'verschwindet kurz und erscheint wieder'
+  // Bug verursacht.
   hydrateMissingRequesters(tickets).then(() => {
-    // Nach Hydration die aktuelle Karte neu rendern wenn wir noch im Stack sind
     if (TICKETS_VIEW_MODE === 'stack' && APP_STATE.page === 'tickets') {
-      _renderTicketStack(APP_STATE.pageState?.tickets || []);
+      renderTicketList(APP_STATE.pageState?.tickets || []);
     }
   }).catch(e => console.warn('stack-hydrate:', e));
 }
