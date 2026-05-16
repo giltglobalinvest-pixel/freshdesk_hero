@@ -167,27 +167,27 @@
   body.fullscreen-stack .sticky.bottom-20 {
     bottom: env(safe-area-inset-bottom, 12px) !important;
   }
-  /* Floating Exit-Button (über alles, rechts mittig — gut mit dem Daumen erreichbar,
-     genug Abstand zur Status-Bar des iPhones, nicht über den Karten-Aktionen) */
+  /* Floating Exit-Button (UNTEN rechts — gut mit dem Daumen erreichbar, weit
+     weg von der iPhone-Status-Bar und über dem Sticky-Footer der Stack-Card) */
   .fullscreen-exit-btn {
     position: fixed;
-    top: calc(env(safe-area-inset-top, 0px) + 6rem);
-    right: 0.875rem;
+    bottom: calc(env(safe-area-inset-bottom, 0px) + 8rem);
+    right: 1rem;
     z-index: 100;
-    width: 56px;
-    height: 56px;
+    width: 60px;
+    height: 60px;
     border-radius: 9999px;
-    background: rgba(255, 255, 255, 0.95);
-    box-shadow: 0 6px 16px -3px rgba(15, 23, 42, 0.3), 0 0 0 1px rgba(15, 23, 42, 0.08);
+    background: rgba(15, 23, 42, 0.92);
+    box-shadow: 0 8px 24px -4px rgba(15, 23, 42, 0.4), 0 0 0 1px rgba(255, 255, 255, 0.1);
     display: flex;
     align-items: center;
     justify-content: center;
-    color: #0F172A;
+    color: #ffffff;
     backdrop-filter: blur(10px);
     -webkit-backdrop-filter: blur(10px);
     transition: transform 0.15s ease, background 0.15s ease;
   }
-  .fullscreen-exit-btn:active { transform: scale(0.92); background: #f1f5f9; }
+  .fullscreen-exit-btn:active { transform: scale(0.92); background: rgba(15, 23, 42, 1); }
   body:not(.fullscreen-stack) .fullscreen-exit-btn { display: none !important; }
 
   /* ============================================================
@@ -634,7 +634,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.29';
+const APP_VERSION = 'v2.46.30';
 
 /* ============================================================
    GLOBAL THEME — v2.46.12
@@ -19908,6 +19908,13 @@ async function showApp() {
   // KI-Kosten-Log laden (im Hintergrund — fürs Dashboard)
   loadAiCostLog().catch(e => console.warn('AI-Cost-Load:', e.message));
   loadAufgaben().catch(e => console.warn('Aufgaben-Load:', e.message));
+  // v2.46.30: Beim App-Start IMMER direkt in Vollbild-Stack-Modus für Tickets springen.
+  // Filter (Status/Account/etc.) bleiben durch localStorage erhalten. User kann das
+  // Vollbild jederzeit via X-Button verlassen.
+  TICKETS_VIEW_MODE = 'stack';
+  try { localStorage.setItem('fdh_tickets_view_mode', 'stack'); } catch (_) {}
+  TICKETS_STACK_FULLSCREEN = true;
+  document.body.classList.add('fullscreen-stack');
   navTo('tickets');
   // Deep-Link: wenn URL-Hash auf ein Ticket zeigt, direkt öffnen
   handleDeepLink();
