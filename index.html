@@ -145,6 +145,51 @@
   }
 
   /* ============================================================
+     v2.46.28 — TICKETS STACK FULLSCREEN MODE
+     Aktiviert via body.fullscreen-stack. Versteckt sämtliche Chrome-
+     Elemente (TopBar, PageHeader, Account-Tabs, Filter-Chips, BottomNav)
+     und nutzt die volle Bildschirmfläche für die Stack-Karten.
+     Funktioniert unabhängig vom Theme (Classic + Fresh). */
+  body.fullscreen-stack #versionBar { display: none !important; }
+  body.fullscreen-stack #appShell > header { display: none !important; }
+  body.fullscreen-stack nav.fixed.bottom-0 { display: none !important; }
+  body.fullscreen-stack .tickets-toolbar { display: none !important; }
+  body.fullscreen-stack #pageContent {
+    padding-top: env(safe-area-inset-top, 0px) !important;
+    padding-bottom: 0 !important;
+  }
+  body.fullscreen-stack #appShell main,
+  body.fullscreen-stack #appShell > div:not(header) {
+    padding-top: 0 !important;
+    padding-bottom: 0 !important;
+  }
+  /* Sticky-Footer der Stack-View darf NICHT mehr bottom-20 sein (kein Bottom-Nav drunter) */
+  body.fullscreen-stack .sticky.bottom-20 {
+    bottom: env(safe-area-inset-bottom, 12px) !important;
+  }
+  /* Floating Exit-Button (über alles, top-right) */
+  .fullscreen-exit-btn {
+    position: fixed;
+    top: calc(env(safe-area-inset-top, 0px) + 0.75rem);
+    right: 0.75rem;
+    z-index: 100;
+    width: 44px;
+    height: 44px;
+    border-radius: 9999px;
+    background: rgba(255, 255, 255, 0.95);
+    box-shadow: 0 4px 12px -2px rgba(15, 23, 42, 0.25), 0 0 0 1px rgba(15, 23, 42, 0.08);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: #0F172A;
+    backdrop-filter: blur(8px);
+    -webkit-backdrop-filter: blur(8px);
+    transition: transform 0.15s ease, background 0.15s ease;
+  }
+  .fullscreen-exit-btn:active { transform: scale(0.92); background: #f1f5f9; }
+  body:not(.fullscreen-stack) .fullscreen-exit-btn { display: none !important; }
+
+  /* ============================================================
      v2.46.27 — FRESH THEME (Clean, ERP-Hero-inspired)
      Cyan/Hellblau-Brand-Palette (#1FA8D6), clean cards mit dezenten
      Schatten, klare Linien, weniger bunt. Kein Purple/Lila mehr.
@@ -588,7 +633,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.27';
+const APP_VERSION = 'v2.46.28';
 
 /* ============================================================
    GLOBAL THEME — v2.46.12
@@ -691,10 +736,29 @@ let TICKETS_VIEW_MODE = (function () {
   try { return localStorage.getItem('fdh_tickets_view_mode') || 'list'; } catch (_) { return 'list'; }
 })();
 let TICKETS_STACK_INDEX = 0;
+let TICKETS_STACK_FULLSCREEN = false;
 function setTicketsViewMode(mode) {
   TICKETS_VIEW_MODE = mode;
   TICKETS_STACK_INDEX = 0;
   try { localStorage.setItem('fdh_tickets_view_mode', mode); } catch (_) {}
+  renderTicketsPage();
+}
+/* v2.46.28: Vollbild-Modus für Stack-View. Aktiviert eine body-Klasse die per CSS
+   alle Chrome-Elemente (TopBar, PageHeader, Filter, BottomNav) ausblendet. Karten
+   bekommen volle Bildschirmfläche. Verlassen via floating X-Button. */
+function enterTicketsStackFullscreen() {
+  TICKETS_STACK_FULLSCREEN = true;
+  // Falls noch nicht im Stack-Modus, wechseln
+  if (TICKETS_VIEW_MODE !== 'stack') {
+    TICKETS_VIEW_MODE = 'stack';
+    try { localStorage.setItem('fdh_tickets_view_mode', 'stack'); } catch (_) {}
+  }
+  document.body.classList.add('fullscreen-stack');
+  renderTicketsPage();
+}
+function exitTicketsStackFullscreen() {
+  TICKETS_STACK_FULLSCREEN = false;
+  document.body.classList.remove('fullscreen-stack');
   renderTicketsPage();
 }
 
@@ -6793,7 +6857,7 @@ async function renderTicketsPage() {
   $('pageContent').innerHTML = `
     <div class="space-y-3">
       <!-- Account Switcher -->
-      <div class="flex gap-2 overflow-x-auto scrollbar-hidden -mx-1 px-1 py-1">
+      <div class="tickets-toolbar flex gap-2 overflow-x-auto scrollbar-hidden -mx-1 px-1 py-1">
         <button onclick="setCurrentAccount('all')" class="account-chip shrink-0 px-3 py-1.5 rounded-full text-xs font-medium border ${acc==='all'?'bg-ink-900 text-white border-ink-900':'bg-white text-ink-700 border-ink-200'}">
           <i data-lucide="layers" class="inline w-3.5 h-3.5 mr-1"></i> Alle (${APP_STATE.accounts.length})
         </button>
@@ -6806,7 +6870,7 @@ async function renderTicketsPage() {
       </div>
 
       <!-- Filter-Chips -->
-      <div class="flex gap-2 overflow-x-auto scrollbar-hidden -mx-1 px-1">
+      <div class="tickets-toolbar flex gap-2 overflow-x-auto scrollbar-hidden -mx-1 px-1">
         ${(() => {
           const f = APP_STATE.filters;
           const isMulti = (acc === 'all');
@@ -6845,6 +6909,10 @@ async function renderTicketsPage() {
           const tvIcon = tvMode === 'stack' ? 'layers' : 'list';
           const tvLabel = tvMode === 'stack' ? 'Stack' : 'Liste';
           html += `<button onclick="setTicketsViewMode('${tvNext}')" class="shrink-0 px-2 py-1 rounded-md text-[11px] font-medium bg-white text-ink-700 border border-ink-200 inline-flex items-center gap-1" title="Ansicht: ${tvLabel} (klick um zu wechseln)"><i data-lucide="${tvIcon}" class="w-3.5 h-3.5"></i>${tvLabel}</button>`;
+          // v2.46.28: Vollbild-Stack-Button (nur sichtbar wenn schon im Stack-Modus)
+          if (tvMode === 'stack') {
+            html += `<button onclick="enterTicketsStackFullscreen()" class="shrink-0 px-2 py-1 rounded-md text-[11px] font-semibold bg-brand-500 text-white border border-brand-500 inline-flex items-center gap-1" title="Karten im Vollbild zeigen (alle anderen UI-Elemente ausblenden)"><i data-lucide="maximize" class="w-3.5 h-3.5"></i>Vollbild</button>`;
+          }
           return html;
         })()}
       </div>
@@ -8131,8 +8199,15 @@ function _renderTicketStack(tickets) {
   const idx = TICKETS_STACK_INDEX;
   const current = tickets[idx];
   const nextOne = tickets[(idx + 1) % tickets.length];
+  // v2.46.28: Im Vollbild — etwas mehr min-height da kein Bottom-Nav drunter ist
+  const minH = TICKETS_STACK_FULLSCREEN ? 'calc(100vh - 200px)' : 'calc(100vh - 320px)';
+  // Floating Exit-Button HTML (nur wenn fullscreen)
+  const exitBtnHtml = TICKETS_STACK_FULLSCREEN
+    ? '<button onclick="exitTicketsStackFullscreen()" class="fullscreen-exit-btn" title="Vollbild verlassen" aria-label="Vollbild verlassen"><i data-lucide="x" class="w-6 h-6"></i></button>'
+    : '';
   $('ticketList').innerHTML =
-    '<div class="relative" style="min-height: calc(100vh - 320px); padding-bottom: 80px;">' +
+    exitBtnHtml +
+    '<div class="relative" style="min-height: ' + minH + '; padding-bottom: 80px;">' +
       (tickets.length > 1
         ? '<div class="absolute inset-x-0 top-3 mx-1 transform scale-[0.95] opacity-50 pointer-events-none">' + _renderTicketStackCard(nextOne, false) + '</div>'
         : '') +
