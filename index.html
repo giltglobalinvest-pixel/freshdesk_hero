@@ -517,7 +517,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.22';
+const APP_VERSION = 'v2.46.23';
 
 /* ============================================================
    GLOBAL THEME — v2.46.12
@@ -8084,6 +8084,14 @@ function _renderTicketStack(tickets) {
     '</div>';
   if (window.lucide) lucide.createIcons();
   _attachTicketStackSwipe();
+  // v2.46.23: Requester-Daten nachladen damit Name/Email/Telefon in der Kontakt-Zeile
+  // erscheinen (Search-API liefert keinen vollen requester-Block).
+  hydrateMissingRequesters(tickets).then(() => {
+    // Nach Hydration die aktuelle Karte neu rendern wenn wir noch im Stack sind
+    if (TICKETS_VIEW_MODE === 'stack' && APP_STATE.page === 'tickets') {
+      _renderTicketStack(APP_STATE.pageState?.tickets || []);
+    }
+  }).catch(e => console.warn('stack-hydrate:', e));
 }
 
 function _ticketStackNav(delta) {
@@ -8715,12 +8723,18 @@ function _renderTicketStackCard(t, isTop) {
       '</div>' +
       // Subject
       '<p class="text-xl font-extrabold leading-tight tracking-tight">' + escapeHtml(subj) + '</p>' +
-      // Customer + Email (klickbar — öffnet Quick-Contact-Modal mit Anruf-Buttons)
-      (reqName
-        ? (t.requester_id
-            ? '<button onclick="event.stopPropagation(); openQuickContactModal(\'' + escapeAttr(accountId) + '\', ' + ticketId + ')" class="text-left mt-2 inline-flex items-center gap-1.5 text-[14px] hover:opacity-90 active:opacity-80 max-w-full"><i data-lucide="user" class="w-4 h-4"></i><span class="truncate font-semibold">' + escapeHtml(reqName) + '</span>' + (reqEmail ? '<span class="opacity-80 truncate">· ' + escapeHtml(reqEmail) + '</span>' : '') + '<i data-lucide="phone-call" class="w-3.5 h-3.5 opacity-90"></i></button>'
-            : '<p class="mt-2 inline-flex items-center gap-1.5 text-[14px]"><i data-lucide="user" class="w-4 h-4"></i><span class="font-semibold">' + escapeHtml(reqName) + '</span>' + (reqEmail ? '<span class="opacity-80">· ' + escapeHtml(reqEmail) + '</span>' : '') + '</p>')
-        : '') +
+      // Customer-Zeile (v2.46.23): immer rendern wenn requester_id da ist, auch ohne Name.
+      // Fallback-Text bis Hydratation fertig ist: „Kontakt anzeigen".
+      (t.requester_id
+        ? '<button onclick="event.stopPropagation(); openQuickContactModal(\'' + escapeAttr(accountId) + '\', ' + ticketId + ')" class="text-left mt-2 inline-flex items-center gap-1.5 text-[14px] hover:opacity-90 active:opacity-80 max-w-full bg-white/10 hover:bg-white/20 backdrop-blur-sm rounded-lg px-2 py-1 transition">' +
+            '<i data-lucide="user" class="w-4 h-4"></i>' +
+            '<span class="truncate font-semibold">' + escapeHtml(reqName || reqEmail || 'Kontakt anzeigen') + '</span>' +
+            (reqName && reqEmail ? '<span class="opacity-80 truncate">· ' + escapeHtml(reqEmail) + '</span>' : '') +
+            '<i data-lucide="phone-call" class="w-3.5 h-3.5 opacity-90 ml-auto shrink-0"></i>' +
+          '</button>'
+        : (reqName || reqEmail
+            ? '<p class="mt-2 inline-flex items-center gap-1.5 text-[14px]"><i data-lucide="user" class="w-4 h-4"></i><span class="font-semibold">' + escapeHtml(reqName || reqEmail) + '</span></p>'
+            : '')) +
     '</div>' +
     // Body
     '<div class="px-5 pb-5 pt-4">' +
