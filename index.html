@@ -713,7 +713,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.40';
+const APP_VERSION = 'v2.46.41';
 
 /* ============================================================
    GLOBAL THEME — v2.46.12
@@ -18966,12 +18966,19 @@ async function autoApplyRulesForTickets(tickets) {
       const chunk = toProcess.slice(i, i + CHUNK);
       chunk.forEach(t => markCardProcessing(t._accountId, t.id, true));
       try {
-        // Für jedes Ticket im Chunk die Conversations laden (zur besseren Regel-Match-Genauigkeit)
-        const enriched = await Promise.all(chunk.map(async t => {
-          if (t.conversations) return t;
-          try { const full = await fetchTicketDetail(t._accountId, t.id); return { ...t, ...full }; }
-          catch (_) { return t; }
-        }));
+        // v2.46.41: SEQUENTIELL statt parallel — sonst löst Freshdesk Rate-Limit aus (HTTP 429).
+        // Vorher: 5 parallel pro Chunk × 6 Chunks = 30 Parallel-Calls in Sekunden → Storm.
+        // Jetzt: 1 Call nach dem anderen, dazwischen kurze Pause damit Rate-Limit nicht greift.
+        const enriched = [];
+        for (const t of chunk) {
+          if (t.conversations) { enriched.push(t); continue; }
+          try {
+            const full = await fetchTicketDetail(t._accountId, t.id);
+            enriched.push({ ...t, ...full });
+          } catch (_) { enriched.push(t); }
+          // 150ms Pause zwischen Detail-Calls — entspannt Freshdesk-Rate-Limit
+          await new Promise(r => setTimeout(r, 150));
+        }
         // Union der noch-nicht-angewandten Regeln über den Chunk
         const unionRuleIds = new Set();
         chunk.forEach(t => {
@@ -19009,6 +19016,10 @@ async function autoApplyRulesForTickets(tickets) {
         console.warn('Phase C chunk failed:', e);
       } finally {
         chunk.forEach(t => markCardProcessing(t._accountId, t.id, false));
+      }
+      // v2.46.41: 500ms Pause zwischen Chunks — verteilt API-Last gleichmäßiger über die Zeit
+      if (i + CHUNK < toProcess.length) {
+        await new Promise(r => setTimeout(r, 500));
       }
     }
     if (totalActions > 0) {
