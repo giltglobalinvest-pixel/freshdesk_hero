@@ -713,7 +713,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.37';
+const APP_VERSION = 'v2.46.38';
 
 /* ============================================================
    GLOBAL THEME — v2.46.12
@@ -8353,10 +8353,8 @@ async function quickHideTicketFromStack(accountId, ticketId) {
 
 /* v2.46.17: Schnell-Schließen aus dem Stack-View. PUT status=5 (Geschlossen),
    Fallback auf status=4 (Gelöst) wenn FD wegen Pflichtfeldern blockt.
-   Bei Erfolg: lokale Liste filtern + nächste Karte zeigen. */
+   v2.46.38: Confirm-Dialog entfernt — User wollte direktes Schließen. */
 async function quickCloseTicketFromStack(accountId, ticketId) {
-  const ok = await confirmDialog('Ticket schließen?', '#' + ticketId + ' direkt schließen?', { okText: 'Schließen' });
-  if (!ok) return;
   const base = '/freshdesk/' + encodeURIComponent(accountId) + '/api/v2/tickets/' + ticketId;
   try {
     await proxyJson(base, { method: 'PUT', body: JSON.stringify({ status: 5 }) });
