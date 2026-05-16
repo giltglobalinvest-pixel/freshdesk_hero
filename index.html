@@ -170,34 +170,51 @@
   /* v2.46.31: Floating-Button entfernt — Exit ist jetzt eine ordentliche Reihe
      im Sticky-Footer (unter Ausblenden-Button), keine schwebende Action mehr. */
 
-  /* v2.46.32 / v2.46.33: Im Vollbild — Karte streckt sich auf ganze verfügbare Höhe.
-     Keine ungenutzte weiße Fläche zwischen Karte und Footer. */
-  body.fullscreen-stack #ticketList > div.relative {
-    min-height: calc(100vh - 200px) !important;
+  /* v2.46.34: Vollbild — sauberes Flex-Layout das Karte + Footer korrekt
+     trennt (kein Überlappen mehr). #ticketList wird ein flex-column-Container
+     mit voller Viewport-Höhe. Card-Wrapper bekommt flex:1, Footer ist ganz
+     unten in normaler Flow-Position (nicht mehr sticky-overlapping). */
+  body.fullscreen-stack #ticketList {
     display: flex !important;
     flex-direction: column !important;
-    padding-bottom: 12px !important;
+    min-height: 100vh !important;
+    padding-top: env(safe-area-inset-top, 0px) !important;
+    padding-bottom: 0 !important;
   }
+  body.fullscreen-stack #ticketList > div.relative {
+    flex: 1 !important;
+    min-height: 0 !important;
+    display: flex !important;
+    flex-direction: column !important;
+    padding-bottom: 0 !important;
+  }
+  /* Sticky-Footer wird in normalen Flow gehoben — bleibt am Ende von ticketList,
+     also unten am Bildschirm dank flex-column auf ticketList */
+  body.fullscreen-stack #ticketList > .sticky.bottom-20 {
+    position: relative !important;
+    bottom: auto !important;
+    margin-bottom: 0 !important;
+    padding-bottom: calc(env(safe-area-inset-bottom, 8px) + 8px) !important;
+  }
+  /* Aktive Karte streckt sich auf 100% des Card-Wrappers */
   body.fullscreen-stack [data-ticket-stack-current] {
     flex: 1 !important;
     min-height: 0 !important;
     display: flex !important;
   }
-  /* Die Karte (bg-white-Wrapper INNERHALB der current-card-div) wächst auf 100% */
   body.fullscreen-stack [data-ticket-stack-current] > div.bg-white {
     flex: 1 !important;
     display: flex !important;
     flex-direction: column !important;
     width: 100% !important;
   }
-  /* v2.46.33: Gradient-Header bekommt mehr Padding oben (für iPhone-Statusbar +
-     visuelle Luft) — Pills/Titel klebt nicht mehr direkt am Rand */
+  /* Gradient-Header: extra Padding oben für Statusbar-Luft */
   body.fullscreen-stack [data-ticket-stack-current] > div.bg-white > div.bg-gradient-to-br,
   body.fullscreen-stack [data-ticket-stack-current] > div.bg-white > div[class*="bg-gradient"] {
-    padding-top: calc(env(safe-area-inset-top, 0px) + 1.25rem) !important;
-    padding-bottom: 1.25rem !important;
+    padding-top: 1.5rem !important;
+    padding-bottom: 1.5rem !important;
   }
-  /* Body-Bereich (zweites Kind nach Gradient-Header) wächst, sodass Footer-Aktionen am Karten-Boden kleben */
+  /* Body-Bereich wächst — Inhalte sind verteilt */
   body.fullscreen-stack [data-ticket-stack-current] > div.bg-white > div:last-child {
     flex: 1 !important;
     display: flex !important;
@@ -205,15 +222,13 @@
     padding-top: 1.25rem !important;
     padding-bottom: 1.25rem !important;
   }
-  /* v2.46.33: Description-Block (Erste Anfrage) streckt sich und füllt die Leere
-     zwischen Action-Buttons und Mini-Footer */
+  /* Description-Block streckt sich + line-clamp weg */
   body.fullscreen-stack [data-ticket-stack-current] > div.bg-white > div:last-child > button.bg-ink-50 {
     flex: 1 !important;
     min-height: 5rem !important;
     display: flex !important;
     flex-direction: column !important;
   }
-  /* line-clamp aufheben damit mehr Text sichtbar wird wenn Platz da ist */
   body.fullscreen-stack [data-ticket-stack-current] > div.bg-white > div:last-child > button.bg-ink-50 p.line-clamp-6 {
     -webkit-line-clamp: unset !important;
     line-clamp: unset !important;
@@ -676,7 +691,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.33';
+const APP_VERSION = 'v2.46.34';
 
 /* ============================================================
    GLOBAL THEME — v2.46.12
