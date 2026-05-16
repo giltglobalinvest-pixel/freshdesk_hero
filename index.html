@@ -170,6 +170,9 @@
   /* v2.46.31: Floating-Button entfernt — Exit ist jetzt eine ordentliche Reihe
      im Sticky-Footer (unter Ausblenden-Button), keine schwebende Action mehr. */
 
+  /* v2.46.37: Safety — loginScreen darf in fullscreen-stack NIE durchscheinen */
+  body.fullscreen-stack #loginScreen { display: none !important; }
+
   /* v2.46.36: Vollbild — sauberes Flex-Layout. Karte füllt verfügbaren Platz
      genau, ohne über den Bildschirm zu wachsen. Description-Text bleibt
      line-clamped (mehr Zeilen) und scrollt NICHT — Card hat feste Höhe. */
@@ -710,7 +713,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.36';
+const APP_VERSION = 'v2.46.37';
 
 /* ============================================================
    GLOBAL THEME — v2.46.12
@@ -19996,14 +19999,18 @@ async function showApp() {
   // KI-Kosten-Log laden (im Hintergrund — fürs Dashboard)
   loadAiCostLog().catch(e => console.warn('AI-Cost-Load:', e.message));
   loadAufgaben().catch(e => console.warn('Aufgaben-Load:', e.message));
-  // v2.46.30: Beim App-Start IMMER direkt in Vollbild-Stack-Modus für Tickets springen.
-  // Filter (Status/Account/etc.) bleiben durch localStorage erhalten. User kann das
-  // Vollbild jederzeit via X-Button verlassen.
+  // v2.46.30 / v2.46.37: Beim App-Start IMMER direkt in Vollbild-Stack-Modus.
+  // WICHTIG: body.classList.add('fullscreen-stack') MUSS NACH navTo passieren
+  // damit nicht kurz die Chrome-Elemente sichtbar/unsichtbar flackern und
+  // dadurch der loginScreen darunter durchblinkt.
   TICKETS_VIEW_MODE = 'stack';
   try { localStorage.setItem('fdh_tickets_view_mode', 'stack'); } catch (_) {}
   TICKETS_STACK_FULLSCREEN = true;
-  document.body.classList.add('fullscreen-stack');
   navTo('tickets');
+  // Nach dem ersten Render: fullscreen-stack aktivieren
+  requestAnimationFrame(() => {
+    document.body.classList.add('fullscreen-stack');
+  });
   // Deep-Link: wenn URL-Hash auf ein Ticket zeigt, direkt öffnen
   handleDeepLink();
   // Falls Deep-Link für anderen User war: Banner zum Umschalten
