@@ -717,7 +717,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.60';
+const APP_VERSION = 'v2.46.61';
 
 /* ============================================================
    GLOBAL THEME — v2.46.12
@@ -19426,7 +19426,7 @@ function _renderDealEmailModal(accountId, dealId, deal, contact, responses, conf
   host.innerHTML =
     '<div class="fixed inset-0 z-[60] flex items-end justify-center bg-black/50" onclick="if(event.target===this)closeDealEmailModal()">' +
       '<div class="bg-white w-full max-w-md rounded-t-3xl shadow-2xl flex flex-col safe-bottom" style="max-height:94vh">' +
-        '<div class="px-4 py-3 border-b border-ink-200 flex items-center justify-between gap-2 shrink-0">' +
+        '<div class="safe-top px-4 py-3 border-b border-ink-200 flex items-center justify-between gap-2 shrink-0">' +
           '<h3 class="font-bold text-ink-900 inline-flex items-center gap-2"><i data-lucide="mail" class="w-5 h-5 text-orange-600"></i> Email-Vorlage senden</h3>' +
           '<button onclick="closeDealEmailModal()" class="w-9 h-9 rounded-lg hover:bg-ink-100 flex items-center justify-center"><i data-lucide="x" class="w-5 h-5 text-ink-700"></i></button>' +
         '</div>' +
@@ -19452,10 +19452,11 @@ function _renderDealEmailModal(accountId, dealId, deal, contact, responses, conf
           '<input id="deSubject" type="text" value="" class="w-full px-3 py-2.5 border border-ink-300 rounded-xl text-sm">' +
           '<div class="flex items-center justify-between">' +
             '<label class="text-xs font-bold text-ink-700 uppercase tracking-wider">Email-Text</label>' +
-            '<button onclick="_deTogglePreview()" id="dePreviewBtn" class="text-[11px] font-semibold text-brand-600 inline-flex items-center gap-1"><i data-lucide="eye" class="w-3 h-3"></i> Vorschau</button>' +
+            '<button onclick="_deTogglePreview()" id="dePreviewBtn" class="text-[11px] font-semibold text-brand-600 inline-flex items-center gap-1"><i data-lucide="code" class="w-3 h-3"></i> HTML bearbeiten</button>' +
           '</div>' +
-          '<textarea id="deBody" rows="10" placeholder="Wähle eine Vorlage oben, oder tippe den Email-Text…" class="w-full px-3 py-2.5 border border-ink-300 rounded-xl text-[12px] font-mono leading-snug resize-y"></textarea>' +
-          '<div id="dePreview" class="hidden border border-ink-300 rounded-xl p-3 bg-white text-[13px] leading-relaxed max-h-72 overflow-y-auto prose prose-sm"></div>' +
+          // v2.46.61: Vorschau als Default sichtbar, Roh-HTML-Textarea versteckt
+          '<textarea id="deBody" rows="10" placeholder="Wähle eine Vorlage oben, oder tippe den Email-Text…" class="hidden w-full px-3 py-2.5 border border-ink-300 rounded-xl text-[12px] font-mono leading-snug resize-y"></textarea>' +
+          '<div id="dePreview" class="border border-ink-300 rounded-xl p-3 bg-white text-[13px] leading-relaxed max-h-96 overflow-y-auto prose prose-sm"><em class="text-ink-400">Vorlage wählen, dann erscheint hier die Email-Vorschau.</em></div>' +
           '<label class="flex items-center gap-2 text-[11px] text-ink-700 cursor-pointer">' +
             '<input id="deNoteToFs" type="checkbox" checked class="w-4 h-4 accent-orange-600">' +
             'Versand als Notiz am Deal protokollieren' +
@@ -19513,9 +19514,8 @@ function _deApplyTemplate() {
   const bodyEl = document.getElementById('deBody');
   if (subjEl) subjEl.value = subj;
   if (bodyEl) bodyEl.value = body;
-  // Falls Vorschau gerade aktiv ist → mit-rendern
-  const prev = document.getElementById('dePreview');
-  if (prev && !prev.classList.contains('hidden')) _deRenderPreview();
+  // v2.46.61: Vorschau IMMER aktualisieren — sie ist Default-sichtbar
+  _deRenderPreview();
 }
 
 function _deTogglePreview() {
@@ -19523,12 +19523,15 @@ function _deTogglePreview() {
   const pv = document.getElementById('dePreview');
   const btn = document.getElementById('dePreviewBtn');
   if (!ta || !pv) return;
+  // v2.46.61: Default ist Vorschau-sichtbar. Toggle wechselt zwischen Preview und Edit.
   if (pv.classList.contains('hidden')) {
+    // → Preview anzeigen
     _deRenderPreview();
     pv.classList.remove('hidden');
     ta.classList.add('hidden');
-    if (btn) btn.innerHTML = '<i data-lucide="code" class="w-3 h-3"></i> HTML';
+    if (btn) btn.innerHTML = '<i data-lucide="code" class="w-3 h-3"></i> HTML bearbeiten';
   } else {
+    // → Edit anzeigen
     pv.classList.add('hidden');
     ta.classList.remove('hidden');
     if (btn) btn.innerHTML = '<i data-lucide="eye" class="w-3 h-3"></i> Vorschau';
@@ -19697,7 +19700,7 @@ function _renderTicketEmailModal(accountId, ticketId, ticket, responses, configs
   host.innerHTML =
     '<div class="fixed inset-0 z-[60] flex items-end justify-center bg-black/50" onclick="if(event.target===this)closeTicketEmailModal()">' +
       '<div class="bg-white w-full max-w-md rounded-t-3xl shadow-2xl flex flex-col safe-bottom" style="max-height:94vh">' +
-        '<div class="px-4 py-3 border-b border-ink-200 flex items-center justify-between gap-2 shrink-0">' +
+        '<div class="safe-top px-4 py-3 border-b border-ink-200 flex items-center justify-between gap-2 shrink-0">' +
           '<h3 class="font-bold text-ink-900 inline-flex items-center gap-2"><i data-lucide="mail" class="w-5 h-5 text-orange-600"></i> Email-Vorlage senden</h3>' +
           '<button onclick="closeTicketEmailModal()" class="w-9 h-9 rounded-lg hover:bg-ink-100 flex items-center justify-center"><i data-lucide="x" class="w-5 h-5 text-ink-700"></i></button>' +
         '</div>' +
@@ -19722,10 +19725,11 @@ function _renderTicketEmailModal(accountId, ticketId, ticket, responses, configs
           '<input id="teSubject" type="text" value="" class="w-full px-3 py-2.5 border border-ink-300 rounded-xl text-sm">' +
           '<div class="flex items-center justify-between">' +
             '<label class="text-xs font-bold text-ink-700 uppercase tracking-wider">Email-Text</label>' +
-            '<button onclick="_teTogglePreview()" id="tePreviewBtn" class="text-[11px] font-semibold text-brand-600 inline-flex items-center gap-1"><i data-lucide="eye" class="w-3 h-3"></i> Vorschau</button>' +
+            '<button onclick="_teTogglePreview()" id="tePreviewBtn" class="text-[11px] font-semibold text-brand-600 inline-flex items-center gap-1"><i data-lucide="code" class="w-3 h-3"></i> HTML bearbeiten</button>' +
           '</div>' +
-          '<textarea id="teBody" rows="10" placeholder="Wähle eine Vorlage oben, oder tippe den Email-Text…" class="w-full px-3 py-2.5 border border-ink-300 rounded-xl text-[12px] font-mono leading-snug resize-y"></textarea>' +
-          '<div id="tePreview" class="hidden border border-ink-300 rounded-xl p-3 bg-white text-[13px] leading-relaxed max-h-72 overflow-y-auto prose prose-sm"></div>' +
+          // v2.46.61: Vorschau als Default sichtbar, Roh-HTML-Textarea versteckt
+          '<textarea id="teBody" rows="10" placeholder="Wähle eine Vorlage oben, oder tippe den Email-Text…" class="hidden w-full px-3 py-2.5 border border-ink-300 rounded-xl text-[12px] font-mono leading-snug resize-y"></textarea>' +
+          '<div id="tePreview" class="border border-ink-300 rounded-xl p-3 bg-white text-[13px] leading-relaxed max-h-96 overflow-y-auto prose prose-sm"><em class="text-ink-400">Vorlage wählen, dann erscheint hier die Email-Vorschau.</em></div>' +
           '<label class="flex items-center gap-2 text-[11px] text-ink-700 cursor-pointer">' +
             '<input id="teNoteToTicket" type="checkbox" checked class="w-4 h-4 accent-orange-600">' +
             'Versand als private Notiz am Quell-Ticket protokollieren' +
@@ -19758,8 +19762,8 @@ function _teApplyTemplate() {
   const bodyEl = document.getElementById('teBody');
   if (subjEl) subjEl.value = subj;
   if (bodyEl) bodyEl.value = body;
-  const prev = document.getElementById('tePreview');
-  if (prev && !prev.classList.contains('hidden')) _teRenderPreview();
+  // v2.46.61: Vorschau IMMER aktualisieren — sie ist Default-sichtbar
+  _teRenderPreview();
 }
 
 function _teTogglePreview() {
@@ -19767,11 +19771,12 @@ function _teTogglePreview() {
   const pv = document.getElementById('tePreview');
   const btn = document.getElementById('tePreviewBtn');
   if (!ta || !pv) return;
+  // v2.46.61: Default ist Vorschau-sichtbar. Toggle wechselt zwischen Preview und Edit.
   if (pv.classList.contains('hidden')) {
     _teRenderPreview();
     pv.classList.remove('hidden');
     ta.classList.add('hidden');
-    if (btn) btn.innerHTML = '<i data-lucide="code" class="w-3 h-3"></i> HTML';
+    if (btn) btn.innerHTML = '<i data-lucide="code" class="w-3 h-3"></i> HTML bearbeiten';
   } else {
     pv.classList.add('hidden');
     ta.classList.remove('hidden');
