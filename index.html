@@ -713,7 +713,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.48';
+const APP_VERSION = 'v2.46.49';
 
 /* ============================================================
    GLOBAL THEME — v2.46.12
@@ -8927,9 +8927,22 @@ function renderNewTicketAiPreview() {
         '<input id="ntpPhone" type="text" value="' + escapeAttr(p.customer_phone || '') + '" class="w-full px-3 py-2.5 border border-ink-300 rounded-xl text-sm">' +
       '</div>' +
     '</div>' +
-    '<label class="text-xs font-bold text-ink-700 uppercase tracking-wider block">Kunde Email *</label>' +
-    '<input id="ntpEmail" type="email" value="' + escapeAttr(p.customer_email || '') + '" placeholder="kunde@firma.de" class="w-full px-3 py-2.5 border border-ink-300 rounded-xl text-sm' + (p.customer_email ? '' : ' border-amber-400 bg-amber-50/30') + '">' +
-    (p.customer_email ? '' : '<p class="text-[10px] text-amber-700">Email fehlt — bitte ergänzen (Pflicht für Ticket-Anlage).</p>') +
+    // v2.46.49: Checkbox „eigene Email als Absender" — Default an. Wenn aktiv,
+    // wird das Email-Feld unten ausgegraut und beim Anlegen die User-Email
+    // (APP_KEYS.user.email) als Requester verwendet — Ticket erscheint dann in
+    // FD mit dem aktuellen User als Anfragenden.
+    (APP_KEYS.user?.email
+      ? '<label class="flex items-start gap-2 bg-emerald-50 border border-emerald-200 rounded-xl p-2.5 cursor-pointer">' +
+          '<input id="ntpUseMyEmail" type="checkbox" checked onchange="_ntpToggleUseMyEmail()" class="mt-0.5 w-4 h-4 accent-emerald-600">' +
+          '<div class="flex-1 min-w-0">' +
+            '<p class="text-[12px] font-semibold text-emerald-900">Meine Email als Absender verwenden</p>' +
+            '<p class="text-[10px] text-emerald-700 mt-0.5">Ticket wird mit <b>' + escapeHtml(APP_KEYS.user.email) + '</b> als Ersteller angelegt.</p>' +
+          '</div>' +
+        '</label>'
+      : '') +
+    '<label class="text-xs font-bold text-ink-700 uppercase tracking-wider block">Kunde Email' + (APP_KEYS.user?.email ? '' : ' *') + '</label>' +
+    '<input id="ntpEmail" type="email" value="' + escapeAttr(p.customer_email || '') + '" placeholder="kunde@firma.de" ' + (APP_KEYS.user?.email ? 'disabled ' : '') + 'class="w-full px-3 py-2.5 border border-ink-300 rounded-xl text-sm' + (APP_KEYS.user?.email ? ' bg-ink-100 text-ink-400' : (p.customer_email ? '' : ' border-amber-400 bg-amber-50/30')) + '">' +
+    (!APP_KEYS.user?.email && !p.customer_email ? '<p class="text-[10px] text-amber-700">Email fehlt — bitte ergänzen (Pflicht für Ticket-Anlage).</p>' : '') +
     '<div class="grid grid-cols-2 gap-2">' +
       '<div>' +
         '<label class="text-xs font-bold text-ink-700 uppercase tracking-wider block">Priorität</label>' +
@@ -8960,6 +8973,23 @@ function renderNewTicketAiPreview() {
   if (window.lucide) lucide.createIcons();
 }
 
+// v2.46.49: Email-Feld grau/aktiv schalten wenn Checkbox geändert wird.
+function _ntpToggleUseMyEmail() {
+  const cb = $('ntpUseMyEmail');
+  const inp = $('ntpEmail');
+  if (!cb || !inp) return;
+  if (cb.checked) {
+    inp.disabled = true;
+    inp.classList.add('bg-ink-100', 'text-ink-400');
+    inp.classList.remove('border-amber-400', 'bg-amber-50/30');
+  } else {
+    inp.disabled = false;
+    inp.classList.remove('bg-ink-100', 'text-ink-400');
+    if (!inp.value.trim()) inp.classList.add('border-amber-400', 'bg-amber-50/30');
+    setTimeout(() => inp.focus(), 30);
+  }
+}
+
 function backToNewTicketAiPrompt() {
   // Plan verwerfen, aber gespeicherten Original-Befehl wieder einsetzen
   const original = NEW_TICKET_AI_PLAN?.originalCmd || '';
@@ -8987,18 +9017,26 @@ async function createTicketFromAiPlan(btn) {
   const subject = ($('ntpSubject')?.value || '').trim();
   const desc    = ($('ntpDesc')?.value || '').trim();
   const name    = ($('ntpName')?.value || '').trim();
-  const email   = ($('ntpEmail')?.value || '').trim();
   const phone   = ($('ntpPhone')?.value || '').trim();
   const prio    = parseInt(($('ntpPriority')?.value || '2'), 10);
   const groupId = ($('ntpGroup')?.value || '').trim();
+  // v2.46.49: „Meine Email als Absender" — bei aktiver Checkbox wird der eingeloggte
+  // User als Requester eingetragen; das Kunden-Email-Feld ist dann irrelevant.
+  const useMyEmail = !!$('ntpUseMyEmail')?.checked && !!APP_KEYS.user?.email;
+  const email = useMyEmail
+    ? APP_KEYS.user.email
+    : ($('ntpEmail')?.value || '').trim();
+  const effectiveName = useMyEmail
+    ? (APP_KEYS.user.name || name || email.split('@')[0])
+    : (name || email.split('@')[0]);
   if (!subject) return setErr('Betreff fehlt');
-  if (!email)   return setErr('Kunden-Email fehlt — Pflicht für Ticket-Anlage');
+  if (!email)   return setErr(useMyEmail ? 'Eigene Email ist nicht hinterlegt — bitte Checkbox abwählen und Kunden-Email angeben' : 'Kunden-Email fehlt — Pflicht für Ticket-Anlage');
   if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return setErr('Email-Adresse sieht ungültig aus');
   setBusy(btn, true, 'Lege an…');
   try {
     // 1. FD-Kontakt finden/anlegen
     const fdContact = await findOrCreateFdContactByEmail(ref.accountId, {
-      name: name || email.split('@')[0], email, phone,
+      name: effectiveName, email, phone: useMyEmail ? (APP_KEYS.user.phone || '') : phone,
     });
     if (!fdContact?.id) throw new Error('FD-Kontakt konnte nicht erstellt werden');
     // 2. Ticket-Payload zusammenbauen
