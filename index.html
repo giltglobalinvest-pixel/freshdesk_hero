@@ -685,6 +685,10 @@
         <i data-lucide="phone-call" class="w-5 h-5"></i>
         <span class="text-[10px] font-medium">Aufgaben</span>
       </button>
+      <button data-nav="deals"    onclick="navTo('deals')"    class="flex-1 py-2 flex flex-col items-center gap-0.5 text-ink-500">
+        <i data-lucide="handshake" class="w-5 h-5"></i>
+        <span class="text-[10px] font-medium">Deals</span>
+      </button>
       <button data-nav="accounts" onclick="navTo('accounts')" class="flex-1 py-2 flex flex-col items-center gap-0.5 text-ink-500">
         <i data-lucide="building-2" class="w-5 h-5"></i>
         <span class="text-[10px] font-medium">Accounts</span>
@@ -713,7 +717,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.51';
+const APP_VERSION = 'v2.46.52';
 
 /* ============================================================
    GLOBAL THEME — v2.46.12
@@ -6559,6 +6563,7 @@ function navTo(page) {
   else if (page === 'automated') renderFn = renderAutomatedPage;
   else if (page === 'costs')     renderFn = renderCostsPage;
   else if (page === 'tasks')     renderFn = renderTasksPage;
+  else if (page === 'deals')     renderFn = renderDealsPage;
   try {
     const result = renderFn();
     if (result && typeof result.catch === 'function') {
@@ -17927,6 +17932,545 @@ async function openAufgabeFromContact(accountId, contactId) {
     related_phone: contact.phone || '',
     related_mobile: contact.mobile || '',
   });
+}
+
+/* ===================== v2.46.52: DEALS PAGE (Freshsales) =====================
+   Zeigt alle Deals aus allen FS-fähigen Accounts. Filter: Offen/Gewonnen/Verloren/Alle.
+   Karte: Firma · Angebotsnummer (Auto-Detect aus Custom-Fields) · Leistungsumfang
+   (Deal-Name) · Preis · Kontakt + Telefon-Quick-Action. Tap → Detail-Modal. */
+
+const DEALS_STATE = {
+  filter: 'open',        // 'open' | 'won' | 'lost' | 'all'
+  accountId: 'all',      // 'all' | <accountId>
+  all: [],               // alle geladenen Deals (über Accounts hinweg)
+  loading: false,
+  lastLoadAt: 0,
+};
+
+// Cache pro Account: { stages: [{id,name,outcome}], stagesByGroup: {open:[], won:[], lost:[]} }
+const FS_STAGES_CACHE = {};
+// Cache pro Account: { filters: [{id, name, ...}] }
+const FS_DEAL_FILTERS_CACHE = {};
+
+function getFsEnabledAccounts() {
+  return (APP_STATE.accounts || []).filter(accountHasFreshsales);
+}
+
+/* Lädt Deal-Stages eines Accounts und gruppiert sie nach Outcome (Open/Won/Lost).
+   FS-API hat je nach Version unterschiedliche Feld-Namen: 'outcome' oder 'forecast_type'.
+   Beide werden tolerant geprüft. */
+async function ensureFsStagesLoaded(accountId) {
+  if (FS_STAGES_CACHE[accountId]) return FS_STAGES_CACHE[accountId];
+  try {
+    const data = await proxyJson('/freshsales/' + encodeURIComponent(accountId) + '/api/selector/deal_stages');
+    const list = Array.isArray(data?.deal_stages) ? data.deal_stages : (Array.isArray(data) ? data : []);
+    const byGroup = { open: [], won: [], lost: [], other: [] };
+    const byId = {};
+    list.forEach(function (s) {
+      const out = String(s.outcome || s.forecast_type || s.deal_stage_type || '').toLowerCase();
+      const nm  = String(s.name || '').toLowerCase();
+      let grp = 'other';
+      if (out === 'won'  || nm === 'won'  || /gewonn|geschloss.*gewonn/.test(nm))  grp = 'won';
+      else if (out === 'lost' || nm === 'lost' || /verlor|geschloss.*verlor/.test(nm)) grp = 'lost';
+      else grp = 'open'; // alles andere zählt als „aktiv/offen"
+      byGroup[grp].push(s.id);
+      byId[s.id] = { id: s.id, name: s.name, outcome: out || null, group: grp };
+    });
+    const cache = { stages: list, byGroup, byId };
+    FS_STAGES_CACHE[accountId] = cache;
+    return cache;
+  } catch (e) {
+    console.warn('FS-Stages-Load fehlgeschlagen für ' + accountId + ':', e.message);
+    return { stages: [], byGroup: { open: [], won: [], lost: [], other: [] }, byId: {} };
+  }
+}
+
+/* Holt FS-Deal-Views (Filter). Wir brauchen den "All Deals"- oder ähnlichen Default-
+   View als View-ID, weil /api/deals/view/<id> erforderlich ist. */
+async function ensureFsDealFiltersLoaded(accountId) {
+  if (FS_DEAL_FILTERS_CACHE[accountId]) return FS_DEAL_FILTERS_CACHE[accountId];
+  try {
+    const data = await proxyJson('/freshsales/' + encodeURIComponent(accountId) + '/api/deals/filters');
+    const list = Array.isArray(data?.filters) ? data.filters : (Array.isArray(data) ? data : []);
+    FS_DEAL_FILTERS_CACHE[accountId] = { filters: list };
+    return FS_DEAL_FILTERS_CACHE[accountId];
+  } catch (e) {
+    console.warn('FS-Deal-Filters-Load fehlgeschlagen für ' + accountId + ':', e.message);
+    FS_DEAL_FILTERS_CACHE[accountId] = { filters: [] };
+    return FS_DEAL_FILTERS_CACHE[accountId];
+  }
+}
+
+/* Sucht in der Filter-Liste nach einer passenden Default-View. Probiert nacheinander:
+   1. "All Deals" / "Alle Deals"
+   2. Die erste View überhaupt
+   Gibt die View-ID zurück oder null. */
+function _pickDefaultDealViewId(filters) {
+  if (!filters?.length) return null;
+  const named = filters.find(function (f) {
+    const n = String(f.name || '').toLowerCase();
+    return n === 'all deals' || n === 'alle deals' || /^all\s+deals/.test(n);
+  });
+  if (named) return named.id;
+  return filters[0].id;
+}
+
+/* Lädt alle Deals eines Accounts (paginiert bis 2 Seiten = max 200). */
+async function fetchDealsForAccount(accountId, maxPages) {
+  maxPages = maxPages || 2;
+  await ensureFsStagesLoaded(accountId);
+  const flt = await ensureFsDealFiltersLoaded(accountId);
+  const viewId = _pickDefaultDealViewId(flt.filters);
+  if (!viewId) {
+    console.warn('Keine Deal-View für Account ' + accountId);
+    return [];
+  }
+  const include = 'owner,deal_stage,sales_account,contacts';
+  const all = [];
+  for (let page = 1; page <= maxPages; page++) {
+    const path = '/freshsales/' + encodeURIComponent(accountId) +
+      '/api/deals/view/' + viewId +
+      '?include=' + encodeURIComponent(include) +
+      '&per_page=100&page=' + page +
+      '&sort=updated_at&sort_type=desc';
+    let data;
+    try { data = await proxyJson(path); }
+    catch (e) { console.warn('FS-Deals fetch page ' + page + ' fehlgeschlagen:', e.message); break; }
+    const deals = Array.isArray(data?.deals) ? data.deals : [];
+    if (!deals.length) break;
+    // Include-Daten extrahieren — FS gibt sie auf Top-Level zurück, wir mappen via ID
+    const accountsArr = data.sales_accounts || [];
+    const contactsArr = data.contacts || [];
+    const ownersArr   = data.owners || data.users || [];
+    const stagesArr   = data.deal_stages || [];
+    const saById = {}; accountsArr.forEach(function (x) { saById[x.id] = x; });
+    const ctById = {}; contactsArr.forEach(function (x) { ctById[x.id] = x; });
+    const owById = {}; ownersArr.forEach(function   (x) { owById[x.id] = x; });
+    const stById = {}; stagesArr.forEach(function   (x) { stById[x.id] = x; });
+    deals.forEach(function (d) {
+      d._salesAccount = d.sales_account_id ? saById[d.sales_account_id] : null;
+      d._stage        = d.deal_stage_id    ? stById[d.deal_stage_id]    : null;
+      d._owner        = d.owner_id         ? owById[d.owner_id]         : null;
+      const cids      = Array.isArray(d.contact_ids) ? d.contact_ids : [];
+      d._contacts     = cids.map(function (cid) { return ctById[cid]; }).filter(Boolean);
+      d._primaryContact = d._contacts[0] || null;
+      all.push(d);
+    });
+    if (deals.length < 100) break; // letzte Seite
+  }
+  return all;
+}
+
+/* Enrich-Helper: setzt _accountId, _accountName, _accountColor + Stage-Gruppe. */
+function _enrichDeal(deal, account, stagesCache) {
+  deal._accountId    = account.id;
+  deal._accountName  = account.name;
+  deal._accountColor = account.color || '#cbd5e1';
+  const stageId      = deal.deal_stage_id;
+  const stageMeta    = stagesCache?.byId?.[stageId] || null;
+  deal._stageGroup   = stageMeta?.group || 'open';
+  deal._stageName    = stageMeta?.name || deal._stage?.name || '–';
+  return deal;
+}
+
+/* Hauptlade-Funktion: lädt aus allen FS-fähigen Accounts parallel und merged. */
+async function loadAllDeals() {
+  if (DEALS_STATE.loading) return;
+  DEALS_STATE.loading = true;
+  try {
+    const accounts = getFsEnabledAccounts();
+    if (!accounts.length) {
+      DEALS_STATE.all = [];
+      return;
+    }
+    const results = await Promise.allSettled(accounts.map(function (acc) {
+      return fetchDealsForAccount(acc.id).then(function (deals) {
+        const stagesCache = FS_STAGES_CACHE[acc.id];
+        return deals.map(function (d) { return _enrichDeal(d, acc, stagesCache); });
+      });
+    }));
+    const flat = [];
+    results.forEach(function (r) { if (r.status === 'fulfilled') flat.push.apply(flat, r.value); });
+    DEALS_STATE.all = flat;
+    DEALS_STATE.lastLoadAt = Date.now();
+  } finally {
+    DEALS_STATE.loading = false;
+  }
+}
+
+/* Auto-Detect der Angebotsnummer aus Custom-Fields.
+   Sucht Keys die wie Angebots-/Quote-Nummern aussehen. */
+function _extractDealQuoteNumber(deal) {
+  const cf = deal?.custom_field || {};
+  const keys = Object.keys(cf);
+  if (!keys.length) return null;
+  const patterns = [
+    /angebots?nr/i, /angebots?nummer/i, /angebot.*nr/i,
+    /quote.*(no|nr|number)/i, /offer.*(no|nr|number)/i,
+    /^cf_(angebot|quote|offer|opportunity).*/i,
+  ];
+  for (let i = 0; i < patterns.length; i++) {
+    const k = keys.find(function (x) { return patterns[i].test(x); });
+    if (k && cf[k] != null && String(cf[k]).trim() !== '') return String(cf[k]).trim();
+  }
+  // Fallback: irgendein Key mit "nummer"/"number" und nicht-leerem Wert
+  const fallback = keys.find(function (x) {
+    return /numm?er|number/i.test(x) && cf[x] != null && String(cf[x]).trim() !== '';
+  });
+  return fallback ? String(cf[fallback]).trim() : null;
+}
+
+/* Preis-Formatierung mit € als Default. FS liefert amount als string. */
+function _formatDealAmount(deal) {
+  const amount = deal?.amount != null ? Number(deal.amount) : null;
+  if (amount == null || isNaN(amount)) return '–';
+  try {
+    return amount.toLocaleString('de-DE', { style: 'currency', currency: 'EUR', maximumFractionDigits: 0 });
+  } catch (_) {
+    return amount.toFixed(0) + ' €';
+  }
+}
+
+/* Beste Telefonnummer eines Contacts (mobile > work > home). */
+function _contactBestPhone(c) {
+  if (!c) return '';
+  return String(c.mobile_number || c.work_number || c.phone_number || c.home_number || c.other_phone || '').trim();
+}
+
+async function renderDealsPage() {
+  setPageTitle('Deals', 'Pipeline aus Freshsales');
+  setActiveNav('deals');
+  $('pageContent').innerHTML =
+    '<div class="space-y-3 max-w-2xl mx-auto">' +
+      '<div id="dealsHeader"></div>' +
+      '<div id="dealsList">' +
+        '<div class="bg-white rounded-2xl border border-ink-200 p-6 text-center">' +
+          '<div class="spinner inline-block w-7 h-7 border-[3px] text-brand-500"></div>' +
+          '<p class="text-sm text-ink-500 mt-2">Lade Deals…</p>' +
+        '</div>' +
+      '</div>' +
+    '</div>';
+  const fsAccounts = getFsEnabledAccounts();
+  if (!fsAccounts.length) {
+    $('dealsList').innerHTML =
+      '<div class="bg-white rounded-2xl border border-ink-200 p-6 text-center">' +
+        '<i data-lucide="link-2-off" class="w-10 h-10 mx-auto text-amber-500"></i>' +
+        '<p class="text-sm text-ink-700 mt-2 font-semibold">Keine Freshsales-Verbindung konfiguriert.</p>' +
+        '<p class="text-[11px] text-ink-500 mt-1 leading-snug">Im Account-Setup unter „Freshsales-Domain" + „Freshsales-API-Key" die Verbindung eintragen, dann erscheinen hier deine Deals.</p>' +
+        '<button onclick="navTo(\'accounts\')" class="mt-4 inline-flex items-center gap-1.5 px-3 py-2 bg-brand-500 hover:bg-brand-600 text-white rounded-lg text-xs font-semibold">' +
+          '<i data-lucide="building-2" class="w-3.5 h-3.5"></i> Zu den Accounts' +
+        '</button>' +
+      '</div>';
+    if (window.lucide) lucide.createIcons();
+    _renderDealsHeader();
+    return;
+  }
+  try { await loadAllDeals(); }
+  catch (e) { console.warn('loadAllDeals:', e); }
+  _renderDealsHeader();
+  _renderDealsList();
+}
+
+function _renderDealsHeader() {
+  const host = $('dealsHeader');
+  if (!host) return;
+  const fsAccounts = getFsEnabledAccounts();
+  const all = DEALS_STATE.all || [];
+  // Counts nach Stage-Group + ggf. Account-Filter
+  const visibleByAcc = function (deal) {
+    return DEALS_STATE.accountId === 'all' || deal._accountId === DEALS_STATE.accountId;
+  };
+  const cntOpen = all.filter(function (d) { return visibleByAcc(d) && d._stageGroup === 'open'; }).length;
+  const cntWon  = all.filter(function (d) { return visibleByAcc(d) && d._stageGroup === 'won';  }).length;
+  const cntLost = all.filter(function (d) { return visibleByAcc(d) && d._stageGroup === 'lost'; }).length;
+  const cntAll  = all.filter(visibleByAcc).length;
+  function chip(key, label, count, active, color) {
+    const colorCls = active
+      ? (color || 'bg-brand-600 text-white border-brand-600')
+      : 'bg-white text-ink-700 border-ink-200';
+    return '<button onclick="DEALS_STATE.filter=\'' + key + '\'; _renderDealsHeader(); _renderDealsList()" class="shrink-0 inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full text-[12px] font-semibold border ' + colorCls + ' shadow-sm">' +
+      escapeHtml(label) +
+      ' <span class="text-[10px] font-mono ' + (active ? 'bg-white/30' : 'bg-ink-100') + ' px-1.5 rounded-full">' + count + '</span>' +
+      '</button>';
+  }
+  const accTabs = fsAccounts.length > 1 ? (
+    '<div class="flex items-center gap-1.5 overflow-x-auto no-scrollbar pb-1 -mx-1 px-1">' +
+      '<button onclick="DEALS_STATE.accountId=\'all\'; _renderDealsHeader(); _renderDealsList()" class="shrink-0 inline-flex items-center gap-1 px-3 py-1.5 rounded-full text-[12px] font-semibold ' +
+        (DEALS_STATE.accountId === 'all' ? 'bg-ink-900 text-white' : 'bg-white text-ink-700 border border-ink-200') + '">' +
+        '<i data-lucide="layers" class="w-3.5 h-3.5"></i> Alle (' + fsAccounts.length + ')' +
+      '</button>' +
+      fsAccounts.map(function (a) {
+        return '<button onclick="DEALS_STATE.accountId=\'' + escapeAttr(a.id) + '\'; _renderDealsHeader(); _renderDealsList()" class="shrink-0 inline-flex items-center gap-1 px-3 py-1.5 rounded-full text-[12px] font-semibold ' +
+          (DEALS_STATE.accountId === a.id ? 'bg-ink-900 text-white' : 'bg-white text-ink-700 border border-ink-200') + '">' +
+          '<span class="w-2 h-2 rounded-full" style="background:' + escapeAttr(a.color || '#cbd5e1') + '"></span>' +
+          '<span class="truncate max-w-32">' + escapeHtml(a.name) + '</span>' +
+        '</button>';
+      }).join('') +
+    '</div>'
+  ) : '';
+  host.innerHTML =
+    '<div class="bg-white/95 backdrop-blur sticky top-0 z-10 -mx-1 px-1 py-2 border-b border-ink-100 space-y-2">' +
+      accTabs +
+      '<div class="flex items-center gap-1.5 overflow-x-auto no-scrollbar pb-1">' +
+        chip('open', 'Offen',     cntOpen, DEALS_STATE.filter === 'open', 'bg-blue-600 text-white border-blue-600') +
+        chip('won',  'Gewonnen',  cntWon,  DEALS_STATE.filter === 'won',  'bg-emerald-600 text-white border-emerald-600') +
+        chip('lost', 'Verloren',  cntLost, DEALS_STATE.filter === 'lost', 'bg-ink-700 text-white border-ink-700') +
+        chip('all',  'Alle',      cntAll,  DEALS_STATE.filter === 'all') +
+        '<button onclick="reloadDealsManual()" class="shrink-0 ml-auto inline-flex items-center gap-1 px-2.5 py-1.5 rounded-full text-[11px] font-semibold bg-white text-ink-700 border border-ink-200 shadow-sm" title="Neu laden">' +
+          '<i data-lucide="refresh-cw" class="w-3 h-3"></i>' +
+        '</button>' +
+      '</div>' +
+    '</div>';
+  if (window.lucide) lucide.createIcons();
+}
+
+async function reloadDealsManual() {
+  $('dealsList').innerHTML =
+    '<div class="bg-white rounded-2xl border border-ink-200 p-6 text-center">' +
+      '<div class="spinner inline-block w-7 h-7 border-[3px] text-brand-500"></div>' +
+      '<p class="text-sm text-ink-500 mt-2">Aktualisiere Deals…</p>' +
+    '</div>';
+  // Caches leeren damit Stages + Filters wieder frisch geholt werden
+  Object.keys(FS_STAGES_CACHE).forEach(function (k) { delete FS_STAGES_CACHE[k]; });
+  Object.keys(FS_DEAL_FILTERS_CACHE).forEach(function (k) { delete FS_DEAL_FILTERS_CACHE[k]; });
+  try { await loadAllDeals(); } catch (e) { console.warn(e); }
+  _renderDealsHeader();
+  _renderDealsList();
+}
+
+function _renderDealsList() {
+  const host = $('dealsList');
+  if (!host) return;
+  const all = DEALS_STATE.all || [];
+  const filtered = all.filter(function (d) {
+    if (DEALS_STATE.accountId !== 'all' && d._accountId !== DEALS_STATE.accountId) return false;
+    if (DEALS_STATE.filter === 'all') return true;
+    return d._stageGroup === DEALS_STATE.filter;
+  });
+  // Nach updated_at desc sortieren (FS liefert das schon, aber sicher ist sicher)
+  filtered.sort(function (a, b) {
+    const av = new Date(a.updated_at || a.created_at || 0).getTime();
+    const bv = new Date(b.updated_at || b.created_at || 0).getTime();
+    return bv - av;
+  });
+  if (!filtered.length) {
+    host.innerHTML =
+      '<div class="bg-white rounded-2xl border border-ink-200 p-6 text-center">' +
+        '<i data-lucide="inbox" class="w-10 h-10 mx-auto text-ink-300"></i>' +
+        '<p class="text-sm text-ink-500 mt-2">Keine Deals in dieser Auswahl.</p>' +
+      '</div>';
+    if (window.lucide) lucide.createIcons();
+    return;
+  }
+  host.innerHTML = filtered.map(_renderDealCard).join('');
+  if (window.lucide) lucide.createIcons();
+}
+
+function _renderDealCard(deal) {
+  const id = deal.id;
+  const accId = deal._accountId;
+  const stageGrp = deal._stageGroup;
+  const stageBadge = stageGrp === 'won'
+    ? '<span class="text-[9px] uppercase tracking-wider bg-emerald-100 text-emerald-700 px-1.5 py-0.5 rounded font-bold">Gewonnen</span>'
+    : (stageGrp === 'lost'
+      ? '<span class="text-[9px] uppercase tracking-wider bg-ink-200 text-ink-700 px-1.5 py-0.5 rounded font-bold">Verloren</span>'
+      : '<span class="text-[9px] uppercase tracking-wider bg-blue-100 text-blue-700 px-1.5 py-0.5 rounded font-bold">' + escapeHtml(deal._stageName || 'Offen') + '</span>');
+  const firma = deal._salesAccount?.name || '–';
+  const angebotNr = _extractDealQuoteNumber(deal);
+  const leistung = deal.name || '–';
+  const preis = _formatDealAmount(deal);
+  const contact = deal._primaryContact;
+  const contactName = contact ? (contact.display_name || (contact.first_name || '') + ' ' + (contact.last_name || '')).trim() : '';
+  const phone = _contactBestPhone(contact);
+  const owner = deal._owner?.display_name || deal._owner?.name || '';
+  return '<div onclick="openDealDetail(\'' + escapeAttr(accId) + '\', ' + id + ')" class="bg-white rounded-2xl border border-ink-200 p-3 cursor-pointer hover:border-brand-300 active:scale-[0.99] transition">' +
+    // Header: Firma + Stage + Account-Color
+    '<div class="flex items-start justify-between gap-2 mb-2">' +
+      '<div class="flex items-center gap-2 min-w-0 flex-1">' +
+        '<span class="w-2 h-2 rounded-full shrink-0" style="background:' + escapeAttr(deal._accountColor) + '" title="' + escapeAttr(deal._accountName) + '"></span>' +
+        '<span class="font-bold text-ink-900 text-sm truncate">' + escapeHtml(firma) + '</span>' +
+      '</div>' +
+      stageBadge +
+    '</div>' +
+    // Angebotsnummer + Preis-Zeile
+    '<div class="flex items-baseline justify-between gap-2 mb-1.5">' +
+      (angebotNr
+        ? '<span class="text-[11px] font-mono bg-ink-100 text-ink-700 px-1.5 py-0.5 rounded">#' + escapeHtml(angebotNr) + '</span>'
+        : '<span class="text-[11px] text-ink-400 italic">keine Angebotsnr</span>') +
+      '<span class="text-base font-bold text-ink-900 tabular-nums">' + escapeHtml(preis) + '</span>' +
+    '</div>' +
+    // Leistungsumfang (Deal-Name)
+    '<p class="text-[13px] text-ink-700 leading-snug line-clamp-2 mb-2">' + escapeHtml(leistung) + '</p>' +
+    // Kontakt-Zeile mit Phone-Quick-Action
+    (contact ? (
+      '<div class="flex items-center gap-2 pt-2 border-t border-ink-100">' +
+        '<div class="flex items-center gap-1.5 min-w-0 flex-1">' +
+          '<i data-lucide="user" class="w-3.5 h-3.5 text-ink-400 shrink-0"></i>' +
+          '<span class="text-[12px] text-ink-700 truncate">' + escapeHtml(contactName || '–') + '</span>' +
+        '</div>' +
+        (phone
+          ? '<a href="tel:' + escapeAttr(phone) + '" onclick="event.stopPropagation()" class="shrink-0 inline-flex items-center gap-1 px-2.5 py-1 rounded-full bg-brand-500 text-white text-[11px] font-semibold shadow-sm active:scale-95"><i data-lucide="phone" class="w-3 h-3"></i> ' + escapeHtml(phone) + '</a>'
+          : '<span class="text-[10px] text-ink-400 italic">keine Tel</span>') +
+      '</div>'
+    ) : '') +
+    // Owner-Footer
+    (owner ? '<p class="text-[10px] text-ink-400 mt-1.5 flex items-center gap-1"><i data-lucide="user-cog" class="w-3 h-3"></i> ' + escapeHtml(owner) + '</p>' : '') +
+  '</div>';
+}
+
+/* ---- DEAL DETAIL MODAL ---- */
+async function openDealDetail(accountId, dealId) {
+  let host = document.getElementById('modalHost');
+  if (!host) { host = document.createElement('div'); host.id = 'modalHost'; document.body.appendChild(host); }
+  host.innerHTML =
+    '<div class="fixed inset-0 z-50 bg-white flex flex-col">' +
+      '<header class="sticky top-0 z-10 bg-white/95 backdrop-blur border-b border-ink-200 safe-top">' +
+        '<div class="px-2 py-2.5 flex items-center gap-1.5">' +
+          '<button onclick="closeDealDetail()" class="w-9 h-9 rounded-lg hover:bg-ink-100 flex items-center justify-center"><i data-lucide="arrow-left" class="w-5 h-5 text-ink-700"></i></button>' +
+          '<div class="flex-1 min-w-0">' +
+            '<h1 class="font-bold text-ink-900 leading-tight truncate">Deal #' + dealId + '</h1>' +
+            '<p class="text-[11px] text-ink-500">Lade Details…</p>' +
+          '</div>' +
+        '</div>' +
+      '</header>' +
+      '<div id="dealDetailBody" class="flex-1 overflow-y-auto p-4">' +
+        '<div class="text-center py-8"><div class="spinner inline-block w-7 h-7 border-[3px] text-brand-500"></div></div>' +
+      '</div>' +
+    '</div>';
+  if (window.lucide) lucide.createIcons();
+  document.body.style.overflow = 'hidden';
+  // Cache-Hit aus Liste verwenden, parallel frische Daten vom Server holen
+  let cached = (DEALS_STATE.all || []).find(function (d) { return d._accountId === accountId && d.id === dealId; });
+  if (cached) _renderDealDetail(cached, accountId, dealId);
+  try {
+    const fresh = await proxyJson('/freshsales/' + encodeURIComponent(accountId) +
+      '/api/deals/' + dealId +
+      '?include=owner,deal_stage,sales_account,contacts');
+    const d = fresh?.deal || fresh;
+    // Include-Daten aus Top-Level mappen
+    const saArr = fresh?.sales_accounts || [];
+    const ctArr = fresh?.contacts || [];
+    const owArr = fresh?.users || fresh?.owners || [];
+    const stArr = fresh?.deal_stages || [];
+    if (d) {
+      d._salesAccount   = d.sales_account_id ? (saArr.find(function (x) { return x.id === d.sales_account_id; }) || cached?._salesAccount) : null;
+      d._stage          = d.deal_stage_id    ? (stArr.find(function (x) { return x.id === d.deal_stage_id;    }) || cached?._stage) : null;
+      d._owner          = d.owner_id         ? (owArr.find(function (x) { return x.id === d.owner_id;         }) || cached?._owner) : null;
+      d._contacts       = (Array.isArray(d.contact_ids) ? d.contact_ids : []).map(function (cid) {
+        return ctArr.find(function (x) { return x.id === cid; }) || (cached?._contacts || []).find(function (x) { return x.id === cid; });
+      }).filter(Boolean);
+      d._primaryContact = d._contacts[0] || null;
+      d._accountId      = accountId;
+      const acc         = (APP_STATE.accounts || []).find(function (a) { return a.id === accountId; });
+      d._accountName    = acc?.name || '';
+      d._accountColor   = acc?.color || '#cbd5e1';
+      const stagesCache = FS_STAGES_CACHE[accountId];
+      d._stageGroup     = stagesCache?.byId?.[d.deal_stage_id]?.group || 'open';
+      d._stageName      = stagesCache?.byId?.[d.deal_stage_id]?.name  || d._stage?.name || '–';
+      _renderDealDetail(d, accountId, dealId);
+    }
+  } catch (e) {
+    if (!cached) {
+      const body = $('dealDetailBody');
+      if (body) body.innerHTML = '<div class="bg-red-50 border border-red-200 rounded-xl p-3 text-sm text-red-800">' + escapeHtml(e.message || String(e)) + '</div>';
+    }
+  }
+}
+
+function _renderDealDetail(d, accountId, dealId) {
+  const body = $('dealDetailBody');
+  if (!body) return;
+  const acc = (APP_STATE.accounts || []).find(function (a) { return a.id === accountId; });
+  const fsUrl = (acc?.freshsales_domain && acc?.freshsales_domain_suffix)
+    ? ('https://' + acc.freshsales_domain + '.' + acc.freshsales_domain_suffix + '/crm/sales/deals/' + dealId)
+    : null;
+  const firma  = d._salesAccount?.name || '–';
+  const angebotNr = _extractDealQuoteNumber(d);
+  const leistung = d.name || '–';
+  const preis = _formatDealAmount(d);
+  const stage = d._stageName || '–';
+  const owner = d._owner?.display_name || d._owner?.name || '';
+  const closeDate = d.expected_close ? new Date(d.expected_close).toLocaleDateString('de-DE') : '';
+  const probability = d.probability != null ? (d.probability + ' %') : '';
+  body.innerHTML =
+    '<div class="space-y-3 max-w-2xl mx-auto">' +
+      // Hero-Box: Firma + Stage
+      '<div class="bg-gradient-to-br from-brand-50 to-white border border-brand-100 rounded-2xl p-4">' +
+        '<div class="flex items-start justify-between gap-2 mb-2">' +
+          '<div class="flex items-center gap-2 min-w-0 flex-1">' +
+            '<span class="w-2.5 h-2.5 rounded-full shrink-0" style="background:' + escapeAttr(d._accountColor || '#cbd5e1') + '"></span>' +
+            '<span class="font-bold text-ink-900 text-base truncate">' + escapeHtml(firma) + '</span>' +
+          '</div>' +
+          '<span class="text-[10px] uppercase tracking-wider bg-white text-ink-700 px-2 py-0.5 rounded border border-ink-200 font-bold">' + escapeHtml(stage) + '</span>' +
+        '</div>' +
+        '<p class="text-[10px] text-ink-500 uppercase tracking-wider font-semibold mt-2">Leistungsumfang</p>' +
+        '<p class="text-[14px] text-ink-900 leading-snug mt-0.5">' + escapeHtml(leistung) + '</p>' +
+      '</div>' +
+      // Kennzahlen-Grid
+      '<div class="grid grid-cols-2 gap-2">' +
+        '<div class="bg-white border border-ink-200 rounded-xl p-3">' +
+          '<p class="text-[10px] text-ink-500 uppercase tracking-wider font-semibold">Angebotsnummer</p>' +
+          '<p class="text-[15px] font-mono font-bold text-ink-900 mt-0.5">' + (angebotNr ? '#' + escapeHtml(angebotNr) : '<span class="text-ink-400 italic text-[12px]">—</span>') + '</p>' +
+        '</div>' +
+        '<div class="bg-white border border-ink-200 rounded-xl p-3">' +
+          '<p class="text-[10px] text-ink-500 uppercase tracking-wider font-semibold">Preis</p>' +
+          '<p class="text-[15px] font-bold text-ink-900 mt-0.5 tabular-nums">' + escapeHtml(preis) + '</p>' +
+        '</div>' +
+        (closeDate ? (
+          '<div class="bg-white border border-ink-200 rounded-xl p-3">' +
+            '<p class="text-[10px] text-ink-500 uppercase tracking-wider font-semibold">Erw. Abschluss</p>' +
+            '<p class="text-[14px] font-semibold text-ink-900 mt-0.5">' + escapeHtml(closeDate) + '</p>' +
+          '</div>'
+        ) : '') +
+        (probability ? (
+          '<div class="bg-white border border-ink-200 rounded-xl p-3">' +
+            '<p class="text-[10px] text-ink-500 uppercase tracking-wider font-semibold">Wahrscheinlichkeit</p>' +
+            '<p class="text-[14px] font-semibold text-ink-900 mt-0.5">' + escapeHtml(probability) + '</p>' +
+          '</div>'
+        ) : '') +
+      '</div>' +
+      // Kontakte
+      ((d._contacts || []).length ? (
+        '<div class="bg-white border border-ink-200 rounded-2xl p-3">' +
+          '<p class="text-[10px] text-ink-500 uppercase tracking-wider font-semibold mb-2">Kontakte</p>' +
+          '<div class="space-y-2">' +
+            d._contacts.map(function (c) {
+              const nm = (c.display_name || ((c.first_name || '') + ' ' + (c.last_name || '')).trim() || '–');
+              const ph = _contactBestPhone(c);
+              const em = (c.email || '').trim();
+              return '<div class="border border-ink-100 rounded-xl p-2.5">' +
+                '<p class="font-semibold text-ink-900 text-[13px]">' + escapeHtml(nm) + '</p>' +
+                (em ? '<p class="text-[11px] text-ink-500 mt-0.5">' + escapeHtml(em) + '</p>' : '') +
+                (ph || em ? '<div class="flex gap-1.5 mt-1.5">' +
+                  (ph ? '<a href="tel:' + escapeAttr(ph) + '" class="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-brand-500 text-white text-[11px] font-semibold"><i data-lucide="phone" class="w-3 h-3"></i> ' + escapeHtml(ph) + '</a>' : '') +
+                  (em ? '<a href="mailto:' + escapeAttr(em) + '" class="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-ink-100 text-ink-700 text-[11px] font-semibold"><i data-lucide="mail" class="w-3 h-3"></i> Email</a>' : '') +
+                '</div>' : '') +
+              '</div>';
+            }).join('') +
+          '</div>' +
+        '</div>'
+      ) : '') +
+      // Owner-Zeile
+      (owner ? (
+        '<div class="bg-white border border-ink-200 rounded-2xl p-3 flex items-center gap-2">' +
+          '<i data-lucide="user-cog" class="w-4 h-4 text-ink-400"></i>' +
+          '<span class="text-[12px] text-ink-700">Owner: <b>' + escapeHtml(owner) + '</b></span>' +
+        '</div>'
+      ) : '') +
+      // Account-Hinweis
+      '<p class="text-[10px] text-ink-400 text-center">Account: ' + escapeHtml(d._accountName || acc?.name || '') + '</p>' +
+      // Externe Links
+      (fsUrl ? (
+        '<a href="' + escapeAttr(fsUrl) + '" target="_blank" rel="noopener" class="block bg-ink-900 hover:bg-ink-800 text-white rounded-xl py-3 text-sm font-bold text-center"><i data-lucide="external-link" class="w-4 h-4 inline-block mr-1"></i> In Freshsales öffnen</a>'
+      ) : '') +
+    '</div>';
+  if (window.lucide) lucide.createIcons();
+}
+
+function closeDealDetail() {
+  const host = document.getElementById('modalHost');
+  if (host) host.innerHTML = '';
+  document.body.style.overflow = '';
 }
 
 /* ===================== USERS PAGE (Admin) ===================== */
