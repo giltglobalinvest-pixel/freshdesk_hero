@@ -717,7 +717,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.54';
+const APP_VERSION = 'v2.46.55';
 
 /* ============================================================
    GLOBAL THEME — v2.46.12
@@ -18422,6 +18422,8 @@ function _renderDealsList() {
     '</div>';
   host.innerHTML = banner + filtered.map(_renderDealCard).join('');
   if (window.lucide) lucide.createIcons();
+  // v2.46.55: Swipe-Handler nach jedem Render neu attachen
+  _attachDealSwipeHandlers();
 }
 
 function _renderDealCard(deal) {
@@ -18441,19 +18443,28 @@ function _renderDealCard(deal) {
   const contactName = contact ? (contact.display_name || (contact.first_name || '') + ' ' + (contact.last_name || '')).trim() : '';
   const phone = _contactBestPhone(contact);
   const owner = deal._owner?.display_name || deal._owner?.name || '';
-  // v2.46.54: kleiner Hide-Button (oder Unhide wenn ausgeblendet-Modus)
-  const hideBtn = DEALS_STATE.showHidden
-    ? '<button onclick="event.stopPropagation(); quickUnhideDeal(\'' + escapeAttr(accId) + '\', ' + id + ')" class="shrink-0 w-6 h-6 rounded-full hover:bg-emerald-100 flex items-center justify-center text-emerald-600" title="Wieder einblenden"><i data-lucide="eye" class="w-3.5 h-3.5"></i></button>'
-    : '<button onclick="event.stopPropagation(); quickHideDeal(\'' + escapeAttr(accId) + '\', ' + id + ')" class="shrink-0 w-6 h-6 rounded-full hover:bg-amber-50 flex items-center justify-center text-ink-400 hover:text-amber-600" title="30 Tage ausblenden"><i data-lucide="eye-off" class="w-3.5 h-3.5"></i></button>';
-  return '<div onclick="openDealDetail(\'' + escapeAttr(accId) + '\', ' + id + ')" class="bg-white rounded-2xl border border-ink-200 p-3 cursor-pointer hover:border-brand-300 active:scale-[0.99] transition">' +
-    // Header: Firma + Stage + Account-Color + Hide-Button
+  // v2.46.55: "..."-Menü-Button (oder Eye bei Hidden-Modus) — Tap öffnet Picker
+  const menuBtn = DEALS_STATE.showHidden
+    ? '<button onclick="event.stopPropagation(); quickUnhideDeal(\'' + escapeAttr(accId) + '\', ' + id + ')" class="shrink-0 w-7 h-7 rounded-full hover:bg-emerald-100 flex items-center justify-center text-emerald-600" title="Wieder einblenden"><i data-lucide="eye" class="w-3.5 h-3.5"></i></button>'
+    : '<button onclick="event.stopPropagation(); openDealActionMenu(\'' + escapeAttr(accId) + '\', ' + id + ')" class="shrink-0 w-7 h-7 rounded-full hover:bg-ink-100 flex items-center justify-center text-ink-500" title="Aktionen"><i data-lucide="more-vertical" class="w-4 h-4"></i></button>';
+  // v2.46.55: Alle Telefonnummern (Kontakte + Sales-Account) als Chips sammeln
+  const phoneChips = _renderDealPhoneChips(deal);
+  // v2.46.55: Swipe-Hinweise (absolut positioniert hinter der Karte)
+  return '<div class="relative overflow-hidden">' +
+    // Hint-Layer hinter der Karte
+    '<div class="absolute inset-0 flex items-center justify-between px-5 text-white font-bold text-sm pointer-events-none">' +
+      '<div class="flex items-center gap-2 bg-amber-500 px-3 py-1.5 rounded-full opacity-0" data-deal-hint-right><i data-lucide="eye-off" class="w-4 h-4"></i> Ausblenden</div>' +
+      '<div class="flex items-center gap-2 bg-purple-500 px-3 py-1.5 rounded-full opacity-0" data-deal-hint-left><i data-lucide="sparkles" class="w-4 h-4"></i> KI-Notiz</div>' +
+    '</div>' +
+  '<div data-deal-card data-deal-acc="' + escapeAttr(accId) + '" data-deal-id="' + id + '" onclick="openDealDetail(\'' + escapeAttr(accId) + '\', ' + id + ')" class="relative bg-white rounded-2xl border border-ink-200 p-3 cursor-pointer hover:border-brand-300 active:scale-[0.99] transition">' +
+    // Header: Firma + Stage + Account-Color + ...-Menü
     '<div class="flex items-start justify-between gap-2 mb-2">' +
       '<div class="flex items-center gap-2 min-w-0 flex-1">' +
         '<span class="w-2 h-2 rounded-full shrink-0" style="background:' + escapeAttr(deal._accountColor) + '" title="' + escapeAttr(deal._accountName) + '"></span>' +
         '<span class="font-bold text-ink-900 text-sm truncate">' + escapeHtml(firma) + '</span>' +
       '</div>' +
       stageBadge +
-      hideBtn +
+      menuBtn +
     '</div>' +
     // Angebotsnummer + Preis-Zeile
     '<div class="flex items-baseline justify-between gap-2 mb-1.5">' +
@@ -18464,16 +18475,16 @@ function _renderDealCard(deal) {
     '</div>' +
     // Leistungsumfang (Deal-Name)
     '<p class="text-[13px] text-ink-700 leading-snug line-clamp-2 mb-2">' + escapeHtml(leistung) + '</p>' +
-    // Kontakt-Zeile mit Phone-Quick-Action
-    (contact ? (
-      '<div class="flex items-center gap-2 pt-2 border-t border-ink-100">' +
-        '<div class="flex items-center gap-1.5 min-w-0 flex-1">' +
-          '<i data-lucide="user" class="w-3.5 h-3.5 text-ink-400 shrink-0"></i>' +
-          '<span class="text-[12px] text-ink-700 truncate">' + escapeHtml(contactName || '–') + '</span>' +
-        '</div>' +
-        (phone
-          ? '<a href="tel:' + escapeAttr(phone) + '" onclick="event.stopPropagation()" class="shrink-0 inline-flex items-center gap-1 px-2.5 py-1 rounded-full bg-brand-500 text-white text-[11px] font-semibold shadow-sm active:scale-95"><i data-lucide="phone" class="w-3 h-3"></i> ' + escapeHtml(phone) + '</a>'
-          : '<span class="text-[10px] text-ink-400 italic">keine Tel</span>') +
+    // Kontakt-Zeile + Telefon-Chips (v2.46.55: alle Telefone prominent als Chips)
+    (contact || phoneChips ? (
+      '<div class="pt-2 border-t border-ink-100 space-y-1.5">' +
+        (contact
+          ? '<div class="flex items-center gap-1.5 min-w-0">' +
+              '<i data-lucide="user" class="w-3.5 h-3.5 text-ink-400 shrink-0"></i>' +
+              '<span class="text-[12px] text-ink-700 truncate">' + escapeHtml(contactName || '–') + '</span>' +
+            '</div>'
+          : '') +
+        (phoneChips || '<span class="text-[10px] text-ink-400 italic">keine Telefonnummer</span>') +
       '</div>'
     ) : '') +
     // Owner + Datum-Footer (v2.46.53: Referenz-Datum sichtbar machen für Zeitraum-Filter)
@@ -18492,6 +18503,39 @@ function _renderDealCard(deal) {
         dateHtml +
       '</div>';
     })() +
+  '</div>' + // close data-deal-card inner
+  '</div>'; // close relative overflow-hidden wrapper
+}
+
+/* v2.46.55: Sammelt alle Telefonnummern (alle Kontakte des Deals + Sales-Account)
+   und rendert sie als click-to-call Chips. Dedupliziert nach Roh-Ziffern. */
+function _renderDealPhoneChips(deal) {
+  const phones = [];
+  const seen = new Set();
+  function add(num, label) {
+    if (!num) return;
+    const digits = String(num).replace(/[^\d+]/g, '');
+    if (!digits || seen.has(digits)) return;
+    seen.add(digits);
+    phones.push({ num: String(num).trim(), label: label || '' });
+  }
+  // Alle Kontakte
+  (deal._contacts || []).forEach(function (c) {
+    const nm = c?.display_name || ((c?.first_name || '') + ' ' + (c?.last_name || '')).trim();
+    add(c?.mobile_number, nm);
+    add(c?.work_number, nm);
+    add(c?.phone_number, nm);
+  });
+  // Sales-Account (Firma)
+  const sa = deal._salesAccount;
+  if (sa) add(sa.phone, sa.name);
+  if (!phones.length) return '';
+  return '<div class="flex flex-wrap gap-1.5">' +
+    phones.map(function (p) {
+      return '<a href="tel:' + escapeAttr(p.num) + '" onclick="event.stopPropagation()" class="inline-flex items-center gap-1 px-2 py-1 rounded-full bg-brand-500 text-white text-[11px] font-semibold shadow-sm active:scale-95">' +
+        '<i data-lucide="phone" class="w-3 h-3"></i> ' + escapeHtml(p.num) +
+      '</a>';
+    }).join('') +
   '</div>';
 }
 
@@ -18569,18 +18613,17 @@ function _renderDealDetail(d, accountId, dealId) {
   const owner = d._owner?.display_name || d._owner?.name || '';
   const closeDate = d.expected_close ? new Date(d.expected_close).toLocaleDateString('de-DE') : '';
   const probability = d.probability != null ? (d.probability + ' %') : '';
-  // v2.46.54: Aktions-Leiste
+  // v2.46.55: Aktions-Leiste (4 Spalten, ohne Won/Lost — dafür WhatsApp drin)
   const accIdAttr = escapeAttr(accountId);
   const isHidden = isDealHidden(accountId, dealId);
   const hideAction = isHidden
     ? '<button onclick="quickUnhideDeal(\'' + accIdAttr + '\', ' + dealId + '); closeDealDetail()" class="flex flex-col items-center gap-1 p-2 rounded-xl bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 active:scale-95 transition"><i data-lucide="eye" class="w-5 h-5 text-emerald-700"></i><span class="text-[10px] font-bold text-emerald-700">Einblenden</span></button>'
-    : '<button onclick="quickHideDeal(\'' + accIdAttr + '\', ' + dealId + '); closeDealDetail()" class="flex flex-col items-center gap-1 p-2 rounded-xl bg-amber-50 hover:bg-amber-100 border border-amber-200 active:scale-95 transition"><i data-lucide="eye-off" class="w-5 h-5 text-amber-700"></i><span class="text-[10px] font-bold text-amber-700">Ausblenden</span></button>';
+    : '<button onclick="openDealHidePicker(\'' + accIdAttr + '\', ' + dealId + ', true)" class="flex flex-col items-center gap-1 p-2 rounded-xl bg-amber-50 hover:bg-amber-100 border border-amber-200 active:scale-95 transition"><i data-lucide="eye-off" class="w-5 h-5 text-amber-700"></i><span class="text-[10px] font-bold text-amber-700">Ausblenden</span></button>';
   const actionBar =
-    '<div class="grid grid-cols-5 gap-1.5">' +
+    '<div class="grid grid-cols-4 gap-1.5">' +
       '<button onclick="openDealNoteAiModal(\'' + accIdAttr + '\', ' + dealId + ')" class="flex flex-col items-center gap-1 p-2 rounded-xl bg-purple-50 hover:bg-purple-100 border border-purple-200 active:scale-95 transition"><i data-lucide="sparkles" class="w-5 h-5 text-purple-700"></i><span class="text-[10px] font-bold text-purple-700">KI-Notiz</span></button>' +
       '<button onclick="openDealToTicketModal(\'' + accIdAttr + '\', ' + dealId + ')" class="flex flex-col items-center gap-1 p-2 rounded-xl bg-brand-50 hover:bg-brand-100 border border-brand-200 active:scale-95 transition"><i data-lucide="send" class="w-5 h-5 text-brand-700"></i><span class="text-[10px] font-bold text-brand-700">Ticket</span></button>' +
-      '<button onclick="markDealOutcome(\'' + accIdAttr + '\', ' + dealId + ', \'won\')" class="flex flex-col items-center gap-1 p-2 rounded-xl bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 active:scale-95 transition"><i data-lucide="trophy" class="w-5 h-5 text-emerald-700"></i><span class="text-[10px] font-bold text-emerald-700">Gewonnen</span></button>' +
-      '<button onclick="markDealOutcome(\'' + accIdAttr + '\', ' + dealId + ', \'lost\')" class="flex flex-col items-center gap-1 p-2 rounded-xl bg-ink-100 hover:bg-ink-200 border border-ink-300 active:scale-95 transition"><i data-lucide="x-circle" class="w-5 h-5 text-ink-700"></i><span class="text-[10px] font-bold text-ink-700">Verloren</span></button>' +
+      '<button onclick="shareDealOnWhatsApp(\'' + accIdAttr + '\', ' + dealId + ')" class="flex flex-col items-center gap-1 p-2 rounded-xl bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 active:scale-95 transition"><i data-lucide="message-circle" class="w-5 h-5 text-emerald-700"></i><span class="text-[10px] font-bold text-emerald-700">WhatsApp</span></button>' +
       hideAction +
     '</div>';
   body.innerHTML =
@@ -18668,9 +18711,13 @@ function closeDealDetail() {
 /* ===================== v2.46.54: DEAL ACTIONS ===================== */
 
 // ---- 1) AUSBLENDEN ----
-function quickHideDeal(accountId, dealId) {
-  hideDeal(accountId, dealId, 30);
-  toast('Deal #' + dealId + ' für 30 Tage ausgeblendet', 'success', 2500);
+function quickHideDeal(accountId, dealId, days) {
+  days = days || 1; // v2.46.55: Default kürzer (1 Tag statt 30)
+  hideDeal(accountId, dealId, days);
+  const label = days < 1
+    ? Math.round(days * 24) + ' Stunden'
+    : (days + ' Tag' + (days === 1 ? '' : 'en'));
+  toast('Deal #' + dealId + ' für ' + label + ' ausgeblendet', 'success', 2500);
   _renderDealsHeader();
   _renderDealsList();
 }
@@ -18679,6 +18726,184 @@ function quickUnhideDeal(accountId, dealId) {
   toast('Deal #' + dealId + ' wieder sichtbar', 'success', 2500);
   _renderDealsHeader();
   _renderDealsList();
+}
+
+// v2.46.55: Hide-Dauer-Picker (Bottom-Sheet, ähnlich wie Wiedervorlage bei Tickets)
+function openDealHidePicker(accountId, dealId, fromDetail) {
+  let host = document.getElementById('subModalHost');
+  if (!host) { host = document.createElement('div'); host.id = 'subModalHost'; document.body.appendChild(host); }
+  const opts = [
+    { d: 1/24,  label: '1 Stunde' },
+    { d: 4/24,  label: '4 Stunden' },
+    { d: 1,     label: '1 Tag' },
+    { d: 3,     label: '3 Tage' },
+    { d: 7,     label: '7 Tage' },
+    { d: 30,    label: '30 Tage' },
+  ];
+  host.innerHTML =
+    '<div class="fixed inset-0 z-[60] flex items-end justify-center bg-black/50" onclick="if(event.target===this)closeDealHidePicker()">' +
+      '<div class="bg-white w-full max-w-md rounded-t-3xl shadow-2xl flex flex-col safe-bottom">' +
+        '<div class="px-4 py-3 border-b border-ink-200 flex items-center justify-between gap-2">' +
+          '<h3 class="font-bold text-ink-900 inline-flex items-center gap-2"><i data-lucide="eye-off" class="w-5 h-5 text-amber-600"></i> Deal #' + dealId + ' ausblenden</h3>' +
+          '<button onclick="closeDealHidePicker()" class="w-9 h-9 rounded-lg hover:bg-ink-100 flex items-center justify-center"><i data-lucide="x" class="w-5 h-5 text-ink-700"></i></button>' +
+        '</div>' +
+        '<div class="p-4 grid grid-cols-3 gap-2">' +
+          opts.map(function (o) {
+            return '<button onclick="_dealHidePick(\'' + escapeAttr(accountId) + '\', ' + dealId + ', ' + o.d + ', ' + (fromDetail ? 'true' : 'false') + ')" class="py-3 rounded-xl bg-amber-50 hover:bg-amber-100 border border-amber-200 text-amber-800 font-bold text-sm active:scale-95 transition">' +
+              escapeHtml(o.label) +
+            '</button>';
+          }).join('') +
+        '</div>' +
+        '<p class="px-4 pb-3 text-[10px] text-ink-500 text-center">Nach Ablauf erscheint der Deal automatisch wieder.</p>' +
+      '</div>' +
+    '</div>';
+  if (window.lucide) lucide.createIcons();
+  document.body.style.overflow = 'hidden';
+}
+function _dealHidePick(accountId, dealId, days, fromDetail) {
+  closeDealHidePicker();
+  quickHideDeal(accountId, dealId, days);
+  if (fromDetail) closeDealDetail();
+}
+function closeDealHidePicker() {
+  const host = document.getElementById('subModalHost');
+  if (host) host.innerHTML = '';
+  document.body.style.overflow = '';
+}
+
+// v2.46.55: Action-Menü (...) auf der Karte — Bottom-Sheet mit allen Optionen
+function openDealActionMenu(accountId, dealId) {
+  let host = document.getElementById('subModalHost');
+  if (!host) { host = document.createElement('div'); host.id = 'subModalHost'; document.body.appendChild(host); }
+  const deal = (DEALS_STATE.all || []).find(function (d) { return d._accountId === accountId && d.id === dealId; });
+  const firma = deal?._salesAccount?.name || 'Deal';
+  function row(icon, color, label, onclick) {
+    return '<button onclick="closeDealActionMenu(); ' + onclick + '" class="w-full text-left px-4 py-3 hover:bg-ink-50 flex items-center gap-3 border-b border-ink-100 last:border-0">' +
+      '<i data-lucide="' + icon + '" class="w-5 h-5 text-' + color + '-600 shrink-0"></i>' +
+      '<span class="text-[14px] font-semibold text-ink-900">' + escapeHtml(label) + '</span>' +
+    '</button>';
+  }
+  host.innerHTML =
+    '<div class="fixed inset-0 z-[60] flex items-end justify-center bg-black/50" onclick="if(event.target===this)closeDealActionMenu()">' +
+      '<div class="bg-white w-full max-w-md rounded-t-3xl shadow-2xl safe-bottom">' +
+        '<div class="px-4 py-3 border-b border-ink-200">' +
+          '<h3 class="font-bold text-ink-900 truncate">' + escapeHtml(firma) + '</h3>' +
+          '<p class="text-[10px] text-ink-500">Deal-Aktionen</p>' +
+        '</div>' +
+        '<div>' +
+          row('sparkles',       'purple',  'KI-Notiz hinzufügen',         'openDealNoteAiModal(\'' + escapeAttr(accountId) + '\', ' + dealId + ')') +
+          row('send',           'brand',   'Ticket an Mitarbeiter',       'openDealToTicketModal(\'' + escapeAttr(accountId) + '\', ' + dealId + ')') +
+          row('message-circle', 'emerald', 'Per WhatsApp teilen',         'shareDealOnWhatsApp(\'' + escapeAttr(accountId) + '\', ' + dealId + ')') +
+          row('eye-off',        'amber',   'Ausblenden …',                'openDealHidePicker(\'' + escapeAttr(accountId) + '\', ' + dealId + ', false)') +
+        '</div>' +
+        '<div class="p-3 border-t border-ink-100">' +
+          '<button onclick="closeDealActionMenu()" class="w-full py-3 bg-ink-100 hover:bg-ink-200 text-ink-700 rounded-xl text-sm font-bold">Abbrechen</button>' +
+        '</div>' +
+      '</div>' +
+    '</div>';
+  if (window.lucide) lucide.createIcons();
+  document.body.style.overflow = 'hidden';
+}
+function closeDealActionMenu() {
+  const host = document.getElementById('subModalHost');
+  if (host) host.innerHTML = '';
+  document.body.style.overflow = '';
+}
+
+// v2.46.55: WhatsApp-Share — formatiert Deal-Info und öffnet wa.me
+function shareDealOnWhatsApp(accountId, dealId) {
+  const deal = (DEALS_STATE.all || []).find(function (d) { return d._accountId === accountId && d.id === dealId; });
+  if (!deal) return toast('Deal nicht im Cache', 'error');
+  const firma     = deal._salesAccount?.name || '';
+  const dealName  = deal.name || '';
+  const angebotNr = _extractDealQuoteNumber(deal);
+  const preis     = _formatDealAmount(deal);
+  const stage     = deal._stageName || '';
+  const contact   = deal._primaryContact;
+  const contactName = contact ? (contact.display_name || ((contact.first_name || '') + ' ' + (contact.last_name || '')).trim()) : '';
+  const phone     = _contactBestPhone(contact);
+  const acc       = (APP_STATE.accounts || []).find(function (a) { return a.id === accountId; });
+  const fsUrl     = (acc?.freshsales_domain && acc?.freshsales_domain_suffix)
+    ? ('https://' + acc.freshsales_domain + '.' + acc.freshsales_domain_suffix + '/crm/sales/deals/' + dealId)
+    : '';
+  const lines = [];
+  lines.push('*Deal*' + (firma ? ': ' + firma : ''));
+  if (dealName)  lines.push('_' + dealName + '_');
+  lines.push('');
+  if (angebotNr) lines.push('📋 Angebotsnr: ' + angebotNr);
+  if (preis && preis !== '–') lines.push('💰 Preis: ' + preis);
+  if (stage)     lines.push('🎯 Stage: ' + stage);
+  if (contactName) lines.push('👤 Kontakt: ' + contactName + (phone ? ' (' + phone + ')' : ''));
+  if (fsUrl)     { lines.push(''); lines.push(fsUrl); }
+  const text = lines.join('\n');
+  const url = 'https://wa.me/?text=' + encodeURIComponent(text);
+  // Native Share API als Fallback bevorzugt (besser auf iOS/Android)
+  if (navigator.share) {
+    navigator.share({ text }).catch(function () { window.open(url, '_blank'); });
+  } else {
+    window.open(url, '_blank');
+  }
+}
+
+// v2.46.55: Swipe-Handler für Deal-Listen-Karten (Mobile-Email-Style)
+// Rechts > 80px: Hide-Picker, Links > 80px: KI-Notiz
+function _attachDealSwipeHandlers() {
+  const cards = document.querySelectorAll('[data-deal-card]');
+  cards.forEach(function (card) {
+    if (card._dealSwipeAttached) return;
+    card._dealSwipeAttached = true;
+    const wrapper = card.parentElement;
+    const hintR = wrapper?.querySelector('[data-deal-hint-right]');
+    const hintL = wrapper?.querySelector('[data-deal-hint-left]');
+    let startX = 0, startY = 0, dx = 0, dragging = false, horiz = null;
+    card.style.transition = 'none';
+    function reset(commit) {
+      dragging = false;
+      card.style.transition = 'transform 0.25s ease';
+      if (hintR) hintR.style.opacity = '0';
+      if (hintL) hintL.style.opacity = '0';
+      const accId  = card.getAttribute('data-deal-acc');
+      const dealId = parseInt(card.getAttribute('data-deal-id'), 10);
+      if (commit && dx > 80) {
+        // Rechts → Hide-Picker
+        card.style.transform = 'translateX(0)';
+        setTimeout(function () { openDealHidePicker(accId, dealId, false); }, 100);
+      } else if (commit && dx < -80) {
+        // Links → KI-Notiz
+        card.style.transform = 'translateX(0)';
+        setTimeout(function () { openDealNoteAiModal(accId, dealId); }, 100);
+      } else {
+        card.style.transform = 'translateX(0)';
+      }
+      dx = 0;
+    }
+    card.addEventListener('touchstart', function (e) {
+      if (e.touches.length !== 1) return;
+      startX = e.touches[0].clientX;
+      startY = e.touches[0].clientY;
+      dx = 0;
+      dragging = true;
+      horiz = null;
+      card.style.transition = 'none';
+    }, { passive: true });
+    card.addEventListener('touchmove', function (e) {
+      if (!dragging || e.touches.length !== 1) return;
+      const cx = e.touches[0].clientX - startX;
+      const cy = Math.abs(e.touches[0].clientY - startY);
+      if (horiz === null) {
+        if (Math.abs(cx) < 8 && cy < 8) return;
+        horiz = Math.abs(cx) > cy;
+        if (!horiz) { dragging = false; return; }
+      }
+      dx = cx;
+      card.style.transform = 'translateX(' + dx + 'px)';
+      const rev = Math.min(1, Math.abs(dx) / 80);
+      if (dx > 0)  { if (hintR) hintR.style.opacity = rev; if (hintL) hintL.style.opacity = '0'; }
+      else         { if (hintL) hintL.style.opacity = rev; if (hintR) hintR.style.opacity = '0'; }
+    }, { passive: true });
+    card.addEventListener('touchend',    function () { if (dragging) reset(true);  }, { passive: true });
+    card.addEventListener('touchcancel', function () { if (dragging) reset(false); }, { passive: true });
+  });
 }
 
 // ---- 4) WON / LOST MANUELL ----
