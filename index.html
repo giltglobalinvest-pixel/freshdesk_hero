@@ -717,7 +717,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.58';
+const APP_VERSION = 'v2.46.59';
 
 /* ============================================================
    GLOBAL THEME — v2.46.12
@@ -18630,8 +18630,9 @@ function _renderDealDetail(d, accountId, dealId) {
     ? '<button onclick="quickUnhideDeal(\'' + accIdAttr + '\', ' + dealId + '); closeDealDetail()" class="flex flex-col items-center gap-1 p-2 rounded-xl bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 active:scale-95 transition"><i data-lucide="eye" class="w-5 h-5 text-emerald-700"></i><span class="text-[10px] font-bold text-emerald-700">Einblenden</span></button>'
     : '<button onclick="openDealHidePicker(\'' + accIdAttr + '\', ' + dealId + ', true)" class="flex flex-col items-center gap-1 p-2 rounded-xl bg-amber-50 hover:bg-amber-100 border border-amber-200 active:scale-95 transition"><i data-lucide="eye-off" class="w-5 h-5 text-amber-700"></i><span class="text-[10px] font-bold text-amber-700">Ausblenden</span></button>';
   const actionBar =
-    '<div class="grid grid-cols-4 gap-1.5">' +
+    '<div class="grid grid-cols-5 gap-1.5">' +
       '<button onclick="openDealNoteAiModal(\'' + accIdAttr + '\', ' + dealId + ')" class="flex flex-col items-center gap-1 p-2 rounded-xl bg-purple-50 hover:bg-purple-100 border border-purple-200 active:scale-95 transition"><i data-lucide="sparkles" class="w-5 h-5 text-purple-700"></i><span class="text-[10px] font-bold text-purple-700">KI-Notiz</span></button>' +
+      '<button onclick="openDealEmailModal(\'' + accIdAttr + '\', ' + dealId + ')" class="flex flex-col items-center gap-1 p-2 rounded-xl bg-orange-50 hover:bg-orange-100 border border-orange-200 active:scale-95 transition"><i data-lucide="mail" class="w-5 h-5 text-orange-700"></i><span class="text-[10px] font-bold text-orange-700">Email</span></button>' +
       '<button onclick="openDealToTicketModal(\'' + accIdAttr + '\', ' + dealId + ')" class="flex flex-col items-center gap-1 p-2 rounded-xl bg-brand-50 hover:bg-brand-100 border border-brand-200 active:scale-95 transition"><i data-lucide="send" class="w-5 h-5 text-brand-700"></i><span class="text-[10px] font-bold text-brand-700">Ticket</span></button>' +
       '<button onclick="shareDealOnWhatsApp(\'' + accIdAttr + '\', ' + dealId + ')" class="flex flex-col items-center gap-1 p-2 rounded-xl bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 active:scale-95 transition"><i data-lucide="message-circle" class="w-5 h-5 text-emerald-700"></i><span class="text-[10px] font-bold text-emerald-700">WhatsApp</span></button>' +
       hideAction +
@@ -18848,6 +18849,7 @@ function openDealActionMenu(accountId, dealId) {
         '</div>' +
         '<div>' +
           row('sparkles',       'purple',  'KI-Notiz hinzufügen',         'openDealNoteAiModal(\'' + escapeAttr(accountId) + '\', ' + dealId + ')') +
+          row('mail',           'orange',  'Email-Vorlage senden',        'openDealEmailModal(\'' + escapeAttr(accountId) + '\', ' + dealId + ')') +
           row('send',           'brand',   'Ticket an Mitarbeiter',       'openDealToTicketModal(\'' + escapeAttr(accountId) + '\', ' + dealId + ')') +
           row('message-circle', 'emerald', 'Per WhatsApp teilen',         'shareDealOnWhatsApp(\'' + escapeAttr(accountId) + '\', ' + dealId + ')') +
           row('eye-off',        'amber',   'Ausblenden …',                'openDealHidePicker(\'' + escapeAttr(accountId) + '\', ' + dealId + ', false)') +
@@ -19281,6 +19283,323 @@ async function createDealToTicket(btn) {
   }
 }
 function closeDealToTicketModal() {
+  const host = document.getElementById('subModalHost');
+  if (host) host.innerHTML = '';
+  document.body.style.overflow = '';
+}
+
+/* ===================== v2.46.59: EMAIL-VORLAGE AUS DEAL VERSENDEN ===================
+   Phase 1: 1:1-Versand aus Deal-Detail.
+   - Lädt Canned Responses + Email Configs des FD-Accounts
+   - Vorlage einsetzen (Platzhalter-Substitution für Standard-Tokens)
+   - Versand via POST /api/v2/tickets/outbound_email (erzeugt 1 Ticket pro Mail)
+   - Optional: zugehörige Notiz an FS-Deal als Tracking */
+
+const FD_CANNED_RESPONSES_CACHE = {}; // per accountId
+const FD_EMAIL_CONFIGS_CACHE    = {}; // per accountId
+
+async function ensureCannedResponsesLoaded(accountId) {
+  if (FD_CANNED_RESPONSES_CACHE[accountId]) return FD_CANNED_RESPONSES_CACHE[accountId];
+  const base = '/freshdesk/' + encodeURIComponent(accountId) + '/api/v2';
+  let folders = [];
+  try { folders = await proxyJson(base + '/canned_response_folders'); }
+  catch (e) { console.warn('canned_response_folders fehlgeschlagen:', e.message); }
+  const responses = [];
+  // Sequentiell durch Folder iterieren — meist nur wenige Folder, vermeidet Rate-Limit
+  for (const folder of (Array.isArray(folders) ? folders : [])) {
+    try {
+      const list = await proxyJson(base + '/canned_response_folders/' + folder.id + '/responses');
+      (Array.isArray(list) ? list : []).forEach(function (r) {
+        responses.push(Object.assign({}, r, { _folderName: folder.name || '' }));
+      });
+    } catch (e) { console.warn('canned-responses folder ' + folder.id + ':', e.message); }
+  }
+  FD_CANNED_RESPONSES_CACHE[accountId] = { folders: folders || [], responses };
+  return FD_CANNED_RESPONSES_CACHE[accountId];
+}
+
+async function ensureEmailConfigsLoaded(accountId) {
+  if (FD_EMAIL_CONFIGS_CACHE[accountId]) return FD_EMAIL_CONFIGS_CACHE[accountId];
+  try {
+    const list = await proxyJson('/freshdesk/' + encodeURIComponent(accountId) + '/api/v2/email_configs');
+    FD_EMAIL_CONFIGS_CACHE[accountId] = Array.isArray(list) ? list : [];
+  } catch (e) {
+    console.warn('email_configs fehlgeschlagen:', e.message);
+    FD_EMAIL_CONFIGS_CACHE[accountId] = [];
+  }
+  return FD_EMAIL_CONFIGS_CACHE[accountId];
+}
+
+/* Platzhalter-Substitution. Deckt die gängigsten FD-Canned-Response-Tokens ab. */
+function _renderPlaceholders(template, ctx) {
+  if (!template) return '';
+  let out = String(template);
+  const repl = {
+    '{{ticket.requester.name}}':      ctx.contactName || '',
+    '{{ticket.requester.firstname}}': ctx.contactFirstName || '',
+    '{{ticket.requester.first_name}}':ctx.contactFirstName || '',
+    '{{ticket.requester.email}}':     ctx.contactEmail || '',
+    '{{contact.name}}':               ctx.contactName || '',
+    '{{contact.firstname}}':          ctx.contactFirstName || '',
+    '{{contact.first_name}}':         ctx.contactFirstName || '',
+    '{{contact.email}}':              ctx.contactEmail || '',
+    '{{user.name}}':                  ctx.userName || '',
+    '{{user.firstname}}':             ctx.userFirstName || '',
+    '{{user.first_name}}':            ctx.userFirstName || '',
+    '{{user.email}}':                 ctx.userEmail || '',
+    '{{agent.name}}':                 ctx.userName || '',
+    '{{agent.firstname}}':            ctx.userFirstName || '',
+    '{{agent.first_name}}':           ctx.userFirstName || '',
+    '{{agent.email}}':                ctx.userEmail || '',
+    '{{company.name}}':               ctx.companyName || '',
+    '{{ticket.subject}}':             ctx.dealName || '',
+    '{{deal.name}}':                  ctx.dealName || '',
+    '{{deal.amount}}':                ctx.dealAmount || '',
+    '{{deal.quote_number}}':          ctx.angebotNr || '',
+    '{{deal.angebotsnummer}}':        ctx.angebotNr || '',
+  };
+  Object.keys(repl).forEach(function (k) { out = out.split(k).join(repl[k]); });
+  return out;
+}
+
+async function openDealEmailModal(accountId, dealId) {
+  let host = document.getElementById('subModalHost');
+  if (!host) { host = document.createElement('div'); host.id = 'subModalHost'; document.body.appendChild(host); }
+  const deal = (DEALS_STATE.all || []).find(function (d) { return d._accountId === accountId && d.id === dealId; });
+  if (!deal) return toast('Deal nicht im Cache', 'error');
+  const contact = deal._primaryContact;
+  if (!contact?.email) {
+    // Wir lassen das modal trotzdem auf — User kann Empfänger eingeben
+  }
+  host.innerHTML =
+    '<div class="fixed inset-0 z-[60] flex items-end justify-center bg-black/50">' +
+      '<div class="bg-white w-full max-w-md rounded-t-3xl shadow-2xl p-8 text-center safe-bottom">' +
+        '<div class="spinner inline-block w-7 h-7 border-[3px] text-orange-500"></div>' +
+        '<p class="text-sm text-ink-500 mt-2">Lade Vorlagen + Email-Adressen…</p>' +
+      '</div>' +
+    '</div>';
+  document.body.style.overflow = 'hidden';
+  try {
+    const [cannedData, configs] = await Promise.all([
+      ensureCannedResponsesLoaded(accountId),
+      ensureEmailConfigsLoaded(accountId),
+    ]);
+    const responses = cannedData?.responses || [];
+    if (!configs.length) {
+      host.innerHTML =
+        '<div class="fixed inset-0 z-[60] flex items-end justify-center bg-black/50">' +
+          '<div class="bg-white w-full max-w-md rounded-t-3xl shadow-2xl p-6 safe-bottom">' +
+            '<h3 class="font-bold mb-2 text-ink-900">Keine Absender-Adressen</h3>' +
+            '<p class="text-sm text-ink-600 mb-4">Es konnten keine Email-Configs aus Freshdesk geladen werden. Prüfe ob mind. eine Support-Email-Adresse im Account aktiv ist.</p>' +
+            '<button onclick="closeDealEmailModal()" class="w-full bg-ink-100 hover:bg-ink-200 text-ink-700 rounded-xl py-3 text-sm font-bold">OK</button>' +
+          '</div>' +
+        '</div>';
+      return;
+    }
+    _renderDealEmailModal(accountId, dealId, deal, contact, responses, configs);
+  } catch (e) {
+    closeDealEmailModal();
+    toast('Laden fehlgeschlagen: ' + (e.message || e), 'error', 8000);
+  }
+}
+
+function _renderDealEmailModal(accountId, dealId, deal, contact, responses, configs) {
+  const host = document.getElementById('subModalHost');
+  if (!host) return;
+  const acc = (APP_STATE.accounts || []).find(function (a) { return a.id === accountId; });
+  const contactName = contact ? (contact.display_name || ((contact.first_name || '') + ' ' + (contact.last_name || '')).trim()) : '';
+  // Default From: erste primary email_config (oder erste überhaupt)
+  const primaryCfg = configs.find(function (c) { return c.primary_role || c.default; }) || configs[0];
+  // Vorlagen-Dropdown (flach, mit Folder als Suffix für Orientierung)
+  const tplOpts = '<option value="">— Vorlage wählen —</option>' +
+    responses.map(function (r) {
+      const folderSuffix = r._folderName ? ' · ' + r._folderName : '';
+      return '<option value="' + r.id + '">' + escapeHtml(r.title || ('#' + r.id)) + escapeHtml(folderSuffix) + '</option>';
+    }).join('');
+  const cfgOpts = configs.map(function (c) {
+    const label = (c.name || '') + ' <' + (c.reply_email || c.support_email || c.email || '') + '>';
+    return '<option value="' + c.id + '"' + (c.id === primaryCfg?.id ? ' selected' : '') + '>' + escapeHtml(label) + '</option>';
+  }).join('');
+  host.innerHTML =
+    '<div class="fixed inset-0 z-[60] flex items-end justify-center bg-black/50" onclick="if(event.target===this)closeDealEmailModal()">' +
+      '<div class="bg-white w-full max-w-md rounded-t-3xl shadow-2xl flex flex-col safe-bottom" style="max-height:94vh">' +
+        '<div class="px-4 py-3 border-b border-ink-200 flex items-center justify-between gap-2 shrink-0">' +
+          '<h3 class="font-bold text-ink-900 inline-flex items-center gap-2"><i data-lucide="mail" class="w-5 h-5 text-orange-600"></i> Email-Vorlage senden</h3>' +
+          '<button onclick="closeDealEmailModal()" class="w-9 h-9 rounded-lg hover:bg-ink-100 flex items-center justify-center"><i data-lucide="x" class="w-5 h-5 text-ink-700"></i></button>' +
+        '</div>' +
+        '<div class="flex-1 overflow-y-auto p-4 space-y-3">' +
+          '<input type="hidden" id="deAcc" value="' + escapeAttr(accountId) + '">' +
+          '<input type="hidden" id="deDealId" value="' + dealId + '">' +
+          '<div class="bg-ink-50 rounded-xl p-2.5 text-[11px]">' +
+            '<p class="text-ink-500 uppercase tracking-wider text-[9px] font-bold">Deal</p>' +
+            '<p class="font-semibold text-ink-900 mt-0.5">' + escapeHtml(deal._salesAccount?.name || '') + '</p>' +
+            '<p class="text-ink-600 mt-0.5 line-clamp-2">' + escapeHtml(deal.name || '') + '</p>' +
+          '</div>' +
+          '<label class="text-xs font-bold text-ink-700 uppercase tracking-wider block">Vorlage</label>' +
+          '<select id="deTemplate" onchange="_deApplyTemplate()" class="w-full px-3 py-2.5 border border-ink-300 rounded-xl text-sm bg-white">' +
+            tplOpts +
+          '</select>' +
+          (!responses.length ? '<p class="text-[11px] text-amber-700 bg-amber-50 border border-amber-200 rounded-lg p-2">Keine Canned-Responses gefunden. Lege welche in Freshdesk an (Admin → Productivity → Canned Responses).</p>' : '') +
+          '<label class="text-xs font-bold text-ink-700 uppercase tracking-wider block">Von</label>' +
+          '<select id="deFrom" class="w-full px-3 py-2.5 border border-ink-300 rounded-xl text-sm bg-white">' + cfgOpts + '</select>' +
+          '<label class="text-xs font-bold text-ink-700 uppercase tracking-wider block">An *</label>' +
+          '<input id="deTo" type="email" value="' + escapeAttr(contact?.email || '') + '" placeholder="empfaenger@firma.de" class="w-full px-3 py-2.5 border border-ink-300 rounded-xl text-sm">' +
+          (contactName ? '<p class="text-[10px] text-ink-500 -mt-1">Primary-Contact: ' + escapeHtml(contactName) + '</p>' : '') +
+          '<label class="text-xs font-bold text-ink-700 uppercase tracking-wider block">Betreff *</label>' +
+          '<input id="deSubject" type="text" value="" class="w-full px-3 py-2.5 border border-ink-300 rounded-xl text-sm">' +
+          '<div class="flex items-center justify-between">' +
+            '<label class="text-xs font-bold text-ink-700 uppercase tracking-wider">Email-Text</label>' +
+            '<button onclick="_deTogglePreview()" id="dePreviewBtn" class="text-[11px] font-semibold text-brand-600 inline-flex items-center gap-1"><i data-lucide="eye" class="w-3 h-3"></i> Vorschau</button>' +
+          '</div>' +
+          '<textarea id="deBody" rows="10" placeholder="Wähle eine Vorlage oben, oder tippe den Email-Text…" class="w-full px-3 py-2.5 border border-ink-300 rounded-xl text-[12px] font-mono leading-snug resize-y"></textarea>' +
+          '<div id="dePreview" class="hidden border border-ink-300 rounded-xl p-3 bg-white text-[13px] leading-relaxed max-h-72 overflow-y-auto prose prose-sm"></div>' +
+          '<label class="flex items-center gap-2 text-[11px] text-ink-700 cursor-pointer">' +
+            '<input id="deNoteToFs" type="checkbox" checked class="w-4 h-4 accent-orange-600">' +
+            'Versand als Notiz am Deal protokollieren' +
+          '</label>' +
+          '<div id="deErr" class="hidden bg-red-50 border border-red-200 rounded-xl p-3 text-sm text-red-800"></div>' +
+        '</div>' +
+        '<div class="border-t border-ink-200 p-3 flex gap-2 shrink-0">' +
+          '<button onclick="closeDealEmailModal()" class="flex-1 bg-ink-100 hover:bg-ink-200 text-ink-700 rounded-xl px-3 py-3 text-sm font-bold">Abbrechen</button>' +
+          '<button onclick="processSendDealEmail(this)" class="flex-[2] bg-orange-600 hover:bg-orange-700 text-white rounded-xl px-3 py-3 text-sm font-bold inline-flex items-center justify-center gap-1.5 shadow-md">' +
+            '<i data-lucide="send" class="w-4 h-4"></i> Jetzt senden' +
+          '</button>' +
+        '</div>' +
+      '</div>' +
+    '</div>';
+  // Vorlagen-Map für späteren Zugriff
+  window._DEAL_EMAIL_CTX = {
+    accountId, dealId, deal, contact,
+    responses, configs,
+    ctx: _buildEmailCtx(deal, contact),
+  };
+  if (window.lucide) lucide.createIcons();
+}
+
+function _buildEmailCtx(deal, contact) {
+  const firstNm = function (full) { return String(full || '').trim().split(/\s+/)[0] || ''; };
+  const userName = APP_KEYS.user?.name || '';
+  const userEmail = APP_KEYS.user?.email || '';
+  const contactName = contact ? (contact.display_name || ((contact.first_name || '') + ' ' + (contact.last_name || '')).trim()) : '';
+  return {
+    contactName,
+    contactFirstName: contact?.first_name || firstNm(contactName),
+    contactEmail: contact?.email || '',
+    userName,
+    userFirstName: firstNm(userName),
+    userEmail,
+    companyName: deal?._salesAccount?.name || '',
+    dealName: deal?.name || '',
+    dealAmount: _formatDealAmount(deal),
+    angebotNr: _extractDealQuoteNumber(deal) || '',
+  };
+}
+
+function _deApplyTemplate() {
+  const ctx = window._DEAL_EMAIL_CTX;
+  if (!ctx) return;
+  const sel = document.getElementById('deTemplate');
+  const tplId = parseInt(sel?.value || '0', 10);
+  if (!tplId) return;
+  const tpl = (ctx.responses || []).find(function (r) { return r.id === tplId; });
+  if (!tpl) return;
+  // Subject + Body via Platzhalter rendern
+  const subj = _renderPlaceholders(tpl.title_text || tpl.subject || tpl.title || '', ctx.ctx);
+  const body = _renderPlaceholders(tpl.content_html || tpl.content || '', ctx.ctx);
+  const subjEl = document.getElementById('deSubject');
+  const bodyEl = document.getElementById('deBody');
+  if (subjEl) subjEl.value = subj;
+  if (bodyEl) bodyEl.value = body;
+  // Falls Vorschau gerade aktiv ist → mit-rendern
+  const prev = document.getElementById('dePreview');
+  if (prev && !prev.classList.contains('hidden')) _deRenderPreview();
+}
+
+function _deTogglePreview() {
+  const ta = document.getElementById('deBody');
+  const pv = document.getElementById('dePreview');
+  const btn = document.getElementById('dePreviewBtn');
+  if (!ta || !pv) return;
+  if (pv.classList.contains('hidden')) {
+    _deRenderPreview();
+    pv.classList.remove('hidden');
+    ta.classList.add('hidden');
+    if (btn) btn.innerHTML = '<i data-lucide="code" class="w-3 h-3"></i> HTML';
+  } else {
+    pv.classList.add('hidden');
+    ta.classList.remove('hidden');
+    if (btn) btn.innerHTML = '<i data-lucide="eye" class="w-3 h-3"></i> Vorschau';
+  }
+  if (window.lucide) lucide.createIcons();
+}
+
+function _deRenderPreview() {
+  const ta = document.getElementById('deBody');
+  const pv = document.getElementById('dePreview');
+  if (!ta || !pv) return;
+  pv.innerHTML = ta.value || '<em class="text-ink-400">(leer)</em>';
+}
+
+async function processSendDealEmail(btn) {
+  const ctx = window._DEAL_EMAIL_CTX;
+  if (!ctx) return;
+  const errEl = document.getElementById('deErr');
+  const setErr = function (msg) { if (errEl) { errEl.textContent = msg; errEl.classList.remove('hidden'); } };
+  if (errEl) errEl.classList.add('hidden');
+  const to        = (document.getElementById('deTo')?.value || '').trim();
+  const subject   = (document.getElementById('deSubject')?.value || '').trim();
+  const body      = (document.getElementById('deBody')?.value || '').trim();
+  const fromIdStr = document.getElementById('deFrom')?.value || '';
+  const alsoNote  = !!document.getElementById('deNoteToFs')?.checked;
+  if (!to)        return setErr('Empfänger fehlt');
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(to)) return setErr('Empfänger-Email sieht ungültig aus');
+  if (!subject)   return setErr('Betreff fehlt');
+  if (!body)      return setErr('Email-Text fehlt');
+  if (!fromIdStr) return setErr('Absender (Von) fehlt');
+  const fromId = parseInt(fromIdStr, 10);
+  setBusy(btn, true, 'Sende…');
+  try {
+    const payload = {
+      subject: subject,
+      description: body,
+      email: to,
+      email_config_id: fromId,
+      priority: 1,
+      status: 5, // Geschlossen — ist eine Outbound-Mail, kein offenes Ticket
+    };
+    const created = await proxyJson('/freshdesk/' + encodeURIComponent(ctx.accountId) + '/api/v2/tickets/outbound_email', {
+      method: 'POST',
+      body: JSON.stringify(payload)
+    });
+    if (!created?.id) throw new Error('Versand fehlgeschlagen (keine Ticket-ID zurück)');
+    // Optional Notiz am Deal
+    if (alsoNote) {
+      const tplName = (function () {
+        const tplId = parseInt(document.getElementById('deTemplate')?.value || '0', 10);
+        const tpl = (ctx.responses || []).find(function (r) { return r.id === tplId; });
+        return tpl?.title || tpl?.title_text || '';
+      })();
+      const noteBody = '📧 Email gesendet an ' + to + (tplName ? ' (Vorlage „' + tplName + '")' : '') +
+        '\nBetreff: ' + subject + '\nFD-Ticket: #' + created.id;
+      proxyJson('/freshsales/' + encodeURIComponent(ctx.accountId) + '/api/notes', {
+        method: 'POST',
+        body: JSON.stringify({ note: { description: noteBody, targetable_type: 'Deal', targetable_id: ctx.dealId } })
+      }).catch(function (e) { console.warn('FS-Notiz für Email-Versand fehlgeschlagen:', e.message); });
+    }
+    closeDealEmailModal();
+    toast('Email gesendet — Ticket #' + created.id + ' erstellt', 'success', 5000);
+    // Detail-View neu laden damit neue Notiz erscheint
+    if (document.getElementById('dealDetailBody')) {
+      openDealDetail(ctx.accountId, ctx.dealId);
+    }
+  } catch (e) {
+    setBusy(btn, false);
+    setErr(e.message || String(e));
+  }
+}
+
+function closeDealEmailModal() {
+  delete window._DEAL_EMAIL_CTX;
   const host = document.getElementById('subModalHost');
   if (host) host.innerHTML = '';
   document.body.style.overflow = '';
