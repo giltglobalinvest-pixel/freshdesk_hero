@@ -713,7 +713,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.50';
+const APP_VERSION = 'v2.46.51';
 
 /* ============================================================
    GLOBAL THEME — v2.46.12
@@ -8771,19 +8771,34 @@ async function openNewTicketAiModal() {
         '</div>' +
         '<div id="newTicketAiBody" class="flex-1 overflow-y-auto p-4 space-y-3">' +
           accountPicker +
+          // v2.46.51: Absender-Wahl ZUERST sichtbar — Default „ich selbst".
+          // User sieht sofort welche Email der Ersteller wird; bei aktivem
+          // Häkchen wird die KI auch entsprechend instruiert (kein Kunden-Extrakt).
+          (APP_KEYS.user?.email
+            ? '<div class="bg-emerald-50 border border-emerald-200 rounded-xl p-3 space-y-2">' +
+                '<label class="flex items-start gap-2 cursor-pointer">' +
+                  '<input id="newTicketAiSelfMode" type="checkbox" checked class="mt-0.5 w-4 h-4 accent-emerald-600 shrink-0">' +
+                  '<div class="flex-1 min-w-0">' +
+                    '<p class="text-[12px] font-semibold text-emerald-900">Ich bin der Absender</p>' +
+                    '<p class="text-[10px] text-emerald-700 mt-0.5">Ticket wird mit <b>' + escapeHtml(APP_KEYS.user.email) + '</b> als Ersteller angelegt.</p>' +
+                    '<p class="text-[10px] text-emerald-600 mt-0.5">Häkchen entfernen, um stattdessen einen Kunden als Absender zu erfassen.</p>' +
+                  '</div>' +
+                '</label>' +
+              '</div>'
+            : '') +
           '<label class="text-xs font-bold text-ink-700 uppercase tracking-wider block">Was soll im Ticket stehen?</label>' +
           (speechAvailable ? '<button id="newTicketAiMicBtn" onclick="toggleNewTicketAiVoice()" class="w-full py-4 rounded-2xl bg-gradient-to-br from-emerald-500 to-emerald-600 text-white font-semibold flex items-center justify-center gap-2 active:opacity-80 shadow-md shadow-emerald-500/30">' +
             '<div id="newTicketAiMicIcon" class="w-9 h-9 rounded-full bg-white/20 flex items-center justify-center"><i data-lucide="mic" class="w-5 h-5"></i></div>' +
             '<span id="newTicketAiMicLabel">Tippe und sprich</span>' +
           '</button>' : '<p class="text-[11px] text-ink-500 italic">Sprach-Eingabe in diesem Browser nicht verfügbar — nutze das Textfeld.</p>') +
-          '<textarea id="newTicketAiCmd" rows="5" placeholder="z.B. „Max Mustermann (max@firma.de) bittet um Angebot für Ersatzteile zu Auftrag 4711. Priorität hoch."' +
+          '<textarea id="newTicketAiCmd" rows="5" placeholder="z.B. „Liftmanager-Zugang Oberwiesenstraße aktualisieren — Überprüfung ausstehend, aber Zugang existiert. Priorität hoch, Gruppe Auftragsbearbeitung."' +
             ' class="w-full px-3 py-3 border border-emerald-200 bg-emerald-50/30 rounded-xl text-sm focus:ring-2 focus:ring-emerald-500/30 focus:border-emerald-500 resize-y"></textarea>' +
           '<div class="bg-white border border-ink-200 rounded-xl p-3">' +
             '<p class="text-[10px] font-semibold text-ink-500 uppercase tracking-wider mb-1.5">Tipps</p>' +
             '<div class="space-y-1 text-[11px] text-ink-700 leading-relaxed">' +
-              '<p>Nenne <b>Name + E-Mail</b> des Kunden (Email ist Pflicht).</p>' +
-              '<p>Beschreibe Anliegen + Auftragsnummern, falls vorhanden.</p>' +
-              '<p>Optional: „Priorität hoch", „Gruppe Support", „Telefon …".</p>' +
+              '<p><b>Standard:</b> Du selbst bist der Absender — beschreibe einfach was zu tun ist.</p>' +
+              '<p>Optional: „Priorität hoch", „Gruppe Support", „Auftrag 4711 …".</p>' +
+              '<p>Für <b>Kunden-Tickets</b>: Häkchen oben entfernen, dann Name + Email des Kunden nennen.</p>' +
             '</div>' +
           '</div>' +
         '</div>' +
@@ -8842,25 +8857,40 @@ async function processNewTicketAi(btn) {
   if (!cmd) return toast('Bitte etwas eintippen oder sprechen', 'warn');
   const accountId = ($('newTicketAiAccount')?.value || '');
   if (!accountId) return toast('Account fehlt', 'warn');
+  // v2.46.51: Self-Mode aus Input-Step übernehmen — KI bekommt anderes Schema
+  const selfMode = !!$('newTicketAiSelfMode')?.checked && !!APP_KEYS.user?.email;
   setBusy(btn, true, 'KI denkt…');
   try {
     // Gruppen schon mal vorladen — die KI bekommt sie als Hinweise mit
     await ensureGroupsLoaded(accountId).catch(() => {});
     const groups = (APP_STATE.groupsCache?.[accountId]?.groups || []).map(g => g.name).slice(0, 30);
-    const sysPrompt = 'Du extrahierst aus einer kurzen Beschreibung die Felder eines neuen Support-Tickets. ' +
-      'Antworte AUSSCHLIESSLICH mit gültigem JSON, ohne Markdown-Codeblock, ohne erklärenden Text. ' +
-      'Schema:\n' +
-      '{\n' +
-      '  "subject": string (max 100 Zeichen, prägnant, auf Deutsch),\n' +
-      '  "description": string (vollständige Beschreibung in Plain-Text, kann mehrere Zeilen haben),\n' +
-      '  "customer_name": string|null,\n' +
-      '  "customer_email": string|null (MUSS gültige Email sein wenn vorhanden),\n' +
-      '  "customer_phone": string|null,\n' +
-      '  "priority": 1|2|3|4 (1=Niedrig, 2=Normal, 3=Hoch, 4=Dringend — Default 2),\n' +
-      '  "group_hint": string|null (Name einer Gruppe aus der Liste, falls erkennbar — sonst null)\n' +
-      '}\n' +
-      (groups.length ? 'Verfügbare Gruppen: ' + groups.join(', ') + '\n' : '') +
-      'Wenn die Email fehlt, setze customer_email auf null — der User muss sie dann manuell nachtragen.';
+    // Schema je nach Mode: bei Self-Mode keine Kunden-Felder, bei Kunden-Mode mit
+    const sysPrompt = selfMode
+      ? 'Du extrahierst aus einer kurzen Beschreibung die Felder eines neuen Support-Tickets. ' +
+        'Der angemeldete User ist selbst der Ersteller — Kunden-Daten NICHT extrahieren. ' +
+        'Antworte AUSSCHLIESSLICH mit gültigem JSON, ohne Markdown-Codeblock, ohne erklärenden Text. ' +
+        'Schema:\n' +
+        '{\n' +
+        '  "subject": string (max 100 Zeichen, prägnant, auf Deutsch),\n' +
+        '  "description": string (vollständige Beschreibung in Plain-Text, kann mehrere Zeilen haben),\n' +
+        '  "priority": 1|2|3|4 (1=Niedrig, 2=Normal, 3=Hoch, 4=Dringend — Default 2),\n' +
+        '  "group_hint": string|null (Name einer Gruppe aus der Liste, falls erkennbar — sonst null)\n' +
+        '}\n' +
+        (groups.length ? 'Verfügbare Gruppen: ' + groups.join(', ') + '\n' : '')
+      : 'Du extrahierst aus einer kurzen Beschreibung die Felder eines neuen Support-Tickets. ' +
+        'Antworte AUSSCHLIESSLICH mit gültigem JSON, ohne Markdown-Codeblock, ohne erklärenden Text. ' +
+        'Schema:\n' +
+        '{\n' +
+        '  "subject": string (max 100 Zeichen, prägnant, auf Deutsch),\n' +
+        '  "description": string (vollständige Beschreibung in Plain-Text, kann mehrere Zeilen haben),\n' +
+        '  "customer_name": string|null,\n' +
+        '  "customer_email": string|null (MUSS gültige Email sein wenn vorhanden),\n' +
+        '  "customer_phone": string|null,\n' +
+        '  "priority": 1|2|3|4 (1=Niedrig, 2=Normal, 3=Hoch, 4=Dringend — Default 2),\n' +
+        '  "group_hint": string|null (Name einer Gruppe aus der Liste, falls erkennbar — sonst null)\n' +
+        '}\n' +
+        (groups.length ? 'Verfügbare Gruppen: ' + groups.join(', ') + '\n' : '') +
+        'Wenn die Email fehlt, setze customer_email auf null — der User muss sie dann manuell nachtragen.';
     const data = await proxyJson('/anthropic/v1/messages', {
       method: 'POST',
       body: JSON.stringify({
@@ -8880,7 +8910,7 @@ async function processNewTicketAi(btn) {
       if (m) { try { plan = JSON.parse(m[0]); } catch (e2) { throw new Error('KI-Antwort ist kein gültiges JSON'); } }
       else throw new Error('KI-Antwort ist kein gültiges JSON');
     }
-    NEW_TICKET_AI_PLAN = { accountId, plan, originalCmd: cmd };
+    NEW_TICKET_AI_PLAN = { accountId, plan, originalCmd: cmd, selfMode };
     renderNewTicketAiPreview();
   } catch (e) {
     setBusy(btn, false);
@@ -8917,23 +8947,19 @@ function renderNewTicketAiPreview() {
     '<input id="ntpSubject" type="text" value="' + escapeAttr(p.subject || '') + '" class="w-full px-3 py-2.5 border border-ink-300 rounded-xl text-sm">' +
     '<label class="text-xs font-bold text-ink-700 uppercase tracking-wider block">Beschreibung</label>' +
     '<textarea id="ntpDesc" rows="5" class="w-full px-3 py-2.5 border border-ink-300 rounded-xl text-sm resize-y">' + escapeHtml(p.description || '') + '</textarea>' +
-    // v2.46.49/.50: Checkbox „eigene Email als Absender" — Default an. Wenn aktiv,
-    // wird der ganze Kunden-Block (Name/Telefon/Email) versteckt und beim Anlegen
-    // die User-Email (APP_KEYS.user.email) als Requester verwendet.
+    // v2.46.49/.50/.51: Checkbox „eigene Email als Absender" — Wert kommt aus dem
+    // Input-Step (ref.selfMode). Toggle blendet Kunden-Block ein/aus.
     (APP_KEYS.user?.email
       ? '<label class="flex items-start gap-2 bg-emerald-50 border border-emerald-200 rounded-xl p-2.5 cursor-pointer">' +
-          '<input id="ntpUseMyEmail" type="checkbox" checked onchange="_ntpToggleUseMyEmail()" class="mt-0.5 w-4 h-4 accent-emerald-600">' +
+          '<input id="ntpUseMyEmail" type="checkbox"' + (ref.selfMode ? ' checked' : '') + ' onchange="_ntpToggleUseMyEmail()" class="mt-0.5 w-4 h-4 accent-emerald-600">' +
           '<div class="flex-1 min-w-0">' +
-            '<p class="text-[12px] font-semibold text-emerald-900">Meine Email als Absender verwenden</p>' +
+            '<p class="text-[12px] font-semibold text-emerald-900">Ich bin der Absender</p>' +
             '<p class="text-[10px] text-emerald-700 mt-0.5">Ticket wird mit <b>' + escapeHtml(APP_KEYS.user.email) + '</b> als Ersteller angelegt.</p>' +
           '</div>' +
         '</label>'
       : '') +
-    // v2.46.50: Kunden-Block in einem Container — wird komplett versteckt wenn
-    // „Meine Email" aktiv ist (Default), damit User nicht zwei widersprüchliche
-    // Eingabefelder sieht. Sichtbar nur wenn Checkbox deaktiviert oder keine
-    // User-Email vorhanden.
-    '<div id="ntpCustomerBlock" class="space-y-3' + (APP_KEYS.user?.email ? ' hidden' : '') + '">' +
+    // v2.46.50/.51: Kunden-Block — versteckt wenn selfMode aktiv, sonst sichtbar.
+    '<div id="ntpCustomerBlock" class="space-y-3' + (ref.selfMode ? ' hidden' : '') + '">' +
       '<div class="grid grid-cols-2 gap-2">' +
         '<div>' +
           '<label class="text-xs font-bold text-ink-700 uppercase tracking-wider block">Kunde Name</label>' +
