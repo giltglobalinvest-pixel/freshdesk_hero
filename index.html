@@ -713,7 +713,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.46';
+const APP_VERSION = 'v2.46.47';
 
 /* ============================================================
    GLOBAL THEME — v2.46.12
@@ -9038,7 +9038,28 @@ function _attachTicketStackSwipe() {
   const card = document.querySelector('[data-ticket-stack-current]');
   if (!card || card._stackSwipeAttached) return;
   card._stackSwipeAttached = true;
+  // v2.46.47 SAFETY: initial state explizit zurücksetzen — falls vom vorherigen
+  // Render stale Transform/Opacity stehen geblieben sind (z.B. App vom Background)
+  card.style.transition = 'none';
+  card.style.transform = 'translateX(0) rotate(0)';
+  card.style.opacity = '1';
   let startX = 0, dx = 0, dragging = false, horiz = null;
+  // Gemeinsamer Reset für touchend UND touchcancel — verhindert die „bleibt mitten
+  // im Swipe stehen"-Bug wenn das OS die Geste unterbricht (App-Wechsel etc.)
+  function _resetOrCommit(committed) {
+    dragging = false;
+    card.style.transition = 'transform 0.3s ease, opacity 0.3s ease';
+    if (committed && Math.abs(dx) > 80) {
+      const direction = dx > 0 ? 1 : -1;
+      card.style.transform = 'translateX(' + (direction * window.innerWidth * 1.2) + 'px) rotate(' + (direction * 25) + 'deg)';
+      card.style.opacity = '0';
+      setTimeout(function () { _ticketStackNav(direction > 0 ? 1 : -1); }, 280);
+    } else {
+      // Snap zurück in die Mitte
+      card.style.transform = 'translateX(0) rotate(0)';
+      card.style.opacity = '1';
+    }
+  }
   card.addEventListener('touchstart', function (e) {
     startX = e.touches[0].clientX;
     card._startY = e.touches[0].clientY;
@@ -9046,6 +9067,8 @@ function _attachTicketStackSwipe() {
     dragging = true;
     horiz = null;
     card.style.transition = 'none';
+    // Falls noch reststaub aus vorigem Wisch → reset
+    card.style.opacity = '1';
   }, { passive: true });
   card.addEventListener('touchmove', function (e) {
     if (!dragging) return;
@@ -9062,18 +9085,33 @@ function _attachTicketStackSwipe() {
   }, { passive: true });
   card.addEventListener('touchend', function () {
     if (!dragging) return;
-    dragging = false;
-    card.style.transition = 'transform 0.3s ease, opacity 0.3s ease';
-    if (Math.abs(dx) > 80) {
-      const direction = dx > 0 ? 1 : -1;
-      card.style.transform = 'translateX(' + (direction * window.innerWidth * 1.2) + 'px) rotate(' + (direction * 25) + 'deg)';
-      card.style.opacity = '0';
-      setTimeout(function () { _ticketStackNav(direction > 0 ? 1 : -1); }, 280);
-    } else {
-      card.style.transform = 'translateX(0) rotate(0)';
-    }
+    _resetOrCommit(true);
+  }, { passive: true });
+  // v2.46.47: touchcancel (vom OS bei Geste-Unterbrechung) → zurück snappen
+  card.addEventListener('touchcancel', function () {
+    if (!dragging) { _resetOrCommit(false); return; }
+    _resetOrCommit(false);
   }, { passive: true });
 }
+
+/* v2.46.47: Wenn die App aus dem Hintergrund zurückkommt, eventuell stehen
+   gebliebene Stack-Card-Transforms zurücksetzen. */
+document.addEventListener('visibilitychange', function () {
+  if (document.visibilityState !== 'visible') return;
+  const stuck = document.querySelector('[data-ticket-stack-current]');
+  if (!stuck) return;
+  // Wenn die Karte mid-swipe oder verschwunden ist → reset
+  const t = stuck.style.transform || '';
+  const op = stuck.style.opacity || '';
+  if (t && t.indexOf('translateX(0') === -1) {
+    stuck.style.transition = 'transform 0.2s ease, opacity 0.2s ease';
+    stuck.style.transform = 'translateX(0) rotate(0)';
+    stuck.style.opacity = '1';
+  } else if (op && parseFloat(op) < 1) {
+    stuck.style.transition = 'opacity 0.2s ease';
+    stuck.style.opacity = '1';
+  }
+});
 
 /* Big Ticket-Card für Stack-View. Status-Gradient-Header, Kunde+Firma, Description,
    Phone-Pills, Action-Buttons (Antworten/Notiz/KI/Status/Verschieben/Detail). */
