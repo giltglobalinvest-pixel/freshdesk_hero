@@ -717,7 +717,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.55';
+const APP_VERSION = 'v2.46.56';
 
 /* ============================================================
    GLOBAL THEME — v2.46.12
@@ -19044,7 +19044,8 @@ async function processDealNote(btn) {
       });
       body = (data?.content?.[0]?.text || '').trim() || raw;
     }
-    await proxyJson('/freshsales/' + encodeURIComponent(accountId) + '/api/deals/' + dealId + '/notes', {
+    // v2.46.56: korrekter FS-Endpoint ist /api/notes (nicht /api/deals/<id>/notes)
+    await proxyJson('/freshsales/' + encodeURIComponent(accountId) + '/api/notes', {
       method: 'POST',
       body: JSON.stringify({ note: { description: body, targetable_type: 'Deal', targetable_id: dealId } })
     });
@@ -19204,7 +19205,8 @@ async function createDealToTicket(btn) {
     if (alsoToFs && dealAcc && dealId) {
       const agentName = (APP_STATE.agentsCache?.[fdAcc]?.byId?.[agentId]?.name) || ('Agent #' + agentId);
       const noteBody = '🎫 Ticket #' + created.id + ' an ' + agentName + ' delegiert.\n\nBetreff: ' + subject + '\n\n' + desc;
-      proxyJson('/freshsales/' + encodeURIComponent(dealAcc) + '/api/deals/' + dealId + '/notes', {
+      // v2.46.56: korrekter FS-Endpoint ist /api/notes
+      proxyJson('/freshsales/' + encodeURIComponent(dealAcc) + '/api/notes', {
         method: 'POST',
         body: JSON.stringify({ note: { description: noteBody, targetable_type: 'Deal', targetable_id: dealId } })
       }).catch(function (e) { console.warn('FS-Note-Save für Delegation fehlgeschlagen:', e.message); });
