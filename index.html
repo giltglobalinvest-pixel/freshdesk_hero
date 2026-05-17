@@ -713,7 +713,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.47';
+const APP_VERSION = 'v2.46.48';
 
 /* ============================================================
    GLOBAL THEME — v2.46.12
@@ -7046,6 +7046,8 @@ async function renderTicketsPage() {
           const tvLabel = tvMode === 'stack' ? 'Karten' : 'Liste';
           let html = `<button onclick="setTicketsViewMode('${tvNext}')" class="shrink-0 px-2.5 py-1 rounded-md text-[11px] font-semibold bg-white text-ink-700 border border-ink-300 inline-flex items-center gap-1 shadow-sm" title="Ansicht: ${tvLabel} (klick um zu wechseln)"><i data-lucide="${tvIcon}" class="w-3.5 h-3.5"></i>${tvLabel}</button>`;
           html += `<button onclick="enterTicketsStackFullscreen()" class="shrink-0 px-2.5 py-1 rounded-md text-[11px] font-semibold bg-brand-500 text-white border border-brand-500 inline-flex items-center gap-1 shadow-sm" title="Direkt in Vollbild-Karten-Modus"><i data-lucide="maximize" class="w-3.5 h-3.5"></i>Vollbild</button>`;
+          // v2.46.48: Neues KI-Ticket erstellen
+          html += `<button onclick="openNewTicketAiModal()" class="shrink-0 px-2.5 py-1 rounded-md text-[11px] font-semibold bg-emerald-500 text-white border border-emerald-500 inline-flex items-center gap-1 shadow-sm" title="Neues Ticket per KI erstellen (Sprach- oder Text-Eingabe)"><i data-lucide="sparkles" class="w-3.5 h-3.5"></i>+ KI</button>`;
           // Schnellbutton: Unzugewiesen (one-tap toggle, account-übergreifend)
           const unassignedActive = f.responderId === 'unassigned';
           html += `<button onclick="toggleUnassignedFilter()" title="${unassignedActive ? 'Unzugewiesen-Filter ausschalten' : 'Nur Tickets ohne Bearbeiter zeigen'}" class="shrink-0 px-2.5 py-1 rounded-md text-[11px] font-semibold inline-flex items-center gap-1 border ${unassignedActive ? 'bg-amber-500 text-white border-amber-500 shadow-sm' : 'bg-amber-50 text-amber-700 border-amber-200 active:bg-amber-100'}">
@@ -8732,6 +8734,301 @@ function closeStackAiModal() {
   if (STACK_AI_REC) { try { STACK_AI_REC.stop(); } catch (_) {} STACK_AI_REC = null; }
   // CURRENT_TICKET zurücksetzen
   if (window._STACK_AI_PREV_CURRENT !== undefined) { CURRENT_TICKET = window._STACK_AI_PREV_CURRENT; delete window._STACK_AI_PREV_CURRENT; }
+  const host = document.getElementById('subModalHost');
+  if (host) host.innerHTML = '';
+  document.body.style.overflow = '';
+}
+
+/* ===================== v2.46.48: NEUES TICKET PER KI ANLEGEN =====================
+   Bottom-Sheet mit Account-Picker, Voice + Text-Input. Claude (Haiku) parsed den
+   Befehl in {subject, description, customer_name, customer_email, priority, group_hint}.
+   Anschließend Preview/Edit-Step, dann Create via findOrCreateFdContactByEmail +
+   POST /api/v2/tickets. Bei Erfolg: openTicketDetail(neueId). */
+let NEW_TICKET_AI_REC = null;
+let NEW_TICKET_AI_PLAN = null;
+async function openNewTicketAiModal() {
+  let host = document.getElementById('subModalHost');
+  if (!host) { host = document.createElement('div'); host.id = 'subModalHost'; document.body.appendChild(host); }
+  NEW_TICKET_AI_PLAN = null;
+  const accounts = APP_STATE.accounts || [];
+  if (!accounts.length) { toast('Keine Accounts verfügbar', 'warn'); return; }
+  const cur = APP_STATE.currentAccount;
+  // Vorauswahl: aktueller Account, sonst der erste
+  let preselect = (cur && cur !== 'all' && accounts.find(a => a.id === cur)) ? cur : accounts[0].id;
+  const speechAvailable = !!(window.SpeechRecognition || window.webkitSpeechRecognition);
+  const accountPicker = accounts.length > 1
+    ? '<label class="text-xs font-bold text-ink-700 uppercase tracking-wider block">Account</label>' +
+      '<select id="newTicketAiAccount" class="w-full px-3 py-2.5 border border-ink-300 rounded-xl text-sm font-medium bg-white">' +
+        accounts.map(a => '<option value="' + escapeAttr(a.id) + '"' + (a.id === preselect ? ' selected' : '') + '>' + escapeHtml(a.name) + '</option>').join('') +
+      '</select>'
+    : '<input type="hidden" id="newTicketAiAccount" value="' + escapeAttr(preselect) + '">';
+  host.innerHTML =
+    '<div class="fixed inset-0 z-[60] flex items-end justify-center bg-black/50" onclick="if(event.target===this)closeNewTicketAiModal()">' +
+      '<div class="bg-white w-full max-w-md rounded-t-3xl shadow-2xl flex flex-col safe-bottom" style="max-height:92vh">' +
+        '<div class="px-4 py-3 border-b border-ink-200 flex items-center justify-between gap-2 shrink-0">' +
+          '<h3 class="font-bold text-ink-900 inline-flex items-center gap-2"><i data-lucide="sparkles" class="w-5 h-5 text-emerald-600"></i> Neues Ticket per KI</h3>' +
+          '<button onclick="closeNewTicketAiModal()" class="w-9 h-9 rounded-lg hover:bg-ink-100 flex items-center justify-center"><i data-lucide="x" class="w-5 h-5 text-ink-700"></i></button>' +
+        '</div>' +
+        '<div id="newTicketAiBody" class="flex-1 overflow-y-auto p-4 space-y-3">' +
+          accountPicker +
+          '<label class="text-xs font-bold text-ink-700 uppercase tracking-wider block">Was soll im Ticket stehen?</label>' +
+          (speechAvailable ? '<button id="newTicketAiMicBtn" onclick="toggleNewTicketAiVoice()" class="w-full py-4 rounded-2xl bg-gradient-to-br from-emerald-500 to-emerald-600 text-white font-semibold flex items-center justify-center gap-2 active:opacity-80 shadow-md shadow-emerald-500/30">' +
+            '<div id="newTicketAiMicIcon" class="w-9 h-9 rounded-full bg-white/20 flex items-center justify-center"><i data-lucide="mic" class="w-5 h-5"></i></div>' +
+            '<span id="newTicketAiMicLabel">Tippe und sprich</span>' +
+          '</button>' : '<p class="text-[11px] text-ink-500 italic">Sprach-Eingabe in diesem Browser nicht verfügbar — nutze das Textfeld.</p>') +
+          '<textarea id="newTicketAiCmd" rows="5" placeholder="z.B. „Max Mustermann (max@firma.de) bittet um Angebot für Ersatzteile zu Auftrag 4711. Priorität hoch."' +
+            ' class="w-full px-3 py-3 border border-emerald-200 bg-emerald-50/30 rounded-xl text-sm focus:ring-2 focus:ring-emerald-500/30 focus:border-emerald-500 resize-y"></textarea>' +
+          '<div class="bg-white border border-ink-200 rounded-xl p-3">' +
+            '<p class="text-[10px] font-semibold text-ink-500 uppercase tracking-wider mb-1.5">Tipps</p>' +
+            '<div class="space-y-1 text-[11px] text-ink-700 leading-relaxed">' +
+              '<p>Nenne <b>Name + E-Mail</b> des Kunden (Email ist Pflicht).</p>' +
+              '<p>Beschreibe Anliegen + Auftragsnummern, falls vorhanden.</p>' +
+              '<p>Optional: „Priorität hoch", „Gruppe Support", „Telefon …".</p>' +
+            '</div>' +
+          '</div>' +
+        '</div>' +
+        '<div id="newTicketAiFooter" class="border-t border-ink-200 p-3 flex gap-2 shrink-0">' +
+          '<button onclick="closeNewTicketAiModal()" class="flex-1 bg-ink-100 hover:bg-ink-200 text-ink-700 rounded-xl px-3 py-3 text-sm font-bold">Abbrechen</button>' +
+          '<button onclick="processNewTicketAi(this)" class="flex-[2] bg-gradient-to-br from-emerald-500 to-emerald-600 hover:opacity-90 text-white rounded-xl px-3 py-3 text-sm font-bold inline-flex items-center justify-center gap-1.5 shadow-md shadow-emerald-200">' +
+            '<i data-lucide="sparkles" class="w-4 h-4"></i> Verstehen' +
+          '</button>' +
+        '</div>' +
+      '</div>' +
+    '</div>';
+  if (window.lucide) lucide.createIcons();
+  document.body.style.overflow = 'hidden';
+  setTimeout(() => { $('newTicketAiCmd')?.focus(); }, 80);
+}
+
+function toggleNewTicketAiVoice() {
+  if (NEW_TICKET_AI_REC) { try { NEW_TICKET_AI_REC.stop(); } catch (_) {} NEW_TICKET_AI_REC = null; _updateNewTicketAiMicUI(false); return; }
+  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if (!SR) return toast('Sprach-Eingabe nicht verfügbar', 'warn', 6000);
+  ensureMicPermission().then(() => {
+    const rec = new SR();
+    rec.lang = 'de-DE';
+    rec.continuous = true;
+    rec.interimResults = true;
+    const ta = $('newTicketAiCmd');
+    let baseText = (ta?.value || '');
+    if (baseText && !/\s$/.test(baseText)) baseText += ' ';
+    rec.onresult = (event) => {
+      let final = '', interim = '';
+      for (let i = event.resultIndex; i < event.results.length; i++) {
+        const tr = event.results[i][0].transcript;
+        if (event.results[i].isFinal) final += tr; else interim += tr;
+      }
+      if (ta) ta.value = baseText + final + interim;
+      if (final) baseText += final;
+    };
+    rec.onerror = (e) => { console.warn('Voice error:', e); NEW_TICKET_AI_REC = null; _updateNewTicketAiMicUI(false); };
+    rec.onend = () => { if (NEW_TICKET_AI_REC === rec) { NEW_TICKET_AI_REC = null; _updateNewTicketAiMicUI(false); } };
+    rec.start();
+    NEW_TICKET_AI_REC = rec;
+    _updateNewTicketAiMicUI(true);
+  }).catch(e => toast(e.message, 'error', 10000));
+}
+function _updateNewTicketAiMicUI(isOn) {
+  const icon = $('newTicketAiMicIcon');
+  const label = $('newTicketAiMicLabel');
+  if (icon) icon.innerHTML = isOn ? '<span class="spinner" style="width:18px;height:18px;border-color:white;border-right-color:transparent"></span>' : '<i data-lucide="mic" class="w-5 h-5"></i>';
+  if (label) label.textContent = isOn ? 'Höre zu — nochmal tippen zum Stoppen' : 'Tippe und sprich';
+  if (window.lucide) lucide.createIcons();
+}
+
+async function processNewTicketAi(btn) {
+  if (NEW_TICKET_AI_REC) { try { NEW_TICKET_AI_REC.stop(); } catch (_) {} NEW_TICKET_AI_REC = null; }
+  const cmd = ($('newTicketAiCmd')?.value || '').trim();
+  if (!cmd) return toast('Bitte etwas eintippen oder sprechen', 'warn');
+  const accountId = ($('newTicketAiAccount')?.value || '');
+  if (!accountId) return toast('Account fehlt', 'warn');
+  setBusy(btn, true, 'KI denkt…');
+  try {
+    // Gruppen schon mal vorladen — die KI bekommt sie als Hinweise mit
+    await ensureGroupsLoaded(accountId).catch(() => {});
+    const groups = (APP_STATE.groupsCache?.[accountId]?.groups || []).map(g => g.name).slice(0, 30);
+    const sysPrompt = 'Du extrahierst aus einer kurzen Beschreibung die Felder eines neuen Support-Tickets. ' +
+      'Antworte AUSSCHLIESSLICH mit gültigem JSON, ohne Markdown-Codeblock, ohne erklärenden Text. ' +
+      'Schema:\n' +
+      '{\n' +
+      '  "subject": string (max 100 Zeichen, prägnant, auf Deutsch),\n' +
+      '  "description": string (vollständige Beschreibung in Plain-Text, kann mehrere Zeilen haben),\n' +
+      '  "customer_name": string|null,\n' +
+      '  "customer_email": string|null (MUSS gültige Email sein wenn vorhanden),\n' +
+      '  "customer_phone": string|null,\n' +
+      '  "priority": 1|2|3|4 (1=Niedrig, 2=Normal, 3=Hoch, 4=Dringend — Default 2),\n' +
+      '  "group_hint": string|null (Name einer Gruppe aus der Liste, falls erkennbar — sonst null)\n' +
+      '}\n' +
+      (groups.length ? 'Verfügbare Gruppen: ' + groups.join(', ') + '\n' : '') +
+      'Wenn die Email fehlt, setze customer_email auf null — der User muss sie dann manuell nachtragen.';
+    const data = await proxyJson('/anthropic/v1/messages', {
+      method: 'POST',
+      body: JSON.stringify({
+        model: 'claude-haiku-4-5-20251001',
+        max_tokens: 800,
+        system: sysPrompt,
+        messages: [{ role: 'user', content: cmd }]
+      })
+    });
+    const raw = (data?.content?.[0]?.text || '').trim();
+    // JSON parsen — Markdown-Codefence tolerieren
+    let json = raw.replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/i, '').trim();
+    let plan;
+    try { plan = JSON.parse(json); }
+    catch (_) {
+      const m = json.match(/\{[\s\S]*\}/);
+      if (m) { try { plan = JSON.parse(m[0]); } catch (e2) { throw new Error('KI-Antwort ist kein gültiges JSON'); } }
+      else throw new Error('KI-Antwort ist kein gültiges JSON');
+    }
+    NEW_TICKET_AI_PLAN = { accountId, plan, originalCmd: cmd };
+    renderNewTicketAiPreview();
+  } catch (e) {
+    setBusy(btn, false);
+    toast(e.message || String(e), 'error', 8000);
+  }
+}
+
+function renderNewTicketAiPreview() {
+  const ref = NEW_TICKET_AI_PLAN;
+  if (!ref) return;
+  const p = ref.plan || {};
+  const accountId = ref.accountId;
+  const groupsCache = APP_STATE.groupsCache?.[accountId]?.groups || [];
+  // group_hint → group_id matchen
+  let preselectGroupId = '';
+  if (p.group_hint) {
+    const hint = String(p.group_hint).toLowerCase();
+    const match = groupsCache.find(g => g.name.toLowerCase() === hint) ||
+                  groupsCache.find(g => g.name.toLowerCase().includes(hint)) ||
+                  groupsCache.find(g => hint.includes(g.name.toLowerCase()));
+    if (match) preselectGroupId = String(match.id);
+  }
+  const body = $('newTicketAiBody');
+  const footer = $('newTicketAiFooter');
+  if (!body || !footer) return;
+  const accName = (APP_STATE.accounts || []).find(a => a.id === accountId)?.name || accountId;
+  body.innerHTML =
+    '<div class="bg-emerald-50 border border-emerald-200 rounded-xl p-2.5 text-[11px] flex items-center gap-2">' +
+      '<i data-lucide="check-circle" class="w-4 h-4 text-emerald-600 shrink-0"></i>' +
+      '<p class="text-emerald-800">KI hat erkannt — bitte prüfen und ggf. anpassen.</p>' +
+    '</div>' +
+    '<div class="bg-ink-50 rounded-xl px-2.5 py-1.5 text-[11px] text-ink-700"><b>Account:</b> ' + escapeHtml(accName) + '</div>' +
+    '<label class="text-xs font-bold text-ink-700 uppercase tracking-wider block">Betreff *</label>' +
+    '<input id="ntpSubject" type="text" value="' + escapeAttr(p.subject || '') + '" class="w-full px-3 py-2.5 border border-ink-300 rounded-xl text-sm">' +
+    '<label class="text-xs font-bold text-ink-700 uppercase tracking-wider block">Beschreibung</label>' +
+    '<textarea id="ntpDesc" rows="5" class="w-full px-3 py-2.5 border border-ink-300 rounded-xl text-sm resize-y">' + escapeHtml(p.description || '') + '</textarea>' +
+    '<div class="grid grid-cols-2 gap-2">' +
+      '<div>' +
+        '<label class="text-xs font-bold text-ink-700 uppercase tracking-wider block">Kunde Name</label>' +
+        '<input id="ntpName" type="text" value="' + escapeAttr(p.customer_name || '') + '" class="w-full px-3 py-2.5 border border-ink-300 rounded-xl text-sm">' +
+      '</div>' +
+      '<div>' +
+        '<label class="text-xs font-bold text-ink-700 uppercase tracking-wider block">Telefon</label>' +
+        '<input id="ntpPhone" type="text" value="' + escapeAttr(p.customer_phone || '') + '" class="w-full px-3 py-2.5 border border-ink-300 rounded-xl text-sm">' +
+      '</div>' +
+    '</div>' +
+    '<label class="text-xs font-bold text-ink-700 uppercase tracking-wider block">Kunde Email *</label>' +
+    '<input id="ntpEmail" type="email" value="' + escapeAttr(p.customer_email || '') + '" placeholder="kunde@firma.de" class="w-full px-3 py-2.5 border border-ink-300 rounded-xl text-sm' + (p.customer_email ? '' : ' border-amber-400 bg-amber-50/30') + '">' +
+    (p.customer_email ? '' : '<p class="text-[10px] text-amber-700">Email fehlt — bitte ergänzen (Pflicht für Ticket-Anlage).</p>') +
+    '<div class="grid grid-cols-2 gap-2">' +
+      '<div>' +
+        '<label class="text-xs font-bold text-ink-700 uppercase tracking-wider block">Priorität</label>' +
+        '<select id="ntpPriority" class="w-full px-3 py-2.5 border border-ink-300 rounded-xl text-sm bg-white">' +
+          [['1','Niedrig'],['2','Normal'],['3','Hoch'],['4','Dringend']].map(([v,l]) =>
+            '<option value="' + v + '"' + ((p.priority || 2) == v ? ' selected' : '') + '>' + l + '</option>'
+          ).join('') +
+        '</select>' +
+      '</div>' +
+      '<div>' +
+        '<label class="text-xs font-bold text-ink-700 uppercase tracking-wider block">Gruppe</label>' +
+        '<select id="ntpGroup" class="w-full px-3 py-2.5 border border-ink-300 rounded-xl text-sm bg-white">' +
+          '<option value="">— Keine —</option>' +
+          groupsCache.map(g => '<option value="' + g.id + '"' + (String(g.id) === preselectGroupId ? ' selected' : '') + '>' + escapeHtml(g.name) + '</option>').join('') +
+        '</select>' +
+      '</div>' +
+    '</div>' +
+    '<details class="bg-ink-50 rounded-xl p-2 text-[10px]">' +
+      '<summary class="cursor-pointer text-ink-500 font-semibold">Original-Eingabe</summary>' +
+      '<p class="mt-1.5 text-ink-700 whitespace-pre-wrap">' + escapeHtml(ref.originalCmd || '') + '</p>' +
+    '</details>' +
+    '<div id="ntpErr" class="hidden bg-red-50 border border-red-200 rounded-xl p-3 text-sm text-red-800"></div>';
+  footer.innerHTML =
+    '<button onclick="backToNewTicketAiPrompt()" class="flex-1 bg-ink-100 hover:bg-ink-200 text-ink-700 rounded-xl px-3 py-3 text-sm font-bold inline-flex items-center justify-center gap-1.5"><i data-lucide="arrow-left" class="w-4 h-4"></i> Zurück</button>' +
+    '<button onclick="createTicketFromAiPlan(this)" class="flex-[2] bg-gradient-to-br from-emerald-500 to-emerald-600 hover:opacity-90 text-white rounded-xl px-3 py-3 text-sm font-bold inline-flex items-center justify-center gap-1.5 shadow-md shadow-emerald-200">' +
+      '<i data-lucide="send" class="w-4 h-4"></i> Ticket anlegen' +
+    '</button>';
+  if (window.lucide) lucide.createIcons();
+}
+
+function backToNewTicketAiPrompt() {
+  // Plan verwerfen, aber gespeicherten Original-Befehl wieder einsetzen
+  const original = NEW_TICKET_AI_PLAN?.originalCmd || '';
+  const accountId = NEW_TICKET_AI_PLAN?.accountId;
+  NEW_TICKET_AI_PLAN = null;
+  closeNewTicketAiModal();
+  setTimeout(() => {
+    openNewTicketAiModal().then(() => {
+      setTimeout(() => {
+        const ta = $('newTicketAiCmd');
+        if (ta && original) ta.value = original;
+        const sel = $('newTicketAiAccount');
+        if (sel && accountId) sel.value = accountId;
+      }, 50);
+    });
+  }, 30);
+}
+
+async function createTicketFromAiPlan(btn) {
+  const ref = NEW_TICKET_AI_PLAN;
+  if (!ref) return;
+  const errEl = $('ntpErr');
+  const setErr = (msg) => { if (errEl) { errEl.textContent = msg; errEl.classList.remove('hidden'); } };
+  if (errEl) errEl.classList.add('hidden');
+  const subject = ($('ntpSubject')?.value || '').trim();
+  const desc    = ($('ntpDesc')?.value || '').trim();
+  const name    = ($('ntpName')?.value || '').trim();
+  const email   = ($('ntpEmail')?.value || '').trim();
+  const phone   = ($('ntpPhone')?.value || '').trim();
+  const prio    = parseInt(($('ntpPriority')?.value || '2'), 10);
+  const groupId = ($('ntpGroup')?.value || '').trim();
+  if (!subject) return setErr('Betreff fehlt');
+  if (!email)   return setErr('Kunden-Email fehlt — Pflicht für Ticket-Anlage');
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return setErr('Email-Adresse sieht ungültig aus');
+  setBusy(btn, true, 'Lege an…');
+  try {
+    // 1. FD-Kontakt finden/anlegen
+    const fdContact = await findOrCreateFdContactByEmail(ref.accountId, {
+      name: name || email.split('@')[0], email, phone,
+    });
+    if (!fdContact?.id) throw new Error('FD-Kontakt konnte nicht erstellt werden');
+    // 2. Ticket-Payload zusammenbauen
+    const payload = {
+      subject,
+      description: desc ? desc.replace(/\n/g, '<br>') : subject,
+      requester_id: fdContact.id,
+      status: 2,        // Open
+      priority: prio,
+      source: 2,        // Portal (sinnvoller Default für intern erstellte Tickets)
+    };
+    if (groupId) payload.group_id = parseInt(groupId, 10);
+    const created = await proxyJson('/freshdesk/' + encodeURIComponent(ref.accountId) + '/api/v2/tickets', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+    if (!created?.id) throw new Error('Ticket-Anlage fehlgeschlagen (keine ID zurückgegeben)');
+    // 3. Aufräumen + Detail öffnen
+    closeNewTicketAiModal();
+    toast('Ticket #' + created.id + ' angelegt', 'success', 4000);
+    setTimeout(() => { try { openTicketDetail(ref.accountId, created.id); } catch (_) {} }, 200);
+  } catch (e) {
+    setBusy(btn, false);
+    setErr(e.message || String(e));
+  }
+}
+
+function closeNewTicketAiModal() {
+  if (NEW_TICKET_AI_REC) { try { NEW_TICKET_AI_REC.stop(); } catch (_) {} NEW_TICKET_AI_REC = null; }
+  NEW_TICKET_AI_PLAN = null;
   const host = document.getElementById('subModalHost');
   if (host) host.innerHTML = '';
   document.body.style.overflow = '';
