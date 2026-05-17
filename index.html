@@ -717,7 +717,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.57';
+const APP_VERSION = 'v2.46.58';
 
 /* ============================================================
    GLOBAL THEME — v2.46.12
@@ -18564,15 +18564,17 @@ async function openDealDetail(accountId, dealId) {
   let cached = (DEALS_STATE.all || []).find(function (d) { return d._accountId === accountId && d.id === dealId; });
   if (cached) _renderDealDetail(cached, accountId, dealId);
   try {
+    // v2.46.58: notes mit-includen damit wir sie in der Detail-View anzeigen können
     const fresh = await proxyJson('/freshsales/' + encodeURIComponent(accountId) +
       '/api/deals/' + dealId +
-      '?include=owner,deal_stage,sales_account,contacts');
+      '?include=owner,deal_stage,sales_account,contacts,notes');
     const d = fresh?.deal || fresh;
     // Include-Daten aus Top-Level mappen
     const saArr = fresh?.sales_accounts || [];
     const ctArr = fresh?.contacts || [];
     const owArr = fresh?.users || fresh?.owners || [];
     const stArr = fresh?.deal_stages || [];
+    const nArr  = fresh?.notes || (Array.isArray(d?.notes) ? d.notes : []);
     if (d) {
       d._salesAccount   = d.sales_account_id ? (saArr.find(function (x) { return x.id === d.sales_account_id; }) || cached?._salesAccount) : null;
       d._stage          = d.deal_stage_id    ? (stArr.find(function (x) { return x.id === d.deal_stage_id;    }) || cached?._stage) : null;
@@ -18588,6 +18590,14 @@ async function openDealDetail(accountId, dealId) {
       const stagesCache = FS_STAGES_CACHE[accountId];
       d._stageGroup     = stagesCache?.byId?.[d.deal_stage_id]?.group || 'open';
       d._stageName      = stagesCache?.byId?.[d.deal_stage_id]?.name  || d._stage?.name || '–';
+      // v2.46.58: Notizen + User-Map für „wer hat geschrieben"
+      const usersById = {}; owArr.forEach(function (u) { usersById[u.id] = u; });
+      d._notes = (nArr || []).slice().sort(function (a, b) {
+        return new Date(b.updated_at || b.created_at || 0) - new Date(a.updated_at || a.created_at || 0);
+      }).map(function (n) {
+        const u = n.user_id ? usersById[n.user_id] : null;
+        return Object.assign({}, n, { _authorName: u?.display_name || u?.name || u?.email || '' });
+      });
       _renderDealDetail(d, accountId, dealId);
     }
   } catch (e) {
@@ -18692,6 +18702,8 @@ function _renderDealDetail(d, accountId, dealId) {
           '<span class="text-[12px] text-ink-700">Owner: <b>' + escapeHtml(owner) + '</b></span>' +
         '</div>'
       ) : '') +
+      // v2.46.58: Notizen-Sektion
+      _renderDealNotesBlock(d, accountId, dealId) +
       // Account-Hinweis
       '<p class="text-[10px] text-ink-400 text-center">Account: ' + escapeHtml(d._accountName || acc?.name || '') + '</p>' +
       // Externe Links
@@ -18700,6 +18712,50 @@ function _renderDealDetail(d, accountId, dealId) {
       ) : '') +
     '</div>';
   if (window.lucide) lucide.createIcons();
+}
+
+/* v2.46.58: Notizen-Block im Deal-Detail. Zeigt alle Notizen aus FS, sortiert
+   nach updated_at desc. Wenn noch nicht geladen (cached-only-Pfad), Loading-Hint.
+   Inkl. „+ Notiz" Button der das KI-Notiz-Modal öffnet. */
+function _renderDealNotesBlock(d, accountId, dealId) {
+  const notes = d._notes;
+  const accIdAttr = escapeAttr(accountId);
+  const header =
+    '<div class="flex items-center justify-between gap-2 mb-2">' +
+      '<div class="flex items-center gap-1.5">' +
+        '<i data-lucide="sticky-note" class="w-4 h-4 text-ink-500"></i>' +
+        '<p class="text-[11px] font-bold text-ink-700 uppercase tracking-wider">Notizen' +
+          (Array.isArray(notes) ? ' <span class="text-ink-400 font-normal">(' + notes.length + ')</span>' : '') +
+        '</p>' +
+      '</div>' +
+      '<button onclick="openDealNoteAiModal(\'' + accIdAttr + '\', ' + dealId + ')" class="inline-flex items-center gap-1 px-2.5 py-1 rounded-full bg-purple-50 hover:bg-purple-100 border border-purple-200 text-purple-700 text-[11px] font-semibold active:scale-95 transition">' +
+        '<i data-lucide="plus" class="w-3 h-3"></i> Notiz' +
+      '</button>' +
+    '</div>';
+  let inner;
+  if (!Array.isArray(notes)) {
+    inner = '<div class="text-center py-3"><div class="spinner inline-block w-4 h-4 border-[2px] text-brand-500"></div><p class="text-[10px] text-ink-400 mt-1">Lade Notizen…</p></div>';
+  } else if (!notes.length) {
+    inner = '<p class="text-[12px] text-ink-400 italic text-center py-3">Noch keine Notizen vorhanden.</p>';
+  } else {
+    inner = '<div class="space-y-2">' + notes.map(function (n) {
+      const txt = htmlToText(n.description || '').trim();
+      const created = n.created_at ? new Date(n.created_at) : null;
+      const updated = n.updated_at ? new Date(n.updated_at) : null;
+      const dateRef = updated || created;
+      const dateStr = dateRef ? dateRef.toLocaleString('de-DE', { day: '2-digit', month: '2-digit', year: '2-digit', hour: '2-digit', minute: '2-digit' }) : '';
+      const edited = (created && updated && Math.abs(updated - created) > 60000) ? ' · bearbeitet' : '';
+      const author = n._authorName || '';
+      return '<div class="bg-ink-50 border border-ink-100 rounded-xl p-2.5">' +
+        '<div class="flex items-center justify-between gap-2 mb-1">' +
+          '<span class="text-[11px] font-semibold text-ink-700 truncate">' + escapeHtml(author || 'Unbekannt') + '</span>' +
+          '<span class="text-[10px] text-ink-400 shrink-0">' + escapeHtml(dateStr + edited) + '</span>' +
+        '</div>' +
+        '<p class="text-[12px] text-ink-800 leading-snug whitespace-pre-wrap break-words">' + escapeHtml(txt) + '</p>' +
+      '</div>';
+    }).join('') + '</div>';
+  }
+  return '<div class="bg-white border border-ink-200 rounded-2xl p-3">' + header + inner + '</div>';
 }
 
 function closeDealDetail() {
@@ -19051,6 +19107,11 @@ async function processDealNote(btn) {
     });
     closeDealNoteAiModal();
     toast('Notiz in Freshsales gespeichert', 'success', 4000);
+    // v2.46.58: Wenn die Deal-Detail-View offen ist, re-fetchen damit die neue
+    // Notiz sofort erscheint.
+    if (document.getElementById('dealDetailBody')) {
+      openDealDetail(accountId, dealId);
+    }
   } catch (e) {
     setBusy(btn, false);
     toast('Notiz-Speichern fehlgeschlagen: ' + (e.message || e), 'error', 8000);
