@@ -717,7 +717,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.52';
+const APP_VERSION = 'v2.46.53';
 
 /* ============================================================
    GLOBAL THEME — v2.46.12
@@ -17942,10 +17942,56 @@ async function openAufgabeFromContact(accountId, contactId) {
 const DEALS_STATE = {
   filter: 'open',        // 'open' | 'won' | 'lost' | 'all'
   accountId: 'all',      // 'all' | <accountId>
+  period: 'all',         // v2.46.53: 'all' | 'today' | '7d' | '30d' | 'quarter' | 'year'
+  sort: 'date_desc',     // v2.46.53: 'date_desc' | 'date_asc' | 'price_desc' | 'price_asc'
   all: [],               // alle geladenen Deals (über Accounts hinweg)
   loading: false,
   lastLoadAt: 0,
 };
+
+/* v2.46.53: Referenz-Datum pro Deal für Zeitraum-Filter.
+   Für Won/Lost: tatsächliches Close-Datum bevorzugt; sonst expected_close;
+   für Open: expected_close bevorzugt. Immer Fallback auf updated_at / created_at. */
+function _dealReferenceDate(d) {
+  if (!d) return 0;
+  const grp = d._stageGroup;
+  let candidates;
+  if (grp === 'won' || grp === 'lost') {
+    candidates = [d.closed_date, d.expected_close, d.updated_at, d.created_at];
+  } else {
+    candidates = [d.expected_close, d.updated_at, d.created_at];
+  }
+  for (let i = 0; i < candidates.length; i++) {
+    if (!candidates[i]) continue;
+    const t = new Date(candidates[i]).getTime();
+    if (!isNaN(t)) return t;
+  }
+  return 0;
+}
+
+/* v2.46.53: Liefert [fromMs, toMs] für die aktuelle Period-Auswahl, oder null
+   wenn 'all'. Period bezieht sich auf die letzten X Tage / dieses Quartal etc. */
+function _periodRange(period) {
+  if (!period || period === 'all') return null;
+  const now = new Date();
+  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+  const oneDay = 86400e3;
+  if (period === 'today')   return [today, today + oneDay];
+  if (period === '7d')      return [today - 7  * oneDay, today + oneDay];
+  if (period === '30d')     return [today - 30 * oneDay, today + oneDay];
+  if (period === 'quarter') {
+    const q = Math.floor(now.getMonth() / 3);
+    const start = new Date(now.getFullYear(), q * 3, 1).getTime();
+    const end   = new Date(now.getFullYear(), q * 3 + 3, 1).getTime();
+    return [start, end];
+  }
+  if (period === 'year') {
+    const start = new Date(now.getFullYear(), 0, 1).getTime();
+    const end   = new Date(now.getFullYear() + 1, 0, 1).getTime();
+    return [start, end];
+  }
+  return null;
+}
 
 // Cache pro Account: { stages: [{id,name,outcome}], stagesByGroup: {open:[], won:[], lost:[]} }
 const FS_STAGES_CACHE = {};
@@ -18208,6 +18254,19 @@ function _renderDealsHeader() {
       }).join('') +
     '</div>'
   ) : '';
+  // v2.46.53: Period- + Sort-Chip-Helper
+  function periodChip(key, label) {
+    const active = DEALS_STATE.period === key;
+    return '<button onclick="DEALS_STATE.period=\'' + key + '\'; _renderDealsHeader(); _renderDealsList()" class="shrink-0 inline-flex items-center px-2.5 py-1 rounded-full text-[11px] font-semibold border ' +
+      (active ? 'bg-ink-900 text-white border-ink-900' : 'bg-white text-ink-700 border-ink-200') +
+      '">' + escapeHtml(label) + '</button>';
+  }
+  function sortChip(key, label, icon) {
+    const active = DEALS_STATE.sort === key;
+    return '<button onclick="DEALS_STATE.sort=\'' + key + '\'; _renderDealsHeader(); _renderDealsList()" class="shrink-0 inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-[11px] font-semibold border ' +
+      (active ? 'bg-brand-600 text-white border-brand-600' : 'bg-white text-ink-700 border-ink-200') +
+      '"><i data-lucide="' + icon + '" class="w-3 h-3"></i>' + escapeHtml(label) + '</button>';
+  }
   host.innerHTML =
     '<div class="bg-white/95 backdrop-blur sticky top-0 z-10 -mx-1 px-1 py-2 border-b border-ink-100 space-y-2">' +
       accTabs +
@@ -18219,6 +18278,24 @@ function _renderDealsHeader() {
         '<button onclick="reloadDealsManual()" class="shrink-0 ml-auto inline-flex items-center gap-1 px-2.5 py-1.5 rounded-full text-[11px] font-semibold bg-white text-ink-700 border border-ink-200 shadow-sm" title="Neu laden">' +
           '<i data-lucide="refresh-cw" class="w-3 h-3"></i>' +
         '</button>' +
+      '</div>' +
+      // v2.46.53: Zeitraum-Filter
+      '<div class="flex items-center gap-1.5 overflow-x-auto no-scrollbar pb-1">' +
+        '<span class="shrink-0 text-[10px] font-bold uppercase tracking-wider text-ink-400 pr-1">Zeitraum</span>' +
+        periodChip('all',     'Alle') +
+        periodChip('today',   'Heute') +
+        periodChip('7d',      '7 Tage') +
+        periodChip('30d',     '30 Tage') +
+        periodChip('quarter', 'Quartal') +
+        periodChip('year',    'Jahr') +
+      '</div>' +
+      // v2.46.53: Sortierung
+      '<div class="flex items-center gap-1.5 overflow-x-auto no-scrollbar pb-1">' +
+        '<span class="shrink-0 text-[10px] font-bold uppercase tracking-wider text-ink-400 pr-1">Sortieren</span>' +
+        sortChip('date_desc',  'Neueste',    'arrow-down-wide-narrow') +
+        sortChip('date_asc',   'Älteste',    'arrow-up-wide-narrow') +
+        sortChip('price_desc', 'Preis ↓',    'banknote') +
+        sortChip('price_asc',  'Preis ↑',    'banknote') +
       '</div>' +
     '</div>';
   if (window.lucide) lucide.createIcons();
@@ -18242,16 +18319,29 @@ function _renderDealsList() {
   const host = $('dealsList');
   if (!host) return;
   const all = DEALS_STATE.all || [];
+  // v2.46.53: Filter-Pipeline = Account → Stage-Group → Zeitraum (auf Referenz-Datum)
+  const range = _periodRange(DEALS_STATE.period);
   const filtered = all.filter(function (d) {
     if (DEALS_STATE.accountId !== 'all' && d._accountId !== DEALS_STATE.accountId) return false;
-    if (DEALS_STATE.filter === 'all') return true;
-    return d._stageGroup === DEALS_STATE.filter;
+    if (DEALS_STATE.filter !== 'all' && d._stageGroup !== DEALS_STATE.filter) return false;
+    if (range) {
+      const ref = _dealReferenceDate(d);
+      if (!ref || ref < range[0] || ref >= range[1]) return false;
+    }
+    return true;
   });
-  // Nach updated_at desc sortieren (FS liefert das schon, aber sicher ist sicher)
+  // v2.46.53: Sortierung
+  const sort = DEALS_STATE.sort || 'date_desc';
+  const amount = function (d) {
+    const v = d?.amount != null ? Number(d.amount) : NaN;
+    return isNaN(v) ? 0 : v;
+  };
   filtered.sort(function (a, b) {
-    const av = new Date(a.updated_at || a.created_at || 0).getTime();
-    const bv = new Date(b.updated_at || b.created_at || 0).getTime();
-    return bv - av;
+    if (sort === 'price_desc') return amount(b) - amount(a);
+    if (sort === 'price_asc')  return amount(a) - amount(b);
+    const av = _dealReferenceDate(a);
+    const bv = _dealReferenceDate(b);
+    return sort === 'date_asc' ? (av - bv) : (bv - av);
   });
   if (!filtered.length) {
     host.innerHTML =
@@ -18262,7 +18352,17 @@ function _renderDealsList() {
     if (window.lucide) lucide.createIcons();
     return;
   }
-  host.innerHTML = filtered.map(_renderDealCard).join('');
+  // v2.46.53: Summen-Banner über der Liste (Anzahl + Summe)
+  const totalAmount = filtered.reduce(function (sum, d) { return sum + amount(d); }, 0);
+  let totalFmt = '';
+  try { totalFmt = totalAmount.toLocaleString('de-DE', { style: 'currency', currency: 'EUR', maximumFractionDigits: 0 }); }
+  catch (_) { totalFmt = Math.round(totalAmount) + ' €'; }
+  const banner =
+    '<div class="bg-ink-50 border border-ink-200 rounded-xl px-3 py-2 flex items-center justify-between gap-2 mb-2 text-[11px]">' +
+      '<span class="text-ink-600"><b class="text-ink-900">' + filtered.length + '</b> Deal' + (filtered.length === 1 ? '' : 's') + '</span>' +
+      '<span class="text-ink-600">Summe: <b class="text-ink-900 tabular-nums">' + escapeHtml(totalFmt) + '</b></span>' +
+    '</div>';
+  host.innerHTML = banner + filtered.map(_renderDealCard).join('');
   if (window.lucide) lucide.createIcons();
 }
 
@@ -18313,8 +18413,22 @@ function _renderDealCard(deal) {
           : '<span class="text-[10px] text-ink-400 italic">keine Tel</span>') +
       '</div>'
     ) : '') +
-    // Owner-Footer
-    (owner ? '<p class="text-[10px] text-ink-400 mt-1.5 flex items-center gap-1"><i data-lucide="user-cog" class="w-3 h-3"></i> ' + escapeHtml(owner) + '</p>' : '') +
+    // Owner + Datum-Footer (v2.46.53: Referenz-Datum sichtbar machen für Zeitraum-Filter)
+    (function () {
+      const refMs = _dealReferenceDate(deal);
+      const dateStr = refMs ? new Date(refMs).toLocaleDateString('de-DE', { day: '2-digit', month: '2-digit', year: '2-digit' }) : '';
+      const dateLabel = (stageGrp === 'won' || stageGrp === 'lost') ? 'Abschluss' : 'Erw. Abschluss';
+      const showDate = dateStr && (
+        (stageGrp === 'won' || stageGrp === 'lost') ? !!deal.closed_date : !!deal.expected_close
+      );
+      const ownerHtml = owner ? '<span class="inline-flex items-center gap-1"><i data-lucide="user-cog" class="w-3 h-3"></i> ' + escapeHtml(owner) + '</span>' : '';
+      const dateHtml  = showDate ? '<span class="inline-flex items-center gap-1"><i data-lucide="calendar" class="w-3 h-3"></i> ' + escapeHtml(dateLabel + ': ' + dateStr) + '</span>' : '';
+      if (!ownerHtml && !dateHtml) return '';
+      return '<div class="text-[10px] text-ink-400 mt-1.5 flex items-center justify-between gap-2">' +
+        ownerHtml +
+        dateHtml +
+      '</div>';
+    })() +
   '</div>';
 }
 
