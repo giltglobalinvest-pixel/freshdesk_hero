@@ -717,7 +717,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.56';
+const APP_VERSION = 'v2.46.57';
 
 /* ============================================================
    GLOBAL THEME — v2.46.12
@@ -21803,18 +21803,14 @@ async function showApp() {
   // KI-Kosten-Log laden (im Hintergrund — fürs Dashboard)
   loadAiCostLog().catch(e => console.warn('AI-Cost-Load:', e.message));
   loadAufgaben().catch(e => console.warn('Aufgaben-Load:', e.message));
-  // v2.46.30 / v2.46.37: Beim App-Start IMMER direkt in Vollbild-Stack-Modus.
-  // WICHTIG: body.classList.add('fullscreen-stack') MUSS NACH navTo passieren
-  // damit nicht kurz die Chrome-Elemente sichtbar/unsichtbar flackern und
-  // dadurch der loginScreen darunter durchblinkt.
-  TICKETS_VIEW_MODE = 'stack';
-  try { localStorage.setItem('fdh_tickets_view_mode', 'stack'); } catch (_) {}
-  TICKETS_STACK_FULLSCREEN = true;
+  // v2.46.57: User-Wunsch — App startet IMMER in normaler Listen-Ansicht.
+  // Wer den Stack/Tinder-Modus will, schaltet ihn manuell in der Filter-Leiste um.
+  // Persistente Vorauswahl wird ignoriert, damit der Start immer vorhersagbar ist.
+  TICKETS_VIEW_MODE = 'list';
+  try { localStorage.setItem('fdh_tickets_view_mode', 'list'); } catch (_) {}
+  TICKETS_STACK_FULLSCREEN = false;
+  document.body.classList.remove('fullscreen-stack');
   navTo('tickets');
-  // Nach dem ersten Render: fullscreen-stack aktivieren
-  requestAnimationFrame(() => {
-    document.body.classList.add('fullscreen-stack');
-  });
   // Deep-Link: wenn URL-Hash auf ein Ticket zeigt, direkt öffnen
   handleDeepLink();
   // Falls Deep-Link für anderen User war: Banner zum Umschalten
