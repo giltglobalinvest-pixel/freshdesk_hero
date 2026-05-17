@@ -717,7 +717,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.53';
+const APP_VERSION = 'v2.46.54';
 
 /* ============================================================
    GLOBAL THEME — v2.46.12
@@ -17944,10 +17944,53 @@ const DEALS_STATE = {
   accountId: 'all',      // 'all' | <accountId>
   period: 'all',         // v2.46.53: 'all' | 'today' | '7d' | '30d' | 'quarter' | 'year'
   sort: 'date_desc',     // v2.46.53: 'date_desc' | 'date_asc' | 'price_desc' | 'price_asc'
+  showHidden: false,     // v2.46.54: ausgeblendete Deals einblenden
   all: [],               // alle geladenen Deals (über Accounts hinweg)
   loading: false,
   lastLoadAt: 0,
 };
+
+/* v2.46.54: Hide-Liste pro User via localStorage. Key per Deal = accountId + '|' + dealId,
+   Value = Ablauf-Timestamp (ms). Beim Lesen werden abgelaufene Einträge gelöscht. */
+function _hiddenDealsKey() {
+  return 'fdh_hidden_deals_' + (APP_KEYS.user?.api_key || 'anon');
+}
+function _loadHiddenDeals() {
+  try {
+    const raw = localStorage.getItem(_hiddenDealsKey());
+    if (!raw) return {};
+    const obj = JSON.parse(raw);
+    if (!obj || typeof obj !== 'object') return {};
+    // Abgelaufene rauswerfen
+    const now = Date.now();
+    let cleaned = false;
+    Object.keys(obj).forEach(function (k) {
+      if (typeof obj[k] !== 'number' || obj[k] < now) { delete obj[k]; cleaned = true; }
+    });
+    if (cleaned) localStorage.setItem(_hiddenDealsKey(), JSON.stringify(obj));
+    return obj;
+  } catch (_) { return {}; }
+}
+function isDealHidden(accountId, dealId) {
+  const obj = _loadHiddenDeals();
+  const v = obj[accountId + '|' + dealId];
+  return typeof v === 'number' && v > Date.now();
+}
+function hideDeal(accountId, dealId, days) {
+  days = days || 30;
+  const obj = _loadHiddenDeals();
+  obj[accountId + '|' + dealId] = Date.now() + days * 86400e3;
+  try { localStorage.setItem(_hiddenDealsKey(), JSON.stringify(obj)); } catch (_) {}
+}
+function unhideDeal(accountId, dealId) {
+  const obj = _loadHiddenDeals();
+  delete obj[accountId + '|' + dealId];
+  try { localStorage.setItem(_hiddenDealsKey(), JSON.stringify(obj)); } catch (_) {}
+}
+function countHiddenDeals() {
+  const obj = _loadHiddenDeals();
+  return Object.keys(obj).length;
+}
 
 /* v2.46.53: Referenz-Datum pro Deal für Zeitraum-Filter.
    Für Won/Lost: tatsächliches Close-Datum bevorzugt; sonst expected_close;
@@ -18275,7 +18318,18 @@ function _renderDealsHeader() {
         chip('won',  'Gewonnen',  cntWon,  DEALS_STATE.filter === 'won',  'bg-emerald-600 text-white border-emerald-600') +
         chip('lost', 'Verloren',  cntLost, DEALS_STATE.filter === 'lost', 'bg-ink-700 text-white border-ink-700') +
         chip('all',  'Alle',      cntAll,  DEALS_STATE.filter === 'all') +
-        '<button onclick="reloadDealsManual()" class="shrink-0 ml-auto inline-flex items-center gap-1 px-2.5 py-1.5 rounded-full text-[11px] font-semibold bg-white text-ink-700 border border-ink-200 shadow-sm" title="Neu laden">' +
+        // v2.46.54: Toggle „Ausgeblendete anzeigen"
+        (function () {
+          const hiddenCount = countHiddenDeals();
+          if (!hiddenCount && !DEALS_STATE.showHidden) return '';
+          const active = DEALS_STATE.showHidden;
+          return '<button onclick="DEALS_STATE.showHidden=' + (!active) + '; _renderDealsHeader(); _renderDealsList()" class="shrink-0 ml-auto inline-flex items-center gap-1 px-2.5 py-1.5 rounded-full text-[11px] font-semibold border ' +
+            (active ? 'bg-amber-500 text-white border-amber-500' : 'bg-white text-ink-700 border-ink-200') + ' shadow-sm" title="Ausgeblendete Deals anzeigen">' +
+            '<i data-lucide="' + (active ? 'eye' : 'eye-off') + '" class="w-3 h-3"></i> ' +
+            (active ? 'Versteckt aktiv' : 'Versteckt (' + hiddenCount + ')') +
+          '</button>';
+        })() +
+        '<button onclick="reloadDealsManual()" class="shrink-0' + (countHiddenDeals() || DEALS_STATE.showHidden ? '' : ' ml-auto') + ' inline-flex items-center gap-1 px-2.5 py-1.5 rounded-full text-[11px] font-semibold bg-white text-ink-700 border border-ink-200 shadow-sm" title="Neu laden">' +
           '<i data-lucide="refresh-cw" class="w-3 h-3"></i>' +
         '</button>' +
       '</div>' +
@@ -18328,6 +18382,10 @@ function _renderDealsList() {
       const ref = _dealReferenceDate(d);
       if (!ref || ref < range[0] || ref >= range[1]) return false;
     }
+    // v2.46.54: ausgeblendete Deals standardmäßig raus, außer Toggle aktiv
+    const hidden = isDealHidden(d._accountId, d.id);
+    if (hidden && !DEALS_STATE.showHidden) return false;
+    if (!hidden && DEALS_STATE.showHidden) return false; // im „Ausgeblendete"-Modus nur Hidden zeigen
     return true;
   });
   // v2.46.53: Sortierung
@@ -18383,14 +18441,19 @@ function _renderDealCard(deal) {
   const contactName = contact ? (contact.display_name || (contact.first_name || '') + ' ' + (contact.last_name || '')).trim() : '';
   const phone = _contactBestPhone(contact);
   const owner = deal._owner?.display_name || deal._owner?.name || '';
+  // v2.46.54: kleiner Hide-Button (oder Unhide wenn ausgeblendet-Modus)
+  const hideBtn = DEALS_STATE.showHidden
+    ? '<button onclick="event.stopPropagation(); quickUnhideDeal(\'' + escapeAttr(accId) + '\', ' + id + ')" class="shrink-0 w-6 h-6 rounded-full hover:bg-emerald-100 flex items-center justify-center text-emerald-600" title="Wieder einblenden"><i data-lucide="eye" class="w-3.5 h-3.5"></i></button>'
+    : '<button onclick="event.stopPropagation(); quickHideDeal(\'' + escapeAttr(accId) + '\', ' + id + ')" class="shrink-0 w-6 h-6 rounded-full hover:bg-amber-50 flex items-center justify-center text-ink-400 hover:text-amber-600" title="30 Tage ausblenden"><i data-lucide="eye-off" class="w-3.5 h-3.5"></i></button>';
   return '<div onclick="openDealDetail(\'' + escapeAttr(accId) + '\', ' + id + ')" class="bg-white rounded-2xl border border-ink-200 p-3 cursor-pointer hover:border-brand-300 active:scale-[0.99] transition">' +
-    // Header: Firma + Stage + Account-Color
+    // Header: Firma + Stage + Account-Color + Hide-Button
     '<div class="flex items-start justify-between gap-2 mb-2">' +
       '<div class="flex items-center gap-2 min-w-0 flex-1">' +
         '<span class="w-2 h-2 rounded-full shrink-0" style="background:' + escapeAttr(deal._accountColor) + '" title="' + escapeAttr(deal._accountName) + '"></span>' +
         '<span class="font-bold text-ink-900 text-sm truncate">' + escapeHtml(firma) + '</span>' +
       '</div>' +
       stageBadge +
+      hideBtn +
     '</div>' +
     // Angebotsnummer + Preis-Zeile
     '<div class="flex items-baseline justify-between gap-2 mb-1.5">' +
@@ -18506,6 +18569,20 @@ function _renderDealDetail(d, accountId, dealId) {
   const owner = d._owner?.display_name || d._owner?.name || '';
   const closeDate = d.expected_close ? new Date(d.expected_close).toLocaleDateString('de-DE') : '';
   const probability = d.probability != null ? (d.probability + ' %') : '';
+  // v2.46.54: Aktions-Leiste
+  const accIdAttr = escapeAttr(accountId);
+  const isHidden = isDealHidden(accountId, dealId);
+  const hideAction = isHidden
+    ? '<button onclick="quickUnhideDeal(\'' + accIdAttr + '\', ' + dealId + '); closeDealDetail()" class="flex flex-col items-center gap-1 p-2 rounded-xl bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 active:scale-95 transition"><i data-lucide="eye" class="w-5 h-5 text-emerald-700"></i><span class="text-[10px] font-bold text-emerald-700">Einblenden</span></button>'
+    : '<button onclick="quickHideDeal(\'' + accIdAttr + '\', ' + dealId + '); closeDealDetail()" class="flex flex-col items-center gap-1 p-2 rounded-xl bg-amber-50 hover:bg-amber-100 border border-amber-200 active:scale-95 transition"><i data-lucide="eye-off" class="w-5 h-5 text-amber-700"></i><span class="text-[10px] font-bold text-amber-700">Ausblenden</span></button>';
+  const actionBar =
+    '<div class="grid grid-cols-5 gap-1.5">' +
+      '<button onclick="openDealNoteAiModal(\'' + accIdAttr + '\', ' + dealId + ')" class="flex flex-col items-center gap-1 p-2 rounded-xl bg-purple-50 hover:bg-purple-100 border border-purple-200 active:scale-95 transition"><i data-lucide="sparkles" class="w-5 h-5 text-purple-700"></i><span class="text-[10px] font-bold text-purple-700">KI-Notiz</span></button>' +
+      '<button onclick="openDealToTicketModal(\'' + accIdAttr + '\', ' + dealId + ')" class="flex flex-col items-center gap-1 p-2 rounded-xl bg-brand-50 hover:bg-brand-100 border border-brand-200 active:scale-95 transition"><i data-lucide="send" class="w-5 h-5 text-brand-700"></i><span class="text-[10px] font-bold text-brand-700">Ticket</span></button>' +
+      '<button onclick="markDealOutcome(\'' + accIdAttr + '\', ' + dealId + ', \'won\')" class="flex flex-col items-center gap-1 p-2 rounded-xl bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 active:scale-95 transition"><i data-lucide="trophy" class="w-5 h-5 text-emerald-700"></i><span class="text-[10px] font-bold text-emerald-700">Gewonnen</span></button>' +
+      '<button onclick="markDealOutcome(\'' + accIdAttr + '\', ' + dealId + ', \'lost\')" class="flex flex-col items-center gap-1 p-2 rounded-xl bg-ink-100 hover:bg-ink-200 border border-ink-300 active:scale-95 transition"><i data-lucide="x-circle" class="w-5 h-5 text-ink-700"></i><span class="text-[10px] font-bold text-ink-700">Verloren</span></button>' +
+      hideAction +
+    '</div>';
   body.innerHTML =
     '<div class="space-y-3 max-w-2xl mx-auto">' +
       // Hero-Box: Firma + Stage
@@ -18520,6 +18597,7 @@ function _renderDealDetail(d, accountId, dealId) {
         '<p class="text-[10px] text-ink-500 uppercase tracking-wider font-semibold mt-2">Leistungsumfang</p>' +
         '<p class="text-[14px] text-ink-900 leading-snug mt-0.5">' + escapeHtml(leistung) + '</p>' +
       '</div>' +
+      actionBar +
       // Kennzahlen-Grid
       '<div class="grid grid-cols-2 gap-2">' +
         '<div class="bg-white border border-ink-200 rounded-xl p-3">' +
@@ -18583,6 +18661,339 @@ function _renderDealDetail(d, accountId, dealId) {
 
 function closeDealDetail() {
   const host = document.getElementById('modalHost');
+  if (host) host.innerHTML = '';
+  document.body.style.overflow = '';
+}
+
+/* ===================== v2.46.54: DEAL ACTIONS ===================== */
+
+// ---- 1) AUSBLENDEN ----
+function quickHideDeal(accountId, dealId) {
+  hideDeal(accountId, dealId, 30);
+  toast('Deal #' + dealId + ' für 30 Tage ausgeblendet', 'success', 2500);
+  _renderDealsHeader();
+  _renderDealsList();
+}
+function quickUnhideDeal(accountId, dealId) {
+  unhideDeal(accountId, dealId);
+  toast('Deal #' + dealId + ' wieder sichtbar', 'success', 2500);
+  _renderDealsHeader();
+  _renderDealsList();
+}
+
+// ---- 4) WON / LOST MANUELL ----
+async function markDealOutcome(accountId, dealId, outcome) {
+  // outcome: 'won' | 'lost'
+  const stagesCache = FS_STAGES_CACHE[accountId] || await ensureFsStagesLoaded(accountId);
+  const ids = stagesCache?.byGroup?.[outcome] || [];
+  if (!ids.length) {
+    toast('Keine ' + (outcome === 'won' ? 'Won' : 'Lost') + '-Stage in Freshsales gefunden', 'error', 6000);
+    return;
+  }
+  const stageId = ids[0]; // erstes passendes Stage
+  if (!confirm('Deal als ' + (outcome === 'won' ? 'Gewonnen' : 'Verloren') + ' markieren?')) return;
+  try {
+    await proxyJson('/freshsales/' + encodeURIComponent(accountId) + '/api/deals/' + dealId, {
+      method: 'PUT',
+      body: JSON.stringify({ deal: { deal_stage_id: stageId } })
+    });
+    // Lokales Update damit UI sofort reagiert
+    const deal = (DEALS_STATE.all || []).find(function (d) { return d._accountId === accountId && d.id === dealId; });
+    if (deal) {
+      deal.deal_stage_id = stageId;
+      deal._stageGroup   = outcome;
+      deal._stageName    = stagesCache.byId?.[stageId]?.name || (outcome === 'won' ? 'Gewonnen' : 'Verloren');
+      if (outcome === 'won' || outcome === 'lost') deal.closed_date = new Date().toISOString();
+    }
+    toast('Deal #' + dealId + ' auf ' + (outcome === 'won' ? 'Gewonnen' : 'Verloren') + ' gesetzt', 'success', 3500);
+    closeDealDetail();
+    _renderDealsHeader();
+    _renderDealsList();
+  } catch (e) {
+    toast('Update fehlgeschlagen: ' + (e.message || e), 'error', 8000);
+  }
+}
+
+// ---- 2) KI-NOTIZ ZU DEAL ----
+let DEAL_NOTE_REC = null;
+async function openDealNoteAiModal(accountId, dealId) {
+  let host = document.getElementById('subModalHost');
+  if (!host) { host = document.createElement('div'); host.id = 'subModalHost'; document.body.appendChild(host); }
+  const deal = (DEALS_STATE.all || []).find(function (d) { return d._accountId === accountId && d.id === dealId; });
+  const firma = deal?._salesAccount?.name || '';
+  const dealName = deal?.name || ('#' + dealId);
+  const speechAvailable = !!(window.SpeechRecognition || window.webkitSpeechRecognition);
+  host.innerHTML =
+    '<div class="fixed inset-0 z-[60] flex items-end justify-center bg-black/50" onclick="if(event.target===this)closeDealNoteAiModal()">' +
+      '<div class="bg-white w-full max-w-md rounded-t-3xl shadow-2xl flex flex-col safe-bottom" style="max-height:92vh">' +
+        '<div class="px-4 py-3 border-b border-ink-200 flex items-center justify-between gap-2 shrink-0">' +
+          '<h3 class="font-bold text-ink-900 inline-flex items-center gap-2"><i data-lucide="sparkles" class="w-5 h-5 text-purple-600"></i> KI-Notiz zum Deal</h3>' +
+          '<button onclick="closeDealNoteAiModal()" class="w-9 h-9 rounded-lg hover:bg-ink-100 flex items-center justify-center"><i data-lucide="x" class="w-5 h-5 text-ink-700"></i></button>' +
+        '</div>' +
+        '<div id="dealNoteBody" class="flex-1 overflow-y-auto p-4 space-y-3">' +
+          '<div class="bg-ink-50 rounded-xl p-2.5 text-[11px]">' +
+            '<p class="text-ink-500 uppercase tracking-wider text-[9px] font-bold">Deal</p>' +
+            '<p class="font-semibold text-ink-900 mt-0.5">' + escapeHtml(firma) + '</p>' +
+            '<p class="text-ink-600 mt-0.5 line-clamp-2">' + escapeHtml(dealName) + '</p>' +
+          '</div>' +
+          '<input type="hidden" id="dealNoteAcc" value="' + escapeAttr(accountId) + '">' +
+          '<input type="hidden" id="dealNoteId" value="' + dealId + '">' +
+          '<label class="text-xs font-bold text-ink-700 uppercase tracking-wider block">Was soll in der Notiz stehen?</label>' +
+          (speechAvailable ? '<button onclick="toggleDealNoteVoice()" class="w-full py-4 rounded-2xl bg-gradient-to-br from-purple-500 to-brand-600 text-white font-semibold flex items-center justify-center gap-2 active:opacity-80 shadow-md">' +
+            '<div id="dealNoteMicIcon" class="w-9 h-9 rounded-full bg-white/20 flex items-center justify-center"><i data-lucide="mic" class="w-5 h-5"></i></div>' +
+            '<span id="dealNoteMicLabel">Tippe und sprich</span>' +
+          '</button>' : '<p class="text-[11px] text-ink-500 italic">Sprach-Eingabe nicht verfügbar — nutze das Textfeld.</p>') +
+          '<textarea id="dealNoteCmd" rows="4" placeholder="Stichworte: z.B. „Kunde will am Donnerstag entscheiden, Budget 12k, Konkurrenz Schindler" — KI formuliert daraus eine saubere CRM-Notiz."' +
+            ' class="w-full px-3 py-3 border border-purple-200 bg-purple-50/30 rounded-xl text-sm focus:ring-2 focus:ring-purple-500/30 resize-y"></textarea>' +
+          '<label class="flex items-center gap-2 text-[11px] text-ink-700 cursor-pointer">' +
+            '<input id="dealNoteRaw" type="checkbox" class="w-4 h-4 accent-purple-600">' +
+            'Direkt speichern (ohne KI-Formulierung)' +
+          '</label>' +
+        '</div>' +
+        '<div class="border-t border-ink-200 p-3 flex gap-2 shrink-0">' +
+          '<button onclick="closeDealNoteAiModal()" class="flex-1 bg-ink-100 hover:bg-ink-200 text-ink-700 rounded-xl px-3 py-3 text-sm font-bold">Abbrechen</button>' +
+          '<button onclick="processDealNote(this)" class="flex-[2] bg-gradient-to-br from-purple-500 to-brand-600 hover:opacity-90 text-white rounded-xl px-3 py-3 text-sm font-bold inline-flex items-center justify-center gap-1.5 shadow-md">' +
+            '<i data-lucide="save" class="w-4 h-4"></i> Speichern' +
+          '</button>' +
+        '</div>' +
+      '</div>' +
+    '</div>';
+  if (window.lucide) lucide.createIcons();
+  document.body.style.overflow = 'hidden';
+  setTimeout(function () { $('dealNoteCmd')?.focus(); }, 80);
+}
+function toggleDealNoteVoice() {
+  if (DEAL_NOTE_REC) { try { DEAL_NOTE_REC.stop(); } catch (_) {} DEAL_NOTE_REC = null; _updateDealNoteMicUI(false); return; }
+  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if (!SR) return toast('Sprach-Eingabe nicht verfügbar', 'warn', 4000);
+  ensureMicPermission().then(function () {
+    const rec = new SR();
+    rec.lang = 'de-DE'; rec.continuous = true; rec.interimResults = true;
+    const ta = $('dealNoteCmd');
+    let baseText = (ta?.value || '');
+    if (baseText && !/\s$/.test(baseText)) baseText += ' ';
+    rec.onresult = function (event) {
+      let final = '', interim = '';
+      for (let i = event.resultIndex; i < event.results.length; i++) {
+        const tr = event.results[i][0].transcript;
+        if (event.results[i].isFinal) final += tr; else interim += tr;
+      }
+      if (ta) ta.value = baseText + final + interim;
+      if (final) baseText += final;
+    };
+    rec.onerror = function () { DEAL_NOTE_REC = null; _updateDealNoteMicUI(false); };
+    rec.onend = function () { if (DEAL_NOTE_REC === rec) { DEAL_NOTE_REC = null; _updateDealNoteMicUI(false); } };
+    rec.start();
+    DEAL_NOTE_REC = rec;
+    _updateDealNoteMicUI(true);
+  }).catch(function (e) { toast(e.message, 'error', 8000); });
+}
+function _updateDealNoteMicUI(isOn) {
+  const icon = $('dealNoteMicIcon');
+  const label = $('dealNoteMicLabel');
+  if (icon) icon.innerHTML = isOn ? '<span class="spinner" style="width:18px;height:18px;border-color:white;border-right-color:transparent"></span>' : '<i data-lucide="mic" class="w-5 h-5"></i>';
+  if (label) label.textContent = isOn ? 'Höre zu — nochmal tippen zum Stoppen' : 'Tippe und sprich';
+  if (window.lucide) lucide.createIcons();
+}
+async function processDealNote(btn) {
+  if (DEAL_NOTE_REC) { try { DEAL_NOTE_REC.stop(); } catch (_) {} DEAL_NOTE_REC = null; }
+  const raw = ($('dealNoteCmd')?.value || '').trim();
+  if (!raw) return toast('Bitte etwas eintippen oder sprechen', 'warn');
+  const accountId = $('dealNoteAcc')?.value;
+  const dealId    = parseInt($('dealNoteId')?.value, 10);
+  const useRaw    = !!$('dealNoteRaw')?.checked;
+  setBusy(btn, true, useRaw ? 'Speichere…' : 'KI formuliert…');
+  try {
+    let body = raw;
+    if (!useRaw) {
+      const deal = (DEALS_STATE.all || []).find(function (d) { return d._accountId === accountId && d.id === dealId; });
+      const ctx = deal ? ('Deal: ' + (deal.name || '') + '\nFirma: ' + (deal._salesAccount?.name || '') + '\nStage: ' + (deal._stageName || '') + '\n') : '';
+      const data = await proxyJson('/anthropic/v1/messages', {
+        method: 'POST',
+        body: JSON.stringify({
+          model: 'claude-haiku-4-5-20251001',
+          max_tokens: 600,
+          system: 'Du formulierst aus Stichworten eine prägnante CRM-Deal-Notiz auf Deutsch. Maximal 4-6 Sätze, faktisch, ohne Floskeln. Wenn Termine/Beträge/Personen genannt sind, hebe sie hervor. Antworte NUR mit dem Notiz-Text, ohne Markdown-Codeblock.',
+          messages: [{ role: 'user', content: ctx + 'Stichworte:\n' + raw }]
+        })
+      });
+      body = (data?.content?.[0]?.text || '').trim() || raw;
+    }
+    await proxyJson('/freshsales/' + encodeURIComponent(accountId) + '/api/deals/' + dealId + '/notes', {
+      method: 'POST',
+      body: JSON.stringify({ note: { description: body, targetable_type: 'Deal', targetable_id: dealId } })
+    });
+    closeDealNoteAiModal();
+    toast('Notiz in Freshsales gespeichert', 'success', 4000);
+  } catch (e) {
+    setBusy(btn, false);
+    toast('Notiz-Speichern fehlgeschlagen: ' + (e.message || e), 'error', 8000);
+  }
+}
+function closeDealNoteAiModal() {
+  if (DEAL_NOTE_REC) { try { DEAL_NOTE_REC.stop(); } catch (_) {} DEAL_NOTE_REC = null; }
+  const host = document.getElementById('subModalHost');
+  if (host) host.innerHTML = '';
+  document.body.style.overflow = '';
+}
+
+// ---- 3) TICKET FÜR MITARBEITER GENERIEREN ----
+async function openDealToTicketModal(accountId, dealId) {
+  let host = document.getElementById('subModalHost');
+  if (!host) { host = document.createElement('div'); host.id = 'subModalHost'; document.body.appendChild(host); }
+  const deal = (DEALS_STATE.all || []).find(function (d) { return d._accountId === accountId && d.id === dealId; });
+  const firma = deal?._salesAccount?.name || '';
+  const dealName = deal?.name || ('#' + dealId);
+  const angebotNr = deal ? _extractDealQuoteNumber(deal) : null;
+  const preis = deal ? _formatDealAmount(deal) : '';
+  const contact = deal?._primaryContact;
+  const contactName = contact ? (contact.display_name || ((contact.first_name || '') + ' ' + (contact.last_name || '')).trim()) : '';
+  const phone = _contactBestPhone(contact);
+  // Default-Beschreibung mit Deal-Kontext
+  const preFill = 'Bezug: Deal „' + dealName + '"\n' +
+    (firma ? 'Firma: ' + firma + '\n' : '') +
+    (angebotNr ? 'Angebotsnr: ' + angebotNr + '\n' : '') +
+    (preis && preis !== '–' ? 'Preis: ' + preis + '\n' : '') +
+    (contactName ? 'Kontakt: ' + contactName + (phone ? ' (' + phone + ')' : '') + '\n' : '') +
+    '\n— Bitte erledigen:\n';
+  // FD-Account-Picker (alle Accounts) — Default: der Account des Deals (gleiche ID)
+  const fdAccounts = APP_STATE.accounts || [];
+  const accOpts = fdAccounts.map(function (a) {
+    return '<option value="' + escapeAttr(a.id) + '"' + (a.id === accountId ? ' selected' : '') + '>' + escapeHtml(a.name) + '</option>';
+  }).join('');
+  host.innerHTML =
+    '<div class="fixed inset-0 z-[60] flex items-end justify-center bg-black/50" onclick="if(event.target===this)closeDealToTicketModal()">' +
+      '<div class="bg-white w-full max-w-md rounded-t-3xl shadow-2xl flex flex-col safe-bottom" style="max-height:92vh">' +
+        '<div class="px-4 py-3 border-b border-ink-200 flex items-center justify-between gap-2 shrink-0">' +
+          '<h3 class="font-bold text-ink-900 inline-flex items-center gap-2"><i data-lucide="send" class="w-5 h-5 text-brand-600"></i> Ticket an Mitarbeiter</h3>' +
+          '<button onclick="closeDealToTicketModal()" class="w-9 h-9 rounded-lg hover:bg-ink-100 flex items-center justify-center"><i data-lucide="x" class="w-5 h-5 text-ink-700"></i></button>' +
+        '</div>' +
+        '<div class="flex-1 overflow-y-auto p-4 space-y-3">' +
+          '<input type="hidden" id="d2tDealAcc" value="' + escapeAttr(accountId) + '">' +
+          '<input type="hidden" id="d2tDealId" value="' + dealId + '">' +
+          '<label class="text-xs font-bold text-ink-700 uppercase tracking-wider block">FD-Account</label>' +
+          '<select id="d2tAccount" onchange="_d2tLoadAgents()" class="w-full px-3 py-2.5 border border-ink-300 rounded-xl text-sm bg-white">' + accOpts + '</select>' +
+          '<label class="text-xs font-bold text-ink-700 uppercase tracking-wider block">Mitarbeiter</label>' +
+          '<select id="d2tAgent" class="w-full px-3 py-2.5 border border-ink-300 rounded-xl text-sm bg-white">' +
+            '<option value="">— Lade Mitarbeiter…</option>' +
+          '</select>' +
+          '<label class="text-xs font-bold text-ink-700 uppercase tracking-wider block">Betreff</label>' +
+          '<input id="d2tSubject" type="text" value="' + escapeAttr((angebotNr ? '[' + angebotNr + '] ' : '') + dealName) + '" class="w-full px-3 py-2.5 border border-ink-300 rounded-xl text-sm">' +
+          '<label class="text-xs font-bold text-ink-700 uppercase tracking-wider block">Notiz / Auftrag</label>' +
+          '<textarea id="d2tDesc" rows="8" class="w-full px-3 py-2.5 border border-ink-300 rounded-xl text-sm resize-y">' + escapeHtml(preFill) + '</textarea>' +
+          '<div class="grid grid-cols-2 gap-2">' +
+            '<div>' +
+              '<label class="text-xs font-bold text-ink-700 uppercase tracking-wider block">Priorität</label>' +
+              '<select id="d2tPriority" class="w-full px-3 py-2.5 border border-ink-300 rounded-xl text-sm bg-white">' +
+                '<option value="1">Niedrig</option>' +
+                '<option value="2" selected>Normal</option>' +
+                '<option value="3">Hoch</option>' +
+                '<option value="4">Dringend</option>' +
+              '</select>' +
+            '</div>' +
+            '<div class="flex items-end">' +
+              '<label class="flex items-center gap-2 text-[11px] text-ink-700 cursor-pointer h-10">' +
+                '<input id="d2tNoteToFs" type="checkbox" checked class="w-4 h-4 accent-brand-600">' +
+                'Auch als Notiz am Deal speichern' +
+              '</label>' +
+            '</div>' +
+          '</div>' +
+          '<div id="d2tErr" class="hidden bg-red-50 border border-red-200 rounded-xl p-3 text-sm text-red-800"></div>' +
+        '</div>' +
+        '<div class="border-t border-ink-200 p-3 flex gap-2 shrink-0">' +
+          '<button onclick="closeDealToTicketModal()" class="flex-1 bg-ink-100 hover:bg-ink-200 text-ink-700 rounded-xl px-3 py-3 text-sm font-bold">Abbrechen</button>' +
+          '<button onclick="createDealToTicket(this)" class="flex-[2] bg-brand-600 hover:bg-brand-700 text-white rounded-xl px-3 py-3 text-sm font-bold inline-flex items-center justify-center gap-1.5 shadow-md">' +
+            '<i data-lucide="send" class="w-4 h-4"></i> Ticket anlegen' +
+          '</button>' +
+        '</div>' +
+      '</div>' +
+    '</div>';
+  if (window.lucide) lucide.createIcons();
+  document.body.style.overflow = 'hidden';
+  _d2tLoadAgents();
+}
+async function _d2tLoadAgents() {
+  const accSel = $('d2tAccount');
+  const agtSel = $('d2tAgent');
+  if (!accSel || !agtSel) return;
+  const accId = accSel.value;
+  agtSel.innerHTML = '<option value="">— Lade Mitarbeiter…</option>';
+  try {
+    await ensureAgentsLoaded(accId);
+    const agents = (APP_STATE.agentsCache?.[accId]?.agents || []).slice().sort(function (a, b) {
+      return String(a.name).localeCompare(String(b.name), 'de');
+    });
+    if (!agents.length) {
+      agtSel.innerHTML = '<option value="">— Keine Agenten gefunden —</option>';
+      return;
+    }
+    const myAgentId = APP_STATE.currentUserAgentId || null;
+    agtSel.innerHTML = '<option value="">— Bitte wählen —</option>' +
+      agents.map(function (a) {
+        return '<option value="' + a.id + '"' + (a.id === myAgentId ? ' selected' : '') + '>' + escapeHtml(a.name) + '</option>';
+      }).join('');
+  } catch (e) {
+    agtSel.innerHTML = '<option value="">— Fehler beim Laden —</option>';
+  }
+}
+async function createDealToTicket(btn) {
+  const errEl = $('d2tErr');
+  const setErr = function (msg) { if (errEl) { errEl.textContent = msg; errEl.classList.remove('hidden'); } };
+  if (errEl) errEl.classList.add('hidden');
+  const fdAcc       = $('d2tAccount')?.value;
+  const agentIdStr  = $('d2tAgent')?.value;
+  const subject     = ($('d2tSubject')?.value || '').trim();
+  const desc        = ($('d2tDesc')?.value || '').trim();
+  const prio        = parseInt($('d2tPriority')?.value || '2', 10);
+  const alsoToFs    = !!$('d2tNoteToFs')?.checked;
+  const dealAcc     = $('d2tDealAcc')?.value;
+  const dealId      = parseInt($('d2tDealId')?.value, 10);
+  if (!fdAcc)      return setErr('FD-Account fehlt');
+  if (!agentIdStr) return setErr('Bitte einen Mitarbeiter wählen');
+  if (!subject)    return setErr('Betreff fehlt');
+  const agentId = parseInt(agentIdStr, 10);
+  // Email des eingeloggten Users als Requester (Self-Mode wie bei „Neues Ticket KI")
+  const myEmail = APP_KEYS.user?.email;
+  if (!myEmail) return setErr('Eigene Email nicht hinterlegt — kann Requester nicht setzen');
+  setBusy(btn, true, 'Lege Ticket an…');
+  try {
+    const fdContact = await findOrCreateFdContactByEmail(fdAcc, {
+      name: APP_KEYS.user.name || myEmail.split('@')[0], email: myEmail, phone: APP_KEYS.user.phone || '',
+    });
+    if (!fdContact?.id) throw new Error('FD-Kontakt konnte nicht erstellt werden');
+    const payload = {
+      subject: subject,
+      description: desc ? desc.replace(/\n/g, '<br>') : subject,
+      requester_id: fdContact.id,
+      responder_id: agentId,
+      status: 2,
+      priority: prio,
+      source: 2,
+    };
+    const created = await proxyJson('/freshdesk/' + encodeURIComponent(fdAcc) + '/api/v2/tickets', {
+      method: 'POST',
+      body: JSON.stringify(payload)
+    });
+    if (!created?.id) throw new Error('Ticket-Anlage fehlgeschlagen');
+    // Optional: Notiz am Deal
+    if (alsoToFs && dealAcc && dealId) {
+      const agentName = (APP_STATE.agentsCache?.[fdAcc]?.byId?.[agentId]?.name) || ('Agent #' + agentId);
+      const noteBody = '🎫 Ticket #' + created.id + ' an ' + agentName + ' delegiert.\n\nBetreff: ' + subject + '\n\n' + desc;
+      proxyJson('/freshsales/' + encodeURIComponent(dealAcc) + '/api/deals/' + dealId + '/notes', {
+        method: 'POST',
+        body: JSON.stringify({ note: { description: noteBody, targetable_type: 'Deal', targetable_id: dealId } })
+      }).catch(function (e) { console.warn('FS-Note-Save für Delegation fehlgeschlagen:', e.message); });
+    }
+    closeDealToTicketModal();
+    toast('Ticket #' + created.id + ' angelegt', 'success', 4000);
+    setTimeout(function () { try { openTicketDetail(fdAcc, created.id); } catch (_) {} }, 200);
+  } catch (e) {
+    setBusy(btn, false);
+    setErr(e.message || String(e));
+  }
+}
+function closeDealToTicketModal() {
+  const host = document.getElementById('subModalHost');
   if (host) host.innerHTML = '';
   document.body.style.overflow = '';
 }
