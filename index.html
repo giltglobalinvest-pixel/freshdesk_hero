@@ -717,7 +717,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.59';
+const APP_VERSION = 'v2.46.60';
 
 /* ============================================================
    GLOBAL THEME — v2.46.12
@@ -9553,10 +9553,11 @@ function _renderTicketStackCard(t, isTop) {
             '<i data-lucide="check-circle-2" class="w-5 h-5"></i> <span class="text-[15px]">Schließen</span>' +
           '</button>') +
     '</div>' +
-    // v2.46.46: WhatsApp als 4. Schnellaktion. 4-Spalten-Grid statt 3.
-    '<div class="grid grid-cols-4 gap-1.5 mt-2">' +
+    // v2.46.60: 5 Schnellaktionen — Email-Vorlage ist dazugekommen
+    '<div class="grid grid-cols-5 gap-1.5 mt-2">' +
       '<button onclick="event.stopPropagation(); openRuleFromTicket(' + ticketRefArgs + ')" class="inline-flex flex-col items-center justify-center gap-0.5 px-1 py-2.5 bg-purple-50 hover:bg-purple-100 border border-purple-200 text-purple-700 rounded-xl text-[11px] font-semibold" title="Regel aus Ticket lernen"><i data-lucide="wand-2" class="w-4 h-4"></i>Regel</button>' +
       '<button onclick="event.stopPropagation(); openWiedervorlagePicker(' + ticketRefArgs + ', true)" class="inline-flex flex-col items-center justify-center gap-0.5 px-1 py-2.5 bg-ink-50 hover:bg-ink-100 border border-ink-200 text-ink-700 rounded-xl text-[11px] font-semibold" title="Wiedervorlage"><i data-lucide="clock" class="w-4 h-4"></i>WV</button>' +
+      '<button onclick="event.stopPropagation(); openTicketEmailModal(' + ticketRefArgs + ')" class="inline-flex flex-col items-center justify-center gap-0.5 px-1 py-2.5 bg-orange-50 hover:bg-orange-100 border border-orange-200 text-orange-700 rounded-xl text-[11px] font-semibold" title="Email-Vorlage senden"><i data-lucide="mail" class="w-4 h-4"></i>Email</button>' +
       '<button onclick="event.stopPropagation(); openWhatsAppTicketShare(' + ticketRefArgs + ')" class="inline-flex flex-col items-center justify-center gap-0.5 px-1 py-2.5 bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 text-emerald-700 rounded-xl text-[11px] font-semibold" title="Per WhatsApp an Kollegen schicken"><i data-lucide="message-circle" class="w-4 h-4"></i>WhatsApp</button>' +
       '<button onclick="event.stopPropagation(); openTicketDetail(' + ticketRefArgs + ')" class="inline-flex flex-col items-center justify-center gap-0.5 px-1 py-2.5 bg-ink-50 hover:bg-ink-100 border border-ink-200 text-ink-700 rounded-xl text-[11px] font-semibold" title="Detail-Ansicht"><i data-lucide="external-link" class="w-4 h-4"></i>Detail</button>' +
     '</div>';
@@ -9888,6 +9889,7 @@ function openCardActionsSheet(accountId, ticketId) {
           ${row('check-circle-2',   'emerald', 'Schließen (Status: Geschlossen)',`closeCardActionsSheet(); ticketActionClose('${escapeAttr(accountId)}', ${ticketId}, null)`, 'Ticket im Freshdesk schließen')}
           ${row('ban',              'red',     'Als SPAM markieren',             `closeCardActionsSheet(); ticketActionSpam('${escapeAttr(accountId)}', ${ticketId}, null)`, 'In den Papierkorb verschieben')}
           ${row('clock',            'indigo',  'Auf Wiedervorlage…',             `closeCardActionsSheet(); openWiedervorlagePicker('${escapeAttr(accountId)}', ${ticketId}, true)`, 'Aus meiner Sicht ausblenden bis…')}
+          ${row('mail',             'orange',  'Email-Vorlage senden',           `closeCardActionsSheet(); openTicketEmailModal('${escapeAttr(accountId)}', ${ticketId})`, 'Canned Response als Outbound-Email')}
           ${row('message-circle',   'emerald', 'Per WhatsApp an Kollegen',       `closeCardActionsSheet(); openWhatsAppTicketShare('${escapeAttr(accountId)}', ${ticketId})`, 'Mit Deep-Link + optionaler KI-Begleittext')}
           ${row('wand-2',           'purple',  'KI-Regel aus Ticket erstellen',  `closeCardActionsSheet(); openRuleFromTicket('${escapeAttr(accountId)}', ${ticketId})`, 'Muster lernen für zukünftige Tickets')}
           ${row('refresh-cw',       'purple',  'Aktive Regeln jetzt prüfen',     `closeCardActionsSheet(); forceApplyRulesToTicket('${escapeAttr(accountId)}', ${ticketId}, null)`, 'Diagnose: matched eine Regel auf dieses Ticket?')}
@@ -10744,6 +10746,7 @@ function _ticketActionBarIcons(accountId, ticketId) {
     btn('lightbulb',      'amber',   'Vorschlag aus Team-Historie',                            `openKnowledgeSuggestionModal('${accIdAttr}', ${ticketId})`),
     `<span class="shrink-0 w-px h-5 bg-ink-200 mx-0.5"></span>`,
     btn('clock',          'indigo',  'Auf Wiedervorlage / aus meiner Sicht ausblenden',        `openWiedervorlagePicker('${accIdAttr}', ${ticketId})`),
+    btn('mail',           'orange',  'Email-Vorlage senden (Outbound)',                        `openTicketEmailModal('${accIdAttr}', ${ticketId})`),
     btn('message-circle', 'emerald', 'Per WhatsApp an Kollegen schicken',                     `openWhatsAppTicketShare('${accIdAttr}', ${ticketId})`),
     btn('check-square',   'brand',   'Mehrfach-Auswahl starten',                               `closeModal(); msEnter('${accIdAttr}', ${ticketId})`),
     `<span class="shrink-0 w-px h-5 bg-ink-200 mx-0.5"></span>`,
@@ -19600,6 +19603,247 @@ async function processSendDealEmail(btn) {
 
 function closeDealEmailModal() {
   delete window._DEAL_EMAIL_CTX;
+  const host = document.getElementById('subModalHost');
+  if (host) host.innerHTML = '';
+  document.body.style.overflow = '';
+}
+
+/* ===================== v2.46.60: EMAIL-VORLAGE AUS TICKET/AUFGABE VERSENDEN ============
+   Outbound-Email auf Basis einer FD-Canned-Response, aus dem Ticket-Kontext.
+   Verwendet die selben Caches wie der Deal-Versand.
+   - Funktioniert sowohl im normalen Ticket-Detail als auch bei Aufgaben
+     (Aufgaben SIND FD-Tickets, daher reicht eine einzige Funktion).
+   - Erzeugt NEUES Ticket (outbound_email) und vermerkt das als PRIVATE Note
+     im Quell-Ticket. */
+
+async function openTicketEmailModal(accountId, ticketId) {
+  let host = document.getElementById('subModalHost');
+  if (!host) { host = document.createElement('div'); host.id = 'subModalHost'; document.body.appendChild(host); }
+  host.innerHTML =
+    '<div class="fixed inset-0 z-[60] flex items-end justify-center bg-black/50">' +
+      '<div class="bg-white w-full max-w-md rounded-t-3xl shadow-2xl p-8 text-center safe-bottom">' +
+        '<div class="spinner inline-block w-7 h-7 border-[3px] text-orange-500"></div>' +
+        '<p class="text-sm text-ink-500 mt-2">Lade Vorlagen + Ticket-Daten…</p>' +
+      '</div>' +
+    '</div>';
+  document.body.style.overflow = 'hidden';
+  try {
+    // Ticket holen (Cache wenn da, sonst fetchen)
+    let ticket = APP_STATE.ticketCache?.get?.(accountId + '|' + ticketId);
+    if (!ticket || !ticket.requester) {
+      try { ticket = await fetchTicketDetail(accountId, ticketId); } catch (_) {}
+    }
+    if (!ticket) throw new Error('Ticket konnte nicht geladen werden');
+    // Caches parallel laden (re-use vom Deal-Modal)
+    const [cannedData, configs] = await Promise.all([
+      ensureCannedResponsesLoaded(accountId),
+      ensureEmailConfigsLoaded(accountId),
+    ]);
+    const responses = cannedData?.responses || [];
+    if (!configs.length) {
+      host.innerHTML =
+        '<div class="fixed inset-0 z-[60] flex items-end justify-center bg-black/50">' +
+          '<div class="bg-white w-full max-w-md rounded-t-3xl shadow-2xl p-6 safe-bottom">' +
+            '<h3 class="font-bold mb-2 text-ink-900">Keine Absender-Adressen</h3>' +
+            '<p class="text-sm text-ink-600 mb-4">Es konnten keine Email-Configs aus Freshdesk geladen werden.</p>' +
+            '<button onclick="closeTicketEmailModal()" class="w-full bg-ink-100 hover:bg-ink-200 text-ink-700 rounded-xl py-3 text-sm font-bold">OK</button>' +
+          '</div>' +
+        '</div>';
+      return;
+    }
+    _renderTicketEmailModal(accountId, ticketId, ticket, responses, configs);
+  } catch (e) {
+    closeTicketEmailModal();
+    toast('Laden fehlgeschlagen: ' + (e.message || e), 'error', 8000);
+  }
+}
+
+function _buildTicketEmailCtx(ticket) {
+  const firstNm = function (full) { return String(full || '').trim().split(/\s+/)[0] || ''; };
+  const userName = APP_KEYS.user?.name || '';
+  const userEmail = APP_KEYS.user?.email || '';
+  const req = ticket?.requester || {};
+  const contactName = req.name || ticket?.email || '';
+  return {
+    contactName,
+    contactFirstName: req.first_name || firstNm(contactName),
+    contactEmail: req.email || ticket?.email || '',
+    userName,
+    userFirstName: firstNm(userName),
+    userEmail,
+    companyName: req.company?.name || '',
+    dealName: '',
+    dealAmount: '',
+    angebotNr: '',
+    ticketId: ticket?.id || '',
+    ticketSubject: ticket?.subject || '',
+  };
+}
+
+function _renderTicketEmailModal(accountId, ticketId, ticket, responses, configs) {
+  const host = document.getElementById('subModalHost');
+  if (!host) return;
+  const ctx = _buildTicketEmailCtx(ticket);
+  const primaryCfg = configs.find(function (c) { return c.primary_role || c.default; }) || configs[0];
+  const tplOpts = '<option value="">— Vorlage wählen —</option>' +
+    responses.map(function (r) {
+      const folderSuffix = r._folderName ? ' · ' + r._folderName : '';
+      return '<option value="' + r.id + '">' + escapeHtml(r.title || ('#' + r.id)) + escapeHtml(folderSuffix) + '</option>';
+    }).join('');
+  const cfgOpts = configs.map(function (c) {
+    const label = (c.name || '') + ' <' + (c.reply_email || c.support_email || c.email || '') + '>';
+    return '<option value="' + c.id + '"' + (c.id === primaryCfg?.id ? ' selected' : '') + '>' + escapeHtml(label) + '</option>';
+  }).join('');
+  host.innerHTML =
+    '<div class="fixed inset-0 z-[60] flex items-end justify-center bg-black/50" onclick="if(event.target===this)closeTicketEmailModal()">' +
+      '<div class="bg-white w-full max-w-md rounded-t-3xl shadow-2xl flex flex-col safe-bottom" style="max-height:94vh">' +
+        '<div class="px-4 py-3 border-b border-ink-200 flex items-center justify-between gap-2 shrink-0">' +
+          '<h3 class="font-bold text-ink-900 inline-flex items-center gap-2"><i data-lucide="mail" class="w-5 h-5 text-orange-600"></i> Email-Vorlage senden</h3>' +
+          '<button onclick="closeTicketEmailModal()" class="w-9 h-9 rounded-lg hover:bg-ink-100 flex items-center justify-center"><i data-lucide="x" class="w-5 h-5 text-ink-700"></i></button>' +
+        '</div>' +
+        '<div class="flex-1 overflow-y-auto p-4 space-y-3">' +
+          '<input type="hidden" id="teAcc" value="' + escapeAttr(accountId) + '">' +
+          '<input type="hidden" id="teTicketId" value="' + ticketId + '">' +
+          '<div class="bg-ink-50 rounded-xl p-2.5 text-[11px]">' +
+            '<p class="text-ink-500 uppercase tracking-wider text-[9px] font-bold">Quell-Ticket</p>' +
+            '<p class="font-semibold text-ink-900 mt-0.5 line-clamp-2">#' + ticketId + ' — ' + escapeHtml(ctx.ticketSubject) + '</p>' +
+            (ctx.contactName ? '<p class="text-ink-600 mt-0.5">' + escapeHtml(ctx.contactName) + (ctx.contactEmail ? ' &lt;' + escapeHtml(ctx.contactEmail) + '&gt;' : '') + '</p>' : '') +
+          '</div>' +
+          '<label class="text-xs font-bold text-ink-700 uppercase tracking-wider block">Vorlage</label>' +
+          '<select id="teTemplate" onchange="_teApplyTemplate()" class="w-full px-3 py-2.5 border border-ink-300 rounded-xl text-sm bg-white">' +
+            tplOpts +
+          '</select>' +
+          (!responses.length ? '<p class="text-[11px] text-amber-700 bg-amber-50 border border-amber-200 rounded-lg p-2">Keine Canned-Responses gefunden. Lege welche in Freshdesk an (Admin → Productivity → Canned Responses).</p>' : '') +
+          '<label class="text-xs font-bold text-ink-700 uppercase tracking-wider block">Von</label>' +
+          '<select id="teFrom" class="w-full px-3 py-2.5 border border-ink-300 rounded-xl text-sm bg-white">' + cfgOpts + '</select>' +
+          '<label class="text-xs font-bold text-ink-700 uppercase tracking-wider block">An *</label>' +
+          '<input id="teTo" type="email" value="' + escapeAttr(ctx.contactEmail || '') + '" placeholder="empfaenger@firma.de" class="w-full px-3 py-2.5 border border-ink-300 rounded-xl text-sm">' +
+          '<label class="text-xs font-bold text-ink-700 uppercase tracking-wider block">Betreff *</label>' +
+          '<input id="teSubject" type="text" value="" class="w-full px-3 py-2.5 border border-ink-300 rounded-xl text-sm">' +
+          '<div class="flex items-center justify-between">' +
+            '<label class="text-xs font-bold text-ink-700 uppercase tracking-wider">Email-Text</label>' +
+            '<button onclick="_teTogglePreview()" id="tePreviewBtn" class="text-[11px] font-semibold text-brand-600 inline-flex items-center gap-1"><i data-lucide="eye" class="w-3 h-3"></i> Vorschau</button>' +
+          '</div>' +
+          '<textarea id="teBody" rows="10" placeholder="Wähle eine Vorlage oben, oder tippe den Email-Text…" class="w-full px-3 py-2.5 border border-ink-300 rounded-xl text-[12px] font-mono leading-snug resize-y"></textarea>' +
+          '<div id="tePreview" class="hidden border border-ink-300 rounded-xl p-3 bg-white text-[13px] leading-relaxed max-h-72 overflow-y-auto prose prose-sm"></div>' +
+          '<label class="flex items-center gap-2 text-[11px] text-ink-700 cursor-pointer">' +
+            '<input id="teNoteToTicket" type="checkbox" checked class="w-4 h-4 accent-orange-600">' +
+            'Versand als private Notiz am Quell-Ticket protokollieren' +
+          '</label>' +
+          '<div id="teErr" class="hidden bg-red-50 border border-red-200 rounded-xl p-3 text-sm text-red-800"></div>' +
+        '</div>' +
+        '<div class="border-t border-ink-200 p-3 flex gap-2 shrink-0">' +
+          '<button onclick="closeTicketEmailModal()" class="flex-1 bg-ink-100 hover:bg-ink-200 text-ink-700 rounded-xl px-3 py-3 text-sm font-bold">Abbrechen</button>' +
+          '<button onclick="processSendTicketEmail(this)" class="flex-[2] bg-orange-600 hover:bg-orange-700 text-white rounded-xl px-3 py-3 text-sm font-bold inline-flex items-center justify-center gap-1.5 shadow-md">' +
+            '<i data-lucide="send" class="w-4 h-4"></i> Jetzt senden' +
+          '</button>' +
+        '</div>' +
+      '</div>' +
+    '</div>';
+  window._TICKET_EMAIL_CTX = { accountId, ticketId, ticket, responses, configs, ctx };
+  if (window.lucide) lucide.createIcons();
+}
+
+function _teApplyTemplate() {
+  const ctx = window._TICKET_EMAIL_CTX;
+  if (!ctx) return;
+  const sel = document.getElementById('teTemplate');
+  const tplId = parseInt(sel?.value || '0', 10);
+  if (!tplId) return;
+  const tpl = (ctx.responses || []).find(function (r) { return r.id === tplId; });
+  if (!tpl) return;
+  const subj = _renderPlaceholders(tpl.title_text || tpl.subject || tpl.title || '', ctx.ctx);
+  const body = _renderPlaceholders(tpl.content_html || tpl.content || '', ctx.ctx);
+  const subjEl = document.getElementById('teSubject');
+  const bodyEl = document.getElementById('teBody');
+  if (subjEl) subjEl.value = subj;
+  if (bodyEl) bodyEl.value = body;
+  const prev = document.getElementById('tePreview');
+  if (prev && !prev.classList.contains('hidden')) _teRenderPreview();
+}
+
+function _teTogglePreview() {
+  const ta = document.getElementById('teBody');
+  const pv = document.getElementById('tePreview');
+  const btn = document.getElementById('tePreviewBtn');
+  if (!ta || !pv) return;
+  if (pv.classList.contains('hidden')) {
+    _teRenderPreview();
+    pv.classList.remove('hidden');
+    ta.classList.add('hidden');
+    if (btn) btn.innerHTML = '<i data-lucide="code" class="w-3 h-3"></i> HTML';
+  } else {
+    pv.classList.add('hidden');
+    ta.classList.remove('hidden');
+    if (btn) btn.innerHTML = '<i data-lucide="eye" class="w-3 h-3"></i> Vorschau';
+  }
+  if (window.lucide) lucide.createIcons();
+}
+
+function _teRenderPreview() {
+  const ta = document.getElementById('teBody');
+  const pv = document.getElementById('tePreview');
+  if (!ta || !pv) return;
+  pv.innerHTML = ta.value || '<em class="text-ink-400">(leer)</em>';
+}
+
+async function processSendTicketEmail(btn) {
+  const ctx = window._TICKET_EMAIL_CTX;
+  if (!ctx) return;
+  const errEl = document.getElementById('teErr');
+  const setErr = function (msg) { if (errEl) { errEl.textContent = msg; errEl.classList.remove('hidden'); } };
+  if (errEl) errEl.classList.add('hidden');
+  const to        = (document.getElementById('teTo')?.value || '').trim();
+  const subject   = (document.getElementById('teSubject')?.value || '').trim();
+  const body      = (document.getElementById('teBody')?.value || '').trim();
+  const fromIdStr = document.getElementById('teFrom')?.value || '';
+  const alsoNote  = !!document.getElementById('teNoteToTicket')?.checked;
+  if (!to)        return setErr('Empfänger fehlt');
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(to)) return setErr('Empfänger-Email sieht ungültig aus');
+  if (!subject)   return setErr('Betreff fehlt');
+  if (!body)      return setErr('Email-Text fehlt');
+  if (!fromIdStr) return setErr('Absender (Von) fehlt');
+  const fromId = parseInt(fromIdStr, 10);
+  setBusy(btn, true, 'Sende…');
+  try {
+    const payload = {
+      subject: subject,
+      description: body,
+      email: to,
+      email_config_id: fromId,
+      priority: 1,
+      status: 5,
+    };
+    const created = await proxyJson('/freshdesk/' + encodeURIComponent(ctx.accountId) + '/api/v2/tickets/outbound_email', {
+      method: 'POST',
+      body: JSON.stringify(payload)
+    });
+    if (!created?.id) throw new Error('Versand fehlgeschlagen (keine Ticket-ID zurück)');
+    // Optional private Notiz am Quell-Ticket
+    if (alsoNote) {
+      const tplName = (function () {
+        const tplId = parseInt(document.getElementById('teTemplate')?.value || '0', 10);
+        const tpl = (ctx.responses || []).find(function (r) { return r.id === tplId; });
+        return tpl?.title || tpl?.title_text || '';
+      })();
+      const noteBody = '📧 Outbound-Email gesendet an ' + to + (tplName ? ' (Vorlage „' + tplName + '")' : '') +
+        '<br>Betreff: ' + escapeHtml(subject) +
+        '<br>Neues Ticket: #' + created.id;
+      proxyJson('/freshdesk/' + encodeURIComponent(ctx.accountId) + '/api/v2/tickets/' + ctx.ticketId + '/notes', {
+        method: 'POST',
+        body: JSON.stringify({ body: noteBody, private: true })
+      }).catch(function (e) { console.warn('FD-Notiz für Email-Versand fehlgeschlagen:', e.message); });
+    }
+    closeTicketEmailModal();
+    toast('Email gesendet — Ticket #' + created.id + ' erstellt', 'success', 5000);
+  } catch (e) {
+    setBusy(btn, false);
+    setErr(e.message || String(e));
+  }
+}
+
+function closeTicketEmailModal() {
+  delete window._TICKET_EMAIL_CTX;
   const host = document.getElementById('subModalHost');
   if (host) host.innerHTML = '';
   document.body.style.overflow = '';
