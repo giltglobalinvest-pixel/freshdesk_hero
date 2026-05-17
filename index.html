@@ -713,7 +713,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.45';
+const APP_VERSION = 'v2.46.46';
 
 /* ============================================================
    GLOBAL THEME — v2.46.12
@@ -9147,10 +9147,12 @@ function _renderTicketStackCard(t, isTop) {
             '<i data-lucide="check-circle-2" class="w-5 h-5"></i> <span class="text-[15px]">Schließen</span>' +
           '</button>') +
     '</div>' +
-    '<div class="grid grid-cols-3 gap-2 mt-2">' +
-      '<button onclick="event.stopPropagation(); openRuleFromTicket(' + ticketRefArgs + ')" class="inline-flex items-center justify-center gap-1.5 px-2 py-2.5 bg-purple-50 hover:bg-purple-100 border border-purple-200 text-purple-700 rounded-xl text-[12px] font-semibold" title="Regel aus Ticket lernen"><i data-lucide="wand-2" class="w-4 h-4"></i>Regel</button>' +
-      '<button onclick="event.stopPropagation(); openWiedervorlagePicker(' + ticketRefArgs + ', true)" class="inline-flex items-center justify-center gap-1.5 px-2 py-2.5 bg-ink-50 hover:bg-ink-100 border border-ink-200 text-ink-700 rounded-xl text-[12px] font-semibold" title="Wiedervorlage"><i data-lucide="clock" class="w-4 h-4"></i>WV</button>' +
-      '<button onclick="event.stopPropagation(); openTicketDetail(' + ticketRefArgs + ')" class="inline-flex items-center justify-center gap-1.5 px-2 py-2.5 bg-ink-50 hover:bg-ink-100 border border-ink-200 text-ink-700 rounded-xl text-[12px] font-semibold" title="Detail-Ansicht"><i data-lucide="external-link" class="w-4 h-4"></i>Detail</button>' +
+    // v2.46.46: WhatsApp als 4. Schnellaktion. 4-Spalten-Grid statt 3.
+    '<div class="grid grid-cols-4 gap-1.5 mt-2">' +
+      '<button onclick="event.stopPropagation(); openRuleFromTicket(' + ticketRefArgs + ')" class="inline-flex flex-col items-center justify-center gap-0.5 px-1 py-2.5 bg-purple-50 hover:bg-purple-100 border border-purple-200 text-purple-700 rounded-xl text-[11px] font-semibold" title="Regel aus Ticket lernen"><i data-lucide="wand-2" class="w-4 h-4"></i>Regel</button>' +
+      '<button onclick="event.stopPropagation(); openWiedervorlagePicker(' + ticketRefArgs + ', true)" class="inline-flex flex-col items-center justify-center gap-0.5 px-1 py-2.5 bg-ink-50 hover:bg-ink-100 border border-ink-200 text-ink-700 rounded-xl text-[11px] font-semibold" title="Wiedervorlage"><i data-lucide="clock" class="w-4 h-4"></i>WV</button>' +
+      '<button onclick="event.stopPropagation(); openWhatsAppTicketShare(' + ticketRefArgs + ')" class="inline-flex flex-col items-center justify-center gap-0.5 px-1 py-2.5 bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 text-emerald-700 rounded-xl text-[11px] font-semibold" title="Per WhatsApp an Kollegen schicken"><i data-lucide="message-circle" class="w-4 h-4"></i>WhatsApp</button>' +
+      '<button onclick="event.stopPropagation(); openTicketDetail(' + ticketRefArgs + ')" class="inline-flex flex-col items-center justify-center gap-0.5 px-1 py-2.5 bg-ink-50 hover:bg-ink-100 border border-ink-200 text-ink-700 rounded-xl text-[11px] font-semibold" title="Detail-Ansicht"><i data-lucide="external-link" class="w-4 h-4"></i>Detail</button>' +
     '</div>';
 
   return '<div class="bg-white rounded-3xl overflow-hidden shadow-xl border border-ink-100">' +
