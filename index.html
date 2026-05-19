@@ -172,6 +172,8 @@
 
   /* v2.46.37: Safety — loginScreen darf in fullscreen-stack NIE durchscheinen */
   body.fullscreen-stack #loginScreen { display: none !important; }
+  /* v2.46.63: FAB im Fullscreen-Stack-Modus ausblenden */
+  body.fullscreen-stack #newEmailFab { display: none !important; }
 
   /* v2.46.36: Vollbild — sauberes Flex-Layout. Karte füllt verfügbaren Platz
      genau, ohne über den Bildschirm zu wachsen. Description-Text bleibt
@@ -707,6 +709,11 @@
   <span id="p2rText">Ziehen zum Aktualisieren</span>
 </div>
 
+<!-- ===================== v2.46.63: FAB "Neue Email schreiben" ===================== -->
+<button id="newEmailFab" onclick="openNewEmailAiModal()" class="hidden fixed right-4 z-40 w-14 h-14 rounded-full bg-orange-600 hover:bg-orange-700 text-white shadow-2xl shadow-orange-500/40 flex items-center justify-center active:scale-95 transition" style="bottom:calc(env(safe-area-inset-bottom, 0px) + 4.5rem)" title="Neue Email schreiben">
+  <i data-lucide="pen-line" class="w-6 h-6"></i>
+</button>
+
 <!-- ===================== TOAST ===================== -->
 <div id="toastContainer" class="fixed bottom-20 inset-x-0 z-50 flex flex-col items-center gap-2 px-4 pointer-events-none safe-bottom"></div>
 
@@ -717,7 +724,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.62';
+const APP_VERSION = 'v2.46.63';
 
 /* ============================================================
    GLOBAL THEME — v2.46.12
@@ -6552,6 +6559,13 @@ function setActiveNav(name) {
 function navTo(page) {
   APP_STATE.page = page;
   setActiveNav(['tickets','tasks','accounts','profile'].includes(page) ? page : '');
+  // v2.46.63: FAB nur auf Seiten zeigen wo "Neue Email schreiben" sinnvoll ist
+  const fab = document.getElementById('newEmailFab');
+  if (fab) {
+    const showOn = ['tickets', 'tasks', 'deals'].includes(page);
+    if (showOn) fab.classList.remove('hidden');
+    else fab.classList.add('hidden');
+  }
   // Page-Render in einem Try-Catch ausführen, damit ein Fehler in der Render-Funktion
   // nicht den ganzen Stack-Trace in pageContent leakt.
   let renderFn = renderTicketsPage;
@@ -19853,6 +19867,433 @@ async function processSendTicketEmail(btn) {
 function closeTicketEmailModal() {
   delete window._TICKET_EMAIL_CTX;
   const host = document.getElementById('subModalHost');
+  if (host) host.innerHTML = '';
+  document.body.style.overflow = '';
+}
+
+/* ===================== v2.46.63: NEUE EMAIL VERFASSEN MIT KI-KONTAKTSUCHE =============
+   Globaler FAB öffnet ein zweistufiges Modal:
+   Step 1: User beschreibt Empfänger + Anliegen per Sprache/Text. Claude extrahiert:
+           {recipient_name, recipient_email, company_name, subject, body, priority}
+   Step 2: Wenn Email schon erkannt → direkt nutzen. Sonst FD-Contact-Suche.
+           Preview/Edit + Versand via /tickets/outbound_email. */
+
+let NEW_EMAIL_REC = null;
+let NEW_EMAIL_PLAN = null;
+
+async function openNewEmailAiModal() {
+  let host = document.getElementById('modalHost');
+  if (!host) { host = document.createElement('div'); host.id = 'modalHost'; document.body.appendChild(host); }
+  NEW_EMAIL_PLAN = null;
+  const accounts = APP_STATE.accounts || [];
+  if (!accounts.length) { toast('Keine Accounts verfügbar', 'warn'); return; }
+  let preselect = (APP_STATE.currentAccount && APP_STATE.currentAccount !== 'all' && accounts.find(a => a.id === APP_STATE.currentAccount))
+    ? APP_STATE.currentAccount
+    : accounts[0].id;
+  const speechAvailable = !!(window.SpeechRecognition || window.webkitSpeechRecognition);
+  const accountPicker = accounts.length > 1
+    ? '<label class="text-xs font-bold text-ink-700 uppercase tracking-wider block">Account</label>' +
+      '<select id="newEmailAccount" class="w-full px-3 py-2.5 border border-ink-300 rounded-xl text-sm font-medium bg-white">' +
+        accounts.map(a => '<option value="' + escapeAttr(a.id) + '"' + (a.id === preselect ? ' selected' : '') + '>' + escapeHtml(a.name) + '</option>').join('') +
+      '</select>'
+    : '<input type="hidden" id="newEmailAccount" value="' + escapeAttr(preselect) + '">';
+  host.innerHTML =
+    '<div class="fixed inset-0 z-50 flex items-end justify-center bg-black/50" onclick="if(event.target===this)closeNewEmailAiModal()">' +
+      '<div class="bg-white w-full max-w-md rounded-t-3xl shadow-2xl flex flex-col safe-bottom" style="max-height:94vh">' +
+        '<div class="safe-top px-4 py-3 border-b border-ink-200 flex items-center justify-between gap-2 shrink-0">' +
+          '<h3 class="font-bold text-ink-900 inline-flex items-center gap-2"><i data-lucide="pen-line" class="w-5 h-5 text-orange-600"></i> Neue Email schreiben</h3>' +
+          '<button onclick="closeNewEmailAiModal()" class="w-9 h-9 rounded-lg hover:bg-ink-100 flex items-center justify-center"><i data-lucide="x" class="w-5 h-5 text-ink-700"></i></button>' +
+        '</div>' +
+        '<div id="newEmailBody" class="flex-1 overflow-y-auto p-4 space-y-3">' +
+          accountPicker +
+          '<label class="text-xs font-bold text-ink-700 uppercase tracking-wider block">An wen schreibst du, und worum geht es?</label>' +
+          (speechAvailable ? '<button id="newEmailMicBtn" onclick="toggleNewEmailVoice()" class="w-full py-4 rounded-2xl bg-gradient-to-br from-orange-500 to-orange-600 text-white font-semibold flex items-center justify-center gap-2 active:opacity-80 shadow-md shadow-orange-500/30">' +
+            '<div id="newEmailMicIcon" class="w-9 h-9 rounded-full bg-white/20 flex items-center justify-center"><i data-lucide="mic" class="w-5 h-5"></i></div>' +
+            '<span id="newEmailMicLabel">Tippe und sprich</span>' +
+          '</button>' : '<p class="text-[11px] text-ink-500 italic">Sprach-Eingabe nicht verfügbar — nutze das Textfeld.</p>') +
+          '<textarea id="newEmailCmd" rows="5" placeholder="z.B. „Schreibe Max Müller von Firma X wegen Angebot 4711, dass wir bis Freitag liefern können" — oder direkt mit Email: „Email an max@firma.de mit Betreff Bestellung Liefertermin"' +
+            ' class="w-full px-3 py-3 border border-orange-200 bg-orange-50/30 rounded-xl text-sm focus:ring-2 focus:ring-orange-500/30 focus:border-orange-500 resize-y"></textarea>' +
+          '<div class="bg-white border border-ink-200 rounded-xl p-3">' +
+            '<p class="text-[10px] font-semibold text-ink-500 uppercase tracking-wider mb-1.5">Was die KI macht</p>' +
+            '<div class="space-y-1 text-[11px] text-ink-700 leading-relaxed">' +
+              '<p>1. Empfänger erkennen (Name + Firma oder direkt Email)</p>' +
+              '<p>2. <b>Freshdesk-Kontakte durchsuchen</b> und Treffer vorschlagen</p>' +
+              '<p>3. Betreff + Email-Text als Entwurf formulieren</p>' +
+              '<p>Du prüfst alles im nächsten Schritt — und kannst optional eine Vorlage drüberlegen.</p>' +
+            '</div>' +
+          '</div>' +
+        '</div>' +
+        '<div id="newEmailFooter" class="border-t border-ink-200 p-3 flex gap-2 shrink-0">' +
+          '<button onclick="closeNewEmailAiModal()" class="flex-1 bg-ink-100 hover:bg-ink-200 text-ink-700 rounded-xl px-3 py-3 text-sm font-bold">Abbrechen</button>' +
+          '<button onclick="processNewEmailAi(this)" class="flex-[2] bg-gradient-to-br from-orange-500 to-orange-600 hover:opacity-90 text-white rounded-xl px-3 py-3 text-sm font-bold inline-flex items-center justify-center gap-1.5 shadow-md shadow-orange-200">' +
+            '<i data-lucide="sparkles" class="w-4 h-4"></i> Verstehen' +
+          '</button>' +
+        '</div>' +
+      '</div>' +
+    '</div>';
+  if (window.lucide) lucide.createIcons();
+  document.body.style.overflow = 'hidden';
+  setTimeout(function () { $('newEmailCmd')?.focus(); }, 80);
+}
+
+function toggleNewEmailVoice() {
+  if (NEW_EMAIL_REC) { try { NEW_EMAIL_REC.stop(); } catch (_) {} NEW_EMAIL_REC = null; _updateNewEmailMicUI(false); return; }
+  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if (!SR) return toast('Sprach-Eingabe nicht verfügbar', 'warn', 4000);
+  ensureMicPermission().then(function () {
+    const rec = new SR();
+    rec.lang = 'de-DE'; rec.continuous = true; rec.interimResults = true;
+    const ta = $('newEmailCmd');
+    let baseText = (ta?.value || '');
+    if (baseText && !/\s$/.test(baseText)) baseText += ' ';
+    rec.onresult = function (event) {
+      let final = '', interim = '';
+      for (let i = event.resultIndex; i < event.results.length; i++) {
+        const tr = event.results[i][0].transcript;
+        if (event.results[i].isFinal) final += tr; else interim += tr;
+      }
+      if (ta) ta.value = baseText + final + interim;
+      if (final) baseText += final;
+    };
+    rec.onerror = function () { NEW_EMAIL_REC = null; _updateNewEmailMicUI(false); };
+    rec.onend = function () { if (NEW_EMAIL_REC === rec) { NEW_EMAIL_REC = null; _updateNewEmailMicUI(false); } };
+    rec.start();
+    NEW_EMAIL_REC = rec;
+    _updateNewEmailMicUI(true);
+  }).catch(function (e) { toast(e.message, 'error', 8000); });
+}
+function _updateNewEmailMicUI(isOn) {
+  const icon = $('newEmailMicIcon');
+  const label = $('newEmailMicLabel');
+  if (icon) icon.innerHTML = isOn ? '<span class="spinner" style="width:18px;height:18px;border-color:white;border-right-color:transparent"></span>' : '<i data-lucide="mic" class="w-5 h-5"></i>';
+  if (label) label.textContent = isOn ? 'Höre zu — nochmal tippen zum Stoppen' : 'Tippe und sprich';
+  if (window.lucide) lucide.createIcons();
+}
+
+async function processNewEmailAi(btn) {
+  if (NEW_EMAIL_REC) { try { NEW_EMAIL_REC.stop(); } catch (_) {} NEW_EMAIL_REC = null; }
+  const cmd = ($('newEmailCmd')?.value || '').trim();
+  if (!cmd) return toast('Bitte etwas eintippen oder sprechen', 'warn');
+  const accountId = $('newEmailAccount')?.value;
+  if (!accountId) return toast('Account fehlt', 'warn');
+  setBusy(btn, true, 'KI denkt…');
+  try {
+    const sysPrompt = 'Du extrahierst aus einer Beschreibung die Felder einer neuen Email auf Deutsch. ' +
+      'Antworte AUSSCHLIESSLICH mit gültigem JSON, ohne Markdown-Codeblock. ' +
+      'Schema:\n' +
+      '{\n' +
+      '  "recipient_name": string|null (Vor- und Nachname falls genannt),\n' +
+      '  "recipient_email": string|null (nur wenn explizit eine Email-Adresse genannt wurde),\n' +
+      '  "company_name": string|null (Firma falls genannt),\n' +
+      '  "subject": string (max 80 Zeichen, prägnant),\n' +
+      '  "body": string (vollständige Email-Text als HTML — höflicher Anschreiben-Stil mit Anrede, ein paar Absätze, Grußformel; <br> für Zeilenumbrüche, <p> für Absätze),\n' +
+      '  "priority": 1|2|3|4 (Default 1=Niedrig)\n' +
+      '}\n' +
+      'Wenn der User selbst der Absender ist, verwende für die Grußformel passende Standard-Floskeln (z.B. „Mit freundlichen Grüßen").';
+    const data = await proxyJson('/anthropic/v1/messages', {
+      method: 'POST',
+      body: JSON.stringify({
+        model: 'claude-haiku-4-5-20251001',
+        max_tokens: 1200,
+        system: sysPrompt,
+        messages: [{ role: 'user', content: cmd }]
+      })
+    });
+    const raw = (data?.content?.[0]?.text || '').trim();
+    let json = raw.replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/i, '').trim();
+    let plan;
+    try { plan = JSON.parse(json); }
+    catch (_) {
+      const m = json.match(/\{[\s\S]*\}/);
+      if (m) { try { plan = JSON.parse(m[0]); } catch (e2) { throw new Error('KI-Antwort ist kein gültiges JSON'); } }
+      else throw new Error('KI-Antwort ist kein gültiges JSON');
+    }
+    NEW_EMAIL_PLAN = { accountId, plan, originalCmd: cmd, contacts: null, selectedContact: null };
+    // Wenn die KI eine Email direkt erkannt hat → kein Search nötig
+    if (plan.recipient_email && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(plan.recipient_email)) {
+      // Direkt zum Preview-Step
+      _renderNewEmailPreview();
+      return;
+    }
+    // Sonst FD-Contacts durchsuchen
+    setBusy(btn, true, 'Suche Kontakt…');
+    const contacts = await _searchFdContactsByPlan(accountId, plan);
+    NEW_EMAIL_PLAN.contacts = contacts;
+    _renderNewEmailContactPicker();
+  } catch (e) {
+    setBusy(btn, false);
+    toast(e.message || String(e), 'error', 8000);
+  }
+}
+
+/* Sucht FD-Kontakte basierend auf Plan (recipient_name + company_name). Probiert
+   /api/v2/search/contacts mit verschiedenen Query-Strategien. */
+async function _searchFdContactsByPlan(accountId, plan) {
+  const base = '/freshdesk/' + encodeURIComponent(accountId) + '/api/v2';
+  const queries = [];
+  // Strategie 1: Name + Firma
+  if (plan.recipient_name && plan.company_name) {
+    queries.push('"name:\'' + plan.recipient_name.replace(/'/g, '\\\'') + '\' AND company_name:\'' + plan.company_name.replace(/'/g, '\\\'') + '\'"');
+  }
+  // Strategie 2: Nur Name
+  if (plan.recipient_name) {
+    queries.push('"name:\'' + plan.recipient_name.replace(/'/g, '\\\'') + '\'"');
+  }
+  // Strategie 3: Nachname only
+  const lastName = (plan.recipient_name || '').trim().split(/\s+/).pop();
+  if (lastName && lastName !== plan.recipient_name) {
+    queries.push('"name:\'' + lastName.replace(/'/g, '\\\'') + '\'"');
+  }
+  // Strategie 4: Firma only
+  if (plan.company_name) {
+    queries.push('"company_name:\'' + plan.company_name.replace(/'/g, '\\\'') + '\'"');
+  }
+  const found = [];
+  const seen = new Set();
+  for (const q of queries) {
+    try {
+      const res = await proxyJson(base + '/search/contacts?query=' + encodeURIComponent(q));
+      const list = Array.isArray(res?.results) ? res.results : [];
+      list.forEach(function (c) {
+        if (!seen.has(c.id) && c.email) { seen.add(c.id); found.push(c); }
+      });
+      if (found.length >= 5) break;
+    } catch (e) { console.warn('contact-search query fehlgeschlagen:', q, e.message); }
+  }
+  return found.slice(0, 8);
+}
+
+function _renderNewEmailContactPicker() {
+  const ref = NEW_EMAIL_PLAN;
+  if (!ref) return;
+  const body = $('newEmailBody');
+  const footer = $('newEmailFooter');
+  if (!body || !footer) return;
+  const plan = ref.plan || {};
+  const contacts = ref.contacts || [];
+  const queryStr = [plan.recipient_name, plan.company_name].filter(Boolean).join(' · ') || '(unbekannt)';
+  body.innerHTML =
+    '<div class="bg-orange-50 border border-orange-200 rounded-xl p-2.5 text-[11px] flex items-center gap-2">' +
+      '<i data-lucide="users" class="w-4 h-4 text-orange-600 shrink-0"></i>' +
+      '<p class="text-orange-800">KI-Suche für „<b>' + escapeHtml(queryStr) + '</b>" — wähle den richtigen Kontakt:</p>' +
+    '</div>' +
+    (contacts.length
+      ? contacts.map(function (c, idx) {
+          return '<button onclick="_neSelectContact(' + idx + ')" class="w-full text-left bg-white hover:bg-orange-50 border border-ink-200 rounded-xl p-3 active:scale-[0.99] transition">' +
+            '<div class="flex items-center justify-between gap-2">' +
+              '<div class="flex-1 min-w-0">' +
+                '<p class="font-semibold text-ink-900 text-sm truncate">' + escapeHtml(c.name || '–') + '</p>' +
+                '<p class="text-[12px] text-ink-600 truncate">' + escapeHtml(c.email || '') + '</p>' +
+                (c.phone || c.mobile ? '<p class="text-[10px] text-ink-400">' + escapeHtml(c.phone || c.mobile || '') + '</p>' : '') +
+              '</div>' +
+              '<i data-lucide="arrow-right" class="w-4 h-4 text-orange-500 shrink-0"></i>' +
+            '</div>' +
+          '</button>';
+        }).join('')
+      : '<div class="bg-amber-50 border border-amber-200 rounded-xl p-3 text-[12px] text-amber-800"><b>Kein Treffer in Freshdesk.</b><br>Du kannst die Email-Adresse im nächsten Schritt manuell eintragen.</div>') +
+    '<button onclick="_neManualEmail()" class="w-full text-left bg-ink-50 hover:bg-ink-100 border border-dashed border-ink-300 rounded-xl p-3 active:scale-[0.99] transition">' +
+      '<div class="flex items-center gap-2">' +
+        '<i data-lucide="pen-line" class="w-4 h-4 text-ink-500"></i>' +
+        '<span class="text-[13px] text-ink-700">Empfänger manuell eintragen</span>' +
+      '</div>' +
+    '</button>';
+  footer.innerHTML =
+    '<button onclick="_neBackToPrompt()" class="flex-1 bg-ink-100 hover:bg-ink-200 text-ink-700 rounded-xl px-3 py-3 text-sm font-bold inline-flex items-center justify-center gap-1.5"><i data-lucide="arrow-left" class="w-4 h-4"></i> Zurück</button>';
+  if (window.lucide) lucide.createIcons();
+}
+
+function _neSelectContact(idx) {
+  const ref = NEW_EMAIL_PLAN;
+  if (!ref?.contacts?.[idx]) return;
+  ref.selectedContact = ref.contacts[idx];
+  ref.plan.recipient_email = ref.selectedContact.email;
+  ref.plan.recipient_name  = ref.selectedContact.name || ref.plan.recipient_name;
+  _renderNewEmailPreview();
+}
+function _neManualEmail() {
+  const ref = NEW_EMAIL_PLAN;
+  if (!ref) return;
+  ref.selectedContact = null;
+  _renderNewEmailPreview();
+}
+function _neBackToPrompt() {
+  const original = NEW_EMAIL_PLAN?.originalCmd || '';
+  const accountId = NEW_EMAIL_PLAN?.accountId;
+  NEW_EMAIL_PLAN = null;
+  closeNewEmailAiModal();
+  setTimeout(function () {
+    openNewEmailAiModal();
+    setTimeout(function () {
+      const ta = $('newEmailCmd');
+      if (ta && original) ta.value = original;
+      const sel = $('newEmailAccount');
+      if (sel && accountId) sel.value = accountId;
+    }, 80);
+  }, 30);
+}
+
+async function _renderNewEmailPreview() {
+  const ref = NEW_EMAIL_PLAN;
+  if (!ref) return;
+  const plan = ref.plan || {};
+  const body = $('newEmailBody');
+  const footer = $('newEmailFooter');
+  if (!body || !footer) return;
+  body.innerHTML =
+    '<div class="text-center py-6"><div class="spinner inline-block w-6 h-6 border-[3px] text-orange-500"></div><p class="text-sm text-ink-500 mt-2">Lade Vorlagen + Absender-Adressen…</p></div>';
+  let configs = [];
+  let responses = [];
+  try {
+    const [cannedData, cfgs] = await Promise.all([
+      ensureCannedResponsesLoaded(ref.accountId),
+      ensureEmailConfigsLoaded(ref.accountId),
+    ]);
+    configs = cfgs || [];
+    responses = cannedData?.responses || [];
+  } catch (e) {
+    toast('Laden fehlgeschlagen: ' + e.message, 'error', 6000);
+    return;
+  }
+  if (!configs.length) {
+    body.innerHTML = '<div class="bg-red-50 border border-red-200 rounded-xl p-3 text-sm text-red-800">Keine Email-Configs gefunden — bitte in Freshdesk eine Support-Email-Adresse aktivieren.</div>';
+    return;
+  }
+  const primaryCfg = configs.find(function (c) { return c.primary_role || c.default; }) || configs[0];
+  const tplOpts = '<option value="">— Keine Vorlage (KI-Entwurf nutzen) —</option>' +
+    responses.map(function (r) {
+      const folderSuffix = r._folderName ? ' · ' + r._folderName : '';
+      return '<option value="' + r.id + '">' + escapeHtml(r.title || ('#' + r.id)) + escapeHtml(folderSuffix) + '</option>';
+    }).join('');
+  const cfgOpts = configs.map(function (c) {
+    const label = (c.name || '') + ' <' + (c.reply_email || c.support_email || c.email || '') + '>';
+    return '<option value="' + c.id + '"' + (c.id === primaryCfg?.id ? ' selected' : '') + '>' + escapeHtml(label) + '</option>';
+  }).join('');
+  // Plan-Daten in den State legen damit das Email-Send-Modul sie nutzen kann
+  ref.responses = responses;
+  ref.configs = configs;
+  body.innerHTML =
+    '<div class="bg-emerald-50 border border-emerald-200 rounded-xl p-2.5 text-[11px] flex items-center gap-2">' +
+      '<i data-lucide="check-circle" class="w-4 h-4 text-emerald-600 shrink-0"></i>' +
+      '<p class="text-emerald-800">KI-Entwurf bereit — bitte prüfen und ggf. anpassen.</p>' +
+    '</div>' +
+    '<label class="text-xs font-bold text-ink-700 uppercase tracking-wider block">Vorlage (optional)</label>' +
+    '<select id="neTemplate" onchange="_neApplyTemplate()" class="w-full px-3 py-2.5 border border-ink-300 rounded-xl text-sm bg-white">' + tplOpts + '</select>' +
+    '<label class="text-xs font-bold text-ink-700 uppercase tracking-wider block">Von</label>' +
+    '<select id="neFrom" class="w-full px-3 py-2.5 border border-ink-300 rounded-xl text-sm bg-white">' + cfgOpts + '</select>' +
+    '<label class="text-xs font-bold text-ink-700 uppercase tracking-wider block">An *</label>' +
+    '<input id="neTo" type="email" value="' + escapeAttr(plan.recipient_email || '') + '" placeholder="empfaenger@firma.de" class="w-full px-3 py-2.5 border border-ink-300 rounded-xl text-sm">' +
+    (ref.selectedContact ? '<p class="text-[10px] text-ink-500 -mt-1">Aus Freshdesk: ' + escapeHtml(ref.selectedContact.name || '') + '</p>' : '') +
+    '<label class="text-xs font-bold text-ink-700 uppercase tracking-wider block">Betreff *</label>' +
+    '<input id="neSubject" type="text" value="' + escapeAttr(plan.subject || '') + '" class="w-full px-3 py-2.5 border border-ink-300 rounded-xl text-sm">' +
+    '<div class="flex items-center justify-between">' +
+      '<label class="text-xs font-bold text-ink-700 uppercase tracking-wider">Email-Text</label>' +
+      '<button onclick="_neTogglePreview()" id="nePreviewBtn" class="text-[11px] font-semibold text-brand-600 inline-flex items-center gap-1"><i data-lucide="code" class="w-3 h-3"></i> HTML bearbeiten</button>' +
+    '</div>' +
+    '<textarea id="neBody" rows="10" class="hidden w-full px-3 py-2.5 border border-ink-300 rounded-xl text-[12px] font-mono leading-snug resize-y">' + escapeHtml(plan.body || '') + '</textarea>' +
+    '<div id="nePreview" class="border border-ink-300 rounded-xl p-3 bg-white text-[13px] leading-relaxed max-h-96 overflow-y-auto prose prose-sm">' + (plan.body || '<em class="text-ink-400">(leer)</em>') + '</div>' +
+    '<div id="neErr" class="hidden bg-red-50 border border-red-200 rounded-xl p-3 text-sm text-red-800"></div>';
+  footer.innerHTML =
+    '<button onclick="_neBackToPrompt()" class="flex-1 bg-ink-100 hover:bg-ink-200 text-ink-700 rounded-xl px-3 py-3 text-sm font-bold inline-flex items-center justify-center gap-1.5"><i data-lucide="arrow-left" class="w-4 h-4"></i> Zurück</button>' +
+    '<button onclick="processSendNewEmail(this)" class="flex-[2] bg-orange-600 hover:bg-orange-700 text-white rounded-xl px-3 py-3 text-sm font-bold inline-flex items-center justify-center gap-1.5 shadow-md">' +
+      '<i data-lucide="send" class="w-4 h-4"></i> Jetzt senden' +
+    '</button>';
+  if (window.lucide) lucide.createIcons();
+}
+
+function _neApplyTemplate() {
+  const ref = NEW_EMAIL_PLAN;
+  if (!ref) return;
+  const sel = document.getElementById('neTemplate');
+  const tplId = parseInt(sel?.value || '0', 10);
+  if (!tplId) return;
+  const tpl = (ref.responses || []).find(function (r) { return r.id === tplId; });
+  if (!tpl) return;
+  // Platzhalter-Kontext aufbauen aus dem ausgewählten Kontakt + User
+  const firstNm = function (full) { return String(full || '').trim().split(/\s+/)[0] || ''; };
+  const sc = ref.selectedContact || {};
+  const ctx = {
+    contactName: sc.name || ref.plan.recipient_name || '',
+    contactFirstName: sc.first_name || firstNm(sc.name || ref.plan.recipient_name || ''),
+    contactEmail: sc.email || ref.plan.recipient_email || '',
+    userName: APP_KEYS.user?.name || '',
+    userFirstName: firstNm(APP_KEYS.user?.name || ''),
+    userEmail: APP_KEYS.user?.email || '',
+    companyName: ref.plan.company_name || '',
+  };
+  const subj = _renderPlaceholders(tpl.title_text || tpl.subject || tpl.title || '', ctx);
+  const body = _renderPlaceholders(tpl.content_html || tpl.content || '', ctx);
+  if (subj) { const subjEl = document.getElementById('neSubject'); if (subjEl) subjEl.value = subj; }
+  if (body) { const bodyEl = document.getElementById('neBody'); if (bodyEl) bodyEl.value = body; }
+  _neRenderPreview();
+}
+
+function _neTogglePreview() {
+  const ta = document.getElementById('neBody');
+  const pv = document.getElementById('nePreview');
+  const btn = document.getElementById('nePreviewBtn');
+  if (!ta || !pv) return;
+  if (pv.classList.contains('hidden')) {
+    _neRenderPreview();
+    pv.classList.remove('hidden');
+    ta.classList.add('hidden');
+    if (btn) btn.innerHTML = '<i data-lucide="code" class="w-3 h-3"></i> HTML bearbeiten';
+  } else {
+    pv.classList.add('hidden');
+    ta.classList.remove('hidden');
+    if (btn) btn.innerHTML = '<i data-lucide="eye" class="w-3 h-3"></i> Vorschau';
+  }
+  if (window.lucide) lucide.createIcons();
+}
+function _neRenderPreview() {
+  const ta = document.getElementById('neBody');
+  const pv = document.getElementById('nePreview');
+  if (!ta || !pv) return;
+  pv.innerHTML = ta.value || '<em class="text-ink-400">(leer)</em>';
+}
+
+async function processSendNewEmail(btn) {
+  const ref = NEW_EMAIL_PLAN;
+  if (!ref) return;
+  const errEl = document.getElementById('neErr');
+  const setErr = function (msg) { if (errEl) { errEl.textContent = msg; errEl.classList.remove('hidden'); } };
+  if (errEl) errEl.classList.add('hidden');
+  const to        = (document.getElementById('neTo')?.value || '').trim();
+  const subject   = (document.getElementById('neSubject')?.value || '').trim();
+  const body      = (document.getElementById('neBody')?.value || '').trim();
+  const fromIdStr = document.getElementById('neFrom')?.value || '';
+  if (!to)        return setErr('Empfänger fehlt');
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(to)) return setErr('Empfänger-Email sieht ungültig aus');
+  if (!subject)   return setErr('Betreff fehlt');
+  if (!body)      return setErr('Email-Text fehlt');
+  if (!fromIdStr) return setErr('Absender (Von) fehlt');
+  const fromId = parseInt(fromIdStr, 10);
+  setBusy(btn, true, 'Sende…');
+  try {
+    const payload = {
+      subject: subject,
+      description: body,
+      email: to,
+      email_config_id: fromId,
+      priority: ref.plan?.priority || 1,
+      status: 5,
+    };
+    const created = await proxyJson('/freshdesk/' + encodeURIComponent(ref.accountId) + '/api/v2/tickets/outbound_email', {
+      method: 'POST',
+      body: JSON.stringify(payload)
+    });
+    if (!created?.id) throw new Error('Versand fehlgeschlagen');
+    closeNewEmailAiModal();
+    toast('Email gesendet — Ticket #' + created.id + ' erstellt', 'success', 5000);
+  } catch (e) {
+    setBusy(btn, false);
+    setErr(e.message || String(e));
+  }
+}
+
+function closeNewEmailAiModal() {
+  if (NEW_EMAIL_REC) { try { NEW_EMAIL_REC.stop(); } catch (_) {} NEW_EMAIL_REC = null; }
+  NEW_EMAIL_PLAN = null;
+  const host = document.getElementById('modalHost');
   if (host) host.innerHTML = '';
   document.body.style.overflow = '';
 }
