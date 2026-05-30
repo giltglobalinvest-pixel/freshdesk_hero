@@ -732,7 +732,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.65';
+const APP_VERSION = 'v2.46.66';
 
 /* ============================================================
    GLOBAL THEME — v2.46.12
@@ -3016,8 +3016,54 @@ function _relTimeFull(iso) {
   return d.toLocaleDateString('de', { day: '2-digit', month: '2-digit', year: 'numeric' });
 }
 
+/* v2.46.66: Per-User Toggle für Accounts (Mandanten ein-/ausschalten).
+   localStorage-basiert, sofort wirksam — alle Views die APP_STATE.accounts
+   lesen, sehen nur die aktiven Accounts. APP_STATE.allAccessibleAccounts
+   behält die volle Liste für die Toggle-UI im Accounts-Tab. */
+function _disabledAccountsKey() {
+  return 'fdh_disabled_accounts_' + (APP_KEYS.user?.api_key || 'anon');
+}
+function _loadDisabledAccounts() {
+  try {
+    const raw = localStorage.getItem(_disabledAccountsKey());
+    if (!raw) return new Set();
+    const arr = JSON.parse(raw);
+    return new Set(Array.isArray(arr) ? arr : []);
+  } catch (_) { return new Set(); }
+}
+function _saveDisabledAccounts(set) {
+  try { localStorage.setItem(_disabledAccountsKey(), JSON.stringify(Array.from(set))); } catch (_) {}
+}
+function isAccountDisabled(accountId) {
+  return _loadDisabledAccounts().has(accountId);
+}
+function disableAccount(accountId) {
+  const s = _loadDisabledAccounts(); s.add(accountId); _saveDisabledAccounts(s);
+}
+function enableAccount(accountId) {
+  const s = _loadDisabledAccounts(); s.delete(accountId); _saveDisabledAccounts(s);
+}
+/* Toggle + sofortiges Re-Apply auf alle Views — kein voller Airtable-Reload nötig.
+   Re-filtert nur APP_STATE.accounts aus der gecachten allAccessibleAccounts-Liste. */
+async function toggleAccountActive(accountId, btnEl) {
+  const now = isAccountDisabled(accountId);
+  if (now) enableAccount(accountId); else disableAccount(accountId);
+  // Schnell re-filtern (loadAccounts nicht nötig — Daten sind schon da)
+  const all = APP_STATE.allAccessibleAccounts || [];
+  const disabledSet = _loadDisabledAccounts();
+  APP_STATE.accounts = all.filter(a => !disabledSet.has(a.id));
+  // currentAccount auf 'all' wenn der aktuelle gerade deaktiviert wurde
+  if (APP_STATE.currentAccount && APP_STATE.currentAccount !== 'all' && disabledSet.has(APP_STATE.currentAccount)) {
+    APP_STATE.currentAccount = 'all';
+    try { localStorage.setItem(LAST_ACCOUNT_KEY, 'all'); } catch (_) {}
+  }
+  toast(now ? 'Account aktiviert' : 'Account pausiert', 'success', 2200);
+  // Aktuelle Seite re-rendern + Accounts-Liste neu
+  if (APP_KEYS.user?.is_admin) renderAccountsList(); else renderAccountsSelfService();
+}
+
 async function loadAccounts() {
-  if (!APP_KEYS.user?.api_key) { APP_STATE.accounts = []; return; }
+  if (!APP_KEYS.user?.api_key) { APP_STATE.accounts = []; APP_STATE.allAccessibleAccounts = []; return; }
   const userKey = APP_KEYS.user.api_key;
 
   // Schritt 1: Per-User-AccountAccess-Einträge laden (eigene API-Keys pro Account)
@@ -3098,7 +3144,11 @@ async function loadAccounts() {
   });
   // APP_STATE.accounts enthält NUR nutzbare Accounts (mit gültigem Zugriff) — alle anderen
   // Stellen (Tickets-Übersicht, Search, Filter) sehen die Accounts also gar nicht erst.
-  APP_STATE.accounts    = allAccounts.filter(a => a._canAccess);
+  // v2.46.66: Zusätzlich raus-gefiltert: per User-Toggle deaktivierte Accounts.
+  const accessibleAccounts = allAccounts.filter(a => a._canAccess);
+  const disabledSet = _loadDisabledAccounts();
+  APP_STATE.allAccessibleAccounts = accessibleAccounts; // für Toggle-UI im Accounts-Tab
+  APP_STATE.accounts    = accessibleAccounts.filter(a => !disabledSet.has(a.id));
   // Self-Service-Page braucht alle zugewiesenen Accounts (auch ohne Key) → separat
   APP_STATE.allAssignedAccounts = allAccounts;
   // Restore last-selected account
@@ -15079,18 +15129,24 @@ async function renderAccountsSelfService() {
         const hasKey = a._hasOwnKey;
         const canViaDefault = a._canAccess && !hasKey; // Zugriff klappt nur via Account-Default-Key
         return `
-          <div class="bg-white rounded-2xl border border-ink-200 p-3" data-self-row data-account-id="${escapeAttr(a.id)}">
+          <div class="bg-white rounded-2xl border ${isAccountDisabled(a.id) ? 'border-ink-200 opacity-60' : 'border-ink-200'} p-3" data-self-row data-account-id="${escapeAttr(a.id)}">
             <div class="flex items-center gap-3">
               <span class="w-10 h-10 rounded-xl flex items-center justify-center shrink-0 text-white font-semibold" style="background:${escapeAttr(a.color)}">
                 ${escapeHtml((a.name || '?').charAt(0).toUpperCase())}
               </span>
               <div class="flex-1 min-w-0">
-                <p class="font-semibold text-ink-900 text-sm truncate">${escapeHtml(a.name)}</p>
+                <p class="font-semibold text-ink-900 text-sm truncate">${escapeHtml(a.name)} ${isAccountDisabled(a.id) ? '<span class="text-[10px] text-amber-700 bg-amber-100 px-1.5 py-0.5 rounded ml-1 align-middle">pausiert</span>' : ''}</p>
                 <p class="text-[11px] text-ink-500 truncate">${escapeHtml(a.domain)}.freshdesk.com</p>
               </div>
               <span class="shrink-0 text-[10px] uppercase tracking-wider px-1.5 py-0.5 rounded font-semibold ${hasKey ? 'bg-emerald-100 text-emerald-700' : (canViaDefault ? 'bg-brand-100 text-brand-700' : 'bg-amber-100 text-amber-700')}" title="${hasKey ? 'Eigener API-Key hinterlegt' : (canViaDefault ? 'Du nutzt den Account-Default-Key (Admin-Erlaubnis)' : 'Kein API-Key — keine Tickets sichtbar')}">
                 ${hasKey ? 'verbunden' : (canViaDefault ? 'Standard-Key' : 'Key fehlt')}
               </span>
+              ${a._canAccess ? `
+                <button onclick="toggleAccountActive('${escapeAttr(a.id)}', this)" class="shrink-0 inline-flex items-center gap-1 px-2 py-1 rounded-lg text-[10px] font-bold border ${isAccountDisabled(a.id) ? 'bg-amber-50 border-amber-300 text-amber-700' : 'bg-emerald-50 border-emerald-300 text-emerald-700'}" title="${isAccountDisabled(a.id) ? 'Wieder aktivieren — Account erscheint in allen Listen' : 'Pausieren — Account verschwindet aus allen Listen/Filtern'}">
+                  <i data-lucide="${isAccountDisabled(a.id) ? 'power-off' : 'power'}" class="w-3 h-3"></i>
+                  ${isAccountDisabled(a.id) ? 'AUS' : 'AN'}
+                </button>
+              ` : ''}
             </div>
             <div class="mt-2 space-y-1.5">
               <label class="text-[10px] uppercase font-semibold text-brand-800 block">Mein Freshdesk-API-Key</label>
@@ -15205,7 +15261,8 @@ async function saveSelfAccountAccess(accountId, btnEl) {
 }
 
 function renderAccountsList() {
-  const list = APP_STATE.accounts;
+  // v2.46.66: Admin sieht ALLE accessibleAccounts (auch pausierte) damit er sie wieder aktivieren kann
+  const list = APP_STATE.allAccessibleAccounts || APP_STATE.accounts;
   if (!list.length) {
     $('accountsList').innerHTML = `
       <div class="bg-white rounded-2xl border border-ink-200 p-6 text-center">
@@ -15218,15 +15275,21 @@ function renderAccountsList() {
   }
   $('accountsList').innerHTML = `
     <div class="space-y-2">
-      ${list.map(a => `
-        <div class="bg-white rounded-2xl border border-ink-200 p-3 flex items-center gap-3">
+      ${list.map(a => {
+        const isOff = isAccountDisabled(a.id);
+        return `
+        <div class="bg-white rounded-2xl border border-ink-200 p-3 flex items-center gap-2 ${isOff ? 'opacity-60' : ''}">
           <span class="w-10 h-10 rounded-xl flex items-center justify-center shrink-0 text-white font-semibold" style="background:${escapeAttr(a.color)}">
             ${escapeHtml((a.name || '?').charAt(0).toUpperCase())}
           </span>
           <div class="flex-1 min-w-0">
-            <p class="font-semibold text-ink-900 text-sm truncate">${escapeHtml(a.name)}</p>
+            <p class="font-semibold text-ink-900 text-sm truncate">${escapeHtml(a.name)} ${isOff ? '<span class="text-[10px] text-amber-700 bg-amber-100 px-1.5 py-0.5 rounded ml-1 align-middle">pausiert</span>' : ''}</p>
             <p class="text-[11px] text-ink-500 truncate">${escapeHtml(a.domain)}.freshdesk.com</p>
           </div>
+          <button onclick="toggleAccountActive('${a.id}', this)" class="shrink-0 inline-flex items-center gap-1 px-2 py-1 rounded-lg text-[10px] font-bold border ${isOff ? 'bg-amber-50 border-amber-300 text-amber-700' : 'bg-emerald-50 border-emerald-300 text-emerald-700'}" title="${isOff ? 'Wieder aktivieren' : 'Aus allen Listen/Filtern ausblenden'}">
+            <i data-lucide="${isOff ? 'power-off' : 'power'}" class="w-3 h-3"></i>
+            ${isOff ? 'AUS' : 'AN'}
+          </button>
           <button onclick="testAccount('${a.id}', this)" class="text-ink-500 hover:text-brand-600 p-2" title="Test">
             <i data-lucide="zap" class="w-4 h-4"></i>
           </button>
@@ -15236,8 +15299,8 @@ function renderAccountsList() {
           <button onclick="confirmDeleteAccount('${a.id}', '${escapeAttr(a.name)}')" class="text-ink-500 hover:text-red-600 p-2" title="Löschen">
             <i data-lucide="trash-2" class="w-4 h-4"></i>
           </button>
-        </div>
-      `).join('')}
+        </div>`;
+      }).join('')}
     </div>`;
   if (window.lucide) lucide.createIcons();
 }
@@ -15254,9 +15317,11 @@ async function testAccount(accountId, btnEl) {
   }
 }
 
-/* Öffnet das Account-Modal im Edit-Mode mit dem Account aus dem APP_STATE. */
+/* Öffnet das Account-Modal im Edit-Mode mit dem Account aus dem APP_STATE.
+   v2.46.66: Suche auch in allAccessibleAccounts (pausierte Accounts sollen editierbar bleiben). */
 function editAccount(accountId) {
-  const account = APP_STATE.accounts.find(a => a.id === accountId);
+  const account = (APP_STATE.allAccessibleAccounts || []).find(a => a.id === accountId)
+               || (APP_STATE.accounts || []).find(a => a.id === accountId);
   if (!account) return toast('Account nicht gefunden', 'error');
   openAccountModal(account);
 }
