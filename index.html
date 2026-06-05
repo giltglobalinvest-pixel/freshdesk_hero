@@ -732,7 +732,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.66';
+const APP_VERSION = 'v2.46.67';
 
 /* ============================================================
    GLOBAL THEME — v2.46.12
@@ -9625,13 +9625,14 @@ function _renderTicketStackCard(t, isTop) {
             '<i data-lucide="check-circle-2" class="w-5 h-5"></i> <span class="text-[15px]">Schließen</span>' +
           '</button>') +
     '</div>' +
-    // v2.46.60: 5 Schnellaktionen — Email-Vorlage ist dazugekommen
-    '<div class="grid grid-cols-5 gap-1.5 mt-2">' +
-      '<button onclick="event.stopPropagation(); openRuleFromTicket(' + ticketRefArgs + ')" class="inline-flex flex-col items-center justify-center gap-0.5 px-1 py-2.5 bg-purple-50 hover:bg-purple-100 border border-purple-200 text-purple-700 rounded-xl text-[11px] font-semibold" title="Regel aus Ticket lernen"><i data-lucide="wand-2" class="w-4 h-4"></i>Regel</button>' +
-      '<button onclick="event.stopPropagation(); openWiedervorlagePicker(' + ticketRefArgs + ', true)" class="inline-flex flex-col items-center justify-center gap-0.5 px-1 py-2.5 bg-ink-50 hover:bg-ink-100 border border-ink-200 text-ink-700 rounded-xl text-[11px] font-semibold" title="Wiedervorlage"><i data-lucide="clock" class="w-4 h-4"></i>WV</button>' +
-      '<button onclick="event.stopPropagation(); openTicketEmailModal(' + ticketRefArgs + ')" class="inline-flex flex-col items-center justify-center gap-0.5 px-1 py-2.5 bg-orange-50 hover:bg-orange-100 border border-orange-200 text-orange-700 rounded-xl text-[11px] font-semibold" title="Email-Vorlage senden"><i data-lucide="mail" class="w-4 h-4"></i>Email</button>' +
-      '<button onclick="event.stopPropagation(); openWhatsAppTicketShare(' + ticketRefArgs + ')" class="inline-flex flex-col items-center justify-center gap-0.5 px-1 py-2.5 bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 text-emerald-700 rounded-xl text-[11px] font-semibold" title="Per WhatsApp an Kollegen schicken"><i data-lucide="message-circle" class="w-4 h-4"></i>WhatsApp</button>' +
-      '<button onclick="event.stopPropagation(); openTicketDetail(' + ticketRefArgs + ')" class="inline-flex flex-col items-center justify-center gap-0.5 px-1 py-2.5 bg-ink-50 hover:bg-ink-100 border border-ink-200 text-ink-700 rounded-xl text-[11px] font-semibold" title="Detail-Ansicht"><i data-lucide="external-link" class="w-4 h-4"></i>Detail</button>' +
+    // v2.46.67: 6 Schnellaktionen — Anfrage-Strukturierer dazugekommen
+    '<div class="grid grid-cols-6 gap-1 mt-2">' +
+      '<button onclick="event.stopPropagation(); openRuleFromTicket(' + ticketRefArgs + ')" class="inline-flex flex-col items-center justify-center gap-0.5 px-1 py-2 bg-purple-50 hover:bg-purple-100 border border-purple-200 text-purple-700 rounded-xl text-[10px] font-semibold" title="Regel aus Ticket lernen"><i data-lucide="wand-2" class="w-4 h-4"></i>Regel</button>' +
+      '<button onclick="event.stopPropagation(); openRestructureTitleModal(' + ticketRefArgs + ')" class="inline-flex flex-col items-center justify-center gap-0.5 px-1 py-2 bg-sky-50 hover:bg-sky-100 border border-sky-200 text-sky-700 rounded-xl text-[10px] font-semibold" title="Titel als ANFRAGE strukturieren"><i data-lucide="text-cursor-input" class="w-4 h-4"></i>Anfrage</button>' +
+      '<button onclick="event.stopPropagation(); openWiedervorlagePicker(' + ticketRefArgs + ', true)" class="inline-flex flex-col items-center justify-center gap-0.5 px-1 py-2 bg-ink-50 hover:bg-ink-100 border border-ink-200 text-ink-700 rounded-xl text-[10px] font-semibold" title="Wiedervorlage"><i data-lucide="clock" class="w-4 h-4"></i>WV</button>' +
+      '<button onclick="event.stopPropagation(); openTicketEmailModal(' + ticketRefArgs + ')" class="inline-flex flex-col items-center justify-center gap-0.5 px-1 py-2 bg-orange-50 hover:bg-orange-100 border border-orange-200 text-orange-700 rounded-xl text-[10px] font-semibold" title="Email-Vorlage senden"><i data-lucide="mail" class="w-4 h-4"></i>Email</button>' +
+      '<button onclick="event.stopPropagation(); openWhatsAppTicketShare(' + ticketRefArgs + ')" class="inline-flex flex-col items-center justify-center gap-0.5 px-1 py-2 bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 text-emerald-700 rounded-xl text-[10px] font-semibold" title="Per WhatsApp"><i data-lucide="message-circle" class="w-4 h-4"></i>WApp</button>' +
+      '<button onclick="event.stopPropagation(); openTicketDetail(' + ticketRefArgs + ')" class="inline-flex flex-col items-center justify-center gap-0.5 px-1 py-2 bg-ink-50 hover:bg-ink-100 border border-ink-200 text-ink-700 rounded-xl text-[10px] font-semibold" title="Detail-Ansicht"><i data-lucide="external-link" class="w-4 h-4"></i>Detail</button>' +
     '</div>';
 
   return '<div class="bg-white rounded-3xl overflow-hidden shadow-xl border border-ink-100">' +
@@ -9961,6 +9962,7 @@ function openCardActionsSheet(accountId, ticketId) {
           ${row('check-circle-2',   'emerald', 'Schließen (Status: Geschlossen)',`closeCardActionsSheet(); ticketActionClose('${escapeAttr(accountId)}', ${ticketId}, null)`, 'Ticket im Freshdesk schließen')}
           ${row('ban',              'red',     'Als SPAM markieren',             `closeCardActionsSheet(); ticketActionSpam('${escapeAttr(accountId)}', ${ticketId}, null)`, 'In den Papierkorb verschieben')}
           ${row('clock',            'indigo',  'Auf Wiedervorlage…',             `closeCardActionsSheet(); openWiedervorlagePicker('${escapeAttr(accountId)}', ${ticketId}, true)`, 'Aus meiner Sicht ausblenden bis…')}
+          ${row('text-cursor-input','sky',     'Titel strukturieren',            `closeCardActionsSheet(); openRestructureTitleModal('${escapeAttr(accountId)}', ${ticketId})`, 'ANFRAGE Nr | Standort | Fabriknummer')}
           ${row('mail',             'orange',  'Email-Vorlage senden',           `closeCardActionsSheet(); openTicketEmailModal('${escapeAttr(accountId)}', ${ticketId})`, 'Canned Response als Outbound-Email')}
           ${row('message-circle',   'emerald', 'Per WhatsApp an Kollegen',       `closeCardActionsSheet(); openWhatsAppTicketShare('${escapeAttr(accountId)}', ${ticketId})`, 'Mit Deep-Link + optionaler KI-Begleittext')}
           ${row('wand-2',           'purple',  'KI-Regel aus Ticket erstellen',  `closeCardActionsSheet(); openRuleFromTicket('${escapeAttr(accountId)}', ${ticketId})`, 'Muster lernen für zukünftige Tickets')}
@@ -10818,6 +10820,7 @@ function _ticketActionBarIcons(accountId, ticketId) {
     btn('lightbulb',      'amber',   'Vorschlag aus Team-Historie',                            `openKnowledgeSuggestionModal('${accIdAttr}', ${ticketId})`),
     `<span class="shrink-0 w-px h-5 bg-ink-200 mx-0.5"></span>`,
     btn('clock',          'indigo',  'Auf Wiedervorlage / aus meiner Sicht ausblenden',        `openWiedervorlagePicker('${accIdAttr}', ${ticketId})`),
+    btn('text-cursor-input', 'sky',  'Titel als „ANFRAGE Nr | Standort | Fabriknr" strukturieren', `openRestructureTitleModal('${accIdAttr}', ${ticketId})`),
     btn('mail',           'orange',  'Email-Vorlage senden (Outbound)',                        `openTicketEmailModal('${accIdAttr}', ${ticketId})`),
     btn('message-circle', 'emerald', 'Per WhatsApp an Kollegen schicken',                     `openWhatsAppTicketShare('${accIdAttr}', ${ticketId})`),
     btn('check-square',   'brand',   'Mehrfach-Auswahl starten',                               `closeModal(); msEnter('${accIdAttr}', ${ticketId})`),
@@ -19939,6 +19942,178 @@ async function processSendTicketEmail(btn) {
 
 function closeTicketEmailModal() {
   delete window._TICKET_EMAIL_CTX;
+  const host = document.getElementById('subModalHost');
+  if (host) host.innerHTML = '';
+  document.body.style.overflow = '';
+}
+
+/* ===================== v2.46.67: TITEL STRUKTURIEREN (ANFRAGE-FORMAT) ============
+   Claude extrahiert Standort + Fabriknummer aus dem Ticket-Inhalt und schlägt
+   einen sauberen Titel vor: "ANFRAGE <id> | <Standort> | <Fabriknummer>".
+   User kann Felder vor dem Speichern editieren — dann PUT subject zu FD. */
+async function openRestructureTitleModal(accountId, ticketId) {
+  let host = document.getElementById('subModalHost');
+  if (!host) { host = document.createElement('div'); host.id = 'subModalHost'; document.body.appendChild(host); }
+  host.innerHTML =
+    '<div class="fixed inset-0 z-[60] flex items-end justify-center bg-black/50">' +
+      '<div class="bg-white w-full max-w-md rounded-t-3xl shadow-2xl p-8 text-center safe-bottom">' +
+        '<div class="spinner inline-block w-7 h-7 border-[3px] text-sky-500"></div>' +
+        '<p class="text-sm text-ink-500 mt-2">Lade Ticket-Daten + KI-Analyse…</p>' +
+      '</div>' +
+    '</div>';
+  document.body.style.overflow = 'hidden';
+  try {
+    // Ticket holen (Cache wenn da, sonst fetchen)
+    let ticket = APP_STATE.ticketCache?.get?.(accountId + '|' + ticketId);
+    if (!ticket || !ticket.conversations) {
+      try { ticket = await fetchTicketDetail(accountId, ticketId); } catch (_) {}
+    }
+    if (!ticket) throw new Error('Ticket konnte nicht geladen werden');
+    // KI fragen: Standort + Fabriknummer extrahieren
+    const subj = ticket.subject || '';
+    const desc = htmlToText(ticket.description_text || ticket.description || '').slice(0, 2500);
+    const conv = (ticket.conversations || [])
+      .slice(0, 4)
+      .map(c => (c.incoming ? 'Kunde' : 'Agent') + ': ' + htmlToText(c.body_text || c.body || '').slice(0, 400))
+      .join('\n\n');
+    const sysPrompt =
+      'Du extrahierst aus einem Aufzug-Service-Ticket zwei Felder:\n' +
+      '1. STANDORT — die Adresse oder der Ort, wo der Aufzug steht (z.B. "Berlin Hauptstr. 12", "Werl Bornstraße 14", "Stuttgart Hbf"). ' +
+      'Bevorzuge: Straße + Hausnummer + Ort. Nimm KEINE Firmennamen, Personennamen oder Liftarten als Standort.\n' +
+      '2. FABRIKNUMMER — die interne Aufzugs-Seriennummer/Fabriknummer (Format meist FN, F-Nr, F#, oder einfach eine Zahl mit 4-8 Stellen). ' +
+      'Häufige Marker: "FN", "F.-Nr.", "Fabrik-Nr", "Fabr. Nr", "Anlage", "Aufzug Nr", "Vorgang".\n\n' +
+      'Antworte AUSSCHLIESSLICH mit gültigem JSON, ohne Markdown-Codeblock, ohne erklärenden Text:\n' +
+      '{ "standort": string|null, "fabriknummer": string|null }\n' +
+      'Wenn du etwas nicht sicher findest → null. KEINE Erklärungen, KEINE Klammern, NUR JSON.';
+    const userPrompt = 'Betreff: ' + subj + '\n\nBeschreibung:\n' + desc + (conv ? '\n\nVerlauf:\n' + conv : '');
+    let plan = { standort: null, fabriknummer: null };
+    try {
+      const data = await proxyJson('/anthropic/v1/messages', {
+        method: 'POST',
+        body: JSON.stringify({
+          model: 'claude-haiku-4-5-20251001',
+          max_tokens: 200,
+          system: sysPrompt,
+          messages: [{ role: 'user', content: userPrompt }]
+        })
+      });
+      const raw = (data?.content?.[0]?.text || '').trim();
+      const json = raw.replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/i, '').trim();
+      try { plan = JSON.parse(json); }
+      catch (_) {
+        const m = json.match(/\{[\s\S]*\}/);
+        if (m) plan = JSON.parse(m[0]);
+      }
+    } catch (e) {
+      console.warn('KI-Extraktion fehlgeschlagen, Modal trotzdem öffnen:', e.message);
+    }
+    _renderRestructureTitleModal(accountId, ticketId, ticket, plan);
+  } catch (e) {
+    closeRestructureTitleModal();
+    toast('Fehler: ' + (e.message || e), 'error', 8000);
+  }
+}
+
+function _renderRestructureTitleModal(accountId, ticketId, ticket, plan) {
+  const host = document.getElementById('subModalHost');
+  if (!host) return;
+  const oldSubj = ticket.subject || '';
+  host.innerHTML =
+    '<div class="fixed inset-0 z-[60] flex items-end justify-center bg-black/50" onclick="if(event.target===this)closeRestructureTitleModal()">' +
+      '<div class="bg-white w-full max-w-md rounded-t-3xl shadow-2xl flex flex-col safe-bottom" style="max-height:92vh">' +
+        '<div class="safe-top px-4 py-3 border-b border-ink-200 flex items-center justify-between gap-2 shrink-0">' +
+          '<h3 class="font-bold text-ink-900 inline-flex items-center gap-2"><i data-lucide="text-cursor-input" class="w-5 h-5 text-sky-600"></i> Titel strukturieren</h3>' +
+          '<button onclick="closeRestructureTitleModal()" class="w-9 h-9 rounded-lg hover:bg-ink-100 flex items-center justify-center"><i data-lucide="x" class="w-5 h-5 text-ink-700"></i></button>' +
+        '</div>' +
+        '<div class="flex-1 overflow-y-auto p-4 space-y-3">' +
+          '<input type="hidden" id="rstAcc" value="' + escapeAttr(accountId) + '">' +
+          '<input type="hidden" id="rstTicketId" value="' + ticketId + '">' +
+          '<div class="bg-ink-50 rounded-xl p-2.5 text-[11px]">' +
+            '<p class="text-ink-500 uppercase tracking-wider text-[9px] font-bold">Bisheriger Titel</p>' +
+            '<p class="text-ink-800 mt-0.5 line-clamp-3">' + escapeHtml(oldSubj) + '</p>' +
+          '</div>' +
+          '<label class="text-xs font-bold text-ink-700 uppercase tracking-wider block">Ticket-Nummer</label>' +
+          '<input id="rstNumber" type="text" value="' + escapeAttr(String(ticketId)) + '" class="w-full px-3 py-2.5 border border-ink-300 rounded-xl text-sm bg-ink-50 text-ink-700" readonly>' +
+          '<label class="text-xs font-bold text-ink-700 uppercase tracking-wider block">Standort</label>' +
+          '<input id="rstStandort" type="text" value="' + escapeAttr(plan?.standort || '') + '" oninput="_rstUpdatePreview()" placeholder="z.B. Berlin Hauptstr. 12" class="w-full px-3 py-2.5 border ' + (plan?.standort ? 'border-ink-300' : 'border-amber-300 bg-amber-50/30') + ' rounded-xl text-sm">' +
+          (!plan?.standort ? '<p class="text-[10px] text-amber-700 -mt-1">KI konnte keinen Standort eindeutig erkennen — bitte selbst eintragen.</p>' : '') +
+          '<label class="text-xs font-bold text-ink-700 uppercase tracking-wider block">Fabriknummer</label>' +
+          '<input id="rstFabriknummer" type="text" value="' + escapeAttr(plan?.fabriknummer || '') + '" oninput="_rstUpdatePreview()" placeholder="z.B. FN-98765" class="w-full px-3 py-2.5 border ' + (plan?.fabriknummer ? 'border-ink-300' : 'border-amber-300 bg-amber-50/30') + ' rounded-xl text-sm">' +
+          (!plan?.fabriknummer ? '<p class="text-[10px] text-amber-700 -mt-1">KI konnte keine Fabriknummer eindeutig erkennen — bitte selbst eintragen.</p>' : '') +
+          '<label class="text-xs font-bold text-ink-700 uppercase tracking-wider block">Vorschau (neuer Titel)</label>' +
+          '<div id="rstPreview" class="bg-sky-50 border border-sky-200 rounded-xl p-3 text-sm font-semibold text-sky-900 break-words"></div>' +
+          '<label class="flex items-center gap-2 text-[11px] text-ink-700 cursor-pointer">' +
+            '<input id="rstAddNote" type="checkbox" checked class="w-4 h-4 accent-sky-600">' +
+            'Als Notiz dokumentieren („Titel automatisch strukturiert")' +
+          '</label>' +
+          '<div id="rstErr" class="hidden bg-red-50 border border-red-200 rounded-xl p-3 text-sm text-red-800"></div>' +
+        '</div>' +
+        '<div class="border-t border-ink-200 p-3 flex gap-2 shrink-0">' +
+          '<button onclick="closeRestructureTitleModal()" class="flex-1 bg-ink-100 hover:bg-ink-200 text-ink-700 rounded-xl px-3 py-3 text-sm font-bold">Abbrechen</button>' +
+          '<button onclick="processRestructureTitle(this)" class="flex-[2] bg-sky-600 hover:bg-sky-700 text-white rounded-xl px-3 py-3 text-sm font-bold inline-flex items-center justify-center gap-1.5 shadow-md">' +
+            '<i data-lucide="check" class="w-4 h-4"></i> Titel speichern' +
+          '</button>' +
+        '</div>' +
+      '</div>' +
+    '</div>';
+  if (window.lucide) lucide.createIcons();
+  _rstUpdatePreview();
+}
+
+function _rstBuildTitle(ticketId, standort, fabriknummer) {
+  const parts = ['ANFRAGE ' + ticketId];
+  if (standort && standort.trim())    parts.push(standort.trim());
+  if (fabriknummer && fabriknummer.trim()) parts.push(fabriknummer.trim());
+  return parts.join(' | ');
+}
+
+function _rstUpdatePreview() {
+  const id = document.getElementById('rstNumber')?.value || '';
+  const s  = document.getElementById('rstStandort')?.value || '';
+  const f  = document.getElementById('rstFabriknummer')?.value || '';
+  const pv = document.getElementById('rstPreview');
+  if (pv) pv.textContent = _rstBuildTitle(id, s, f);
+}
+
+async function processRestructureTitle(btn) {
+  const errEl = document.getElementById('rstErr');
+  const setErr = function (msg) { if (errEl) { errEl.textContent = msg; errEl.classList.remove('hidden'); } };
+  if (errEl) errEl.classList.add('hidden');
+  const accountId = document.getElementById('rstAcc')?.value;
+  const ticketId  = parseInt(document.getElementById('rstTicketId')?.value, 10);
+  const standort  = (document.getElementById('rstStandort')?.value || '').trim();
+  const fabriknr  = (document.getElementById('rstFabriknummer')?.value || '').trim();
+  const addNote   = !!document.getElementById('rstAddNote')?.checked;
+  if (!standort && !fabriknr) return setErr('Mindestens Standort ODER Fabriknummer muss ausgefüllt sein.');
+  const newTitle = _rstBuildTitle(ticketId, standort, fabriknr);
+  setBusy(btn, true, 'Speichere…');
+  try {
+    await proxyJson('/freshdesk/' + encodeURIComponent(accountId) + '/api/v2/tickets/' + ticketId, {
+      method: 'PUT',
+      body: JSON.stringify({ subject: newTitle })
+    });
+    // Lokal aktualisieren (Cache + Listen)
+    const cached = APP_STATE.ticketCache?.get?.(accountId + '|' + ticketId);
+    if (cached) cached.subject = newTitle;
+    if (typeof patchTicketInList === 'function') patchTicketInList(accountId, ticketId, { subject: newTitle });
+    // Optional Notiz
+    if (addNote) {
+      const noteBody = '🏷 Titel automatisch strukturiert: <b>' + escapeHtml(newTitle) + '</b><br>' +
+        'Standort: ' + escapeHtml(standort || '—') + '<br>Fabriknummer: ' + escapeHtml(fabriknr || '—');
+      proxyJson('/freshdesk/' + encodeURIComponent(accountId) + '/api/v2/tickets/' + ticketId + '/notes', {
+        method: 'POST',
+        body: JSON.stringify({ body: noteBody, private: true })
+      }).catch(function (e) { console.warn('Notiz fehlgeschlagen:', e.message); });
+    }
+    closeRestructureTitleModal();
+    toast('Titel aktualisiert', 'success', 3500);
+  } catch (e) {
+    setBusy(btn, false);
+    setErr(e.message || String(e));
+  }
+}
+
+function closeRestructureTitleModal() {
   const host = document.getElementById('subModalHost');
   if (host) host.innerHTML = '';
   document.body.style.overflow = '';
