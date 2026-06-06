@@ -732,7 +732,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.76';
+const APP_VERSION = 'v2.46.77';
 
 /* ============================================================
    GLOBAL THEME — v2.46.12
@@ -21465,11 +21465,11 @@ async function openAngebotsChatModal(accountId, ticketId) {
       stilReferenzen: null, // wird beim ersten Step gefüllt
     };
     _renderAngChatShell();
-    // v2.46.76: KI startet NICHT automatisch. User beginnt mit der Beschreibung.
+    // v2.46.76 / .77: KI startet NICHT automatisch. User beginnt mit der Beschreibung.
     // Statt KI-Greeting: statische Hint-Bubble + Input-Field bereit.
     const subj = ticket.subject || '';
     const reqName = ticket.requester?.name || '';
-    const profileSubtypen = (s.collected && Array.isArray(s.profile?.subtypen_keys)) ? s.profile.subtypen_keys : [];
+    const profileSubtypen = Array.isArray(profile?.subtypen_keys) ? profile.subtypen_keys : [];
     let subtypHint = '';
     if (profileSubtypen.length === 1) {
       const t = ANGEBOTS_SUBTYPEN.find(x => x.key === profileSubtypen[0]);
