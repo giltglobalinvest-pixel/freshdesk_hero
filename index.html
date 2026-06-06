@@ -732,7 +732,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.69';
+const APP_VERSION = 'v2.46.70';
 
 /* ============================================================
    GLOBAL THEME — v2.46.12
@@ -9698,15 +9698,23 @@ function _renderTicketStackCard(t, isTop) {
             '<i data-lucide="check-circle-2" class="w-5 h-5"></i> <span class="text-[15px]">Schließen</span>' +
           '</button>') +
     '</div>' +
-    // v2.46.67: 6 Schnellaktionen — Anfrage-Strukturierer dazugekommen
-    '<div class="grid grid-cols-6 gap-1 mt-2">' +
-      '<button onclick="event.stopPropagation(); openRuleFromTicket(' + ticketRefArgs + ')" class="inline-flex flex-col items-center justify-center gap-0.5 px-1 py-2 bg-purple-50 hover:bg-purple-100 border border-purple-200 text-purple-700 rounded-xl text-[10px] font-semibold" title="Regel aus Ticket lernen"><i data-lucide="wand-2" class="w-4 h-4"></i>Regel</button>' +
-      '<button onclick="event.stopPropagation(); openRestructureTitleModal(' + ticketRefArgs + ')" class="inline-flex flex-col items-center justify-center gap-0.5 px-1 py-2 bg-sky-50 hover:bg-sky-100 border border-sky-200 text-sky-700 rounded-xl text-[10px] font-semibold" title="Titel als ANFRAGE strukturieren"><i data-lucide="text-cursor-input" class="w-4 h-4"></i>Anfrage</button>' +
-      '<button onclick="event.stopPropagation(); openWiedervorlagePicker(' + ticketRefArgs + ', true)" class="inline-flex flex-col items-center justify-center gap-0.5 px-1 py-2 bg-ink-50 hover:bg-ink-100 border border-ink-200 text-ink-700 rounded-xl text-[10px] font-semibold" title="Wiedervorlage"><i data-lucide="clock" class="w-4 h-4"></i>WV</button>' +
-      '<button onclick="event.stopPropagation(); openTicketEmailModal(' + ticketRefArgs + ')" class="inline-flex flex-col items-center justify-center gap-0.5 px-1 py-2 bg-orange-50 hover:bg-orange-100 border border-orange-200 text-orange-700 rounded-xl text-[10px] font-semibold" title="Email-Vorlage senden"><i data-lucide="mail" class="w-4 h-4"></i>Email</button>' +
-      '<button onclick="event.stopPropagation(); openWhatsAppTicketShare(' + ticketRefArgs + ')" class="inline-flex flex-col items-center justify-center gap-0.5 px-1 py-2 bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 text-emerald-700 rounded-xl text-[10px] font-semibold" title="Per WhatsApp"><i data-lucide="message-circle" class="w-4 h-4"></i>WApp</button>' +
-      '<button onclick="event.stopPropagation(); openTicketDetail(' + ticketRefArgs + ')" class="inline-flex flex-col items-center justify-center gap-0.5 px-1 py-2 bg-ink-50 hover:bg-ink-100 border border-ink-200 text-ink-700 rounded-xl text-[10px] font-semibold" title="Detail-Ansicht"><i data-lucide="external-link" class="w-4 h-4"></i>Detail</button>' +
-    '</div>';
+    // v2.46.70: 7 Schnellaktionen wenn Angebots-Modul aktiv, sonst 6
+    (function () {
+      const hasAng = accountHasAngebotsModul(acc);
+      const cols = hasAng ? 'grid-cols-7' : 'grid-cols-6';
+      const angBtn = hasAng
+        ? '<button onclick="event.stopPropagation(); openAngebotsModal(' + ticketRefArgs + ')" class="inline-flex flex-col items-center justify-center gap-0.5 px-1 py-2 bg-indigo-50 hover:bg-indigo-100 border border-indigo-200 text-indigo-700 rounded-xl text-[10px] font-semibold" title="Angebot erstellen (KI)"><i data-lucide="file-text" class="w-4 h-4"></i>Angebot</button>'
+        : '';
+      return '<div class="grid ' + cols + ' gap-1 mt-2">' +
+        '<button onclick="event.stopPropagation(); openRuleFromTicket(' + ticketRefArgs + ')" class="inline-flex flex-col items-center justify-center gap-0.5 px-1 py-2 bg-purple-50 hover:bg-purple-100 border border-purple-200 text-purple-700 rounded-xl text-[10px] font-semibold" title="Regel aus Ticket lernen"><i data-lucide="wand-2" class="w-4 h-4"></i>Regel</button>' +
+        '<button onclick="event.stopPropagation(); openRestructureTitleModal(' + ticketRefArgs + ')" class="inline-flex flex-col items-center justify-center gap-0.5 px-1 py-2 bg-sky-50 hover:bg-sky-100 border border-sky-200 text-sky-700 rounded-xl text-[10px] font-semibold" title="Titel als ANFRAGE strukturieren"><i data-lucide="text-cursor-input" class="w-4 h-4"></i>Anfrage</button>' +
+        angBtn +
+        '<button onclick="event.stopPropagation(); openWiedervorlagePicker(' + ticketRefArgs + ', true)" class="inline-flex flex-col items-center justify-center gap-0.5 px-1 py-2 bg-ink-50 hover:bg-ink-100 border border-ink-200 text-ink-700 rounded-xl text-[10px] font-semibold" title="Wiedervorlage"><i data-lucide="clock" class="w-4 h-4"></i>WV</button>' +
+        '<button onclick="event.stopPropagation(); openTicketEmailModal(' + ticketRefArgs + ')" class="inline-flex flex-col items-center justify-center gap-0.5 px-1 py-2 bg-orange-50 hover:bg-orange-100 border border-orange-200 text-orange-700 rounded-xl text-[10px] font-semibold" title="Email-Vorlage senden"><i data-lucide="mail" class="w-4 h-4"></i>Email</button>' +
+        '<button onclick="event.stopPropagation(); openWhatsAppTicketShare(' + ticketRefArgs + ')" class="inline-flex flex-col items-center justify-center gap-0.5 px-1 py-2 bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 text-emerald-700 rounded-xl text-[10px] font-semibold" title="Per WhatsApp"><i data-lucide="message-circle" class="w-4 h-4"></i>WApp</button>' +
+        '<button onclick="event.stopPropagation(); openTicketDetail(' + ticketRefArgs + ')" class="inline-flex flex-col items-center justify-center gap-0.5 px-1 py-2 bg-ink-50 hover:bg-ink-100 border border-ink-200 text-ink-700 rounded-xl text-[10px] font-semibold" title="Detail-Ansicht"><i data-lucide="external-link" class="w-4 h-4"></i>Detail</button>' +
+      '</div>';
+    })();
 
   return '<div class="bg-white rounded-3xl overflow-hidden shadow-xl border border-ink-100">' +
     // Status-Gradient-Header
@@ -10036,6 +10044,9 @@ function openCardActionsSheet(accountId, ticketId) {
           ${row('ban',              'red',     'Als SPAM markieren',             `closeCardActionsSheet(); ticketActionSpam('${escapeAttr(accountId)}', ${ticketId}, null)`, 'In den Papierkorb verschieben')}
           ${row('clock',            'indigo',  'Auf Wiedervorlage…',             `closeCardActionsSheet(); openWiedervorlagePicker('${escapeAttr(accountId)}', ${ticketId}, true)`, 'Aus meiner Sicht ausblenden bis…')}
           ${row('text-cursor-input','sky',     'Titel strukturieren',            `closeCardActionsSheet(); openRestructureTitleModal('${escapeAttr(accountId)}', ${ticketId})`, 'ANFRAGE Nr | Standort | Fabriknummer')}
+          ${accountHasAngebotsModul((APP_STATE.accounts || []).find(a => a.id === accountId))
+            ? row('file-text', 'indigo', 'Angebot erstellen', `closeCardActionsSheet(); openAngebotsModal('${escapeAttr(accountId)}', ${ticketId})`, 'KI-gestützter Verkaufsbrief mit Pauschalpreis')
+            : ''}
           ${row('mail',             'orange',  'Email-Vorlage senden',           `closeCardActionsSheet(); openTicketEmailModal('${escapeAttr(accountId)}', ${ticketId})`, 'Canned Response als Outbound-Email')}
           ${row('message-circle',   'emerald', 'Per WhatsApp an Kollegen',       `closeCardActionsSheet(); openWhatsAppTicketShare('${escapeAttr(accountId)}', ${ticketId})`, 'Mit Deep-Link + optionaler KI-Begleittext')}
           ${row('wand-2',           'purple',  'KI-Regel aus Ticket erstellen',  `closeCardActionsSheet(); openRuleFromTicket('${escapeAttr(accountId)}', ${ticketId})`, 'Muster lernen für zukünftige Tickets')}
@@ -10877,6 +10888,7 @@ let CURRENT_TICKET = null;
    Auf Mobile horizontal scrollbar, auf Desktop alle Icons sichtbar. */
 function _ticketActionBarIcons(accountId, ticketId) {
   const accIdAttr = escapeAttr(accountId);
+  const acc = (APP_STATE.accounts || []).find(a => a.id === accountId); // v2.46.70: für accountHasAngebotsModul
   const btn = (icon, color, label, onclick) =>
     `<button onclick="${onclick}" class="shrink-0 w-9 h-9 rounded-lg hover:bg-${color}-50 active:bg-${color}-100 inline-flex items-center justify-center group" aria-label="${escapeAttr(label)}" title="${escapeAttr(label)}">
       <i data-lucide="${icon}" class="w-4 h-4 text-${color}-700 group-active:text-${color}-900"></i>
@@ -10894,6 +10906,8 @@ function _ticketActionBarIcons(accountId, ticketId) {
     `<span class="shrink-0 w-px h-5 bg-ink-200 mx-0.5"></span>`,
     btn('clock',          'indigo',  'Auf Wiedervorlage / aus meiner Sicht ausblenden',        `openWiedervorlagePicker('${accIdAttr}', ${ticketId})`),
     btn('text-cursor-input', 'sky',  'Titel als „ANFRAGE Nr | Standort | Fabriknr" strukturieren', `openRestructureTitleModal('${accIdAttr}', ${ticketId})`),
+    // v2.46.70: Angebots-Button nur für Aufzug-Service-Accounts (Aufzugshandwerk/Aszendio)
+    (accountHasAngebotsModul(acc) ? btn('file-text', 'indigo', 'Angebot erstellen (KI-gestützt)', `openAngebotsModal('${accIdAttr}', ${ticketId})`) : ''),
     btn('mail',           'orange',  'Email-Vorlage senden (Outbound)',                        `openTicketEmailModal('${accIdAttr}', ${ticketId})`),
     btn('message-circle', 'emerald', 'Per WhatsApp an Kollegen schicken',                     `openWhatsAppTicketShare('${accIdAttr}', ${ticketId})`),
     btn('check-square',   'brand',   'Mehrfach-Auswahl starten',                               `closeModal(); msEnter('${accIdAttr}', ${ticketId})`),
@@ -20667,6 +20681,835 @@ function closeNewEmailAiModal() {
   const host = document.getElementById('modalHost');
   if (host) host.innerHTML = '';
   document.body.style.overflow = '';
+}
+
+/* ===================== v2.46.70: ANGEBOTS-MODUL (Phase 1.0) ============
+   TKE-Stil-Verkaufsbrief + Pauschalpreis-Angebot mit AGB-Footer.
+   Quick-Icon im Ticket öffnet Modal: Kontext-Input → KI-Generation (Sonnet)
+   → editierbare Vorschau → Reply senden / PDF drucken / Entwurf speichern.
+
+   Pro Account hartcodierte Profile mit Briefkopf-Daten + AGB-Text.
+   Phase 1.2 wird Account-Edit-Modal ein UI bekommen um diese zu pflegen.
+*/
+
+/* Aufzugshandwerk-Stammdaten — aus dem Original-Angebot übernommen */
+const ANGEBOTS_PROFILE_AUFZUGSHANDWERK = {
+  firma: 'Aufzugshandwerk GmbH',
+  anschrift: 'Ludwig-Pfau-Str. 17, 70176 Stuttgart',
+  hrb: 'Amtsgericht Stuttgart HRB 770 666',
+  tel: '0711 96882904',
+  email: 'service@aufzugshandwerk.de',
+  web: 'www.aufzugshandwerk.de',
+  steuernr: '9049 107 575',
+  ustidnr: '', // wenn bekannt
+  bank: 'Volksbank Stuttgart eG',
+  bic: 'VOBADESS',
+  iban: 'DE12 6009 0100 0599 7370 00',
+  briefkopf_logo_text: 'aufzugshandwerk',
+  default_zahlungsziel: '14 Tage nach Rechnungsstellung',
+  default_lieferzeit: 'nach Terminabsprache',
+  default_gewaehrleistung: '2 Jahre auf verbautes Material',
+  default_bindefrist: '60 Tage',
+  default_preisstellung: 'Festpreis netto, zzgl. gesetzlicher MwSt',
+  default_mwst: 19,
+  ki_branche_hint: 'Aufzug-Service (Wartung, Reparatur, Modernisierung). Typische Defekte: Frequenzumrichter, Türsteuerung, Tableaus, Notrufzentrale, Antrieb. Preise grob: Wartung 100-200€/Monat, Stundensatz Monteur 95-145€, Frequenzumrichter Material 3.000-8.000€, Türmotor 800-2.500€.',
+  agb_html: '<h2 style="font-size:13pt;margin:0 0 12px 0;font-weight:bold">MONTAGEBEDINGUNGEN</h2>' +
+    '<div style="font-size:9pt;line-height:1.4">' +
+    '<p style="margin:8px 0 2px 0;font-weight:bold">Preise</p>' +
+    '<p style="margin:0">Alle Preise verstehen sich netto (ohne gesetzliche Mehrwertsteuer).</p>' +
+    '<p style="margin:8px 0 2px 0;font-weight:bold">Stundenverrechnungssätze</p>' +
+    '<p style="margin:0">Stundenverrechnungssätze für Arbeitszeit während der normalen Geschäftszeiten: 90,00 €/h</p>' +
+    '<p style="margin:8px 0 2px 0;font-weight:bold">Normale Geschäftszeiten</p>' +
+    '<p style="margin:0">Montag – Freitag: 8:00 – 16:00 Uhr</p>' +
+    '<p style="margin:8px 0 2px 0;font-weight:bold">Fahrzeugpauschalen</p>' +
+    '<p style="margin:0">Die Verrechnung erfolgt nach ortsüblichen Verrechnungssätzen.</p>' +
+    '<p style="margin:8px 0 2px 0;font-weight:bold">Zuschläge</p>' +
+    '<p style="margin:0">Montag – Samstag: 50% / Sonntag: 100% / Feiertage: 150% – Gilt bei Arbeiten außerhalb der normalen Geschäftszeiten.</p>' +
+    '<p style="margin:8px 0 2px 0;font-weight:bold">Arbeitsnachweise</p>' +
+    '<p style="margin:0">Arbeitsnachweise werden vom Monteur, sowie einer unterschriftsberechtigten Person vor Ort unterschrieben. Sollte keine unterschriftsberechtigte Person vor Ort anwesend sein, so ist die Unterschrift des Monteurs ausreichend.</p>' +
+    '<p style="margin:8px 0 2px 0;font-weight:bold">Mehrarbeiten</p>' +
+    '<p style="margin:0">Eventuell erforderliche Mehrarbeiten werden zusätzlich und separat berechnet.</p>' +
+    '<p style="margin:8px 0 2px 0;font-weight:bold">Material</p>' +
+    '<p style="margin:0">Verbautes oder geliefertes Material bleibt bis zur vollständigen Rechnungsbegleichung in Besitz des Auftragnehmers.</p>' +
+    '<p style="margin:8px 0 2px 0;font-weight:bold">Ausgebautes Material</p>' +
+    '<p style="margin:0">Defektes Material geht nach Ausbau in den Besitz des Auftragnehmers über oder wird direkt verschrottet.</p>' +
+    '<p style="margin:8px 0 2px 0;font-weight:bold">Garantie</p>' +
+    '<p style="margin:0">Auf verbautes Material wird eine Garantie von 2 Jahren gegeben. Reklamationen sind vom Kunden zu begründen und nachzuweisen.</p>' +
+    '<p style="margin:8px 0 2px 0;font-weight:bold">Angebotsgültigkeit</p>' +
+    '<p style="margin:0">Dieses Angebot ist 60 Tage lang gültig.</p>' +
+    '<p style="margin:8px 0 2px 0;font-weight:bold">Haftungsausschluss</p>' +
+    '<p style="margin:0">Wir übernehmen keine Haftung oder Kosten bei Schäden, die durch Dritte verursacht werden. Ebenso übernehmen wir keine Haftung für Bauteile, die nicht von uns eingebaut und montiert wurden.</p>' +
+    '</div>'
+};
+
+/* Aszendio-Stammdaten — Platzhalter bis du echte Daten lieferst */
+const ANGEBOTS_PROFILE_ASZENDIO = Object.assign({}, ANGEBOTS_PROFILE_AUFZUGSHANDWERK, {
+  firma: 'Aszendio Aufzugservice GmbH',
+  anschrift: '— Adresse bitte einpflegen —',
+  hrb: '',
+  tel: '',
+  email: '',
+  web: '',
+  bank: '',
+  bic: '',
+  iban: '',
+  briefkopf_logo_text: 'aszendio',
+});
+
+/* Account → Profil-Map. Wird in Phase 1.2 durch ein Account-Edit-UI ersetzt.
+   Aktuell: heuristisch nach Account-Name. Fallback: Aufzugshandwerk-Profil. */
+function getAngebotsProfile(account) {
+  if (!account) return ANGEBOTS_PROFILE_AUFZUGSHANDWERK;
+  const name = String(account.name || '').toLowerCase();
+  if (/aszendio/.test(name)) return ANGEBOTS_PROFILE_ASZENDIO;
+  if (/aufzugshandwerk/.test(name)) return ANGEBOTS_PROFILE_AUFZUGSHANDWERK;
+  // Default: Aufzugshandwerk-Stil — sicher für alle anderen Aufzug-Service-Accounts
+  return ANGEBOTS_PROFILE_AUFZUGSHANDWERK;
+}
+
+/* Heuristische Erkennung: Hat dieser Account das "Aufzug-Service"-Profil?
+   Phase 2 (FLP Ersatzteile) wird hier ein anderes Profil erkennen und ein
+   anderes Modal öffnen. Phase 1.0 fängt nur Aufzug-Service ab. */
+function accountHasAngebotsModul(account) {
+  if (!account) return false;
+  const name = String(account.name || '').toLowerCase();
+  // Phase 1.0: nur Aufzugshandwerk + Aszendio
+  return /aufzugshandwerk|aszendio/.test(name);
+}
+
+const ANGEBOTE_TABLE = 'Angebote';
+
+/* Hauptfunktion: öffnet das Angebots-Modal für ein Ticket. */
+async function openAngebotsModal(accountId, ticketId) {
+  let host = document.getElementById('subModalHost');
+  if (!host) { host = document.createElement('div'); host.id = 'subModalHost'; document.body.appendChild(host); }
+  const account = (APP_STATE.accounts || []).find(a => a.id === accountId);
+  if (!account) { toast('Account nicht gefunden', 'error'); return; }
+  const profile = getAngebotsProfile(account);
+  document.body.style.overflow = 'hidden';
+  host.innerHTML =
+    '<div class="fixed inset-0 z-[60] flex items-end justify-center bg-black/50">' +
+      '<div class="bg-white w-full max-w-md rounded-t-3xl shadow-2xl p-8 text-center safe-bottom">' +
+        '<div class="spinner inline-block w-7 h-7 border-[3px] text-indigo-500"></div>' +
+        '<p class="text-sm text-ink-500 mt-2">Lade Ticket-Daten…</p>' +
+      '</div>' +
+    '</div>';
+  try {
+    let ticket = APP_STATE.ticketCache?.get?.(accountId + '|' + ticketId);
+    if (!ticket || !ticket.conversations) {
+      try { ticket = await fetchTicketDetail(accountId, ticketId); } catch (_) {}
+    }
+    if (!ticket) throw new Error('Ticket konnte nicht geladen werden');
+    // Anlagen-Daten Hybrid: erst Titel-Struktur, dann KI-Extraktion
+    const anlage = _extractAnlageHybrid(ticket);
+    _renderAngebotsKontextModal(accountId, ticketId, ticket, profile, anlage);
+  } catch (e) {
+    closeAngebotsModal();
+    toast('Fehler: ' + (e.message || e), 'error', 8000);
+  }
+}
+
+/* Hybrid-Extraktion: ANFRAGE <id> | <standort> | <fabriknummer> → wenn vorhanden,
+   sonst null/null. KI-Extraktion folgt erst beim Generieren-Klick. */
+function _extractAnlageHybrid(ticket) {
+  const subj = String(ticket?.subject || '').trim();
+  // Format: "ANFRAGE 1234 | Standort | Fabriknummer"
+  const m = subj.match(/^ANFRAGE\s+\d+\s*\|\s*(.+?)(?:\s*\|\s*(.+?))?\s*$/i);
+  if (m) {
+    return { standort: (m[1] || '').trim(), fabriknummer: (m[2] || '').trim() };
+  }
+  return { standort: '', fabriknummer: '' };
+}
+
+/* ===== Step 1: Kontext-Modal (User tippt Anlass + Hinweise) ===== */
+function _renderAngebotsKontextModal(accountId, ticketId, ticket, profile, anlage) {
+  const host = document.getElementById('subModalHost');
+  if (!host) return;
+  const req = ticket.requester || {};
+  const subj = ticket.subject || '';
+  // Auto-Vorschlag „Anlass" aus Ticket-Beschreibung (erste 300 Zeichen)
+  const desc = htmlToText(ticket.description_text || ticket.description || '').slice(0, 600);
+  const autoAnlass = desc.split('\n').filter(l => l.trim()).slice(0, 4).join(' ').slice(0, 400);
+  host.innerHTML =
+    '<div class="fixed inset-0 z-[60] flex items-end justify-center bg-black/50" onclick="if(event.target===this)closeAngebotsModal()">' +
+      '<div class="bg-white w-full max-w-md rounded-t-3xl shadow-2xl flex flex-col safe-bottom" style="max-height:94vh">' +
+        '<div class="safe-top px-4 py-3 border-b border-ink-200 flex items-center justify-between gap-2 shrink-0">' +
+          '<h3 class="font-bold text-ink-900 inline-flex items-center gap-2"><i data-lucide="file-text" class="w-5 h-5 text-indigo-600"></i> Angebot erstellen</h3>' +
+          '<button onclick="closeAngebotsModal()" class="w-9 h-9 rounded-lg hover:bg-ink-100 flex items-center justify-center"><i data-lucide="x" class="w-5 h-5 text-ink-700"></i></button>' +
+        '</div>' +
+        '<div class="flex-1 overflow-y-auto p-4 space-y-3">' +
+          '<input type="hidden" id="angAcc" value="' + escapeAttr(accountId) + '">' +
+          '<input type="hidden" id="angTicketId" value="' + ticketId + '">' +
+          '<div class="bg-indigo-50 border border-indigo-200 rounded-xl p-2.5 text-[11px]">' +
+            '<p class="text-indigo-600 uppercase tracking-wider text-[9px] font-bold">Profil</p>' +
+            '<p class="font-semibold text-indigo-900 mt-0.5">' + escapeHtml(profile.firma) + '</p>' +
+          '</div>' +
+          '<div class="bg-ink-50 rounded-xl p-2.5 text-[11px]">' +
+            '<p class="text-ink-500 uppercase tracking-wider text-[9px] font-bold">Ticket</p>' +
+            '<p class="font-semibold text-ink-900 mt-0.5 line-clamp-2">#' + ticketId + ' – ' + escapeHtml(subj) + '</p>' +
+            (req.name ? '<p class="text-ink-600 mt-0.5">' + escapeHtml(req.name) + (req.email ? ' &lt;' + escapeHtml(req.email) + '&gt;' : '') + '</p>' : '') +
+          '</div>' +
+          '<label class="text-xs font-bold text-ink-700 uppercase tracking-wider block">Anlagen-Standort</label>' +
+          '<input id="angStandort" type="text" value="' + escapeAttr(anlage.standort) + '" placeholder="z.B. Bornstr. 14, 59457 Werl" class="w-full px-3 py-2.5 border border-ink-300 rounded-xl text-sm">' +
+          '<label class="text-xs font-bold text-ink-700 uppercase tracking-wider block">Fabriknummer / Anlagen-Nr.</label>' +
+          '<input id="angFabriknummer" type="text" value="' + escapeAttr(anlage.fabriknummer) + '" placeholder="z.B. FN-184355" class="w-full px-3 py-2.5 border border-ink-300 rounded-xl text-sm">' +
+          '<label class="text-xs font-bold text-ink-700 uppercase tracking-wider block">Anlass / Befund — was hat den Bedarf ausgelöst?</label>' +
+          '<textarea id="angAnlass" rows="4" placeholder="z.B. Bei der letzten Wartung am 15.05. wurde festgestellt, dass die Türsteuerung Aussetzer hat..." class="w-full px-3 py-2.5 border border-ink-300 rounded-xl text-sm resize-y">' + escapeHtml(autoAnlass) + '</textarea>' +
+          '<p class="text-[10px] text-ink-500 -mt-1">Vorbefüllt aus Ticket — bitte erweitern oder konkretisieren. Die KI baut darauf ihren Brief auf.</p>' +
+          '<label class="text-xs font-bold text-ink-700 uppercase tracking-wider block">Hinweise an die KI (optional)</label>' +
+          '<textarea id="angHinweise" rows="2" placeholder="z.B. Kunde ist preissensibel, zurückhaltend formulieren. Oder: Wartungskunde seit 5 Jahren, persönlicher Ton." class="w-full px-3 py-2.5 border border-ink-300 rounded-xl text-sm resize-y"></textarea>' +
+          '<div id="angErr" class="hidden bg-red-50 border border-red-200 rounded-xl p-3 text-sm text-red-800"></div>' +
+        '</div>' +
+        '<div class="border-t border-ink-200 p-3 flex gap-2 shrink-0">' +
+          '<button onclick="closeAngebotsModal()" class="flex-1 bg-ink-100 hover:bg-ink-200 text-ink-700 rounded-xl px-3 py-3 text-sm font-bold">Abbrechen</button>' +
+          '<button onclick="processAngebotGenerate(this)" class="flex-[2] bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl px-3 py-3 text-sm font-bold inline-flex items-center justify-center gap-1.5 shadow-md">' +
+            '<i data-lucide="sparkles" class="w-4 h-4"></i> Angebot generieren' +
+          '</button>' +
+        '</div>' +
+      '</div>' +
+    '</div>';
+  if (window.lucide) lucide.createIcons();
+  setTimeout(() => $('angAnlass')?.focus(), 80);
+  window._ANGEBOT_CTX = { accountId, ticketId, ticket, profile };
+}
+
+/* Step 2: KI-Generation (Sonnet 4.5 mit TKE-Style-Reference) */
+async function processAngebotGenerate(btn) {
+  const ctx = window._ANGEBOT_CTX;
+  if (!ctx) return;
+  const errEl = $('angErr');
+  const setErr = function (msg) { if (errEl) { errEl.textContent = msg; errEl.classList.remove('hidden'); } };
+  if (errEl) errEl.classList.add('hidden');
+  const standort = ($('angStandort')?.value || '').trim();
+  const fabriknummer = ($('angFabriknummer')?.value || '').trim();
+  const anlass = ($('angAnlass')?.value || '').trim();
+  const hinweise = ($('angHinweise')?.value || '').trim();
+  if (!anlass) return setErr('Bitte den Anlass beschreiben — die KI braucht Kontext.');
+  setBusy(btn, true, 'KI denkt…');
+  try {
+    const plan = await _angebotAiGenerate(ctx, { standort, fabriknummer, anlass, hinweise });
+    Object.assign(ctx, { standort, fabriknummer, anlass, hinweise, plan });
+    _renderAngebotsVorschauModal(ctx);
+  } catch (e) {
+    setBusy(btn, false);
+    setErr('KI-Generierung fehlgeschlagen: ' + (e.message || e));
+  }
+}
+
+async function _angebotAiGenerate(ctx, inputs) {
+  const { ticket, profile, accountId, ticketId } = ctx;
+  const req = ticket.requester || {};
+  const reqName = req.name || '';
+  const reqFirma = req.company?.name || '';
+  const reqEmail = req.email || '';
+  // Erste 5 Konversationen für mehr Kontext
+  const conv = (ticket.conversations || [])
+    .slice(0, 5)
+    .map(c => (c.incoming ? 'Kunde' : 'Agent') + ': ' + htmlToText(c.body_text || c.body || '').slice(0, 500))
+    .join('\n\n');
+  const sysPrompt =
+    'Du bist ein erfahrener B2B-Vertriebs-Experte für Aufzug-Service-Angebote. ' +
+    'Du schreibst psychologisch wirksame Verkaufsbriefe im Stil von TK Elevator. ' +
+    'Charakteristika deines Stils:\n' +
+    '1. PERSÖNLICH — Du nennst Techniker-Namen und konkrete Daten wenn aus dem Ticket-Verlauf bekannt\n' +
+    '2. BEZIEHUNGS-ANKER — "Als Ihr Servicepartner..." baut Vertrauen auf\n' +
+    '3. EMPATHIE — "Uns liegt viel daran, dass Ihre Anlage..." zeigt Sorgfalt\n' +
+    '4. FAKTISCHER BEFUND — konkret beschreiben, kein Drama-Vokabular\n' +
+    '5. KOMPETENZ — wenn Techniker temporäre Lösung gemacht hat, erwähnen\n' +
+    '6. RISIKO WEICH — "kann jederzeit wieder kommen" statt "müssen handeln"\n' +
+    '7. EMPFEHLUNG WEICH — "Daher empfehlen wir" statt "Sie müssen"\n' +
+    '8. TRANSPARENZ — Konsequenzen kommunizieren (Ausfallzeit, Dauer)\n' +
+    '9. ABLAUF — Arbeitsschritte als Bulletpoints listen\n' +
+    '10. PRE-CLOSING WARM — "Wir hoffen... sehr gerne für Sie umsetzen würden"\n' +
+    '11. KEINE FLOSKELN, KEINE übertriebene Dringlichkeit, KEINE CAPS\n\n' +
+    'Branche: ' + (profile.ki_branche_hint || 'Aufzug-Service') + '\n\n' +
+    'Antworte AUSSCHLIESSLICH mit gültigem JSON ohne Markdown-Codeblock:\n' +
+    '{\n' +
+    '  "warnung_aktiv": boolean (true wenn Anlage außer Betrieb oder akut sicherheitskritisch),\n' +
+    '  "warnung_text": string (z.B. "Wichtiger Hinweis: Ihre Anlage ist außer Betrieb!"),\n' +
+    '  "anrede": string (z.B. "Sehr geehrter Herr Müller," — wenn Name unbekannt: "Sehr geehrte Damen und Herren,"),\n' +
+    '  "einleitung": string (Befund-Narrativ-Absatz: Techniker-Name+Datum+Servicepartner-Anker+Empathie-Formel+Übergang zur Empfehlung),\n' +
+    '  "befund_detail": string (Technischer Detail-Absatz: was ist konkret, warum Risiko, was temporär gemacht, was wir empfehlen, Auswirkung),\n' +
+    '  "ablauf_punkte": [string, ...] (3-6 Bullet-Punkte mit den Arbeitsschritten),\n' +
+    '  "positionen": [\n' +
+    '    {"menge": number|null, "einheit": string ("ST"|"STD"|"Pauschal"|"Std"), "bezeichnung": string, "einzelpreis": number, "kategorie": "Material"|"Montage"}\n' +
+    '  ],\n' +
+    '  "konditionen": {\n' +
+    '    "lieferzeit": string (z.B. "ca. 1 Woche nach Auftragseingang" oder "nach Terminabsprache"),\n' +
+    '    "preisstellung": string (Default: "Festpreis netto, zzgl. gesetzlicher MwSt"),\n' +
+    '    "zahlungsziel": string (Default: "14 Tage nach Rechnungsstellung"),\n' +
+    '    "gewaehrleistung": string (Default: "2 Jahre auf verbautes Material"),\n' +
+    '    "bindefrist": string (Default: "60 Tage")\n' +
+    '  },\n' +
+    '  "schluss": string (warmer Pre-Closing wie "Wir hoffen, dass unser Angebot Ihren Vorstellungen entspricht und wir den Auftrag sehr gerne für Sie umsetzen würden. Eine kurze Antwort an diese Email genügt uns als Auftragsbestätigung."),\n' +
+    '  "ki_konfidenz_text": string (1 Satz: was unsicher war, was geschätzt wurde — bzgl. Preisen oder Befund)\n' +
+    '}\n' +
+    'Preise schätzt du REALISTISCH branchenüblich — User korrigiert nachher.';
+  const userPrompt =
+    'Anlass / Befund (vom User formuliert):\n' + inputs.anlass + '\n\n' +
+    (inputs.hinweise ? 'User-Hinweise an die KI:\n' + inputs.hinweise + '\n\n' : '') +
+    'Kunde:\n' +
+    (reqName ? 'Name: ' + reqName + '\n' : '') +
+    (reqFirma ? 'Firma: ' + reqFirma + '\n' : '') +
+    (reqEmail ? 'Email: ' + reqEmail + '\n' : '') +
+    '\n' +
+    'Anlage:\n' +
+    (inputs.standort ? 'Standort: ' + inputs.standort + '\n' : '') +
+    (inputs.fabriknummer ? 'Fabriknummer/Anlagennr: ' + inputs.fabriknummer + '\n' : '') +
+    '\n' +
+    'Ticket-Betreff: ' + (ticket.subject || '') + '\n\n' +
+    'Ticket-Verlauf:\n' + conv + '\n\n' +
+    'Generiere jetzt das Angebot als JSON.';
+  const data = await proxyJson('/anthropic/v1/messages', {
+    method: 'POST',
+    body: JSON.stringify({
+      model: 'claude-sonnet-4-5-20250929',
+      max_tokens: 4000,
+      system: sysPrompt,
+      messages: [{ role: 'user', content: userPrompt }]
+    })
+  });
+  const raw = (data?.content?.[0]?.text || '').trim();
+  const json = raw.replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/i, '').trim();
+  let plan;
+  try { plan = JSON.parse(json); }
+  catch (_) {
+    const m = json.match(/\{[\s\S]*\}/);
+    if (m) plan = JSON.parse(m[0]);
+    else throw new Error('KI-Antwort ist kein gültiges JSON');
+  }
+  return plan;
+}
+
+function closeAngebotsModal() {
+  delete window._ANGEBOT_CTX;
+  const host = document.getElementById('subModalHost');
+  if (host) host.innerHTML = '';
+  document.body.style.overflow = '';
+}
+
+/* ===== Step 3: Vorschau-Modal mit editierbaren Feldern + Aktions-Buttons ===== */
+function _renderAngebotsVorschauModal(ctx) {
+  const host = document.getElementById('subModalHost');
+  if (!host) return;
+  const { ticketId, profile, plan } = ctx;
+  const angebotsnr = 'ANG-' + ticketId;
+  // Defaults aus Profile in fehlende Konditionen-Felder
+  const k = plan.konditionen || {};
+  if (!k.lieferzeit)     k.lieferzeit     = profile.default_lieferzeit;
+  if (!k.preisstellung)  k.preisstellung  = profile.default_preisstellung;
+  if (!k.zahlungsziel)   k.zahlungsziel   = profile.default_zahlungsziel;
+  if (!k.gewaehrleistung) k.gewaehrleistung = profile.default_gewaehrleistung;
+  if (!k.bindefrist)     k.bindefrist     = profile.default_bindefrist;
+  plan.konditionen = k;
+  if (typeof plan.mwst_satz !== 'number') plan.mwst_satz = profile.default_mwst || 19;
+  host.innerHTML =
+    '<div class="fixed inset-0 z-[60] flex items-end justify-center bg-black/50">' +
+      '<div class="bg-white w-full max-w-2xl rounded-t-3xl shadow-2xl flex flex-col safe-bottom" style="max-height:96vh">' +
+        '<div class="safe-top px-4 py-3 border-b border-ink-200 flex items-center justify-between gap-2 shrink-0">' +
+          '<h3 class="font-bold text-ink-900 inline-flex items-center gap-2"><i data-lucide="file-text" class="w-5 h-5 text-indigo-600"></i> Angebot ' + escapeHtml(angebotsnr) + '</h3>' +
+          '<button onclick="closeAngebotsModal()" class="w-9 h-9 rounded-lg hover:bg-ink-100 flex items-center justify-center"><i data-lucide="x" class="w-5 h-5 text-ink-700"></i></button>' +
+        '</div>' +
+        '<div class="flex-1 overflow-y-auto p-4 space-y-3">' +
+          (plan.ki_konfidenz_text ? '<div class="bg-amber-50 border border-amber-200 rounded-xl p-2.5 text-[11px] text-amber-900"><b>KI-Hinweis:</b> ' + escapeHtml(plan.ki_konfidenz_text) + '</div>' : '') +
+          '<div class="flex items-center justify-between bg-ink-50 rounded-xl px-3 py-2">' +
+            '<div class="flex gap-2">' +
+              '<button onclick="_angebotShowMode(\'edit\')" id="angBtnEdit" class="px-3 py-1.5 rounded-lg text-[11px] font-semibold bg-indigo-600 text-white">Bearbeiten</button>' +
+              '<button onclick="_angebotShowMode(\'preview\')" id="angBtnPreview" class="px-3 py-1.5 rounded-lg text-[11px] font-semibold bg-white text-ink-700 border border-ink-200">Vorschau</button>' +
+            '</div>' +
+            '<button onclick="_angebotRegenerate()" class="text-[11px] font-semibold text-indigo-600 inline-flex items-center gap-1"><i data-lucide="refresh-cw" class="w-3 h-3"></i> Neu generieren</button>' +
+          '</div>' +
+          '<div id="angEditPane" class="space-y-3">' + _renderAngebotEditPane(plan) + '</div>' +
+          '<div id="angPreviewPane" class="hidden border border-ink-200 rounded-xl bg-white overflow-hidden"></div>' +
+          '<div id="angErr2" class="hidden bg-red-50 border border-red-200 rounded-xl p-3 text-sm text-red-800"></div>' +
+        '</div>' +
+        '<div class="border-t border-ink-200 p-3 shrink-0 space-y-2">' +
+          '<div class="grid grid-cols-2 gap-2">' +
+            '<button onclick="angebotSaveDraft(this)" class="bg-ink-100 hover:bg-ink-200 text-ink-700 rounded-xl px-3 py-2.5 text-sm font-bold inline-flex items-center justify-center gap-1.5"><i data-lucide="save" class="w-4 h-4"></i> Entwurf speichern</button>' +
+            '<button onclick="angebotShowPdf(this)" class="bg-white border border-indigo-300 text-indigo-700 hover:bg-indigo-50 rounded-xl px-3 py-2.5 text-sm font-bold inline-flex items-center justify-center gap-1.5"><i data-lucide="printer" class="w-4 h-4"></i> PDF anzeigen</button>' +
+          '</div>' +
+          '<button onclick="angebotSendReply(this)" class="w-full bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl px-3 py-3 text-sm font-bold inline-flex items-center justify-center gap-1.5 shadow-md"><i data-lucide="send" class="w-4 h-4"></i> An Kunden senden (als Antwort)</button>' +
+        '</div>' +
+      '</div>' +
+    '</div>';
+  if (window.lucide) lucide.createIcons();
+  _angebotAttachInputs();
+}
+
+/* Edit-Pane: alle Felder editierbar */
+function _renderAngebotEditPane(plan) {
+  const k = plan.konditionen || {};
+  return '' +
+    (plan.warnung_aktiv ? (
+      '<div class="bg-red-50 border-l-4 border-red-500 rounded p-2.5">' +
+        '<label class="flex items-center gap-2 text-[11px] font-bold text-red-700 cursor-pointer mb-1">' +
+          '<input type="checkbox" id="angWarnAktiv" checked class="w-4 h-4 accent-red-600" oninput="_angebotPatch()"> Warn-Banner anzeigen' +
+        '</label>' +
+        '<input id="angWarnText" type="text" value="' + escapeAttr(plan.warnung_text || '') + '" oninput="_angebotPatch()" class="w-full px-2 py-1.5 border border-red-300 rounded text-[12px]">' +
+      '</div>'
+    ) : (
+      '<details class="border border-ink-200 rounded-lg">' +
+        '<summary class="px-3 py-2 text-[11px] font-semibold text-ink-600 cursor-pointer">+ Warn-Banner hinzufügen (z.B. „Anlage außer Betrieb")</summary>' +
+        '<div class="p-3 space-y-2">' +
+          '<label class="flex items-center gap-2 text-[11px] font-bold text-ink-700 cursor-pointer">' +
+            '<input type="checkbox" id="angWarnAktiv" class="w-4 h-4 accent-red-600" oninput="_angebotPatch()"> Aktivieren' +
+          '</label>' +
+          '<input id="angWarnText" type="text" placeholder="z.B. Wichtiger Hinweis: Ihre Anlage ist außer Betrieb!" oninput="_angebotPatch()" class="w-full px-2 py-1.5 border border-ink-300 rounded text-[12px]">' +
+        '</div>' +
+      '</details>'
+    )) +
+    '<label class="text-[10px] font-bold text-ink-500 uppercase tracking-wider block">Anrede</label>' +
+    '<input id="angAnrede" type="text" value="' + escapeAttr(plan.anrede || '') + '" oninput="_angebotPatch()" class="w-full px-3 py-2 border border-ink-300 rounded-lg text-sm">' +
+    '<label class="text-[10px] font-bold text-ink-500 uppercase tracking-wider block">Einleitung (Befund-Narrativ)</label>' +
+    '<textarea id="angEinleitung" rows="4" oninput="_angebotPatch()" class="w-full px-3 py-2 border border-ink-300 rounded-lg text-sm resize-y">' + escapeHtml(plan.einleitung || '') + '</textarea>' +
+    '<label class="text-[10px] font-bold text-ink-500 uppercase tracking-wider block">Technisches Detail / Empfehlung</label>' +
+    '<textarea id="angBefund" rows="5" oninput="_angebotPatch()" class="w-full px-3 py-2 border border-ink-300 rounded-lg text-sm resize-y">' + escapeHtml(plan.befund_detail || '') + '</textarea>' +
+    '<label class="text-[10px] font-bold text-ink-500 uppercase tracking-wider block">Ablauf-Punkte (eine pro Zeile)</label>' +
+    '<textarea id="angAblauf" rows="4" oninput="_angebotPatch()" class="w-full px-3 py-2 border border-ink-300 rounded-lg text-sm resize-y">' + escapeHtml((plan.ablauf_punkte || []).join('\n')) + '</textarea>' +
+    // Positionen
+    '<div class="border border-ink-200 rounded-lg p-3 bg-ink-50/50">' +
+      '<div class="flex items-center justify-between mb-2"><b class="text-[11px] uppercase tracking-wider text-ink-700">Positionen</b>' +
+      '<button onclick="_angebotAddPosition()" class="text-[11px] text-indigo-600 font-semibold inline-flex items-center gap-1"><i data-lucide="plus" class="w-3 h-3"></i> Position</button></div>' +
+      '<div id="angPositionen" class="space-y-2">' +
+        (plan.positionen || []).map((p, i) => _renderPositionRow(p, i)).join('') +
+      '</div>' +
+    '</div>' +
+    // Summen-Steuerung
+    '<div class="flex items-center gap-2">' +
+      '<label class="text-[10px] font-bold text-ink-500 uppercase tracking-wider">MwSt-Satz:</label>' +
+      '<select id="angMwst" oninput="_angebotPatch()" class="px-2 py-1.5 border border-ink-300 rounded text-sm bg-white">' +
+        '<option value="19"' + (plan.mwst_satz === 19 ? ' selected' : '') + '>19%</option>' +
+        '<option value="7"' + (plan.mwst_satz === 7 ? ' selected' : '') + '>7%</option>' +
+        '<option value="0"' + (plan.mwst_satz === 0 ? ' selected' : '') + '>0% (steuerfrei)</option>' +
+      '</select>' +
+      '<span id="angSumLabel" class="text-[12px] text-ink-600 ml-auto"></span>' +
+    '</div>' +
+    // Konditionen
+    '<details class="border border-ink-200 rounded-lg" open>' +
+      '<summary class="px-3 py-2 text-[11px] font-bold text-ink-700 uppercase tracking-wider cursor-pointer">Konditionen</summary>' +
+      '<div class="p-3 grid grid-cols-2 gap-2 text-[12px]">' +
+        '<div><label class="text-[10px] text-ink-500 uppercase">Lieferzeit</label><input id="angLieferzeit" type="text" value="' + escapeAttr(k.lieferzeit || '') + '" oninput="_angebotPatch()" class="w-full px-2 py-1 border border-ink-300 rounded"></div>' +
+        '<div><label class="text-[10px] text-ink-500 uppercase">Preisstellung</label><input id="angPreisstellung" type="text" value="' + escapeAttr(k.preisstellung || '') + '" oninput="_angebotPatch()" class="w-full px-2 py-1 border border-ink-300 rounded"></div>' +
+        '<div><label class="text-[10px] text-ink-500 uppercase">Zahlbar</label><input id="angZahlung" type="text" value="' + escapeAttr(k.zahlungsziel || '') + '" oninput="_angebotPatch()" class="w-full px-2 py-1 border border-ink-300 rounded"></div>' +
+        '<div><label class="text-[10px] text-ink-500 uppercase">Gewährleistung</label><input id="angGewaehr" type="text" value="' + escapeAttr(k.gewaehrleistung || '') + '" oninput="_angebotPatch()" class="w-full px-2 py-1 border border-ink-300 rounded"></div>' +
+        '<div class="col-span-2"><label class="text-[10px] text-ink-500 uppercase">Bindefrist</label><input id="angBindefrist" type="text" value="' + escapeAttr(k.bindefrist || '') + '" oninput="_angebotPatch()" class="w-full px-2 py-1 border border-ink-300 rounded"></div>' +
+      '</div>' +
+    '</details>' +
+    '<label class="text-[10px] font-bold text-ink-500 uppercase tracking-wider block">Schluss-Block (Pre-Closing)</label>' +
+    '<textarea id="angSchluss" rows="3" oninput="_angebotPatch()" class="w-full px-3 py-2 border border-ink-300 rounded-lg text-sm resize-y">' + escapeHtml(plan.schluss || '') + '</textarea>';
+}
+
+function _renderPositionRow(p, idx) {
+  return '<div class="bg-white border border-ink-200 rounded-lg p-2 grid grid-cols-12 gap-1.5 text-[11px]" data-pos-idx="' + idx + '">' +
+    '<input type="text" class="ang-pos-bez col-span-12 px-2 py-1 border border-ink-200 rounded" placeholder="Bezeichnung" value="' + escapeAttr(p.bezeichnung || '') + '" oninput="_angebotPatch()">' +
+    '<input type="text" class="ang-pos-menge col-span-3 px-2 py-1 border border-ink-200 rounded" placeholder="Menge" value="' + escapeAttr(p.menge != null ? String(p.menge) : '') + '" oninput="_angebotPatch()">' +
+    '<input type="text" class="ang-pos-einheit col-span-3 px-2 py-1 border border-ink-200 rounded" placeholder="Einheit" value="' + escapeAttr(p.einheit || 'ST') + '" oninput="_angebotPatch()">' +
+    '<input type="number" step="0.01" class="ang-pos-ep col-span-4 px-2 py-1 border border-ink-200 rounded text-right" placeholder="EP €" value="' + escapeAttr(p.einzelpreis != null ? String(p.einzelpreis) : '') + '" oninput="_angebotPatch()">' +
+    '<button onclick="_angebotDelPosition(' + idx + ')" class="col-span-2 px-2 py-1 bg-red-50 border border-red-200 text-red-700 rounded hover:bg-red-100"><i data-lucide="trash-2" class="w-3 h-3 inline"></i></button>' +
+    '<select class="ang-pos-kat col-span-12 px-2 py-1 border border-ink-200 rounded text-[10px]" oninput="_angebotPatch()">' +
+      '<option value="Material"' + ((p.kategorie || 'Material') === 'Material' ? ' selected' : '') + '>Material</option>' +
+      '<option value="Montage"' + (p.kategorie === 'Montage' ? ' selected' : '') + '>Montage</option>' +
+    '</select>' +
+  '</div>';
+}
+
+function _angebotAttachInputs() {
+  // Initial Summe berechnen
+  _angebotPatch();
+}
+
+function _angebotPatch() {
+  const ctx = window._ANGEBOT_CTX;
+  if (!ctx) return;
+  const plan = ctx.plan;
+  plan.warnung_aktiv = !!$('angWarnAktiv')?.checked;
+  plan.warnung_text  = $('angWarnText')?.value || '';
+  plan.anrede        = $('angAnrede')?.value || '';
+  plan.einleitung    = $('angEinleitung')?.value || '';
+  plan.befund_detail = $('angBefund')?.value || '';
+  plan.ablauf_punkte = ($('angAblauf')?.value || '').split('\n').map(s => s.trim()).filter(Boolean);
+  plan.schluss       = $('angSchluss')?.value || '';
+  plan.mwst_satz     = parseFloat($('angMwst')?.value || '19') || 19;
+  plan.konditionen = {
+    lieferzeit:     $('angLieferzeit')?.value     || '',
+    preisstellung:  $('angPreisstellung')?.value  || '',
+    zahlungsziel:   $('angZahlung')?.value        || '',
+    gewaehrleistung: $('angGewaehr')?.value       || '',
+    bindefrist:     $('angBindefrist')?.value     || '',
+  };
+  // Positionen
+  const rows = document.querySelectorAll('[data-pos-idx]');
+  const positionen = [];
+  rows.forEach(row => {
+    const bez = row.querySelector('.ang-pos-bez')?.value || '';
+    const menge = parseFloat(row.querySelector('.ang-pos-menge')?.value || '0') || null;
+    const einheit = row.querySelector('.ang-pos-einheit')?.value || 'ST';
+    const ep = parseFloat(row.querySelector('.ang-pos-ep')?.value || '0') || 0;
+    const kat = row.querySelector('.ang-pos-kat')?.value || 'Material';
+    positionen.push({ bezeichnung: bez, menge: menge, einheit: einheit, einzelpreis: ep, kategorie: kat });
+  });
+  plan.positionen = positionen;
+  // Summen
+  const totals = _angebotCalcTotals(plan);
+  plan._totals = totals;
+  const lbl = $('angSumLabel');
+  if (lbl) lbl.innerHTML = 'Netto <b>' + _formatEur(totals.netto) + '</b> · MwSt <b>' + _formatEur(totals.mwst) + '</b> · Brutto <b class="text-ink-900">' + _formatEur(totals.brutto) + '</b>';
+}
+
+function _angebotCalcTotals(plan) {
+  let mat = 0, mon = 0;
+  (plan.positionen || []).forEach(p => {
+    const m = p.menge == null ? 1 : p.menge;
+    const sum = m * (p.einzelpreis || 0);
+    if (p.kategorie === 'Montage') mon += sum; else mat += sum;
+  });
+  const netto = mat + mon;
+  const mwst = netto * ((plan.mwst_satz || 19) / 100);
+  const brutto = netto + mwst;
+  return { material: mat, montage: mon, netto, mwst, brutto };
+}
+
+function _formatEur(n) {
+  try { return n.toLocaleString('de-DE', { style: 'currency', currency: 'EUR', minimumFractionDigits: 2, maximumFractionDigits: 2 }); }
+  catch (_) { return n.toFixed(2) + ' €'; }
+}
+
+function _angebotAddPosition() {
+  const ctx = window._ANGEBOT_CTX;
+  if (!ctx) return;
+  ctx.plan.positionen = ctx.plan.positionen || [];
+  ctx.plan.positionen.push({ bezeichnung: '', menge: 1, einheit: 'ST', einzelpreis: 0, kategorie: 'Material' });
+  const list = $('angPositionen');
+  if (list) {
+    list.insertAdjacentHTML('beforeend', _renderPositionRow(ctx.plan.positionen[ctx.plan.positionen.length - 1], ctx.plan.positionen.length - 1));
+    if (window.lucide) lucide.createIcons();
+  }
+}
+function _angebotDelPosition(idx) {
+  const ctx = window._ANGEBOT_CTX;
+  if (!ctx) return;
+  ctx.plan.positionen = (ctx.plan.positionen || []).filter((_, i) => i !== idx);
+  const list = $('angPositionen');
+  if (list) {
+    list.innerHTML = ctx.plan.positionen.map((p, i) => _renderPositionRow(p, i)).join('');
+    if (window.lucide) lucide.createIcons();
+    _angebotPatch();
+  }
+}
+
+function _angebotShowMode(mode) {
+  const editPane = $('angEditPane');
+  const prevPane = $('angPreviewPane');
+  const btnE = $('angBtnEdit');
+  const btnP = $('angBtnPreview');
+  if (mode === 'preview') {
+    editPane?.classList.add('hidden');
+    prevPane?.classList.remove('hidden');
+    if (btnE) { btnE.classList.remove('bg-indigo-600', 'text-white'); btnE.classList.add('bg-white', 'text-ink-700', 'border', 'border-ink-200'); }
+    if (btnP) { btnP.classList.add('bg-indigo-600', 'text-white'); btnP.classList.remove('bg-white', 'text-ink-700', 'border', 'border-ink-200'); }
+    // Render Preview
+    if (prevPane) prevPane.innerHTML = '<div style="transform:scale(0.55);transform-origin:top left;width:182%;height:182%">' + _renderAngebotHtml(window._ANGEBOT_CTX, { embeddedPreview: true }) + '</div>';
+  } else {
+    editPane?.classList.remove('hidden');
+    prevPane?.classList.add('hidden');
+    if (btnE) { btnE.classList.add('bg-indigo-600', 'text-white'); btnE.classList.remove('bg-white', 'text-ink-700', 'border', 'border-ink-200'); }
+    if (btnP) { btnP.classList.remove('bg-indigo-600', 'text-white'); btnP.classList.add('bg-white', 'text-ink-700', 'border', 'border-ink-200'); }
+  }
+}
+
+async function _angebotRegenerate() {
+  const ctx = window._ANGEBOT_CTX;
+  if (!ctx) return;
+  if (!confirm('Aktuelle Eingaben verwerfen und neu generieren?')) return;
+  _renderAngebotsKontextModal(ctx.accountId, ctx.ticketId, ctx.ticket, ctx.profile, { standort: ctx.standort || '', fabriknummer: ctx.fabriknummer || '' });
+  // Re-fill
+  setTimeout(() => {
+    if (ctx.anlass) $('angAnlass').value = ctx.anlass;
+    if (ctx.hinweise) $('angHinweise').value = ctx.hinweise;
+  }, 50);
+}
+
+/* ===== HTML-Renderer für PDF + Email-Reply ===== */
+function _renderAngebotHtml(ctx, opts) {
+  opts = opts || {};
+  const { ticketId, profile, plan, ticket } = ctx;
+  const req = ticket.requester || {};
+  const angebotsnr = 'ANG-' + ticketId;
+  const today = new Date();
+  const datum = today.toLocaleDateString('de-DE');
+  const totals = plan._totals || _angebotCalcTotals(plan);
+  const empfaengerName = req.name || '';
+  const empfaengerEmail = req.email || '';
+  const empfaengerFirma = req.company?.name || '';
+  const senderName = APP_KEYS.user?.name || '';
+  const senderEmail = APP_KEYS.user?.email || profile.email;
+  const senderTel = APP_KEYS.user?.phone || profile.tel;
+  // Briefkopf-Stil
+  const css =
+    '<style>' +
+    '.fdh-ang { font-family: Helvetica, Arial, sans-serif; color: #1f2937; font-size: 10pt; line-height: 1.5; }' +
+    '.fdh-ang .page { max-width: 800px; margin: 0 auto; padding: 30px 35px; background: white; box-sizing: border-box; }' +
+    '.fdh-ang .header-row { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 30px; }' +
+    '.fdh-ang .logo-block { font-weight: bold; font-size: 16pt; color: #1f2937; letter-spacing: 0.5px; padding: 6px 14px; border: 2px solid #1f2937; display: inline-block; }' +
+    '.fdh-ang .meta-block { font-size: 8pt; text-align: right; }' +
+    '.fdh-ang .meta-block .row { padding: 4px 6px; border: 1px solid #d1d5db; min-width: 140px; margin-bottom: 4px; }' +
+    '.fdh-ang .meta-block .label { font-size: 7pt; color: #6b7280; text-transform: uppercase; }' +
+    '.fdh-ang .addr-row { display: flex; justify-content: space-between; margin-bottom: 25px; }' +
+    '.fdh-ang .empfaenger { font-size: 10pt; line-height: 1.4; }' +
+    '.fdh-ang .empfaenger .small { font-size: 7pt; color: #6b7280; border-bottom: 1px solid #d1d5db; padding-bottom: 2px; margin-bottom: 6px; }' +
+    '.fdh-ang .ansprechpartner { font-size: 9pt; text-align: right; line-height: 1.4; }' +
+    '.fdh-ang h1 { font-size: 16pt; font-weight: bold; margin: 20px 0 15px 0; }' +
+    '.fdh-ang .warning { background: #fef2f2; border-left: 4px solid #dc2626; padding: 10px 14px; margin: 15px 0; display: flex; align-items: center; gap: 10px; }' +
+    '.fdh-ang .warning .icon { font-size: 16pt; }' +
+    '.fdh-ang .warning .text { font-weight: bold; font-size: 11pt; }' +
+    '.fdh-ang .stammdaten { background: #f9fafb; padding: 10px 14px; margin: 15px 0; font-size: 9pt; }' +
+    '.fdh-ang .stammdaten .row { display: flex; padding: 2px 0; }' +
+    '.fdh-ang .stammdaten .key { width: 140px; color: #6b7280; }' +
+    '.fdh-ang p { margin: 10px 0; }' +
+    '.fdh-ang ul { margin: 8px 0; padding-left: 20px; }' +
+    '.fdh-ang ul li { margin: 3px 0; }' +
+    '.fdh-ang table.pos { width: 100%; border-collapse: collapse; margin: 15px 0; font-size: 9pt; }' +
+    '.fdh-ang table.pos thead th { background: #1f2937; color: white; padding: 6px 8px; text-align: left; }' +
+    '.fdh-ang table.pos td { padding: 6px 8px; border-bottom: 1px solid #e5e7eb; }' +
+    '.fdh-ang table.pos td.right { text-align: right; white-space: nowrap; }' +
+    '.fdh-ang .sum-table { margin-left: auto; margin-right: 0; margin-top: 15px; font-size: 9pt; }' +
+    '.fdh-ang .sum-table td { padding: 3px 12px; }' +
+    '.fdh-ang .sum-table .label { color: #6b7280; }' +
+    '.fdh-ang .sum-table .value { text-align: right; min-width: 100px; }' +
+    '.fdh-ang .sum-table .total { font-weight: bold; font-size: 11pt; border-top: 2px solid #1f2937; padding-top: 6px; }' +
+    '.fdh-ang .konditionen { margin: 20px 0; font-size: 9pt; border: 1px solid #e5e7eb; border-radius: 4px; }' +
+    '.fdh-ang .konditionen .row { display: flex; padding: 6px 12px; border-bottom: 1px solid #e5e7eb; }' +
+    '.fdh-ang .konditionen .row:last-child { border-bottom: none; }' +
+    '.fdh-ang .konditionen .key { width: 150px; font-weight: bold; color: #4b5563; }' +
+    '.fdh-ang .schluss { margin: 20px 0; }' +
+    '.fdh-ang .signature { margin-top: 30px; }' +
+    '.fdh-ang .signature .name { font-weight: bold; margin-top: 25px; }' +
+    '.fdh-ang .footer { margin-top: 35px; padding-top: 12px; border-top: 1px solid #d1d5db; font-size: 7pt; color: #6b7280; display: flex; gap: 20px; }' +
+    '.fdh-ang .footer > div { flex: 1; }' +
+    '.fdh-ang .agb-page { page-break-before: always; padding-top: 30px; }' +
+    '.fdh-ang .pagebreak { page-break-after: always; }' +
+    '@media print { .fdh-ang { font-size: 10pt; } .fdh-ang .page { padding: 20px 25px; box-shadow: none; } }' +
+    '</style>';
+  // Footer
+  const footerHtml =
+    '<div class="footer">' +
+      '<div><b>' + escapeHtml(profile.firma) + '</b><br>' + escapeHtml(profile.anschrift) + '<br>' + escapeHtml(profile.hrb) + '</div>' +
+      '<div>Tel.: ' + escapeHtml(profile.tel) + '<br>Mail: ' + escapeHtml(profile.email) + '<br>Web: ' + escapeHtml(profile.web) + (profile.steuernr ? '<br>Steuernr: ' + escapeHtml(profile.steuernr) : '') + '</div>' +
+      '<div>' + escapeHtml(profile.bank) + '<br>BIC: ' + escapeHtml(profile.bic) + '<br>IBAN: ' + escapeHtml(profile.iban) + '</div>' +
+    '</div>';
+  // Stammdaten-Block
+  const standort = ctx.standort || '';
+  const fabriknummer = ctx.fabriknummer || '';
+  const stammdatenHtml =
+    '<div class="stammdaten">' +
+      (empfaengerEmail ? '<div class="row"><div class="key">Per E-Mail an:</div><div>' + escapeHtml(empfaengerEmail) + '</div></div>' : '') +
+      (fabriknummer ? '<div class="row"><div class="key">Anlagen-Nr.:</div><div>' + escapeHtml(fabriknummer) + '</div></div>' : '') +
+      (standort ? '<div class="row"><div class="key">Standort:</div><div>' + escapeHtml(standort) + '</div></div>' : '') +
+    '</div>';
+  // Positionen-Tabelle
+  let pos = 0;
+  const posRows = (plan.positionen || []).map(p => {
+    pos++;
+    const m = p.menge == null ? '' : (Number.isInteger(p.menge) ? String(p.menge) : p.menge.toString().replace('.', ','));
+    const sum = (p.menge == null ? 1 : p.menge) * (p.einzelpreis || 0);
+    return '<tr>' +
+      '<td>' + pos + '</td>' +
+      '<td>' + escapeHtml(m) + '</td>' +
+      '<td>' + escapeHtml(p.einheit || 'ST') + '</td>' +
+      '<td>' + escapeHtml(p.bezeichnung || '') + '</td>' +
+      '<td class="right">' + _formatEur(sum) + '</td>' +
+    '</tr>';
+  }).join('');
+  const sumTable =
+    '<table class="sum-table"><tbody>' +
+      (totals.material ? '<tr><td class="label">Material:</td><td class="value">' + _formatEur(totals.material) + '</td></tr>' : '') +
+      (totals.montage  ? '<tr><td class="label">Montage:</td><td class="value">' + _formatEur(totals.montage) + '</td></tr>' : '') +
+      '<tr><td class="label" style="font-weight:bold">Festpreis:</td><td class="value" style="font-weight:bold">' + _formatEur(totals.netto) + '</td></tr>' +
+      '<tr><td class="label">MwSt ' + (plan.mwst_satz || 19) + '%:</td><td class="value">' + _formatEur(totals.mwst) + '</td></tr>' +
+      '<tr><td class="label total">Gesamt:</td><td class="value total">' + _formatEur(totals.brutto) + '</td></tr>' +
+    '</tbody></table>';
+  const k = plan.konditionen || {};
+  const konditionenHtml =
+    '<div class="konditionen">' +
+      (k.lieferzeit ? '<div class="row"><div class="key">Lieferzeit:</div><div>' + escapeHtml(k.lieferzeit) + '</div></div>' : '') +
+      (k.preisstellung ? '<div class="row"><div class="key">Preisstellung:</div><div>' + escapeHtml(k.preisstellung) + '</div></div>' : '') +
+      (k.zahlungsziel ? '<div class="row"><div class="key">Zahlbar:</div><div>' + escapeHtml(k.zahlungsziel) + '</div></div>' : '') +
+      (k.gewaehrleistung ? '<div class="row"><div class="key">Gewährleistung:</div><div>' + escapeHtml(k.gewaehrleistung) + '</div></div>' : '') +
+      (k.bindefrist ? '<div class="row"><div class="key">Bindefrist:</div><div>' + escapeHtml(k.bindefrist) + '</div></div>' : '') +
+    '</div>' +
+    '<p style="font-size:9pt;color:#6b7280;margin:8px 0">Diesem Angebot liegen unsere allgemeinen Verkaufsbedingungen (siehe folgende Seite) zugrunde.</p>';
+  const ablaufHtml = (plan.ablauf_punkte || []).length
+    ? '<p>Aus diesem Grund bieten wir Ihnen die Leistung wie folgt an:</p><ul>' +
+      (plan.ablauf_punkte || []).map(a => '<li>' + escapeHtml(a) + '</li>').join('') +
+      '</ul>'
+    : '';
+  // Komplettes HTML
+  return css + '<div class="fdh-ang">' +
+    '<div class="page">' +
+      '<div class="header-row">' +
+        '<div class="logo-block">' + escapeHtml(profile.briefkopf_logo_text) + '</div>' +
+        '<div class="meta-block">' +
+          '<div class="row"><div class="label">Angebotsnummer</div><div>' + escapeHtml(angebotsnr) + '</div></div>' +
+          '<div class="row"><div class="label">Datum</div><div>' + escapeHtml(datum) + '</div></div>' +
+        '</div>' +
+      '</div>' +
+      '<div class="addr-row">' +
+        '<div class="empfaenger">' +
+          '<div class="small">' + escapeHtml(profile.firma) + ', ' + escapeHtml(profile.anschrift) + '</div>' +
+          (empfaengerFirma ? escapeHtml(empfaengerFirma) + '<br>' : '') +
+          (empfaengerName && empfaengerName !== empfaengerFirma ? escapeHtml(empfaengerName) + '<br>' : '') +
+        '</div>' +
+        '<div class="ansprechpartner">' +
+          (senderName ? '<b>' + escapeHtml(senderName) + '</b><br>' : '') +
+          (senderTel ? escapeHtml(senderTel) + '<br>' : '') +
+          (senderEmail ? escapeHtml(senderEmail) + '<br>' : '') +
+          escapeHtml(datum) +
+        '</div>' +
+      '</div>' +
+      '<h1>Unser Serviceangebot für Sie.</h1>' +
+      (plan.warnung_aktiv && plan.warnung_text ? '<div class="warning"><div class="icon">⚠</div><div class="text">' + escapeHtml(plan.warnung_text) + '</div></div>' : '') +
+      stammdatenHtml +
+      '<p>' + escapeHtml(plan.anrede || 'Sehr geehrte Damen und Herren,') + '</p>' +
+      '<p>' + escapeHtml(plan.einleitung || '') + '</p>' +
+      '<p style="white-space:pre-line">' + escapeHtml(plan.befund_detail || '') + '</p>' +
+      ablaufHtml +
+      '<p>Aus diesem Grund möchten wir Ihnen Folgendes anbieten:</p>' +
+      '<table class="pos"><thead><tr><th>Pos</th><th>Menge</th><th>Einheit</th><th>Bezeichnung</th><th class="right">Preis</th></tr></thead><tbody>' + posRows + '</tbody></table>' +
+      sumTable +
+      '<p style="font-size:9pt;color:#6b7280;margin-top:10px">Die Aufteilung zwischen Material und Montage kann in der Rechnung abweichen. Der Gesamtpreis bleibt bestehen.</p>' +
+      konditionenHtml +
+      '<div class="schluss">' +
+        '<p style="white-space:pre-line">' + escapeHtml(plan.schluss || '') + '</p>' +
+        '<div class="signature">' +
+          '<p style="margin-bottom:4px">Mit freundlichen Grüßen<br>Ihre ' + escapeHtml(profile.firma) + '</p>' +
+          '<p class="name">' + escapeHtml(senderName || '') + '</p>' +
+        '</div>' +
+      '</div>' +
+      footerHtml +
+    '</div>' +
+    // AGB-Seite
+    '<div class="page agb-page">' +
+      '<div class="header-row">' +
+        '<div class="logo-block">' + escapeHtml(profile.briefkopf_logo_text) + '</div>' +
+        '<div class="meta-block">' +
+          '<div class="row"><div class="label">Angebotsnummer</div><div>' + escapeHtml(angebotsnr) + '</div></div>' +
+          '<div class="row"><div class="label">Seite</div><div>2</div></div>' +
+        '</div>' +
+      '</div>' +
+      (profile.agb_html || '') +
+      footerHtml +
+    '</div>' +
+  '</div>';
+}
+
+/* ===== Aktionen ===== */
+async function angebotShowPdf(btn) {
+  const ctx = window._ANGEBOT_CTX;
+  if (!ctx) return;
+  _angebotPatch(); // Letzten Stand sichern
+  const html = _renderAngebotHtml(ctx);
+  const w = window.open('', '_blank');
+  if (!w) { toast('Browser hat Popup blockiert — bitte erlauben', 'warn', 6000); return; }
+  w.document.write('<!DOCTYPE html><html><head><meta charset="utf-8"><title>Angebot ' + 'ANG-' + ctx.ticketId + '</title></head><body>' + html + '<script>setTimeout(function(){window.print();},400);<\/script></body></html>');
+  w.document.close();
+  toast('PDF-Druck-Dialog öffnet — Cmd+P → „Als PDF speichern"', 'success', 4000);
+}
+
+async function angebotSaveDraft(btn) {
+  const ctx = window._ANGEBOT_CTX;
+  if (!ctx) return;
+  _angebotPatch();
+  setBusy(btn, true, 'Speichere…');
+  try {
+    await _angebotSaveAirtable(ctx, 'Entwurf');
+    setBusy(btn, false);
+    toast('Entwurf gespeichert', 'success', 3500);
+  } catch (e) {
+    setBusy(btn, false);
+    toast('Speichern fehlgeschlagen: ' + (e.message || e), 'error', 8000);
+  }
+}
+
+async function angebotSendReply(btn) {
+  const ctx = window._ANGEBOT_CTX;
+  if (!ctx) return;
+  _angebotPatch();
+  if (!confirm('Angebot ' + 'ANG-' + ctx.ticketId + ' als Antwort an den Kunden senden?\n\n(Sichtbar im Ticket-Verlauf, geht als Email raus.)')) return;
+  setBusy(btn, true, 'Sende…');
+  try {
+    const html = _renderAngebotHtml(ctx);
+    const reqEmail = ctx.ticket.requester?.email || ctx.ticket.email || '';
+    const replyBody =
+      '<p>vielen Dank für Ihre Anfrage.</p>' +
+      '<p>Anbei senden wir Ihnen unser Angebot <b>ANG-' + ctx.ticketId + '</b>:</p>' +
+      '<hr style="margin:20px 0">' +
+      html +
+      '<hr style="margin:20px 0">' +
+      '<p style="font-size:9pt;color:#6b7280">Tipp: Eine kurze Antwort an diese Email genügt uns als Auftragsbestätigung.</p>';
+    const payload = { body: replyBody };
+    await proxyJson('/freshdesk/' + encodeURIComponent(ctx.accountId) + '/api/v2/tickets/' + ctx.ticketId + '/reply', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+    // In Airtable als Versendet ablegen
+    try { await _angebotSaveAirtable(ctx, 'Versendet'); } catch (e) { console.warn('Airtable-Save fehlgeschlagen (nicht-blockierend):', e.message); }
+    closeAngebotsModal();
+    toast('Angebot an Kunde versendet', 'success', 5000);
+  } catch (e) {
+    setBusy(btn, false);
+    toast('Versand fehlgeschlagen: ' + (e.message || e), 'error', 8000);
+  }
+}
+
+async function _angebotSaveAirtable(ctx, status) {
+  const { accountId, ticketId, plan, ticket } = ctx;
+  const angebotsnr = 'ANG-' + ticketId;
+  const totals = plan._totals || _angebotCalcTotals(plan);
+  const fields = {
+    ticket_id: String(ticketId),
+    account_id: accountId,
+    angebotsnr: angebotsnr,
+    status: status,
+    summe_netto: Math.round(totals.netto * 100) / 100,
+    mwst_satz: plan.mwst_satz || 19,
+    summe_brutto: Math.round(totals.brutto * 100) / 100,
+    anrede: plan.anrede || '',
+    einleitung_text: plan.einleitung || '',
+    befund_text: plan.befund_detail || '',
+    schluss_text: plan.schluss || '',
+    positionen_json: JSON.stringify(plan.positionen || []),
+    konditionen_json: JSON.stringify(plan.konditionen || {}),
+    ablauf_json: JSON.stringify(plan.ablauf_punkte || []),
+    standort: ctx.standort || '',
+    fabriknummer: ctx.fabriknummer || '',
+    anlass: ctx.anlass || '',
+    hinweise_ki: ctx.hinweise || '',
+    created_at: nowIso(),
+    created_by_api_key: APP_KEYS.user?.api_key || '',
+  };
+  if (status === 'Versendet') fields.sent_at = nowIso();
+  // Snapshot weglassen für Größe (kann später dazu wenn nötig)
+  await airtableWriteWithAutoField(ANGEBOTE_TABLE, fields, {
+    angebotsnr: 'singleLineText',
+    status: 'singleLineText',
+    summe_netto: 'number',
+    mwst_satz: 'number',
+    summe_brutto: 'number',
+    anrede: 'singleLineText',
+    einleitung_text: 'multilineText',
+    befund_text: 'multilineText',
+    schluss_text: 'multilineText',
+    positionen_json: 'multilineText',
+    konditionen_json: 'multilineText',
+    ablauf_json: 'multilineText',
+    standort: 'singleLineText',
+    fabriknummer: 'singleLineText',
+    anlass: 'multilineText',
+    hinweise_ki: 'multilineText',
+    created_at: 'singleLineText',
+    sent_at: 'singleLineText',
+    created_by_api_key: 'singleLineText',
+  });
 }
 
 /* ===================== USERS PAGE (Admin) ===================== */
