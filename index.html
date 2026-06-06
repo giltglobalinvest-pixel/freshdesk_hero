@@ -732,7 +732,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.70';
+const APP_VERSION = 'v2.46.71';
 
 /* ============================================================
    GLOBAL THEME — v2.46.12
@@ -15524,6 +15524,24 @@ function openAccountModal(account) {
               `).join('')}
             </div>
           </div>
+          ${isEdit && accountHasAngebotsModul(account) ? `
+            <details class="border border-indigo-200 rounded-lg" data-ang-lern-details>
+              <summary class="px-3 py-2 text-xs font-semibold text-indigo-700 cursor-pointer flex items-center gap-1.5">
+                <i data-lucide="brain" class="w-3.5 h-3.5"></i>
+                KI-Lernmaterial fürs Angebots-Modul
+                <span class="ml-auto text-[10px] text-indigo-500" data-ang-lern-count></span>
+              </summary>
+              <div class="px-3 pb-3 pt-1 space-y-2">
+                <p class="text-[10px] text-ink-500">PDFs von Wettbewerber-Angeboten hochladen — die KI nutzt sie als Stil-Referenz beim Angebot generieren. Aus eigenen gewonnenen Angeboten lernt sie automatisch.</p>
+                <button type="button" onclick="openAngebotsLernUploadModal('${escapeAttr(account.id)}')" class="w-full px-3 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg text-xs font-semibold inline-flex items-center justify-center gap-1.5">
+                  <i data-lucide="upload-cloud" class="w-3.5 h-3.5"></i> PDF hinzufügen
+                </button>
+                <div id="angLernList" data-ang-lern-list>
+                  <p class="text-[10px] text-ink-400 italic text-center py-2">Lade Lerntexte…</p>
+                </div>
+              </div>
+            </details>
+          ` : ''}
           <div>
             <label class="text-xs font-semibold text-ink-700">Anfrage-Titel-Format (Schnellfunktion)</label>
             <select id="accTitlePreset" class="mt-1 w-full px-3 py-2 border border-ink-200 rounded-lg text-sm bg-white focus:ring-2 focus:ring-brand-500/30 focus:border-brand-500">
@@ -15543,6 +15561,15 @@ function openAccountModal(account) {
       </div>
     </div>`;
   if (window.lucide) lucide.createIcons();
+  // v2.46.71: Lazy-Load der Lerntext-Liste wenn User den Lernmaterial-Block aufklappt
+  if (isEdit && accountHasAngebotsModul(account)) {
+    document.querySelectorAll('[data-ang-lern-details]').forEach(el => {
+      el.addEventListener('toggle', () => {
+        if (!el.open) return;
+        renderAngebotsLernListInAccountModal(account.id).catch(e => console.warn(e));
+      });
+    });
+  }
   $('accountForm').onsubmit = async (e) => {
     e.preventDefault();
     const errEl = $('accFormError'); errEl.classList.add('hidden');
@@ -20778,6 +20805,67 @@ function accountHasAngebotsModul(account) {
 }
 
 const ANGEBOTE_TABLE = 'Angebote';
+const ANGEBOTS_LERN_TABLE = 'Angebots_Lerntexte';
+
+/* v2.46.71: Lädt aktive KI-Lerntexte für einen Account (Top-N, neueste zuerst).
+   Verwendet als Few-Shot-Examples im Sonnet-Prompt bei Angebots-Generierung. */
+async function loadAngebotsLerntexte(accountId, max) {
+  max = max || 5;
+  if (!accountId) return [];
+  const filter = "AND({account_id}='" + escapeFormula(accountId) + "',OR({aktiv}=1,{aktiv}='1',{aktiv}='ja',{aktiv}='true',{aktiv}=BLANK()))";
+  try {
+    const recs = await airtableRead(ANGEBOTS_LERN_TABLE, {
+      filter,
+      sort: [{ field: 'created_at', direction: 'desc' }],
+      maxRecords: max,
+    });
+    return recs.map(r => ({
+      recordId: r.id,
+      anbieter: r.fields.anbieter_name || '',
+      lerntext: r.fields.lerntext || '',
+      filename: r.fields.quell_filename || '',
+      created: r.fields.created_at || '',
+      aktiv: r.fields.aktiv !== false && r.fields.aktiv !== 'nein',
+    }));
+  } catch (e) {
+    // Tabelle existiert ggf. noch nicht — kein Fehler, einfach leer
+    console.warn('Lerntexte-Load fehlgeschlagen (Tabelle ggf. noch nicht da):', e.message);
+    return [];
+  }
+}
+
+/* v2.46.71: Lädt eigene gewonnene Angebote (Status=Auftrag) als Selbstlern-Pool.
+   Format kompatibel mit Lerntexten — gleiche Few-Shot-Struktur. */
+async function loadAngeboteAuftrag(accountId, max) {
+  max = max || 3;
+  if (!accountId) return [];
+  const filter = "AND({account_id}='" + escapeFormula(accountId) + "',{status}='Auftrag')";
+  try {
+    const recs = await airtableRead(ANGEBOTE_TABLE, {
+      filter,
+      sort: [{ field: 'created_at', direction: 'desc' }],
+      maxRecords: max,
+    });
+    return recs.map(r => {
+      const f = r.fields || {};
+      const txt = 'GEWONNENES EIGEN-ANGEBOT (' + (f.angebotsnr || '') + ', Festpreis ' + (f.summe_netto || 0) + '€):\n' +
+        'Einleitung: ' + (f.einleitung_text || '') + '\n' +
+        'Befund/Empfehlung: ' + (f.befund_text || '') + '\n' +
+        'Schluss: ' + (f.schluss_text || '');
+      return {
+        recordId: r.id,
+        anbieter: 'Eigenes Angebot (gewonnen)',
+        lerntext: txt,
+        filename: f.angebotsnr || '',
+        created: f.created_at || '',
+        aktiv: true,
+      };
+    });
+  } catch (e) {
+    console.warn('Auftrags-Angebote-Load fehlgeschlagen:', e.message);
+    return [];
+  }
+}
 
 /* Hauptfunktion: öffnet das Angebots-Modal für ein Ticket. */
 async function openAngebotsModal(accountId, ticketId) {
@@ -20907,6 +20995,17 @@ async function _angebotAiGenerate(ctx, inputs) {
     .slice(0, 5)
     .map(c => (c.incoming ? 'Kunde' : 'Agent') + ': ' + htmlToText(c.body_text || c.body || '').slice(0, 500))
     .join('\n\n');
+  // v2.46.71: Stil-Referenzen aus Lerntexten + gewonnenen Eigen-Angeboten laden
+  const [lerntexte, eigeneAuftraege] = await Promise.all([
+    loadAngebotsLerntexte(accountId, 5),
+    loadAngeboteAuftrag(accountId, 3),
+  ]);
+  const stilReferenzen = [].concat(eigeneAuftraege, lerntexte).slice(0, 5);
+  const stilBlock = stilReferenzen.length
+    ? '\n\n=== STIL-REFERENZEN (lerne nur den STIL, übernimm NICHT 1:1) ===\n' +
+      stilReferenzen.map((r, i) => '\n--- Referenz ' + (i + 1) + ' [' + (r.anbieter || '') + '] ---\n' + (r.lerntext || '').slice(0, 1800)).join('\n') +
+      '\n\nNutze diese als Stil-Inspiration für Tonalität, Formulierungen und Aufbau — aber bleibe individuell und passe dich an den konkreten Anlass an.\n'
+    : '';
   const sysPrompt =
     'Du bist ein erfahrener B2B-Vertriebs-Experte für Aufzug-Service-Angebote. ' +
     'Du schreibst psychologisch wirksame Verkaufsbriefe im Stil von TK Elevator. ' +
@@ -20922,7 +21021,9 @@ async function _angebotAiGenerate(ctx, inputs) {
     '9. ABLAUF — Arbeitsschritte als Bulletpoints listen\n' +
     '10. PRE-CLOSING WARM — "Wir hoffen... sehr gerne für Sie umsetzen würden"\n' +
     '11. KEINE FLOSKELN, KEINE übertriebene Dringlichkeit, KEINE CAPS\n\n' +
-    'Branche: ' + (profile.ki_branche_hint || 'Aufzug-Service') + '\n\n' +
+    'Branche: ' + (profile.ki_branche_hint || 'Aufzug-Service') + '\n' +
+    stilBlock + // v2.46.71: Stil-Referenzen aus hochgeladenen PDFs + gewonnenen Eigen-Angeboten
+    '\n' +
     'Antworte AUSSCHLIESSLICH mit gültigem JSON ohne Markdown-Codeblock:\n' +
     '{\n' +
     '  "warnung_aktiv": boolean (true wenn Anlage außer Betrieb oder akut sicherheitskritisch),\n' +
@@ -21459,6 +21560,237 @@ async function angebotSendReply(btn) {
     setBusy(btn, false);
     toast('Versand fehlgeschlagen: ' + (e.message || e), 'error', 8000);
   }
+}
+
+/* ===== v2.46.71: PDF-Upload + KI-Stil-Extraktion ===== */
+
+/* Öffnet das Upload-Modal für ein Wettbewerber-PDF. Wird aus dem Account-Edit-Modal
+   per Button aufgerufen — siehe openAccountModal. */
+function openAngebotsLernUploadModal(accountId) {
+  let host = document.getElementById('subModalHost');
+  if (!host) { host = document.createElement('div'); host.id = 'subModalHost'; document.body.appendChild(host); }
+  document.body.style.overflow = 'hidden';
+  host.innerHTML =
+    '<div class="fixed inset-0 z-[60] flex items-end justify-center bg-black/50" onclick="if(event.target===this)closeAngebotsLernUploadModal()">' +
+      '<div class="bg-white w-full max-w-md rounded-t-3xl shadow-2xl flex flex-col safe-bottom" style="max-height:92vh">' +
+        '<div class="safe-top px-4 py-3 border-b border-ink-200 flex items-center justify-between gap-2 shrink-0">' +
+          '<h3 class="font-bold text-ink-900 inline-flex items-center gap-2"><i data-lucide="upload-cloud" class="w-5 h-5 text-indigo-600"></i> KI-Lernmaterial hinzufügen</h3>' +
+          '<button onclick="closeAngebotsLernUploadModal()" class="w-9 h-9 rounded-lg hover:bg-ink-100 flex items-center justify-center"><i data-lucide="x" class="w-5 h-5 text-ink-700"></i></button>' +
+        '</div>' +
+        '<div class="flex-1 overflow-y-auto p-4 space-y-3">' +
+          '<input type="hidden" id="lernAccId" value="' + escapeAttr(accountId) + '">' +
+          '<div class="bg-indigo-50 border border-indigo-200 rounded-xl p-3 text-[12px] text-indigo-900">' +
+            '<p class="font-bold mb-1">So funktioniert\'s</p>' +
+            '<ol class="list-decimal pl-4 space-y-0.5">' +
+              '<li>Lade ein PDF eines Wettbewerber-Angebots hoch (z.B. TKE, Schindler, Otis, Kone)</li>' +
+              '<li>Claude analysiert Stil, Tonalität, Position-Format, Konditionen</li>' +
+              '<li>Strukturiertes Lernwissen wird gespeichert — die KI nutzt es als Stil-Referenz</li>' +
+              '<li>PDF selbst wird NICHT gespeichert (nur das extrahierte Wissen)</li>' +
+            '</ol>' +
+          '</div>' +
+          '<label class="text-xs font-bold text-ink-700 uppercase tracking-wider block">Anbieter-Name *</label>' +
+          '<input id="lernAnbieter" type="text" placeholder="z.B. TK Elevator, Schindler, Otis, Kone" class="w-full px-3 py-2.5 border border-ink-300 rounded-xl text-sm">' +
+          '<label class="text-xs font-bold text-ink-700 uppercase tracking-wider block">PDF-Datei *</label>' +
+          '<input id="lernFile" type="file" accept="application/pdf" class="w-full px-3 py-2 border border-ink-300 rounded-xl text-sm">' +
+          '<p class="text-[10px] text-ink-500 -mt-1">Max. 32 MB. PDFs aller Größen werden von Claude Sonnet nativ gelesen.</p>' +
+          '<div id="lernStatus" class="hidden bg-ink-50 border border-ink-200 rounded-xl p-3 text-[12px]"></div>' +
+          '<div id="lernPreview" class="hidden bg-white border border-emerald-200 rounded-xl p-3 text-[12px] space-y-2 max-h-72 overflow-y-auto"></div>' +
+          '<div id="lernErr" class="hidden bg-red-50 border border-red-200 rounded-xl p-3 text-sm text-red-800"></div>' +
+        '</div>' +
+        '<div class="border-t border-ink-200 p-3 flex gap-2 shrink-0">' +
+          '<button onclick="closeAngebotsLernUploadModal()" class="flex-1 bg-ink-100 hover:bg-ink-200 text-ink-700 rounded-xl px-3 py-3 text-sm font-bold">Abbrechen</button>' +
+          '<button onclick="processAngebotsLernUpload(this)" id="lernSubmitBtn" class="flex-[2] bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl px-3 py-3 text-sm font-bold inline-flex items-center justify-center gap-1.5 shadow-md">' +
+            '<i data-lucide="sparkles" class="w-4 h-4"></i> Analysieren & speichern' +
+          '</button>' +
+        '</div>' +
+      '</div>' +
+    '</div>';
+  if (window.lucide) lucide.createIcons();
+}
+
+function closeAngebotsLernUploadModal() {
+  const host = document.getElementById('subModalHost');
+  if (host) host.innerHTML = '';
+  document.body.style.overflow = '';
+}
+
+async function processAngebotsLernUpload(btn) {
+  const errEl = $('lernErr');
+  const setErr = function (msg) { if (errEl) { errEl.textContent = msg; errEl.classList.remove('hidden'); } };
+  if (errEl) errEl.classList.add('hidden');
+  const accountId = $('lernAccId')?.value;
+  const anbieter  = ($('lernAnbieter')?.value || '').trim();
+  const fileInput = $('lernFile');
+  const file = fileInput?.files?.[0];
+  if (!anbieter) return setErr('Anbieter-Name fehlt');
+  if (!file)     return setErr('Bitte PDF auswählen');
+  if (file.type !== 'application/pdf') return setErr('Nur PDF-Dateien werden unterstützt');
+  if (file.size > 32 * 1024 * 1024) return setErr('Datei ist zu groß (max 32 MB)');
+  const statusEl = $('lernStatus');
+  const setStatus = (msg) => { if (statusEl) { statusEl.textContent = msg; statusEl.classList.remove('hidden'); } };
+  setBusy(btn, true, 'Lese PDF…');
+  try {
+    // PDF → base64
+    setStatus('1/3: PDF wird gelesen und kodiert…');
+    const base64 = await _fileToBase64(file);
+    // An Anthropic schicken
+    setStatus('2/3: Claude analysiert Stil + Struktur (10-30 Sek)…');
+    const extracted = await _angebotsLernExtract(base64, anbieter);
+    setStatus('3/3: Speichere in Lern-Datenbank…');
+    // In Airtable
+    const fields = {
+      account_id: accountId,
+      anbieter_name: anbieter,
+      lerntext: extracted.lerntext,
+      quell_filename: file.name,
+      ki_modell: 'claude-sonnet-4-5-20250929',
+      kategorien_json: JSON.stringify(extracted.kategorien || []),
+      created_at: nowIso(),
+      created_by_api_key: APP_KEYS.user?.api_key || '',
+      aktiv: 'ja',
+    };
+    await airtableWriteWithAutoField(ANGEBOTS_LERN_TABLE, fields, {
+      anbieter_name: 'singleLineText',
+      lerntext: 'multilineText',
+      quell_filename: 'singleLineText',
+      ki_modell: 'singleLineText',
+      kategorien_json: 'multilineText',
+      created_at: 'singleLineText',
+      created_by_api_key: 'singleLineText',
+      aktiv: 'singleLineText',
+    });
+    setBusy(btn, false);
+    closeAngebotsLernUploadModal();
+    toast('Lern-Material gespeichert — KI nutzt es ab sofort als Stil-Referenz', 'success', 5000);
+    // Account-Edit-Modal aktualisieren, damit Lerntext in der Liste erscheint
+    if (typeof renderAngebotsLernListInAccountModal === 'function') {
+      renderAngebotsLernListInAccountModal(accountId).catch(e => console.warn(e));
+    }
+  } catch (e) {
+    setBusy(btn, false);
+    setErr('Fehler: ' + (e.message || e));
+  }
+}
+
+/* v2.46.71: Lerntext-Liste im Account-Edit-Modal rendern */
+async function renderAngebotsLernListInAccountModal(accountId) {
+  const list = document.getElementById('angLernList');
+  const countEl = document.querySelector('[data-ang-lern-count]');
+  if (!list) return;
+  list.innerHTML = '<p class="text-[10px] text-ink-400 italic text-center py-2"><span class="spinner inline-block w-3 h-3 border-[2px] text-indigo-500"></span> Lade Lerntexte…</p>';
+  let recs = [];
+  try {
+    const filter = "{account_id}='" + escapeFormula(accountId) + "'";
+    recs = await airtableRead(ANGEBOTS_LERN_TABLE, { filter, sort: [{ field: 'created_at', direction: 'desc' }] });
+  } catch (e) {
+    list.innerHTML = '<p class="text-[10px] text-amber-700 italic text-center py-2">Tabelle „' + ANGEBOTS_LERN_TABLE + '" existiert noch nicht — wird beim ersten Upload erstellt.</p>';
+    if (countEl) countEl.textContent = '0';
+    return;
+  }
+  if (countEl) countEl.textContent = recs.length + ' Eintr' + (recs.length === 1 ? 'ag' : 'äge');
+  if (!recs.length) {
+    list.innerHTML = '<p class="text-[10px] text-ink-400 italic text-center py-2">Noch kein Lernmaterial. Klick „PDF hinzufügen" oben.</p>';
+    return;
+  }
+  list.innerHTML = recs.map(r => {
+    const f = r.fields || {};
+    const aktiv = f.aktiv !== false && f.aktiv !== 'nein';
+    const date = f.created_at ? new Date(f.created_at).toLocaleDateString('de-DE') : '';
+    return '<div class="bg-white border border-ink-200 rounded-lg p-2 mb-1.5 text-[11px]" data-lern-id="' + r.id + '">' +
+      '<div class="flex items-center justify-between gap-2 mb-1">' +
+        '<div class="flex-1 min-w-0">' +
+          '<p class="font-semibold text-ink-900 truncate">' + escapeHtml(f.anbieter_name || '–') + '</p>' +
+          '<p class="text-[10px] text-ink-500 truncate">' + escapeHtml(f.quell_filename || '') + (date ? ' · ' + date : '') + '</p>' +
+        '</div>' +
+        '<button onclick="toggleAngebotsLernAktiv(\'' + escapeAttr(r.id) + '\', \'' + escapeAttr(accountId) + '\', this)" class="shrink-0 px-2 py-1 rounded text-[10px] font-bold ' + (aktiv ? 'bg-emerald-100 text-emerald-700' : 'bg-ink-100 text-ink-500') + '" title="Aktiv/Inaktiv">' + (aktiv ? 'AN' : 'AUS') + '</button>' +
+        '<button onclick="deleteAngebotsLern(\'' + escapeAttr(r.id) + '\', \'' + escapeAttr(accountId) + '\')" class="shrink-0 px-2 py-1 rounded text-[10px] bg-red-50 text-red-600 border border-red-200" title="Löschen"><i data-lucide="trash-2" class="w-3 h-3"></i></button>' +
+      '</div>' +
+      (f.lerntext ? '<details><summary class="text-[10px] text-ink-500 cursor-pointer">Lerntext anzeigen</summary><pre class="mt-1 text-[10px] text-ink-700 bg-ink-50 p-2 rounded whitespace-pre-wrap break-words max-h-40 overflow-y-auto">' + escapeHtml(f.lerntext) + '</pre></details>' : '') +
+    '</div>';
+  }).join('');
+  if (window.lucide) lucide.createIcons();
+}
+
+async function toggleAngebotsLernAktiv(recordId, accountId, btn) {
+  try {
+    const current = btn.textContent.trim() === 'AN';
+    await airtableUpdateWithAutoField(ANGEBOTS_LERN_TABLE, recordId, { aktiv: current ? 'nein' : 'ja' }, { aktiv: 'singleLineText' });
+    await renderAngebotsLernListInAccountModal(accountId);
+  } catch (e) { toast('Fehler: ' + e.message, 'error', 6000); }
+}
+
+async function deleteAngebotsLern(recordId, accountId) {
+  if (!confirm('Diesen Lerntext löschen? Die KI nutzt ihn dann nicht mehr.')) return;
+  try {
+    await airtableDelete(ANGEBOTS_LERN_TABLE, recordId);
+    toast('Lerntext gelöscht', 'success', 2500);
+    await renderAngebotsLernListInAccountModal(accountId);
+  } catch (e) { toast('Fehler: ' + e.message, 'error', 6000); }
+}
+
+function _fileToBase64(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const result = reader.result || '';
+      // result hat Format "data:application/pdf;base64,XXXX" — nur den Base64-Teil zurückgeben
+      const comma = String(result).indexOf(',');
+      resolve(comma >= 0 ? String(result).slice(comma + 1) : String(result));
+    };
+    reader.onerror = (e) => reject(new Error('FileReader-Fehler: ' + (e.target?.error?.message || 'unbekannt')));
+    reader.readAsDataURL(file);
+  });
+}
+
+async function _angebotsLernExtract(pdfBase64, anbieter) {
+  const sysPrompt =
+    'Du analysierst ein Angebots-PDF eines Aufzug-Service-Anbieters und extrahierst das STIL-WISSEN strukturiert. ' +
+    'Du extrahierst NICHT kundenspezifische Daten (Preise, Namen, Anschriften) — nur das STILISTISCHE.\n\n' +
+    'Antworte AUSSCHLIESSLICH mit gültigem JSON ohne Markdown-Codeblock:\n' +
+    '{\n' +
+    '  "verkaufsbrief_stil": string (Tonalität, Anrede, typische Floskeln — 3-5 Sätze),\n' +
+    '  "befund_narrativ_pattern": string (wie wird der Defekt/Befund kommuniziert — Aufbau-Beispiel),\n' +
+    '  "positions_format": string (wie sind die Positionen aufgebaut — Spalten, Pauschalen-Stil),\n' +
+    '  "konditionen_stil": string (Formulierung von Lieferzeit, Bindefrist, AGB-Verweis),\n' +
+    '  "pre_closing_formel": string (wörtlich aus dem PDF, wenn vorhanden — die Schluss-Formel die zum Auftrag einlädt),\n' +
+    '  "goldene_floskeln": [string, ...] (3-5 rhetorisch wirksame Sätze aus dem PDF, wörtlich),\n' +
+    '  "kategorien": [string, ...] (Tags: "Sicherheits-Fokus", "Wartung", "Reparatur", "Modernisierung", "Bindefrist-stark", etc.)\n' +
+    '}';
+  const userText = 'Analysiere dieses Angebot des Anbieters „' + anbieter + '" und extrahiere strukturiert das Stil-Wissen.';
+  const data = await proxyJson('/anthropic/v1/messages', {
+    method: 'POST',
+    body: JSON.stringify({
+      model: 'claude-sonnet-4-5-20250929',
+      max_tokens: 2500,
+      system: sysPrompt,
+      messages: [{
+        role: 'user',
+        content: [
+          { type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: pdfBase64 } },
+          { type: 'text', text: userText },
+        ],
+      }],
+    }),
+  });
+  const raw = (data?.content?.[0]?.text || '').trim();
+  const json = raw.replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/i, '').trim();
+  let plan;
+  try { plan = JSON.parse(json); }
+  catch (_) {
+    const m = json.match(/\{[\s\S]*\}/);
+    if (m) plan = JSON.parse(m[0]);
+    else throw new Error('KI-Antwort ist kein gültiges JSON: ' + raw.slice(0, 200));
+  }
+  // Strukturiertes Wissen zu einem Lerntext-Block zusammenbauen
+  const lerntext =
+    'ANBIETER: ' + anbieter + '\n\n' +
+    'VERKAUFSBRIEF-STIL:\n' + (plan.verkaufsbrief_stil || '') + '\n\n' +
+    'BEFUND-NARRATIV-PATTERN:\n' + (plan.befund_narrativ_pattern || '') + '\n\n' +
+    'POSITIONS-FORMAT:\n' + (plan.positions_format || '') + '\n\n' +
+    'KONDITIONEN-STIL:\n' + (plan.konditionen_stil || '') + '\n\n' +
+    'PRE-CLOSING-FORMEL:\n' + (plan.pre_closing_formel || '') + '\n\n' +
+    'GOLDENE FLOSKELN:\n' + ((plan.goldene_floskeln || []).map(f => '- ' + f).join('\n')) + '\n';
+  return { lerntext, kategorien: plan.kategorien || [] };
 }
 
 async function _angebotSaveAirtable(ctx, status) {
