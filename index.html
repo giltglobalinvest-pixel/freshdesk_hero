@@ -745,7 +745,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.82';
+const APP_VERSION = 'v2.46.83';
 
 /* ============================================================
    GLOBAL THEME — v2.46.12
@@ -21862,39 +21862,45 @@ async function _angChatGenerateOffer(s, userText) {
     ? '\n\nAKTIVE SUB-TYPEN BEI DIESEM ACCOUNT:\n' + subtypList.map(t => '- ' + t.label + ': ' + t.ki_hint).join('\n') + '\n'
     : '';
   const sysPrompt =
-    'Du bist ein Vertriebs-Experte für Aufzug-Service-Angebote im Stil von TK Elevator. ' +
-    'Du generierst aus der User-Anweisung in EINEM Schritt ein VOLLSTÄNDIGES, professionelles Angebot.\n\n' +
-    'STIL-REGELN (psychologisch wirksam):\n' +
-    '1. PERSÖNLICH: Techniker-Name + Datum aus Ticket-Verlauf wenn bekannt\n' +
-    '2. BEZIEHUNGS-ANKER: "Als Ihr Servicepartner..."\n' +
-    '3. EMPATHIE: "Uns liegt viel daran..."\n' +
-    '4. FAKTISCH: konkreter Befund, kein Drama\n' +
-    '5. KOMPETENZ: wenn temporäre Lösung gemacht — erwähnen\n' +
-    '6. WEICHE RISIKO-ANKER: "kann jederzeit wieder kommen"\n' +
-    '7. EMPFEHLUNG STATT FORDERUNG: "Daher empfehlen wir"\n' +
-    '8. TRANSPARENZ: Ausfallzeit kommunizieren\n' +
-    '9. ABLAUF als Bulletpoints\n' +
-    '10. PRE-CLOSING WARM: "Wir hoffen ... sehr gerne für Sie umsetzen würden. Eine kurze Antwort an diese Email genügt uns als Auftragsbestätigung."\n' +
-    '11. KEINE Floskeln, keine CAPS, keine übertriebene Dringlichkeit\n' +
-    '12. Preise: realistisch schätzen wenn nicht vom User vorgegeben — wenn vorgegeben: ÜBERNIMM exakt\n\n' +
+    'Du erstellst SCHLANK STRUKTURIERTE Aufzug-Service-Angebote im Stil von Aufzugshandwerk GmbH (Referenz-Beispiel). ' +
+    'WICHTIG: Das ANGEBOT ist sachlich-formular-artig (NICHT erzählerisch). ' +
+    'Persönliche Brief-Texte (Empathie, Befund-Narrativ, Risiko-Anker) gehören NICHT ins Angebot, sondern OPTIONAL in ein SEPARATES Anschreiben (Seite 0).\n\n' +
+    'ANGEBOT-STRUKTUR (immer):\n' +
+    '- Leistungsbeschreibung (1-3 Sätze, klare Beschreibung was angeboten wird, KEIN Verkaufstext)\n' +
+    '- Erläuterung (optional, kurzer Hinweis z.B. zur Anlage, Voraussetzung, Ausschlüsse — 1-2 Sätze)\n' +
+    '- Positionen (Liste mit Mengen/Einheiten/Preisen — Pauschalen erlaubt)\n' +
+    '- Konditionen (Lieferzeit, Bindefrist, Zahlung, Gewährleistung)\n' +
+    '- AGB-Verweis (automatisch durch Layout)\n\n' +
+    'ANSCHREIBEN (Seite 0, OPTIONAL):\n' +
+    'Wenn der User es WÜNSCHT (oder du fragst nach), generierst du auch ein klassisches Brief-Anschreiben: ' +
+    'Anrede, kurzer Bezug auf die Anfrage / Kontext, Hinweis dass im Anhang das Angebot folgt, ggf. Empfehlung/Begründung, freundlicher Gruß. ' +
+    'Stil: persönlich aber professionell. Max 6-8 Sätze.\n\n' +
+    'WIE DU MIT DEM ANSCHREIBEN UMGEHST:\n' +
+    '- Wenn User noch NICHT erwähnt hat ob er ein Anschreiben will → in deiner "message" am Ende kurz fragen: "Möchtest du ein begleitendes Anschreiben (Brief vor dem Angebot)? Wenn ja, schick mir kurze Hinweise oder ich entwerfe was Standardisches." Lass anschreiben_aktiv=false.\n' +
+    '- Wenn User SAGT er will ein Anschreiben → setze anschreiben_aktiv=true und fülle anschreiben_betreff + anschreiben_body + anschreiben_anrede + anschreiben_gruss komplett aus.\n' +
+    '- Wenn User SAGT er will KEIN Anschreiben → anschreiben_aktiv=false.\n\n' +
+    'PREISE:\n' +
+    '- Wenn User Preise nennt → übernimm EXAKT\n' +
+    '- Wenn nicht → realistisch branchenüblich schätzen\n\n' +
     'Branche: ' + (profile.ki_branche_hint || 'Aufzug-Service') + '\n' +
     subtypBlock +
     stilBlock +
     '\nTICKET-HINTERGRUND (bereits analysiert):\n' + (s.ticket_summary || '(keine Hintergrund-Analyse verfügbar)') + '\n\n' +
     'Antworte AUSSCHLIESSLICH mit gültigem JSON ohne Markdown-Codeblock:\n' +
     '{\n' +
-    '  "message": string (KURZE Chat-Nachricht an User, max 3 Sätze — z.B. "Hier dein Angebot. Festpreis 8.450 €. Lieferzeit nach Absprache. Anpassungen?"),\n' +
+    '  "message": string (KURZE Chat-Nachricht an User, max 3 Sätze. Endet ggf. mit der Frage nach Anschreiben),\n' +
     '  "plan": {\n' +
-    '    "warnung_aktiv": boolean,\n' +
-    '    "warnung_text": string,\n' +
-    '    "anrede": string,\n' +
-    '    "einleitung": string,\n' +
-    '    "befund_detail": string,\n' +
-    '    "ablauf_punkte": [string, ...],\n' +
+    '    "leistungsbeschreibung": string (WAS angeboten wird, sachlich, 1-3 Sätze — z.B. "Austausch Frequenzumrichter inklusive Montage, Parametrierung und Inbetriebnahme."),\n' +
+    '    "erlaeuterung": string (OPTIONAL, kurzer Hinweis 1-2 Sätze — z.B. zu Voraussetzungen, Anschluss, Ausschlüssen — oder leer),\n' +
     '    "positionen": [{"bezeichnung": string, "menge": number, "einheit": "ST"|"STD"|"Pauschal"|"Monat", "einzelpreis": number, "kategorie": "Material"|"Montage"}],\n' +
-    '    "konditionen": {"lieferzeit": string, "preisstellung": string, "zahlungsziel": string, "gewaehrleistung": string, "bindefrist": string},\n' +
+    '    "konditionen": {"lieferzeit": string, "preisstellung": string, "zahlungsziel": string, "gewaehrleistung": string, "bindefrist": string, "montagetermin": string},\n' +
     '    "mwst_satz": number,\n' +
-    '    "schluss": string\n' +
+    '    "einsatzpauschale_anfahrt": number (Pauschale pro Anfahrt, 0 wenn inkludiert),\n' +
+    '    "anschreiben_aktiv": boolean,\n' +
+    '    "anschreiben_betreff": string,\n' +
+    '    "anschreiben_anrede": string,\n' +
+    '    "anschreiben_body": string (max 6-8 Sätze, Absätze mit \\n\\n),\n' +
+    '    "anschreiben_gruss": string\n' +
     '  }\n' +
     '}';
   // Conversation-History: alle bisherigen User-Anweisungen + aktuelle
@@ -22429,7 +22435,15 @@ async function _angebotRegenerate() {
 }
 
 /* ===== HTML-Renderer für PDF + Email-Reply ===== */
+/* v2.46.83: Renderer komplett umgestellt auf Aufzugshandwerk-Stil.
+   Seite 0: Anschreiben (OPTIONAL, klassischer Brief mit Anrede)
+   Seite 1: SERVICEANGEBOT (sachlich-formularartig, Pauschalpreis-fokussiert)
+   Seite 2: AGB-Montagebedingungen */
 function _renderAngebotHtml(ctx, opts) {
+  return _renderAngebotHtmlV2(ctx, opts);
+}
+function _renderAngebotHtmlLegacy(ctx, opts) {
+  // Ältere TKE-Stil-Variante — wird nicht mehr verwendet, bleibt für Kompatibilität
   opts = opts || {};
   const { ticketId, profile, plan, ticket } = ctx;
   const req = ticket.requester || {};
@@ -22599,6 +22613,223 @@ function _renderAngebotHtml(ctx, opts) {
       footerHtml +
     '</div>' +
   '</div>';
+}
+
+/* v2.46.83: Neuer Renderer im Aufzugshandwerk-Stil.
+   - Optional: Anschreiben-Seite (DIN 5008 Brief)
+   - Servicebot-Seite (sachlich, Pauschalpreis-Box)
+   - AGB-Seite */
+function _renderAngebotHtmlV2(ctx, opts) {
+  opts = opts || {};
+  const { ticketId, profile, plan, ticket } = ctx;
+  const req = ticket.requester || {};
+  const angebotsnr = 'ANG-' + ticketId;
+  const today = new Date();
+  const datum = today.toLocaleDateString('de-DE');
+  const totals = plan._totals || _angebotCalcTotals(plan);
+  const empfaengerName  = req.name || '';
+  const empfaengerEmail = req.email || '';
+  const empfaengerFirma = req.company?.name || '';
+  const senderName  = APP_KEYS.user?.name || '';
+  const senderEmail = APP_KEYS.user?.email || profile.email;
+  const senderTel   = APP_KEYS.user?.phone || profile.tel;
+  const standort     = ctx.standort || '';
+  const fabriknummer = ctx.fabriknummer || '';
+  // CSS-Block (geteilt zwischen allen Seiten)
+  const css =
+    '<style>' +
+    '.fdh-ang { font-family: Helvetica, Arial, sans-serif; color: #1f2937; font-size: 10pt; line-height: 1.5; }' +
+    '.fdh-ang .page { max-width: 800px; margin: 0 auto; padding: 30px 35px; background: white; box-sizing: border-box; position: relative; min-height: 1050px; }' +
+    '.fdh-ang .page + .page { page-break-before: always; margin-top: 30px; }' +
+    '.fdh-ang .pheader { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 20px; }' +
+    '.fdh-ang .plogo { font-weight: bold; font-size: 14pt; color: #5a6f5a; letter-spacing: 0.5px; padding: 4px 10px; border: 2px solid #5a6f5a; display: inline-block; }' +
+    '.fdh-ang .pmeta { font-size: 8pt; }' +
+    '.fdh-ang .pmeta .box { padding: 3px 5px; border: 1px solid #aaa; min-width: 130px; margin-bottom: 3px; display: flex; justify-content: space-between; }' +
+    '.fdh-ang .pmeta .lbl { color: #666; font-size: 7pt; }' +
+    '.fdh-ang .smalladdr { font-size: 7pt; color: #6b7280; border-bottom: 1px solid #d1d5db; padding-bottom: 2px; margin-bottom: 6px; }' +
+    /* Anschreiben (Seite 0) */
+    '.fdh-ang .anschreiben-empfaenger { margin-top: 35px; margin-bottom: 35px; font-size: 10pt; line-height: 1.5; }' +
+    '.fdh-ang .anschreiben-datum { text-align: right; margin-bottom: 25px; font-size: 9pt; }' +
+    '.fdh-ang .anschreiben-betreff { font-weight: bold; margin-bottom: 20px; font-size: 11pt; }' +
+    '.fdh-ang .anschreiben-anrede { margin-bottom: 15px; }' +
+    '.fdh-ang .anschreiben-body { white-space: pre-line; margin-bottom: 25px; }' +
+    '.fdh-ang .anschreiben-gruss { margin-top: 30px; }' +
+    '.fdh-ang .anschreiben-name { font-weight: bold; margin-top: 25px; }' +
+    /* Angebot (Seite 1) */
+    '.fdh-ang h1.serviceangebot { font-size: 22pt; font-weight: bold; text-align: center; margin: 18px 0 22px 0; letter-spacing: 1px; }' +
+    '.fdh-ang .stamm-grid { display: flex; gap: 18px; margin-bottom: 18px; font-size: 9pt; }' +
+    '.fdh-ang .stamm-grid .col { flex: 1; }' +
+    '.fdh-ang .stamm-grid .row { padding: 4px 0; border-bottom: 1px solid #d1d5db; }' +
+    '.fdh-ang .stamm-grid .lbl { font-size: 8pt; color: #6b7280; }' +
+    '.fdh-ang .stamm-grid .val { color: #1f2937; }' +
+    '.fdh-ang .section-h { font-weight: bold; font-size: 10pt; text-transform: uppercase; margin: 18px 0 6px 0; letter-spacing: 0.3px; }' +
+    '.fdh-ang .section-box { border: 1px solid #d1d5db; padding: 10px 12px; min-height: 50px; margin-bottom: 14px; font-size: 10pt; line-height: 1.5; white-space: pre-line; }' +
+    '.fdh-ang .verguetungs-hinweis { font-size: 8pt; text-transform: uppercase; line-height: 1.4; margin: 14px 0; color: #4b5563; letter-spacing: 0.2px; }' +
+    '.fdh-ang .preis-grid { display: flex; gap: 14px; margin: 16px 0; }' +
+    '.fdh-ang .preis-grid .box { flex: 1; border: 1px solid #d1d5db; padding: 8px 12px; }' +
+    '.fdh-ang .preis-grid .lbl { font-size: 7.5pt; color: #6b7280; text-transform: uppercase; }' +
+    '.fdh-ang .preis-grid .val { font-size: 12pt; font-weight: bold; text-align: right; margin-top: 4px; }' +
+    '.fdh-ang .preis-grid .val.big { font-size: 14pt; }' +
+    '.fdh-ang .konditionen-mini { font-size: 9pt; color: #6b7280; margin: 8px 0 16px 0; }' +
+    '.fdh-ang .positionen-table { width: 100%; border-collapse: collapse; margin: 12px 0; font-size: 9pt; }' +
+    '.fdh-ang .positionen-table th { background: #f3f4f6; padding: 5px 7px; text-align: left; border-bottom: 1.5px solid #1f2937; font-size: 8pt; text-transform: uppercase; }' +
+    '.fdh-ang .positionen-table td { padding: 5px 7px; border-bottom: 1px solid #e5e7eb; }' +
+    '.fdh-ang .positionen-table td.right { text-align: right; white-space: nowrap; }' +
+    '.fdh-ang .sum-mini { display: flex; justify-content: flex-end; margin: 8px 0 16px 0; font-size: 9pt; }' +
+    '.fdh-ang .sum-mini table { border-collapse: collapse; }' +
+    '.fdh-ang .sum-mini td { padding: 2px 12px; }' +
+    '.fdh-ang .sum-mini td.r { text-align: right; min-width: 90px; }' +
+    '.fdh-ang .sum-mini .total { font-weight: bold; font-size: 11pt; border-top: 2px solid #1f2937; }' +
+    '.fdh-ang .unterschriften { margin-top: 28px; }' +
+    '.fdh-ang .unterschriften .head { margin-bottom: 24px; }' +
+    '.fdh-ang .unterschriften .sigs { display: flex; gap: 30px; }' +
+    '.fdh-ang .unterschriften .sigs .sig { flex: 1; }' +
+    '.fdh-ang .unterschriften .sigs .line { border-top: 1px solid #6b7280; padding-top: 5px; font-size: 8pt; color: #6b7280; }' +
+    /* AGB-Seite */
+    '.fdh-ang .agb-content h2 { font-size: 13pt; margin: 0 0 12px 0; font-weight: bold; }' +
+    '.fdh-ang .agb-content { font-size: 9pt; line-height: 1.4; }' +
+    /* Footer */
+    '.fdh-ang .pfooter { position: absolute; bottom: 25px; left: 35px; right: 35px; padding-top: 12px; border-top: 1px solid #d1d5db; font-size: 7pt; color: #6b7280; display: flex; gap: 20px; }' +
+    '.fdh-ang .pfooter > div { flex: 1; }' +
+    /* Print */
+    '@media print { .fdh-ang { font-size: 10pt; } .fdh-ang .page { padding: 18px 22px; min-height: auto; box-shadow: none; } .fdh-ang .pfooter { position: static; margin-top: 25px; } }' +
+    '</style>';
+  // Footer-HTML (geteilt)
+  const footerHtml =
+    '<div class="pfooter">' +
+      '<div><b>' + escapeHtml(profile.firma) + '</b><br>' + escapeHtml(profile.anschrift) + '<br>' + escapeHtml(profile.hrb) + '</div>' +
+      '<div>Tel.: ' + escapeHtml(profile.tel) + '<br>Mail: ' + escapeHtml(profile.email) + '<br>Web: ' + escapeHtml(profile.web) + (profile.steuernr ? '<br>Steuernr: ' + escapeHtml(profile.steuernr) : '') + '</div>' +
+      '<div>' + escapeHtml(profile.bank) + '<br>BIC: ' + escapeHtml(profile.bic) + '<br>IBAN: ' + escapeHtml(profile.iban) + '</div>' +
+    '</div>';
+  // Page-Header-HTML (Logo links + Meta-Box rechts)
+  function pageHeader(seite, totalPages) {
+    return '<div class="pheader">' +
+      '<div class="plogo">' + escapeHtml(profile.briefkopf_logo_text) + '</div>' +
+      '<div class="pmeta">' +
+        '<div class="box"><span class="lbl">Angebots-Nr.</span><span>' + escapeHtml(angebotsnr) + '</span></div>' +
+        '<div class="box"><span class="lbl">Datum</span><span>' + escapeHtml(datum) + '</span></div>' +
+        '<div class="box"><span class="lbl">Seite</span><span>' + seite + ' / ' + totalPages + '</span></div>' +
+      '</div>' +
+    '</div>';
+  }
+  // === Anschreiben (Seite 0, optional) ===
+  const anschreibenAktiv = !!plan.anschreiben_aktiv && (plan.anschreiben_body || '').trim().length > 0;
+  // Anzahl Seiten ermitteln
+  const totalPages = (anschreibenAktiv ? 1 : 0) + 1 /* Angebot */ + 1 /* AGB */;
+  let currentPage = 1;
+  let html = css + '<div class="fdh-ang">';
+  if (anschreibenAktiv) {
+    html += '<div class="page">' +
+      pageHeader(currentPage++, totalPages) +
+      '<div class="anschreiben-empfaenger">' +
+        '<div class="smalladdr">' + escapeHtml(profile.firma) + ', ' + escapeHtml(profile.anschrift) + '</div>' +
+        (empfaengerFirma ? escapeHtml(empfaengerFirma) + '<br>' : '') +
+        (empfaengerName && empfaengerName !== empfaengerFirma ? escapeHtml(empfaengerName) + '<br>' : '') +
+      '</div>' +
+      '<div class="anschreiben-datum">' + escapeHtml(datum) + '</div>' +
+      '<div class="anschreiben-betreff">' + escapeHtml(plan.anschreiben_betreff || ('Unser Angebot ' + angebotsnr)) + '</div>' +
+      '<div class="anschreiben-anrede">' + escapeHtml(plan.anschreiben_anrede || 'Sehr geehrte Damen und Herren,') + '</div>' +
+      '<div class="anschreiben-body">' + escapeHtml(plan.anschreiben_body || '') + '</div>' +
+      '<div class="anschreiben-gruss">' + escapeHtml(plan.anschreiben_gruss || 'Mit freundlichen Grüßen') + '<br>Ihre ' + escapeHtml(profile.firma) + '</div>' +
+      (senderName ? '<div class="anschreiben-name">' + escapeHtml(senderName) + '</div>' : '') +
+      footerHtml +
+    '</div>';
+  }
+  // === Servicebot (Hauptseite) ===
+  const eAdr = (req.address || '') || '';
+  const ePhone = (req.phone || req.mobile || '') || '';
+  const ansprechpartner = senderName || '';
+  // Stammdaten-Felder
+  const stammHtml =
+    '<div class="stamm-grid">' +
+      '<div class="col">' +
+        '<div class="row"><div class="lbl">Vertragspartner (Rechnungsanschrift)</div><div class="val">' + escapeHtml(empfaengerFirma || empfaengerName || '–') + '</div></div>' +
+        '<div class="row"><div class="lbl">E-Mail Adresse</div><div class="val">' + escapeHtml(empfaengerEmail) + '</div></div>' +
+        '<div class="row"><div class="lbl">Standort/e der Aufzugsanlage/n</div><div class="val">' + escapeHtml(standort || '–') + '</div></div>' +
+      '</div>' +
+      '<div class="col">' +
+        '<div class="row"><div class="lbl">Anschrift (Straße, PLZ, Ort)</div><div class="val">' + escapeHtml(eAdr || '–') + '</div></div>' +
+        '<div class="row"><div class="lbl">Tel. Nr.</div><div class="val">' + escapeHtml(ePhone) + '</div></div>' +
+        '<div class="row"><div class="lbl">Ansprechpartner vor Ort</div><div class="val">' + escapeHtml(empfaengerName || '–') + '</div></div>' +
+      '</div>' +
+    '</div>' +
+    (fabriknummer ? '<div class="stamm-grid"><div class="col"><div class="row"><div class="lbl">Anlagen-Nr / Fabriknummer</div><div class="val">' + escapeHtml(fabriknummer) + '</div></div></div></div>' : '');
+  // Positionen-Tabelle (nur wenn detaillierte Positionen vorhanden)
+  const hasPositionen = Array.isArray(plan.positionen) && plan.positionen.length > 0;
+  let posTableHtml = '';
+  if (hasPositionen) {
+    let posIdx = 0;
+    const posRows = plan.positionen.map(p => {
+      posIdx++;
+      const m = p.menge == null ? '' : (Number.isInteger(p.menge) ? String(p.menge) : String(p.menge).replace('.', ','));
+      const sum = (p.menge == null ? 1 : p.menge) * (p.einzelpreis || 0);
+      return '<tr>' +
+        '<td>' + posIdx + '</td>' +
+        '<td>' + escapeHtml(m) + '</td>' +
+        '<td>' + escapeHtml(p.einheit || 'ST') + '</td>' +
+        '<td>' + escapeHtml(p.bezeichnung || '') + '</td>' +
+        '<td class="right">' + _formatEur(sum) + '</td>' +
+      '</tr>';
+    }).join('');
+    posTableHtml =
+      '<div class="section-h">Positionen</div>' +
+      '<table class="positionen-table"><thead><tr><th>Pos</th><th>Menge</th><th>Einheit</th><th>Bezeichnung</th><th class="right">Preis</th></tr></thead><tbody>' + posRows + '</tbody></table>' +
+      '<div class="sum-mini"><table>' +
+        (totals.material ? '<tr><td>Material:</td><td class="r">' + _formatEur(totals.material) + '</td></tr>' : '') +
+        (totals.montage  ? '<tr><td>Montage:</td><td class="r">' + _formatEur(totals.montage) + '</td></tr>' : '') +
+        '<tr><td>Festpreis netto:</td><td class="r">' + _formatEur(totals.netto) + '</td></tr>' +
+        '<tr><td>MwSt ' + (plan.mwst_satz || 19) + '%:</td><td class="r">' + _formatEur(totals.mwst) + '</td></tr>' +
+        '<tr class="total"><td>Brutto:</td><td class="r">' + _formatEur(totals.brutto) + '</td></tr>' +
+      '</table></div>';
+  }
+  // Preis-Boxen (Pauschalpreis + Einsatzpauschale)
+  const einsatzpausch = Number(plan.einsatzpauschale_anfahrt || 0) || 0;
+  const preisBoxenHtml = !hasPositionen
+    ? '<div class="preis-grid">' +
+        '<div class="box"><div class="lbl">Pauschalpreis (netto)</div><div class="val big">' + _formatEur(totals.netto) + '</div></div>' +
+        '<div class="box"><div class="lbl">Einsatzpauschale je Anfahrt</div><div class="val">' + _formatEur(einsatzpausch) + '</div></div>' +
+      '</div>' +
+      '<div class="konditionen-mini">Zzgl. ' + (plan.mwst_satz || 19) + ' % MwSt — Bruttogesamt: <b>' + _formatEur(totals.brutto) + '</b></div>'
+    : '';
+  // Konditionen-Mini
+  const k = plan.konditionen || {};
+  const kondHtml =
+    '<div class="konditionen-mini">' +
+      (k.zahlungsziel ? '<b>Zahlungsziel:</b> ' + escapeHtml(k.zahlungsziel) + ' &nbsp;·&nbsp; ' : '') +
+      (k.montagetermin ? '<b>Geplanter Montagetermin:</b> ' + escapeHtml(k.montagetermin) + ' &nbsp;·&nbsp; ' : '') +
+      (k.lieferzeit && !k.montagetermin ? '<b>Lieferzeit:</b> ' + escapeHtml(k.lieferzeit) + ' &nbsp;·&nbsp; ' : '') +
+      (k.bindefrist ? '<b>Bindefrist:</b> ' + escapeHtml(k.bindefrist) + ' &nbsp;·&nbsp; ' : '') +
+      (k.gewaehrleistung ? '<b>Gewährleistung:</b> ' + escapeHtml(k.gewaehrleistung) : '') +
+    '</div>';
+  // Hauptseite (Servicebot)
+  html += '<div class="page">' +
+    pageHeader(currentPage++, totalPages) +
+    '<h1 class="serviceangebot">SERVICEANGEBOT</h1>' +
+    stammHtml +
+    '<div class="section-h">Hiermit bieten wir Ihnen folgende Leistung an:</div>' +
+    '<div class="section-box">' + escapeHtml(plan.leistungsbeschreibung || '–') + '</div>' +
+    (plan.erlaeuterung ? '<div class="section-h">Erläuterung zum Angebot:</div><div class="section-box">' + escapeHtml(plan.erlaeuterung) + '</div>' : '') +
+    '<div class="verguetungs-hinweis">DIE VERGÜTUNG VON ARBEIT UND MATERIAL ERFOLGT GEMÄSS BESCHREIBUNG, PAUSCHAL NACH ERBRACHTER LEISTUNG. JE ANFAHRT BERECHNEN WIR ZUDEM EINE EINSATZPAUSCHALE FÜR FAHRTZEIT, FAHRZEUGBENUTZUNG UND RÜSTZEIT. ES GELTEN DIE BEDINGUNGEN, DIE AUF DER FOLGENDEN SEITE DIESES ANGEBOTES AUFGEFÜHRT SIND.</div>' +
+    posTableHtml +
+    preisBoxenHtml +
+    kondHtml +
+    '<div class="unterschriften">' +
+      '<div class="head">Hiermit beauftrage und bestätige ich das Angebot.</div>' +
+      '<div class="sigs">' +
+        '<div class="sig"><div class="line">Datum, Auftragnehmer (Unterschrift)</div></div>' +
+        '<div class="sig"><div class="line">Datum, Kunde (Unterschrift)</div></div>' +
+      '</div>' +
+    '</div>' +
+    footerHtml +
+  '</div>';
+  // === AGB-Seite ===
+  html += '<div class="page">' +
+    pageHeader(currentPage++, totalPages) +
+    '<div class="agb-content">' + (profile.agb_html || '<p>(Keine AGB hinterlegt. Bitte im Account-Profil pflegen.)</p>') + '</div>' +
+    footerHtml +
+  '</div>';
+  html += '</div>';
+  return html;
 }
 
 /* ===== Aktionen ===== */
