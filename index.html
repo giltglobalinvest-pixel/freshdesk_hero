@@ -732,7 +732,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.77';
+const APP_VERSION = 'v2.46.78';
 
 /* ============================================================
    GLOBAL THEME — v2.46.12
@@ -21424,9 +21424,9 @@ async function openAngebotsChatModal(accountId, ticketId) {
   if (!account) { toast('Account nicht gefunden', 'error'); return; }
   const profile = getAngebotsProfile(account);
   host.innerHTML =
-    '<div class="fixed inset-0 z-[60] flex items-end sm:items-center justify-center bg-black/50 sm:p-4">' +
-      '<div class="bg-white w-full max-w-md rounded-t-3xl sm:rounded-3xl shadow-2xl p-8 text-center safe-bottom">' +
-        '<div class="spinner inline-block w-7 h-7 border-[3px] text-indigo-500"></div>' +
+    '<div class="fixed inset-0 sm:inset-y-0 sm:right-0 sm:left-auto z-[60] flex items-end sm:items-stretch justify-center sm:justify-end bg-black/50 sm:bg-transparent sm:pointer-events-none">' +
+      '<div class="bg-white w-full max-w-md sm:w-[460px] sm:max-w-none rounded-t-3xl sm:rounded-none shadow-2xl flex flex-col safe-bottom max-h-[96vh] sm:h-screen sm:max-h-screen sm:border-l sm:border-ink-200 sm:pointer-events-auto p-8 text-center">' +
+        '<div class="spinner inline-block w-7 h-7 border-[3px] text-indigo-500 mx-auto"></div>' +
         '<p class="text-sm text-ink-500 mt-2">Bereite Chat vor…</p>' +
       '</div>' +
     '</div>';
@@ -21465,23 +21465,23 @@ async function openAngebotsChatModal(accountId, ticketId) {
       stilReferenzen: null, // wird beim ersten Step gefüllt
     };
     _renderAngChatShell();
-    // v2.46.76 / .77: KI startet NICHT automatisch. User beginnt mit der Beschreibung.
-    // Statt KI-Greeting: statische Hint-Bubble + Input-Field bereit.
-    const subj = ticket.subject || '';
-    const reqName = ticket.requester?.name || '';
-    const profileSubtypen = Array.isArray(profile?.subtypen_keys) ? profile.subtypen_keys : [];
-    let subtypHint = '';
-    if (profileSubtypen.length === 1) {
-      const t = ANGEBOTS_SUBTYPEN.find(x => x.key === profileSubtypen[0]);
-      if (t) subtypHint = ' (' + t.label + ')';
-    } else if (profileSubtypen.length > 1) {
-      subtypHint = ' (z.B. Wartungsvertrag, Reparatur Pauschal, Inspektion, …)';
+    // v2.46.78: KI macht zuerst eine Initial-Analyse des Ticket-Inhalts + Anhänge
+    // damit der User direkt sieht was sie verstanden hat. Loading-State zeigen:
+    _angChatAppendBubble('assistant', '🔍 Lese Ticket-Inhalt und ggf. Anhänge…');
+    try {
+      const analysis = await _angChatInitialAnalysis(accountId, ticketId, ticket, profile);
+      _angChatReplaceLastAiBubble(analysis);
+    } catch (e) {
+      console.warn('Initial-Analyse fehlgeschlagen:', e);
+      // Fallback: statische Hint-Bubble
+      const subj = ticket.subject || '';
+      const reqName = ticket.requester?.name || '';
+      const hintBubble = 'Hallo 👋\n\n' +
+        'Beschreib mir kurz was im Angebot stehen soll.\n\n' +
+        'Z.B. „Türsteuerung tauschen, Pauschal ca. 1.500€" oder „Wartungsvertrag 24 Mon mit Notruf".\n\n' +
+        'Tipp: Je konkreter du bist, desto besser. Oder sag „mach was Sinn macht für ' + (subj || 'dieses Ticket') + '"' + (reqName ? ' für ' + reqName : '') + '.';
+      _angChatReplaceLastAiBubble(hintBubble);
     }
-    const hintBubble = 'Hallo 👋\n\n' +
-      'Beschreib mir kurz was im Angebot stehen soll' + subtypHint + '.\n\n' +
-      'Z.B. „Türsteuerung tauschen, Pauschal ca. 1.500€" oder „Wartungsvertrag 24 Mon mit Notruf" oder „Sicherheitsinspektion BetrSichV einmalig".\n\n' +
-      'Tipp: Je konkreter du bist, desto besser werden die Vorschläge. Du kannst auch sagen „mach was Sinn macht für ' + (subj || 'dieses Ticket') + '"' + (reqName ? ' für ' + reqName : '') + '.';
-    _angChatAppendBubble('assistant', hintBubble);
     _angChatRenderActions({ awaitingFirstUserInput: true });
   } catch (e) {
     closeAngebotsChatModal();
@@ -21494,8 +21494,8 @@ function _renderAngChatShell() {
   if (!host) return;
   const s = window._ANG_CHAT;
   host.innerHTML =
-    '<div class="fixed inset-0 z-[60] flex items-end sm:items-center justify-center bg-black/50 sm:p-4">' +
-      '<div class="bg-white w-full max-w-md rounded-t-3xl sm:rounded-3xl shadow-2xl flex flex-col safe-bottom" style="max-height:96vh">' +
+    '<div class="fixed inset-0 sm:inset-y-0 sm:right-0 sm:left-auto z-[60] flex items-end sm:items-stretch justify-center sm:justify-end bg-black/50 sm:bg-transparent sm:pointer-events-none">' +
+      '<div class="bg-white w-full max-w-md sm:w-[460px] sm:max-w-none rounded-t-3xl sm:rounded-none shadow-2xl flex flex-col safe-bottom max-h-[96vh] sm:h-screen sm:max-h-screen sm:border-l sm:border-ink-200 sm:pointer-events-auto">' +
         '<div class="safe-top px-4 py-3 border-b border-ink-200 flex items-center justify-between gap-2 shrink-0">' +
           '<div class="flex-1 min-w-0">' +
             '<h3 class="font-bold text-ink-900 inline-flex items-center gap-2"><i data-lucide="message-square" class="w-5 h-5 text-indigo-600"></i> Angebot erstellen</h3>' +
@@ -21510,6 +21510,150 @@ function _renderAngChatShell() {
       '</div>' +
     '</div>';
   if (window.lucide) lucide.createIcons();
+}
+
+/* v2.46.78: Ersetzt die letzte KI-Bubble (z.B. "🔍 lese…" → analyse-Ergebnis) */
+function _angChatReplaceLastAiBubble(newContent) {
+  const list = document.getElementById('angChatBubbles');
+  if (!list) return;
+  // Finde letzte KI-Bubble (von hinten)
+  const bubbles = list.querySelectorAll(':scope > div');
+  for (let i = bubbles.length - 1; i >= 0; i--) {
+    const b = bubbles[i];
+    if (b.classList.contains('justify-start')) {
+      // Innerer Text-Container
+      const txt = b.querySelector('.text-\\[13px\\]');
+      if (txt) {
+        txt.textContent = newContent;
+        list.scrollTop = list.scrollHeight;
+        return;
+      }
+    }
+  }
+  // Falls nichts gefunden: anhängen
+  _angChatAppendBubble('assistant', newContent);
+}
+
+/* v2.46.78: Initial-Analyse beim Modal-Öffnen. KI bekommt Ticket-Text + Anhänge
+   und macht eine kompakte Zusammenfassung der relevanten Punkte. */
+async function _angChatInitialAnalysis(accountId, ticketId, ticket, profile) {
+  // Anhänge laden (max 3, max 16 MB total)
+  let attachments = [];
+  try {
+    attachments = await _angChatCollectAttachments(accountId, ticketId, ticket, { maxCount: 3, maxBytes: 16 * 1024 * 1024 });
+  } catch (e) { console.warn('Anhänge-Load Warnung:', e.message); }
+  // Ticket-Text aufbereiten
+  const subj = ticket.subject || '';
+  const req = ticket.requester || {};
+  const desc = htmlToText(ticket.description_text || ticket.description || '').slice(0, 3500);
+  const conv = (ticket.conversations || [])
+    .slice(0, 5)
+    .map(c => (c.incoming ? 'Kunde' : 'Agent') + ': ' + htmlToText(c.body_text || c.body || '').slice(0, 600))
+    .join('\n\n');
+  const subtypList = ANGEBOTS_SUBTYPEN.filter(t => (profile.subtypen_keys || []).includes(t.key));
+  const subtypHint = subtypList.length
+    ? '\n\nAktive Angebots-Sub-Typen: ' + subtypList.map(t => t.label).join(', ')
+    : '';
+  const sysPrompt =
+    'Du bist ein Vertriebs-Experte für Aufzug-Service-Angebote. ' +
+    'Der User öffnet gerade das Angebots-Modal — analysiere das Ticket + die Anhänge und fasse zusammen, was du SIEHST.\n\n' +
+    'Antworte als FREUNDLICHE Chat-Nachricht, NICHT als JSON. Format:\n\n' +
+    'Hallo 👋\n\n' +
+    'Ich habe das Ticket' + (attachments.length ? ' + ' + attachments.length + ' Anhang/Anhänge' : '') + ' gelesen. Hier was ich sehe:\n\n' +
+    '**Kunde:** [Name + Firma falls erkennbar]\n' +
+    '**Anlage:** [Standort, Fabriknr falls erkennbar]\n' +
+    '**Anliegen:** [1-2 Sätze was der Kunde will/braucht]\n' +
+    (attachments.length ? '**Aus den Anhängen:** [wichtige Daten/Fotos kurz nennen]\n' : '') +
+    '\nWas möchtest du machen? Soll ich daraus direkt ein Angebot komponieren, oder gibt dir konkrete Vorgaben (Preise, Pauschale, Sub-Typ)?\n\n' +
+    'Halte die Antwort KOMPAKT — max 120 Wörter. KEINE Markdown-Codeblöcke, einfach Klartext mit ein paar **Markdown-Highlights**.' +
+    subtypHint;
+  const userMessageContent = [
+    { type: 'text', text:
+      'Ticket #' + ticketId + ': ' + subj + '\n\n' +
+      'Kunde: ' + (req.name || '?') + (req.email ? ' <' + req.email + '>' : '') + '\n' +
+      (req.company?.name ? 'Firma: ' + req.company.name + '\n' : '') +
+      '\nBeschreibung:\n' + desc +
+      (conv ? '\n\nVerlauf:\n' + conv : '') +
+      (attachments.length ? '\n\nAnhänge folgen…' : '')
+    }
+  ];
+  // Anhänge als image/document content blocks anhängen
+  attachments.forEach(att => {
+    if (att.mediaType === 'application/pdf') {
+      userMessageContent.push({ type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: att.base64 }});
+    } else if (att.mediaType.startsWith('image/')) {
+      userMessageContent.push({ type: 'image', source: { type: 'base64', media_type: att.mediaType, data: att.base64 }});
+    }
+  });
+  const data = await proxyJson('/anthropic/v1/messages', {
+    method: 'POST',
+    body: JSON.stringify({
+      model: 'claude-sonnet-4-5-20250929',
+      max_tokens: 800,
+      system: sysPrompt,
+      messages: [{ role: 'user', content: userMessageContent }],
+    }),
+  });
+  const raw = (data?.content?.[0]?.text || '').trim();
+  return raw || 'Konnte das Ticket nicht analysieren — beschreib mir kurz was zu tun ist.';
+}
+
+/* v2.46.78: Sammelt Attachments aus Ticket + Conversations, lädt sie als base64.
+   Nur unterstützte Typen (PDF + Bilder) werden inkludiert. */
+async function _angChatCollectAttachments(accountId, ticketId, ticket, opts) {
+  opts = opts || {};
+  const maxCount = opts.maxCount || 3;
+  const maxBytes = opts.maxBytes || 16 * 1024 * 1024;
+  const all = [];
+  // Ticket-Attachments
+  (ticket.attachments || []).forEach(a => all.push(a));
+  // Conversation-Attachments
+  (ticket.conversations || []).forEach(c => {
+    (c.attachments || []).forEach(a => all.push(a));
+  });
+  // Nur PDF + Bilder
+  const supported = all.filter(a => {
+    const ct = String(a.content_type || '').toLowerCase();
+    return ct === 'application/pdf' || ct.startsWith('image/');
+  });
+  // Nach Größe sortieren (kleine zuerst — mehr Chancen reinzupassen)
+  supported.sort((a, b) => (a.size || 0) - (b.size || 0));
+  const result = [];
+  let totalBytes = 0;
+  for (const a of supported) {
+    if (result.length >= maxCount) break;
+    if ((a.size || 0) + totalBytes > maxBytes) continue;
+    if (!a.attachment_url) continue;
+    try {
+      // Direkter Fetch — FD-URLs sind temporär signiert, CORS sollte OK sein
+      const resp = await fetch(a.attachment_url, { mode: 'cors' });
+      if (!resp.ok) { console.warn('Anhang ' + a.name + ' nicht abrufbar:', resp.status); continue; }
+      const blob = await resp.blob();
+      if (blob.size + totalBytes > maxBytes) continue;
+      const base64 = await _blobToBase64(blob);
+      result.push({
+        name: a.name || ('attachment-' + a.id),
+        mediaType: String(a.content_type || '').toLowerCase(),
+        base64: base64,
+      });
+      totalBytes += blob.size;
+    } catch (e) {
+      console.warn('Anhang-Load fehlgeschlagen für ' + a.name + ':', e.message);
+    }
+  }
+  return result;
+}
+function _blobToBase64(blob) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const r = reader.result || '';
+      const comma = String(r).indexOf(',');
+      resolve(comma >= 0 ? String(r).slice(comma + 1) : String(r));
+    };
+    reader.onerror = (e) => reject(new Error('FileReader: ' + (e.target?.error?.message || 'unbekannt')));
+    reader.readAsDataURL(blob);
+  });
 }
 
 /* Eine Chat-Bubble (KI oder User) rendern + an Liste anhängen. */
