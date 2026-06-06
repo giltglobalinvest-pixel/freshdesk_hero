@@ -178,6 +178,13 @@
   /* v2.46.63: FAB im Fullscreen-Stack-Modus ausblenden */
   body.fullscreen-stack #newEmailFab { display: none !important; }
 
+  /* v2.46.79: Wenn das Angebots-Chat-Side-Panel offen ist (Desktop), den Rest
+     der App nach links schieben damit nichts vom Panel verdeckt wird. */
+  @media (min-width: 640px) {
+    body.ang-side-panel-open #modalHost > div { right: 460px !important; }
+    body.ang-side-panel-open #appShell { padding-right: 460px; }
+  }
+
   /* v2.46.36: Vollbild — sauberes Flex-Layout. Karte füllt verfügbaren Platz
      genau, ohne über den Bildschirm zu wachsen. Description-Text bleibt
      line-clamped (mehr Zeilen) und scrollt NICHT — Card hat feste Höhe. */
@@ -732,7 +739,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.78';
+const APP_VERSION = 'v2.46.79';
 
 /* ============================================================
    GLOBAL THEME — v2.46.12
@@ -21419,7 +21426,10 @@ const ANG_CHAT_STEPS = [
 async function openAngebotsChatModal(accountId, ticketId) {
   let host = document.getElementById('subModalHost');
   if (!host) { host = document.createElement('div'); host.id = 'subModalHost'; document.body.appendChild(host); }
-  document.body.style.overflow = 'hidden';
+  // v2.46.79: Body-Klasse für Side-Panel-Layout (Ticket-Detail bekommt right: 460px Padding)
+  document.body.classList.add('ang-side-panel-open');
+  // Auf Desktop kein overflow:hidden — User soll den Rest scrollen können
+  if (window.matchMedia('(max-width: 639px)').matches) document.body.style.overflow = 'hidden';
   const account = (APP_STATE.accounts || []).find(a => a.id === accountId);
   if (!account) { toast('Account nicht gefunden', 'error'); return; }
   const profile = getAngebotsProfile(account);
@@ -21989,6 +21999,8 @@ function closeAngebotsChatModal() {
   const host = document.getElementById('subModalHost');
   if (host) host.innerHTML = '';
   document.body.style.overflow = '';
+  // v2.46.79: Body-Klasse für Side-Panel entfernen → Ticket-Detail nimmt wieder volle Breite
+  document.body.classList.remove('ang-side-panel-open');
 }
 
 /* ===== Step 3: Vorschau-Modal mit editierbaren Feldern + Aktions-Buttons ===== */
