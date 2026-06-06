@@ -732,7 +732,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.67';
+const APP_VERSION = 'v2.46.68';
 
 /* ============================================================
    GLOBAL THEME — v2.46.12
@@ -3016,6 +3016,75 @@ function _relTimeFull(iso) {
   return d.toLocaleDateString('de', { day: '2-digit', month: '2-digit', year: 'numeric' });
 }
 
+/* v2.46.68: Titel-Format-Presets für die "Anfrage strukturieren"-Schnellfunktion.
+   Pro Account konfigurierbar. Jedes Preset definiert: anzuzeigende Felder,
+   KI-Hinweise pro Feld, und Template mit Platzhaltern {id} + {<feldname>}. */
+const TITLE_FORMAT_PRESETS = {
+  aufzug: {
+    label: 'Aufzug-Service (Standort + Fabriknummer)',
+    description: 'Für Aufzugshandwerk, Aszendio, klassische Service-Tickets.',
+    fields: [
+      {
+        key: 'standort',
+        label: 'Standort',
+        placeholder: 'z.B. Berlin Hauptstr. 12',
+        aiHint: 'STANDORT — die Adresse oder der Ort, wo der Aufzug steht (z.B. "Berlin Hauptstr. 12", "Werl Bornstraße 14", "Stuttgart Hbf"). Bevorzuge Straße + Hausnummer + Ort. Nimm KEINE Firmennamen, Personennamen oder Liftarten als Standort.'
+      },
+      {
+        key: 'fabriknummer',
+        label: 'Fabriknummer',
+        placeholder: 'z.B. FN-98765',
+        aiHint: 'FABRIKNUMMER — die interne Aufzugs-Seriennummer/Fabriknummer (Format meist FN, F-Nr, F#, oder einfach eine Zahl mit 4-8 Stellen). Häufige Marker: "FN", "F.-Nr.", "Fabrik-Nr", "Fabr. Nr", "Anlage", "Aufzug Nr", "Vorgang".'
+      }
+    ],
+    template: 'ANFRAGE {id} | {standort} | {fabriknummer}'
+  },
+  referenz: {
+    label: 'Ersatzteile / Kundenreferenz',
+    description: 'Für FLP Lift Parts und ähnliche Ersatzteile-Anfragen.',
+    fields: [
+      {
+        key: 'kundenreferenz',
+        label: 'Kundenreferenz',
+        placeholder: 'z.B. Best.-Nr. 4711',
+        aiHint: 'KUNDENREFERENZ — eine Referenznummer vom Kunden (Bestellnummer, Auftragsnummer, Ticket-ID des Kunden, Anfrage-Nr beim Kunden). Marker: "Bestellnr", "Best-Nr", "Auftrag", "Auftrags-Nr", "Ref", "Referenz", "Ihr Zeichen", "Ihre Nr". Typisch alphanumerisch 5-15 Zeichen.'
+      },
+      {
+        key: 'artikel',
+        label: 'Artikel/Teil (optional)',
+        placeholder: 'z.B. Türmotor',
+        aiHint: 'ARTIKEL — kurze Bezeichnung des angefragten Teils oder Artikels (max 30 Zeichen), falls erkennbar. Beispiele: "Türmotor", "Steuerung", "Seil". Nur wenn explizit genannt — sonst null.'
+      }
+    ],
+    template: 'ANFRAGE {id} | {kundenreferenz} | {artikel}'
+  },
+  einfach: {
+    label: 'Nur Anfrage-Nummer',
+    description: 'Minimal — kennzeichnet das Ticket nur als „Anfrage" mit Nummer.',
+    fields: [],
+    template: 'ANFRAGE {id}'
+  }
+};
+function getTitleFormatPreset(accountId) {
+  const acc = (APP_STATE.accounts || []).find(a => a.id === accountId)
+           || (APP_STATE.allAccessibleAccounts || []).find(a => a.id === accountId);
+  const key = (acc?.title_preset || 'aufzug').trim().toLowerCase();
+  return TITLE_FORMAT_PRESETS[key] || TITLE_FORMAT_PRESETS.aufzug;
+}
+function buildTitleFromPreset(preset, ticketId, values) {
+  let out = String(preset.template || 'ANFRAGE {id}');
+  out = out.split('{id}').join(String(ticketId));
+  (preset.fields || []).forEach(f => {
+    const v = (values[f.key] || '').trim();
+    out = out.split('{' + f.key + '}').join(v);
+  });
+  // Leere Felder erzeugen Dopppel-Trenner wie "| |" → kollabieren
+  out = out.replace(/\|\s*\|/g, '|').replace(/\|\s*$/, '').replace(/^\s*\|/, '').trim();
+  // Trailing/Leading Whitespace bei Trennern aufräumen
+  out = out.replace(/\s*\|\s*/g, ' | ').trim();
+  return out;
+}
+
 /* v2.46.66: Per-User Toggle für Accounts (Mandanten ein-/ausschalten).
    localStorage-basiert, sofort wirksam — alle Views die APP_STATE.accounts
    lesen, sehen nur die aktiven Accounts. APP_STATE.allAccessibleAccounts
@@ -3117,6 +3186,7 @@ async function loadAccounts() {
       freshsales_owner_email: (r.fields.freshsales_owner_email || '').trim(),
       color:    r.fields.color || ACCOUNT_COLORS[Math.floor(Math.random() * ACCOUNT_COLORS.length)],
       created:  r.fields.created || '',
+      title_preset: (r.fields.title_preset || 'aufzug').trim().toLowerCase(), // v2.46.68
       // Meta für UI/Debug
       _hasOwnAccess: !!access,
       _hasOwnKey:    hasOwnKey,
@@ -3299,7 +3369,7 @@ async function loadUsersWithAccessToAccount(accountId) {
     .filter(u => u.hasAccess);
 }
 
-async function createAccount({ name, domain, apiKey, color, freshsalesDomain, freshsalesApiKey, freshsalesDomainSuffix }) {
+async function createAccount({ name, domain, apiKey, color, freshsalesDomain, freshsalesApiKey, freshsalesDomainSuffix, titlePreset }) {
   domain = (domain || '').trim().replace(/^https?:\/\//i, '').replace(/\.freshdesk\.com\/?$/i, '').replace(/\/+$/, '');
   freshsalesDomain = (freshsalesDomain || '').trim().replace(/^https?:\/\//i, '').replace(/\.(myfreshworks|freshworks)\.com\/?$/i, '').replace(/\/+$/, '');
   freshsalesDomainSuffix = (freshsalesDomainSuffix || 'myfreshworks.com').trim().toLowerCase();
@@ -3312,6 +3382,7 @@ async function createAccount({ name, domain, apiKey, color, freshsalesDomain, fr
     color: color || ACCOUNT_COLORS[APP_STATE.accounts.length % ACCOUNT_COLORS.length],
     api_key: APP_KEYS.user.api_key,
     created: nowIso(),
+    title_preset: (titlePreset || 'aufzug').toLowerCase(), // v2.46.68
   };
   // Freshsales nur eintragen, wenn Domain UND Key gesetzt sind
   if (freshsalesDomain && freshsalesApiKey) {
@@ -3323,6 +3394,7 @@ async function createAccount({ name, domain, apiKey, color, freshsalesDomain, fr
     freshsales_domain:        'singleLineText',
     freshsales_api_key:       'singleLineText',
     freshsales_domain_suffix: 'singleLineText',
+    title_preset:             'singleLineText', // v2.46.68
   });
 }
 
@@ -3331,6 +3403,7 @@ async function updateAccount(id, fields) {
     freshsales_domain:        'singleLineText',
     freshsales_api_key:       'singleLineText',
     freshsales_domain_suffix: 'singleLineText',
+    title_preset:             'singleLineText', // v2.46.68
   });
 }
 
@@ -15437,6 +15510,16 @@ function openAccountModal(account) {
               `).join('')}
             </div>
           </div>
+          <div>
+            <label class="text-xs font-semibold text-ink-700">Anfrage-Titel-Format (Schnellfunktion)</label>
+            <select id="accTitlePreset" class="mt-1 w-full px-3 py-2 border border-ink-200 rounded-lg text-sm bg-white focus:ring-2 focus:ring-brand-500/30 focus:border-brand-500">
+              ${Object.entries(TITLE_FORMAT_PRESETS).map(([key, p]) => {
+                const isOn = (account?.title_preset || 'aufzug').toLowerCase() === key;
+                return `<option value="${key}"${isOn ? ' selected' : ''}>${escapeHtml(p.label)}</option>`;
+              }).join('')}
+            </select>
+            <p class="text-[10px] text-ink-500 mt-1">Welche Felder die „Anfrage"-Schnellfunktion aus dem Ticket extrahiert und in den Titel schreibt.</p>
+          </div>
           <div id="accFormError" class="hidden text-xs text-red-700 bg-red-50 border border-red-200 rounded px-2 py-1.5"></div>
           <div class="flex gap-2 pt-1">
             <button type="button" onclick="closeModal()" class="flex-1 px-3 py-2.5 border border-ink-200 rounded-lg text-sm font-medium hover:bg-ink-50">Abbrechen</button>
@@ -15460,6 +15543,7 @@ function openAccountModal(account) {
       const fsApiKey = ($('accFsApiKey')?.value || '').trim();
       let fsSuffix   = ($('accFsSuffix')?.value || 'myfreshworks.com').trim().toLowerCase();
       if (!['myfreshworks.com', 'freshworks.com'].includes(fsSuffix)) fsSuffix = 'myfreshworks.com';
+      const titlePreset = ($('accTitlePreset')?.value || 'aufzug').trim().toLowerCase(); // v2.46.68
 
       if (isEdit) {
         // EDIT: nur geänderte Felder ins Patch packen; leere API-Keys = Key behalten
@@ -15469,6 +15553,7 @@ function openAccountModal(account) {
           name,
           freshdesk_domain: domain,
           color,
+          title_preset: titlePreset, // v2.46.68
         };
         if (apiKey) patch.freshdesk_api_key = apiKey;
         // Freshsales-Logik:
@@ -15506,6 +15591,7 @@ function openAccountModal(account) {
           freshsalesApiKey: fsApiKey,
           freshsalesDomainSuffix: fsSuffix,
           color,
+          titlePreset, // v2.46.68
         });
         closeModal();
         toast('Account angelegt', 'success');
@@ -19947,77 +20033,98 @@ function closeTicketEmailModal() {
   document.body.style.overflow = '';
 }
 
-/* ===================== v2.46.67: TITEL STRUKTURIEREN (ANFRAGE-FORMAT) ============
-   Claude extrahiert Standort + Fabriknummer aus dem Ticket-Inhalt und schlägt
-   einen sauberen Titel vor: "ANFRAGE <id> | <Standort> | <Fabriknummer>".
-   User kann Felder vor dem Speichern editieren — dann PUT subject zu FD. */
+/* ===================== v2.46.67/68: TITEL STRUKTURIEREN (ANFRAGE-FORMAT) ============
+   Per Account konfigurierbar — siehe TITLE_FORMAT_PRESETS oben.
+   Claude extrahiert die im Preset definierten Felder aus dem Ticket-Inhalt,
+   User kann editieren, dann PUT subject zu FD. */
 async function openRestructureTitleModal(accountId, ticketId) {
   let host = document.getElementById('subModalHost');
   if (!host) { host = document.createElement('div'); host.id = 'subModalHost'; document.body.appendChild(host); }
+  const preset = getTitleFormatPreset(accountId);
   host.innerHTML =
     '<div class="fixed inset-0 z-[60] flex items-end justify-center bg-black/50">' +
       '<div class="bg-white w-full max-w-md rounded-t-3xl shadow-2xl p-8 text-center safe-bottom">' +
         '<div class="spinner inline-block w-7 h-7 border-[3px] text-sky-500"></div>' +
         '<p class="text-sm text-ink-500 mt-2">Lade Ticket-Daten + KI-Analyse…</p>' +
+        '<p class="text-[11px] text-ink-400 mt-1">Preset: ' + escapeHtml(preset.label) + '</p>' +
       '</div>' +
     '</div>';
   document.body.style.overflow = 'hidden';
   try {
-    // Ticket holen (Cache wenn da, sonst fetchen)
     let ticket = APP_STATE.ticketCache?.get?.(accountId + '|' + ticketId);
     if (!ticket || !ticket.conversations) {
       try { ticket = await fetchTicketDetail(accountId, ticketId); } catch (_) {}
     }
     if (!ticket) throw new Error('Ticket konnte nicht geladen werden');
-    // KI fragen: Standort + Fabriknummer extrahieren
-    const subj = ticket.subject || '';
-    const desc = htmlToText(ticket.description_text || ticket.description || '').slice(0, 2500);
-    const conv = (ticket.conversations || [])
-      .slice(0, 4)
-      .map(c => (c.incoming ? 'Kunde' : 'Agent') + ': ' + htmlToText(c.body_text || c.body || '').slice(0, 400))
-      .join('\n\n');
-    const sysPrompt =
-      'Du extrahierst aus einem Aufzug-Service-Ticket zwei Felder:\n' +
-      '1. STANDORT — die Adresse oder der Ort, wo der Aufzug steht (z.B. "Berlin Hauptstr. 12", "Werl Bornstraße 14", "Stuttgart Hbf"). ' +
-      'Bevorzuge: Straße + Hausnummer + Ort. Nimm KEINE Firmennamen, Personennamen oder Liftarten als Standort.\n' +
-      '2. FABRIKNUMMER — die interne Aufzugs-Seriennummer/Fabriknummer (Format meist FN, F-Nr, F#, oder einfach eine Zahl mit 4-8 Stellen). ' +
-      'Häufige Marker: "FN", "F.-Nr.", "Fabrik-Nr", "Fabr. Nr", "Anlage", "Aufzug Nr", "Vorgang".\n\n' +
-      'Antworte AUSSCHLIESSLICH mit gültigem JSON, ohne Markdown-Codeblock, ohne erklärenden Text:\n' +
-      '{ "standort": string|null, "fabriknummer": string|null }\n' +
-      'Wenn du etwas nicht sicher findest → null. KEINE Erklärungen, KEINE Klammern, NUR JSON.';
-    const userPrompt = 'Betreff: ' + subj + '\n\nBeschreibung:\n' + desc + (conv ? '\n\nVerlauf:\n' + conv : '');
-    let plan = { standort: null, fabriknummer: null };
-    try {
-      const data = await proxyJson('/anthropic/v1/messages', {
-        method: 'POST',
-        body: JSON.stringify({
-          model: 'claude-haiku-4-5-20251001',
-          max_tokens: 200,
-          system: sysPrompt,
-          messages: [{ role: 'user', content: userPrompt }]
-        })
-      });
-      const raw = (data?.content?.[0]?.text || '').trim();
-      const json = raw.replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/i, '').trim();
-      try { plan = JSON.parse(json); }
-      catch (_) {
-        const m = json.match(/\{[\s\S]*\}/);
-        if (m) plan = JSON.parse(m[0]);
-      }
-    } catch (e) {
-      console.warn('KI-Extraktion fehlgeschlagen, Modal trotzdem öffnen:', e.message);
+    // Preset hat Felder? Dann KI-Extraktion. Sonst direkt rendern (nur ID-only Format).
+    let extracted = {};
+    if ((preset.fields || []).length > 0) {
+      extracted = await _rstExtractWithAi(ticket, preset);
     }
-    _renderRestructureTitleModal(accountId, ticketId, ticket, plan);
+    _renderRestructureTitleModal(accountId, ticketId, ticket, preset, extracted);
   } catch (e) {
     closeRestructureTitleModal();
     toast('Fehler: ' + (e.message || e), 'error', 8000);
   }
 }
 
-function _renderRestructureTitleModal(accountId, ticketId, ticket, plan) {
+async function _rstExtractWithAi(ticket, preset) {
+  const subj = ticket.subject || '';
+  const desc = htmlToText(ticket.description_text || ticket.description || '').slice(0, 2500);
+  const conv = (ticket.conversations || [])
+    .slice(0, 4)
+    .map(c => (c.incoming ? 'Kunde' : 'Agent') + ': ' + htmlToText(c.body_text || c.body || '').slice(0, 400))
+    .join('\n\n');
+  // Aus Preset-Feldern dynamische Liste für die KI bauen
+  const fieldsList = (preset.fields || []).map((f, i) => (i + 1) + '. ' + f.aiHint).join('\n');
+  const jsonShape  = '{ ' + (preset.fields || []).map(f => '"' + f.key + '": string|null').join(', ') + ' }';
+  const sysPrompt =
+    'Du extrahierst aus einem Support-Ticket die folgenden Felder:\n' +
+    fieldsList + '\n\n' +
+    'Antworte AUSSCHLIESSLICH mit gültigem JSON, ohne Markdown-Codeblock, ohne erklärenden Text:\n' +
+    jsonShape + '\n' +
+    'Wenn du etwas nicht sicher findest → null. KEINE Erklärungen, NUR JSON.';
+  const userPrompt = 'Betreff: ' + subj + '\n\nBeschreibung:\n' + desc + (conv ? '\n\nVerlauf:\n' + conv : '');
+  let plan = {};
+  try {
+    const data = await proxyJson('/anthropic/v1/messages', {
+      method: 'POST',
+      body: JSON.stringify({
+        model: 'claude-haiku-4-5-20251001',
+        max_tokens: 300,
+        system: sysPrompt,
+        messages: [{ role: 'user', content: userPrompt }]
+      })
+    });
+    const raw = (data?.content?.[0]?.text || '').trim();
+    const json = raw.replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/i, '').trim();
+    try { plan = JSON.parse(json); }
+    catch (_) {
+      const m = json.match(/\{[\s\S]*\}/);
+      if (m) plan = JSON.parse(m[0]);
+    }
+  } catch (e) {
+    console.warn('KI-Extraktion fehlgeschlagen, Modal trotzdem öffnen:', e.message);
+  }
+  return plan || {};
+}
+
+function _renderRestructureTitleModal(accountId, ticketId, ticket, preset, extracted) {
   const host = document.getElementById('subModalHost');
   if (!host) return;
   const oldSubj = ticket.subject || '';
+  // Dynamische Felder rendern
+  const fieldsHtml = (preset.fields || []).map(f => {
+    const v = (extracted && extracted[f.key]) ? String(extracted[f.key]) : '';
+    const hasValue = v.trim().length > 0;
+    return '<label class="text-xs font-bold text-ink-700 uppercase tracking-wider block">' + escapeHtml(f.label) + '</label>' +
+      '<input id="rstField_' + escapeAttr(f.key) + '" data-field-key="' + escapeAttr(f.key) + '" type="text" value="' + escapeAttr(v) + '" oninput="_rstUpdatePreview()" placeholder="' + escapeAttr(f.placeholder || '') + '" class="w-full px-3 py-2.5 border ' + (hasValue ? 'border-ink-300' : 'border-amber-300 bg-amber-50/30') + ' rounded-xl text-sm">' +
+      (!hasValue ? '<p class="text-[10px] text-amber-700 -mt-1">KI konnte „' + escapeHtml(f.label) + '" nicht eindeutig erkennen — bitte selbst eintragen (oder leer lassen).</p>' : '');
+  }).join('');
+  const fieldsCount = (preset.fields || []).length;
+  const headerInfo  = fieldsCount === 0
+    ? '<p class="text-[11px] text-ink-500">Preset „' + escapeHtml(preset.label) + '" — keine zusätzlichen Felder. Der Titel wird nur als „ANFRAGE ' + ticketId + '" geschrieben.</p>'
+    : '<p class="text-[11px] text-ink-500">Preset: <b>' + escapeHtml(preset.label) + '</b></p>';
   host.innerHTML =
     '<div class="fixed inset-0 z-[60] flex items-end justify-center bg-black/50" onclick="if(event.target===this)closeRestructureTitleModal()">' +
       '<div class="bg-white w-full max-w-md rounded-t-3xl shadow-2xl flex flex-col safe-bottom" style="max-height:92vh">' +
@@ -20028,18 +20135,15 @@ function _renderRestructureTitleModal(accountId, ticketId, ticket, plan) {
         '<div class="flex-1 overflow-y-auto p-4 space-y-3">' +
           '<input type="hidden" id="rstAcc" value="' + escapeAttr(accountId) + '">' +
           '<input type="hidden" id="rstTicketId" value="' + ticketId + '">' +
+          '<input type="hidden" id="rstPresetKey" value="' + escapeAttr(Object.keys(TITLE_FORMAT_PRESETS).find(k => TITLE_FORMAT_PRESETS[k] === preset) || 'aufzug') + '">' +
           '<div class="bg-ink-50 rounded-xl p-2.5 text-[11px]">' +
             '<p class="text-ink-500 uppercase tracking-wider text-[9px] font-bold">Bisheriger Titel</p>' +
             '<p class="text-ink-800 mt-0.5 line-clamp-3">' + escapeHtml(oldSubj) + '</p>' +
+            headerInfo +
           '</div>' +
           '<label class="text-xs font-bold text-ink-700 uppercase tracking-wider block">Ticket-Nummer</label>' +
           '<input id="rstNumber" type="text" value="' + escapeAttr(String(ticketId)) + '" class="w-full px-3 py-2.5 border border-ink-300 rounded-xl text-sm bg-ink-50 text-ink-700" readonly>' +
-          '<label class="text-xs font-bold text-ink-700 uppercase tracking-wider block">Standort</label>' +
-          '<input id="rstStandort" type="text" value="' + escapeAttr(plan?.standort || '') + '" oninput="_rstUpdatePreview()" placeholder="z.B. Berlin Hauptstr. 12" class="w-full px-3 py-2.5 border ' + (plan?.standort ? 'border-ink-300' : 'border-amber-300 bg-amber-50/30') + ' rounded-xl text-sm">' +
-          (!plan?.standort ? '<p class="text-[10px] text-amber-700 -mt-1">KI konnte keinen Standort eindeutig erkennen — bitte selbst eintragen.</p>' : '') +
-          '<label class="text-xs font-bold text-ink-700 uppercase tracking-wider block">Fabriknummer</label>' +
-          '<input id="rstFabriknummer" type="text" value="' + escapeAttr(plan?.fabriknummer || '') + '" oninput="_rstUpdatePreview()" placeholder="z.B. FN-98765" class="w-full px-3 py-2.5 border ' + (plan?.fabriknummer ? 'border-ink-300' : 'border-amber-300 bg-amber-50/30') + ' rounded-xl text-sm">' +
-          (!plan?.fabriknummer ? '<p class="text-[10px] text-amber-700 -mt-1">KI konnte keine Fabriknummer eindeutig erkennen — bitte selbst eintragen.</p>' : '') +
+          fieldsHtml +
           '<label class="text-xs font-bold text-ink-700 uppercase tracking-wider block">Vorschau (neuer Titel)</label>' +
           '<div id="rstPreview" class="bg-sky-50 border border-sky-200 rounded-xl p-3 text-sm font-semibold text-sky-900 break-words"></div>' +
           '<label class="flex items-center gap-2 text-[11px] text-ink-700 cursor-pointer">' +
@@ -20060,19 +20164,21 @@ function _renderRestructureTitleModal(accountId, ticketId, ticket, plan) {
   _rstUpdatePreview();
 }
 
-function _rstBuildTitle(ticketId, standort, fabriknummer) {
-  const parts = ['ANFRAGE ' + ticketId];
-  if (standort && standort.trim())    parts.push(standort.trim());
-  if (fabriknummer && fabriknummer.trim()) parts.push(fabriknummer.trim());
-  return parts.join(' | ');
+function _rstReadFieldValues() {
+  const out = {};
+  document.querySelectorAll('[data-field-key]').forEach(el => {
+    out[el.getAttribute('data-field-key')] = el.value || '';
+  });
+  return out;
 }
 
 function _rstUpdatePreview() {
   const id = document.getElementById('rstNumber')?.value || '';
-  const s  = document.getElementById('rstStandort')?.value || '';
-  const f  = document.getElementById('rstFabriknummer')?.value || '';
+  const presetKey = document.getElementById('rstPresetKey')?.value || 'aufzug';
+  const preset = TITLE_FORMAT_PRESETS[presetKey] || TITLE_FORMAT_PRESETS.aufzug;
+  const values = _rstReadFieldValues();
   const pv = document.getElementById('rstPreview');
-  if (pv) pv.textContent = _rstBuildTitle(id, s, f);
+  if (pv) pv.textContent = buildTitleFromPreset(preset, id, values);
 }
 
 async function processRestructureTitle(btn) {
@@ -20081,25 +20187,31 @@ async function processRestructureTitle(btn) {
   if (errEl) errEl.classList.add('hidden');
   const accountId = document.getElementById('rstAcc')?.value;
   const ticketId  = parseInt(document.getElementById('rstTicketId')?.value, 10);
-  const standort  = (document.getElementById('rstStandort')?.value || '').trim();
-  const fabriknr  = (document.getElementById('rstFabriknummer')?.value || '').trim();
+  const presetKey = document.getElementById('rstPresetKey')?.value || 'aufzug';
+  const preset    = TITLE_FORMAT_PRESETS[presetKey] || TITLE_FORMAT_PRESETS.aufzug;
   const addNote   = !!document.getElementById('rstAddNote')?.checked;
-  if (!standort && !fabriknr) return setErr('Mindestens Standort ODER Fabriknummer muss ausgefüllt sein.');
-  const newTitle = _rstBuildTitle(ticketId, standort, fabriknr);
+  const values    = _rstReadFieldValues();
+  // Validierung: wenn Felder definiert sind, muss mindestens eines ausgefüllt sein
+  const filledCount = Object.values(values).filter(v => v && v.trim()).length;
+  if ((preset.fields || []).length > 0 && filledCount === 0) {
+    return setErr('Bitte mindestens ein Feld ausfüllen.');
+  }
+  const newTitle = buildTitleFromPreset(preset, ticketId, values);
   setBusy(btn, true, 'Speichere…');
   try {
     await proxyJson('/freshdesk/' + encodeURIComponent(accountId) + '/api/v2/tickets/' + ticketId, {
       method: 'PUT',
       body: JSON.stringify({ subject: newTitle })
     });
-    // Lokal aktualisieren (Cache + Listen)
     const cached = APP_STATE.ticketCache?.get?.(accountId + '|' + ticketId);
     if (cached) cached.subject = newTitle;
     if (typeof patchTicketInList === 'function') patchTicketInList(accountId, ticketId, { subject: newTitle });
-    // Optional Notiz
     if (addNote) {
-      const noteBody = '🏷 Titel automatisch strukturiert: <b>' + escapeHtml(newTitle) + '</b><br>' +
-        'Standort: ' + escapeHtml(standort || '—') + '<br>Fabriknummer: ' + escapeHtml(fabriknr || '—');
+      const valuesText = (preset.fields || [])
+        .map(f => f.label + ': ' + escapeHtml(values[f.key] || '—'))
+        .join('<br>');
+      const noteBody = '🏷 Titel strukturiert (' + escapeHtml(preset.label) + '): <b>' + escapeHtml(newTitle) + '</b>' +
+        (valuesText ? '<br>' + valuesText : '');
       proxyJson('/freshdesk/' + encodeURIComponent(accountId) + '/api/v2/tickets/' + ticketId + '/notes', {
         method: 'POST',
         body: JSON.stringify({ body: noteBody, private: true })
