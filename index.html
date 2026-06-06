@@ -739,7 +739,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.80';
+const APP_VERSION = 'v2.46.81';
 
 /* ============================================================
    GLOBAL THEME — v2.46.12
@@ -21634,13 +21634,16 @@ async function _angChatCollectAttachments(accountId, ticketId, ticket, opts) {
     if (result.length >= maxCount) break;
     if ((a.size || 0) + totalBytes > maxBytes) continue;
     if (!a.attachment_url) continue;
-    // v2.46.80: Erst direkt versuchen (S3-URLs haben oft CORS), dann via val.town-Proxy
+    // v2.46.80/.81: FD-S3-URLs erlauben kein CORS — bei bekannten Problem-Hosts gleich
+    // den val.town-Proxy nutzen. Spart laute Console-Errors.
+    const corsProblemHosts = /s3\.amazonaws\.com|attachments6?\.freshdesk\.com|attachment\.freshdesk\.com/i;
     let blob = null;
-    try {
-      const resp = await fetch(a.attachment_url, { mode: 'cors' });
-      if (resp.ok) blob = await resp.blob();
-    } catch (e) {
-      // CORS-Fehler — fällt auf Proxy zurück
+    const useProxyFirst = corsProblemHosts.test(a.attachment_url || '');
+    if (!useProxyFirst) {
+      try {
+        const resp = await fetch(a.attachment_url, { mode: 'cors' });
+        if (resp.ok) blob = await resp.blob();
+      } catch (_) { /* fällt auf Proxy zurück */ }
     }
     if (!blob) {
       try {
