@@ -732,7 +732,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.68';
+const APP_VERSION = 'v2.46.69';
 
 /* ============================================================
    GLOBAL THEME — v2.46.12
@@ -20206,6 +20206,17 @@ async function processRestructureTitle(btn) {
     const cached = APP_STATE.ticketCache?.get?.(accountId + '|' + ticketId);
     if (cached) cached.subject = newTitle;
     if (typeof patchTicketInList === 'function') patchTicketInList(accountId, ticketId, { subject: newTitle });
+    // v2.46.69: DOM der sichtbaren Liste sofort re-rendern, sonst sieht User beim
+    // Zurück-Navigieren noch den alten Titel.
+    if (typeof refreshTicketsListFromCache === 'function') refreshTicketsListFromCache();
+    if (APP_STATE.page === 'tasks' && typeof _renderTasksList === 'function') {
+      // Aufgaben-Tab nutzt eigene Render-Funktion, da Aufgaben FD-Tickets in
+      // speziellen Gruppen sind. Auch der Aufgaben-Cache wird mit-gepatched.
+      const taskArr = APP_STATE.taskTickets || [];
+      const idx = taskArr.findIndex(t => t._accountId === accountId && t.id === ticketId);
+      if (idx >= 0) taskArr[idx].subject = newTitle;
+      _renderTasksList();
+    }
     if (addNote) {
       const valuesText = (preset.fields || [])
         .map(f => f.label + ': ' + escapeHtml(values[f.key] || '—'))
