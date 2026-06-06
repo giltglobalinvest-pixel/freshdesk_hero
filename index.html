@@ -739,7 +739,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.79';
+const APP_VERSION = 'v2.46.80';
 
 /* ============================================================
    GLOBAL THEME — v2.46.12
@@ -21634,11 +21634,27 @@ async function _angChatCollectAttachments(accountId, ticketId, ticket, opts) {
     if (result.length >= maxCount) break;
     if ((a.size || 0) + totalBytes > maxBytes) continue;
     if (!a.attachment_url) continue;
+    // v2.46.80: Erst direkt versuchen (S3-URLs haben oft CORS), dann via val.town-Proxy
+    let blob = null;
     try {
-      // Direkter Fetch — FD-URLs sind temporär signiert, CORS sollte OK sein
       const resp = await fetch(a.attachment_url, { mode: 'cors' });
-      if (!resp.ok) { console.warn('Anhang ' + a.name + ' nicht abrufbar:', resp.status); continue; }
-      const blob = await resp.blob();
+      if (resp.ok) blob = await resp.blob();
+    } catch (e) {
+      // CORS-Fehler — fällt auf Proxy zurück
+    }
+    if (!blob) {
+      try {
+        const proxyUrl = '/attachment-fetch?url=' + encodeURIComponent(a.attachment_url);
+        const resp = await proxyFetch(proxyUrl);
+        if (resp.ok) blob = await resp.blob();
+        else console.warn('Anhang ' + a.name + ' Proxy-Fetch ' + resp.status);
+      } catch (e) {
+        console.warn('Anhang-Load fehlgeschlagen für ' + a.name + ':', e.message);
+        continue;
+      }
+    }
+    if (!blob) continue;
+    try {
       if (blob.size + totalBytes > maxBytes) continue;
       const base64 = await _blobToBase64(blob);
       result.push({
@@ -21648,7 +21664,7 @@ async function _angChatCollectAttachments(accountId, ticketId, ticket, opts) {
       });
       totalBytes += blob.size;
     } catch (e) {
-      console.warn('Anhang-Load fehlgeschlagen für ' + a.name + ':', e.message);
+      console.warn('Anhang-Base64-Fehler ' + a.name + ':', e.message);
     }
   }
   return result;
@@ -25297,6 +25313,42 @@ export default async function (req) {
       status: upstreamStatus,
       headers: { "content-type": upstream.headers.get("content-type") || "application/json", "access-control-allow-origin": "*" }
     });
+  }
+
+  // ===== /attachment-fetch?url=<encoded-url> =====
+  // v2.46.80: CORS-Workaround für Freshdesk-Attachment-URLs (S3 / attachments6.freshdesk.com).
+  // Browser kann diese nicht direkt fetchen. Proxy lädt die Datei serverseitig und gibt sie
+  // mit Access-Control-Allow-Origin: * zurück. Nur eingeloggte User, nur FD-typische URLs.
+  if (path === "attachment-fetch") {
+    const targetUrl = url.searchParams.get("url");
+    if (!targetUrl) return jsonResponse({ error: "Parameter 'url' fehlt" }, 400);
+    // Whitelist: nur Freshdesk-typische Attachment-URLs
+    const allowedHosts = [
+      "s3.amazonaws.com",
+      "attachments6.freshdesk.com",
+      "attachment.freshdesk.com",
+      "attachments.freshdesk.com",
+      "cdn.freshdesk.com",
+    ];
+    let parsed;
+    try { parsed = new URL(targetUrl); }
+    catch (_) { return jsonResponse({ error: "Ungültige URL" }, 400); }
+    const hostOk = allowedHosts.some(h => parsed.hostname === h || parsed.hostname.endsWith("." + h));
+    if (!hostOk) return jsonResponse({ error: "Host nicht erlaubt: " + parsed.hostname }, 403);
+    try {
+      const upstream = await fetch(targetUrl);
+      if (!upstream.ok) return jsonResponse({ error: "Upstream " + upstream.status }, upstream.status);
+      const arr = await upstream.arrayBuffer();
+      return new Response(arr, {
+        status: 200,
+        headers: {
+          "content-type": upstream.headers.get("content-type") || "application/octet-stream",
+          "access-control-allow-origin": "*",
+        }
+      });
+    } catch (e) {
+      return jsonResponse({ error: "Fetch fehlgeschlagen: " + e.message }, 502);
+    }
   }
 
   // ===== /freshsales/<account_id>/api/... =====
