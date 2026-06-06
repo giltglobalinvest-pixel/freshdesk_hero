@@ -732,7 +732,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.72';
+const APP_VERSION = 'v2.46.73';
 
 /* ============================================================
    GLOBAL THEME — v2.46.12
@@ -3187,6 +3187,13 @@ async function loadAccounts() {
       color:    r.fields.color || ACCOUNT_COLORS[Math.floor(Math.random() * ACCOUNT_COLORS.length)],
       created:  r.fields.created || '',
       title_preset: (r.fields.title_preset || 'aufzug').trim().toLowerCase(), // v2.46.68
+      // v2.46.73: Angebots-Profil-Felder
+      angebots_profil:          (r.fields.angebots_profil || '').trim().toLowerCase(),
+      angebots_briefkopf_json:  r.fields.angebots_briefkopf_json || '',
+      angebots_defaults_json:   r.fields.angebots_defaults_json  || '',
+      angebots_agb_html:        r.fields.angebots_agb_html        || '',
+      angebots_branchen_hint:   r.fields.angebots_branchen_hint   || '',
+      angebots_subtypen_json:   r.fields.angebots_subtypen_json   || '',
       // Meta für UI/Debug
       _hasOwnAccess: !!access,
       _hasOwnKey:    hasOwnKey,
@@ -3404,6 +3411,13 @@ async function updateAccount(id, fields) {
     freshsales_api_key:       'singleLineText',
     freshsales_domain_suffix: 'singleLineText',
     title_preset:             'singleLineText', // v2.46.68
+    // v2.46.73: Angebots-Profil-Felder
+    angebots_profil:          'singleLineText',
+    angebots_briefkopf_json:  'multilineText',
+    angebots_defaults_json:   'multilineText',
+    angebots_agb_html:        'multilineText',
+    angebots_branchen_hint:   'multilineText',
+    angebots_subtypen_json:   'multilineText',
   });
 }
 
@@ -15524,6 +15538,118 @@ function openAccountModal(account) {
               `).join('')}
             </div>
           </div>
+          ${isEdit ? `
+            <details class="border border-indigo-200 rounded-lg" ${(account?.angebots_profil || accountHasAngebotsModul(account)) ? 'open' : ''}>
+              <summary class="px-3 py-2 text-xs font-semibold text-indigo-700 cursor-pointer flex items-center gap-1.5">
+                <i data-lucide="file-text" class="w-3.5 h-3.5"></i>
+                Angebots-Profil (Quick-Funktion „Angebot")
+                ${(account?.angebots_profil || accountHasAngebotsModul(account)) ? '<span class="ml-auto text-[10px] text-emerald-700 bg-emerald-100 px-1.5 py-0.5 rounded font-semibold uppercase tracking-wider">aktiv</span>' : ''}
+              </summary>
+              <div class="px-3 pb-3 pt-1 space-y-3">
+                <div>
+                  <label class="text-[11px] font-bold text-ink-700">Profil-Variante</label>
+                  <select id="accAngProfil" class="mt-1 w-full px-3 py-2 border border-ink-200 rounded-lg text-sm bg-white">
+                    <option value="" ${!(account?.angebots_profil) ? 'selected' : ''}>(automatisch nach Account-Name)</option>
+                    <option value="aufzug-service" ${account?.angebots_profil === 'aufzug-service' ? 'selected' : ''}>Aufzug-Service (Wartung/Reparatur/…)</option>
+                    <option value="flp-ersatzteile" ${account?.angebots_profil === 'flp-ersatzteile' ? 'selected' : ''}>FLP Ersatzteile (Phase 2 — kommt später)</option>
+                    <option value="deaktiviert" ${account?.angebots_profil === 'deaktiviert' ? 'selected' : ''}>Deaktiviert (kein Quick-Button)</option>
+                  </select>
+                  <p class="text-[10px] text-ink-500 mt-1">Welche Variante des Angebots-Moduls dieser Account verwendet.</p>
+                </div>
+
+                <div>
+                  <label class="text-[11px] font-bold text-ink-700">Aktive Angebots-Sub-Typen <span class="text-ink-400 font-normal">(Mehrfachauswahl)</span></label>
+                  <div class="mt-1 space-y-1 max-h-40 overflow-y-auto border border-ink-200 rounded-lg p-2 bg-ink-50/50">
+                    ${(() => {
+                      const aktiv = (() => {
+                        try { return JSON.parse(account?.angebots_subtypen_json || '[]'); } catch (_) { return []; }
+                      })();
+                      return ANGEBOTS_SUBTYPEN.map(t => `
+                        <label class="flex items-start gap-2 px-1.5 py-1 hover:bg-white rounded cursor-pointer">
+                          <input type="checkbox" class="acc-ang-subtyp w-4 h-4 accent-indigo-600 mt-0.5" value="${escapeAttr(t.key)}" ${aktiv.includes(t.key) ? 'checked' : ''}>
+                          <span class="text-[12px] text-ink-800">${escapeHtml(t.label)}<br><span class="text-[10px] text-ink-500">${escapeHtml(t.ki_hint.slice(0, 90))}…</span></span>
+                        </label>
+                      `).join('');
+                    })()}
+                  </div>
+                  <p class="text-[10px] text-ink-500 mt-1">Wenn mehrere aktiv: KI fragt im Chat-Step 1 nach welchen Typ du gerade machen willst.</p>
+                </div>
+
+                <details class="border border-ink-200 rounded-lg" ${account?.angebots_briefkopf_json ? 'open' : ''}>
+                  <summary class="px-2 py-1.5 text-[11px] font-bold text-ink-700 cursor-pointer">Briefkopf / Stammdaten</summary>
+                  <div class="p-2 space-y-2 text-[12px]">
+                    <div class="bg-amber-50 border border-amber-200 rounded p-2 text-[10px] text-amber-800">
+                      <b>💡 Schnell-Setup:</b> Lade ein vorhandenes Angebot oder Briefbogen als PDF hoch — Claude liest die Stammdaten automatisch aus.
+                      <input type="file" id="accAngBriefkopfPdf" accept="application/pdf" class="hidden">
+                      <button type="button" onclick="document.getElementById('accAngBriefkopfPdf').click()" class="mt-1 w-full px-2 py-1.5 bg-amber-600 hover:bg-amber-700 text-white rounded text-[11px] font-bold inline-flex items-center justify-center gap-1">
+                        <i data-lucide="upload-cloud" class="w-3 h-3"></i> Briefpapier-PDF hochladen
+                      </button>
+                      <div id="accAngBriefkopfStatus" class="hidden mt-1 text-[10px]"></div>
+                    </div>
+                    ${(() => {
+                      const b = (() => {
+                        try { return JSON.parse(account?.angebots_briefkopf_json || '{}'); } catch (_) { return {}; }
+                      })();
+                      const field = (id, label, val) => `
+                        <div><label class="text-[10px] text-ink-500 uppercase">${escapeHtml(label)}</label>
+                        <input type="text" id="${id}" value="${escapeAttr(val || '')}" class="w-full px-2 py-1 border border-ink-200 rounded text-[12px]"></div>`;
+                      return field('accAngFirma',     'Firma',            b.firma) +
+                             field('accAngAnschrift', 'Anschrift',        b.anschrift) +
+                             field('accAngHrb',       'HRB / Amtsgericht', b.hrb) +
+                             '<div class="grid grid-cols-2 gap-2">' +
+                               field('accAngTel',     'Telefon',          b.tel) +
+                               field('accAngEmail',   'Email',            b.email) +
+                             '</div>' +
+                             '<div class="grid grid-cols-2 gap-2">' +
+                               field('accAngWeb',     'Web',              b.web) +
+                               field('accAngSteuer',  'Steuernummer',     b.steuernr) +
+                             '</div>' +
+                             field('accAngBank',     'Bank',              b.bank) +
+                             '<div class="grid grid-cols-2 gap-2">' +
+                               field('accAngBic',    'BIC',               b.bic) +
+                               field('accAngIban',   'IBAN',              b.iban) +
+                             '</div>' +
+                             field('accAngLogo',     'Logo-Text (Briefkopf)', b.briefkopf_logo_text);
+                    })()}
+                  </div>
+                </details>
+
+                <details class="border border-ink-200 rounded-lg">
+                  <summary class="px-2 py-1.5 text-[11px] font-bold text-ink-700 cursor-pointer">Standard-Konditionen</summary>
+                  <div class="p-2 space-y-2 text-[12px]">
+                    ${(() => {
+                      const d = (() => {
+                        try { return JSON.parse(account?.angebots_defaults_json || '{}'); } catch (_) { return {}; }
+                      })();
+                      const f = (id, lbl, v, ph) => `<div><label class="text-[10px] text-ink-500 uppercase">${escapeHtml(lbl)}</label><input type="text" id="${id}" value="${escapeAttr(v || '')}" placeholder="${escapeAttr(ph || '')}" class="w-full px-2 py-1 border border-ink-200 rounded text-[12px]"></div>`;
+                      return f('accAngDefZahlung',  'Zahlungsziel',  d.zahlungsziel,  '14 Tage nach Rechnungsstellung') +
+                             f('accAngDefLieferzeit','Lieferzeit',   d.lieferzeit,    'nach Terminabsprache') +
+                             f('accAngDefGewaehr',  'Gewährleistung', d.gewaehrleistung, '2 Jahre auf verbautes Material') +
+                             f('accAngDefBindefrist','Bindefrist',   d.bindefrist,    '60 Tage') +
+                             f('accAngDefPreisstellung','Preisstellung',d.preisstellung,'Festpreis netto, zzgl. gesetzlicher MwSt') +
+                             '<div><label class="text-[10px] text-ink-500 uppercase">MwSt-Satz (%)</label><input type="number" id="accAngDefMwst" value="' + (d.mwst != null ? d.mwst : 19) + '" min="0" max="25" step="1" class="w-full px-2 py-1 border border-ink-200 rounded text-[12px]"></div>';
+                    })()}
+                  </div>
+                </details>
+
+                <details class="border border-ink-200 rounded-lg">
+                  <summary class="px-2 py-1.5 text-[11px] font-bold text-ink-700 cursor-pointer">AGB / Montagebedingungen (PDF-Seite 2)</summary>
+                  <div class="p-2 space-y-1 text-[12px]">
+                    <p class="text-[10px] text-ink-500">HTML erlaubt (z.B. &lt;p&gt;, &lt;b&gt;, &lt;h2&gt;). Leer lassen = Standard-AGB von Aufzugshandwerk verwenden.</p>
+                    <textarea id="accAngAgbHtml" rows="6" class="w-full px-2 py-1.5 border border-ink-200 rounded text-[11px] font-mono leading-snug resize-y">${escapeHtml(account?.angebots_agb_html || '')}</textarea>
+                  </div>
+                </details>
+
+                <details class="border border-ink-200 rounded-lg">
+                  <summary class="px-2 py-1.5 text-[11px] font-bold text-ink-700 cursor-pointer">KI-Branchen-Hint (für Preis-Schätzungen)</summary>
+                  <div class="p-2 space-y-1 text-[12px]">
+                    <p class="text-[10px] text-ink-500">Hilft Claude bei realistischen Preis-Schätzungen pro Position. Z.B. „Wartung 100-200€/Monat, Stundensatz 95-145€, Frequenzumrichter 3.000-8.000€"</p>
+                    <textarea id="accAngBrancheHint" rows="3" placeholder="z.B. typische Preise pro Leistung" class="w-full px-2 py-1.5 border border-ink-200 rounded text-[11px] resize-y">${escapeHtml(account?.angebots_branchen_hint || '')}</textarea>
+                  </div>
+                </details>
+              </div>
+            </details>
+          ` : ''}
           ${isEdit && accountHasAngebotsModul(account) ? `
             <details class="border border-indigo-200 rounded-lg" data-ang-lern-details>
               <summary class="px-3 py-2 text-xs font-semibold text-indigo-700 cursor-pointer flex items-center gap-1.5">
@@ -15570,6 +15696,49 @@ function openAccountModal(account) {
       });
     });
   }
+  // v2.46.73: Briefpapier-PDF-Upload-Handler
+  if (isEdit) {
+    const briefkopfInput = $('accAngBriefkopfPdf');
+    if (briefkopfInput) {
+      briefkopfInput.addEventListener('change', async (ev) => {
+        const file = ev.target.files?.[0];
+        if (!file) return;
+        if (file.type !== 'application/pdf') { toast('Nur PDF erlaubt', 'warn'); return; }
+        if (file.size > 16 * 1024 * 1024) { toast('Datei zu groß (max 16 MB)', 'warn'); return; }
+        const statusEl = $('accAngBriefkopfStatus');
+        const setStatus = (msg, isErr) => {
+          if (!statusEl) return;
+          statusEl.className = 'mt-1 text-[10px] ' + (isErr ? 'text-red-700' : 'text-amber-800');
+          statusEl.textContent = msg;
+          statusEl.classList.remove('hidden');
+        };
+        try {
+          setStatus('1/2: PDF wird gelesen…');
+          const base64 = await _fileToBase64(file);
+          setStatus('2/2: Claude extrahiert Stammdaten (15-30 Sek)…');
+          const extracted = await _extractBriefkopfFromPdf(base64);
+          // Felder vorausfüllen
+          const fld = (id, val) => { const el = $(id); if (el && val) el.value = val; };
+          fld('accAngFirma',     extracted.firma);
+          fld('accAngAnschrift', extracted.anschrift);
+          fld('accAngHrb',       extracted.hrb);
+          fld('accAngTel',       extracted.tel);
+          fld('accAngEmail',     extracted.email);
+          fld('accAngWeb',       extracted.web);
+          fld('accAngSteuer',    extracted.steuernr);
+          fld('accAngBank',      extracted.bank);
+          fld('accAngBic',       extracted.bic);
+          fld('accAngIban',      extracted.iban);
+          fld('accAngLogo',      extracted.briefkopf_logo_text);
+          setStatus('✓ Stammdaten extrahiert — bitte prüfen und Account speichern.', false);
+          toast('Briefkopf-Daten aus PDF übernommen — bitte prüfen + Account speichern', 'success', 5000);
+        } catch (e) {
+          setStatus('Fehler: ' + (e.message || e), true);
+          toast('Extraktion fehlgeschlagen: ' + (e.message || e), 'error', 8000);
+        }
+      });
+    }
+  }
   $('accountForm').onsubmit = async (e) => {
     e.preventDefault();
     const errEl = $('accFormError'); errEl.classList.add('hidden');
@@ -15585,6 +15754,47 @@ function openAccountModal(account) {
       let fsSuffix   = ($('accFsSuffix')?.value || 'myfreshworks.com').trim().toLowerCase();
       if (!['myfreshworks.com', 'freshworks.com'].includes(fsSuffix)) fsSuffix = 'myfreshworks.com';
       const titlePreset = ($('accTitlePreset')?.value || 'aufzug').trim().toLowerCase(); // v2.46.68
+      // v2.46.73: Angebots-Profil-Felder aus Form lesen
+      const angebotsProfil = ($('accAngProfil')?.value || '').trim().toLowerCase();
+      let angebotsBriefkopfJson = '';
+      let angebotsDefaultsJson  = '';
+      let angebotsSubtypenJson  = '';
+      const angebotsAgbHtml     = $('accAngAgbHtml')?.value || '';
+      const angebotsBrancheHint = $('accAngBrancheHint')?.value || '';
+      if (isEdit) {
+        // Briefkopf-Felder einsammeln nur wenn mind. 1 Feld gefüllt
+        const bk = {
+          firma:     ($('accAngFirma')?.value     || '').trim(),
+          anschrift: ($('accAngAnschrift')?.value || '').trim(),
+          hrb:       ($('accAngHrb')?.value       || '').trim(),
+          tel:       ($('accAngTel')?.value       || '').trim(),
+          email:     ($('accAngEmail')?.value     || '').trim(),
+          web:       ($('accAngWeb')?.value       || '').trim(),
+          steuernr:  ($('accAngSteuer')?.value    || '').trim(),
+          bank:      ($('accAngBank')?.value      || '').trim(),
+          bic:       ($('accAngBic')?.value       || '').trim(),
+          iban:      ($('accAngIban')?.value      || '').trim(),
+          briefkopf_logo_text: ($('accAngLogo')?.value || '').trim(),
+        };
+        if (bk.firma || bk.anschrift || bk.tel || bk.email) {
+          angebotsBriefkopfJson = JSON.stringify(bk);
+        }
+        const def = {
+          zahlungsziel:    ($('accAngDefZahlung')?.value   || '').trim(),
+          lieferzeit:      ($('accAngDefLieferzeit')?.value || '').trim(),
+          gewaehrleistung: ($('accAngDefGewaehr')?.value   || '').trim(),
+          bindefrist:      ($('accAngDefBindefrist')?.value || '').trim(),
+          preisstellung:   ($('accAngDefPreisstellung')?.value || '').trim(),
+          mwst:            parseInt($('accAngDefMwst')?.value || '19', 10) || 19,
+        };
+        if (def.zahlungsziel || def.lieferzeit || def.gewaehrleistung || def.bindefrist || def.preisstellung) {
+          angebotsDefaultsJson = JSON.stringify(def);
+        }
+        // Sub-Typen einsammeln
+        const subKeys = [];
+        document.querySelectorAll('.acc-ang-subtyp:checked').forEach(cb => subKeys.push(cb.value));
+        if (subKeys.length) angebotsSubtypenJson = JSON.stringify(subKeys);
+      }
 
       if (isEdit) {
         // EDIT: nur geänderte Felder ins Patch packen; leere API-Keys = Key behalten
@@ -15595,6 +15805,13 @@ function openAccountModal(account) {
           freshdesk_domain: domain,
           color,
           title_preset: titlePreset, // v2.46.68
+          // v2.46.73: Angebots-Profil
+          angebots_profil:          angebotsProfil,
+          angebots_briefkopf_json:  angebotsBriefkopfJson,
+          angebots_defaults_json:   angebotsDefaultsJson,
+          angebots_agb_html:        angebotsAgbHtml,
+          angebots_branchen_hint:   angebotsBrancheHint,
+          angebots_subtypen_json:   angebotsSubtypenJson,
         };
         if (apiKey) patch.freshdesk_api_key = apiKey;
         // Freshsales-Logik:
@@ -20794,13 +21011,100 @@ function getAngebotsProfile(account) {
   return ANGEBOTS_PROFILE_AUFZUGSHANDWERK;
 }
 
-/* Heuristische Erkennung: Hat dieser Account das "Aufzug-Service"-Profil?
-   Phase 2 (FLP Ersatzteile) wird hier ein anderes Profil erkennen und ein
-   anderes Modal öffnen. Phase 1.0 fängt nur Aufzug-Service ab. */
+/* v2.46.73: Vordefinierte Sub-Typen. Pro Account werden die aktiven via
+   `angebots_subtypen_json` als JSON-Array gespeichert. */
+const ANGEBOTS_SUBTYPEN = [
+  { key: 'wartungsvertrag',  label: 'Wartungsvertrag',                ki_hint: 'Laufender Vertrag mit Monatspauschale × Laufzeit. Übliche Laufzeit 24-36 Monate. Beinhaltet typisch: Wartungspauschale, Notrufbereitschaft, optional Inspektion BetrSichV.' },
+  { key: 'reparatur',        label: 'Reparatur (Pauschal)',           ki_hint: 'Einmal-Reparatur mit Festpreis. 1-3 Pauschal-Positionen, Anfahrt inkludiert oder separat. Klare Leistungsabgrenzung.' },
+  { key: 'inspektion',       label: 'Inspektion BetrSichV',           ki_hint: 'Einmal-Pauschale für die Hauptprüfung gem. §16 BetrSichV. ZÜS-Begleitung optional. Typisch 150-300€ pro Anlage.' },
+  { key: 'modernisierung',   label: 'Modernisierung',                 ki_hint: 'Projektartig: Steuerungs-Update, Tableaus, Frequenzumrichter, Türen erneuern. Größere Summen 3.000-50.000€. Eventuell mehrere Phasen.' },
+  { key: 'notdienst',        label: 'Notdienst-Pauschale (24/7)',     ki_hint: 'Monats-Pauschale für 24/7-Bereitschaft, oft Add-on zum Wartungsvertrag. Typisch 25-50€/Monat.' },
+  { key: 'aufwand',          label: 'Arbeit nach Aufwand',            ki_hint: 'Variable Abrechnung: Stundensatz × ca. Stunden + Material + Anfahrt. Bereich angeben (z.B. "ca. 4-6 Std"), kein Festpreis.' },
+];
+
+/* v2.46.73: Liest Account-spezifische Angebots-Konfiguration aus dem Airtable-Account.
+   Fallback auf hartcodierte Profile wenn nichts gesetzt ist. */
+function _loadAccountAngebotsConfig(account) {
+  if (!account) return null;
+  const cfg = {};
+  // angebots_profil: 'aufzug-service' | 'flp-ersatzteile' | 'deaktiviert' | ''
+  cfg.profil = (account.angebots_profil || '').trim().toLowerCase();
+  // Briefkopf
+  if (account.angebots_briefkopf_json) {
+    try { cfg.briefkopf = JSON.parse(account.angebots_briefkopf_json); }
+    catch (_) { cfg.briefkopf = null; }
+  }
+  // Defaults
+  if (account.angebots_defaults_json) {
+    try { cfg.defaults = JSON.parse(account.angebots_defaults_json); }
+    catch (_) { cfg.defaults = null; }
+  }
+  cfg.agb_html = account.angebots_agb_html || '';
+  cfg.branchen_hint = account.angebots_branchen_hint || '';
+  // Sub-Typen
+  if (account.angebots_subtypen_json) {
+    try { cfg.subtypen = JSON.parse(account.angebots_subtypen_json); }
+    catch (_) { cfg.subtypen = []; }
+  } else {
+    cfg.subtypen = [];
+  }
+  return cfg;
+}
+
+/* v2.46.73: getAngebotsProfile mit Airtable-Override.
+   1. Lade Account-Config aus Airtable.
+   2. Wenn briefkopf gesetzt: Custom-Profil bauen.
+   3. Sonst: Fallback auf Code-Konstanten (Aufzugshandwerk/Aszendio per Namen). */
+function getAngebotsProfile(account) {
+  if (!account) return ANGEBOTS_PROFILE_AUFZUGSHANDWERK;
+  const cfg = _loadAccountAngebotsConfig(account);
+  if (cfg && cfg.briefkopf && cfg.briefkopf.firma) {
+    // Custom-Profil aus Airtable bauen
+    const fallback = ANGEBOTS_PROFILE_AUFZUGSHANDWERK;
+    const b = cfg.briefkopf;
+    const d = cfg.defaults || {};
+    return {
+      firma: b.firma || fallback.firma,
+      anschrift: b.anschrift || fallback.anschrift,
+      hrb: b.hrb || '',
+      tel: b.tel || '',
+      email: b.email || '',
+      web: b.web || '',
+      steuernr: b.steuernr || '',
+      ustidnr: b.ustidnr || '',
+      bank: b.bank || '',
+      bic: b.bic || '',
+      iban: b.iban || '',
+      briefkopf_logo_text: b.briefkopf_logo_text || (b.firma || '').toLowerCase().replace(/\s+gmbh.*$/i, '').replace(/\s+ag.*$/i, ''),
+      default_zahlungsziel:   d.zahlungsziel   || fallback.default_zahlungsziel,
+      default_lieferzeit:     d.lieferzeit     || fallback.default_lieferzeit,
+      default_gewaehrleistung: d.gewaehrleistung || fallback.default_gewaehrleistung,
+      default_bindefrist:     d.bindefrist     || fallback.default_bindefrist,
+      default_preisstellung:  d.preisstellung  || fallback.default_preisstellung,
+      default_mwst:           d.mwst != null ? Number(d.mwst) : fallback.default_mwst,
+      ki_branche_hint: cfg.branchen_hint || fallback.ki_branche_hint,
+      agb_html: cfg.agb_html || fallback.agb_html,
+      // Phase 1.3: Sub-Typen
+      subtypen_keys: Array.isArray(cfg.subtypen) ? cfg.subtypen : [],
+    };
+  }
+  // Fallback: Code-Profile via Name-Heuristik (Backward-Compat)
+  const name = String(account.name || '').toLowerCase();
+  if (/aszendio/.test(name)) return ANGEBOTS_PROFILE_ASZENDIO;
+  if (/aufzugshandwerk/.test(name)) return ANGEBOTS_PROFILE_AUFZUGSHANDWERK;
+  return ANGEBOTS_PROFILE_AUFZUGSHANDWERK;
+}
+
+/* v2.46.73: Modul-Aktivierung jetzt per Airtable-Flag + Fallback auf Namens-Heuristik */
 function accountHasAngebotsModul(account) {
   if (!account) return false;
+  const cfg = _loadAccountAngebotsConfig(account);
+  if (cfg && cfg.profil) {
+    if (cfg.profil === 'deaktiviert') return false;
+    if (cfg.profil) return true;
+  }
+  // Fallback Backward-Compat: alte Heuristik
   const name = String(account.name || '').toLowerCase();
-  // Phase 1.0: nur Aufzugshandwerk + Aszendio
   return /aufzugshandwerk|aszendio/.test(name);
 }
 
@@ -21102,7 +21406,7 @@ function closeAngebotsModal() {
    Jeder Step ist eine Reihe von "KI schlägt vor → User bestätigt".
    Wenn alle Steps durch: PDF-Erzeugung + Versand. */
 const ANG_CHAT_STEPS = [
-  { key: 'intro',       label: 'Einstieg',       sysHint: 'Begrüße kurz. Fasse aus dem Ticket zusammen was du erkennst (Anlage, Standort, Befund). Frage ob du loslegen sollst und ob der Standort/die FN stimmt.' },
+  { key: 'intro',       label: 'Einstieg',       sysHint: 'Begrüße kurz. Fasse aus dem Ticket zusammen was du erkennst (Anlage, Standort, Befund). WENN MEHRERE Sub-Typen aktiv sind: frage welchen Typ wir machen (Wartungsvertrag/Reparatur/Inspektion/…). Bestätige Standort + FN. Wenn nur 1 Sub-Typ aktiv: nimm den automatisch und springe gleich zur Bestätigung.' },
   { key: 'einleitung',  label: 'Einleitung',     sysHint: 'Komponiere die EINLEITUNG des Angebots-Briefs: Empathie-Anker, "Als Ihr Servicepartner", Bezug auf den Anlass. 4-6 Sätze. Frage nach Bestätigung.' },
   { key: 'befund',      label: 'Befund/Empfehlung', sysHint: 'Komponiere den TECHNISCHEN DETAIL-BLOCK: konkreter Befund, Risiko-Anker (weich), Empfehlung. 4-8 Sätze. Frage nach Bestätigung.' },
   { key: 'positionen',  label: 'Positionen',     sysHint: 'Komponiere die POSITIONEN-LISTE mit realistischen Preis-Schätzungen. Je Position: Bezeichnung + Menge + Einheit + EP + Kategorie (Material/Montage). Liste sie tabellarisch und frage nach Bestätigung.' },
@@ -21328,6 +21632,25 @@ async function _angChatCallApi(s) {
     '5. Schreibe kurze Chat-Nachrichten — max 200 Wörter pro Antwort.\n' +
     '6. Wenn du den Vorschlag-Text präsentierst, formatiere ihn klar erkennbar (Anführungszeichen oder Block).\n' +
     '7. Beim Sammeln der Positionen: gib EP-Schätzungen — User korrigiert wenn nötig.\n\n' +
+    // v2.46.73: Sub-Typen-Kontext
+    (function () {
+      const subKeys = profile.subtypen_keys || [];
+      if (!subKeys.length) return '';
+      const subList = ANGEBOTS_SUBTYPEN.filter(t => subKeys.includes(t.key));
+      if (!subList.length) return '';
+      let txt = '\nDIESE SUB-TYPEN SIND BEI DIESEM ACCOUNT AKTIV:\n';
+      subList.forEach(t => { txt += '- ' + t.label + ': ' + t.ki_hint + '\n'; });
+      const chosen = collected.angebots_subtyp;
+      if (chosen) {
+        const meta = ANGEBOTS_SUBTYPEN.find(t => t.key === chosen);
+        if (meta) txt += '\nAKTUELL GEWÄHLTER SUB-TYP: ' + meta.label + ' — RICHTE DICH NACH DESSEN STRUKTUR.\n';
+      } else if (subList.length === 1) {
+        txt += '\nNur 1 Sub-Typ aktiv (' + subList[0].label + ') — nimm den automatisch.\n';
+      } else {
+        txt += '\nMEHRERE Sub-Typen aktiv. Im Intro-Step FRAGE den User welchen er möchte. Speichere die Antwort als collected_updates.angebots_subtyp (key aus obiger Liste).\n';
+      }
+      return txt;
+    })() +
     'AKTUELLER SCHRITT [' + step.key + '] — ' + step.sysHint + '\n\n' +
     'TICKET-KONTEXT:\n' +
     'Betreff: ' + (ticket.subject || '') + '\n' +
@@ -22156,6 +22479,56 @@ async function _angebotsLernExtract(pdfBase64, anbieter) {
     'PRE-CLOSING-FORMEL:\n' + (plan.pre_closing_formel || '') + '\n\n' +
     'GOLDENE FLOSKELN:\n' + ((plan.goldene_floskeln || []).map(f => '- ' + f).join('\n')) + '\n';
   return { lerntext, kategorien: plan.kategorien || [] };
+}
+
+/* v2.46.73: Extrahiert Briefkopf-Stammdaten aus einem PDF (Brief, Angebot, Briefbogen).
+   Verwendet Sonnet 4.5 mit native PDF-Vision. */
+async function _extractBriefkopfFromPdf(pdfBase64) {
+  const sysPrompt =
+    'Du analysierst ein Briefpapier oder Geschäftsdokument und extrahierst die FIRMEN-STAMMDATEN strukturiert. ' +
+    'Du suchst typischerweise im Briefkopf, im Footer und/oder im Impressum nach diesen Daten.\n\n' +
+    'Antworte AUSSCHLIESSLICH mit gültigem JSON ohne Markdown-Codeblock:\n' +
+    '{\n' +
+    '  "firma": string (offizieller Firmenname inkl. Rechtsform, z.B. "Aufzugshandwerk GmbH"),\n' +
+    '  "anschrift": string (Straße + PLZ + Ort in einer Zeile, z.B. "Ludwig-Pfau-Str. 17, 70176 Stuttgart"),\n' +
+    '  "hrb": string (Amtsgericht + HRB-Nummer, z.B. "Amtsgericht Stuttgart HRB 770 666"),\n' +
+    '  "tel": string (Telefonnummer im Format wie sie da steht),\n' +
+    '  "email": string (Email-Adresse),\n' +
+    '  "web": string (Webseite),\n' +
+    '  "steuernr": string (Steuernummer),\n' +
+    '  "ustidnr": string (USt-IdNr falls vorhanden),\n' +
+    '  "bank": string (Bank-Name),\n' +
+    '  "bic": string,\n' +
+    '  "iban": string,\n' +
+    '  "briefkopf_logo_text": string (was im Logo-Bereich oben links/rechts steht — kurzer Brand-Name, z.B. "aufzugshandwerk", "TKE", "schindler")\n' +
+    '}\n' +
+    'Setze nicht-gefundene Felder auf leeren String "" — KEINE null oder Vermutungen.';
+  const userText = 'Extrahiere die Firmen-Stammdaten aus diesem Dokument als JSON.';
+  const data = await proxyJson('/anthropic/v1/messages', {
+    method: 'POST',
+    body: JSON.stringify({
+      model: 'claude-sonnet-4-5-20250929',
+      max_tokens: 1500,
+      system: sysPrompt,
+      messages: [{
+        role: 'user',
+        content: [
+          { type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: pdfBase64 } },
+          { type: 'text', text: userText },
+        ],
+      }],
+    }),
+  });
+  const raw = (data?.content?.[0]?.text || '').trim();
+  const json = raw.replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/i, '').trim();
+  let plan;
+  try { plan = JSON.parse(json); }
+  catch (_) {
+    const m = json.match(/\{[\s\S]*\}/);
+    if (m) plan = JSON.parse(m[0]);
+    else throw new Error('KI-Antwort ist kein JSON: ' + raw.slice(0, 200));
+  }
+  return plan || {};
 }
 
 async function _angebotSaveAirtable(ctx, status) {
