@@ -732,7 +732,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.71';
+const APP_VERSION = 'v2.46.72';
 
 /* ============================================================
    GLOBAL THEME — v2.46.12
@@ -20867,8 +20867,13 @@ async function loadAngeboteAuftrag(accountId, max) {
   }
 }
 
-/* Hauptfunktion: öffnet das Angebots-Modal für ein Ticket. */
-async function openAngebotsModal(accountId, ticketId) {
+/* v2.46.72: Dispatcher. Standard ist Chat-Modus. Form bleibt als Backup im Code. */
+function openAngebotsModal(accountId, ticketId) {
+  return openAngebotsChatModal(accountId, ticketId);
+}
+
+/* v2.46.70 (Form-Variante, Plan B): kann manuell aufgerufen werden falls Chat ausfällt. */
+async function openAngebotsModalForm(accountId, ticketId) {
   let host = document.getElementById('subModalHost');
   if (!host) { host = document.createElement('div'); host.id = 'subModalHost'; document.body.appendChild(host); }
   const account = (APP_STATE.accounts || []).find(a => a.id === accountId);
@@ -21084,6 +21089,366 @@ async function _angebotAiGenerate(ctx, inputs) {
 
 function closeAngebotsModal() {
   delete window._ANGEBOT_CTX;
+  const host = document.getElementById('subModalHost');
+  if (host) host.innerHTML = '';
+  document.body.style.overflow = '';
+}
+
+/* =================================================================
+   v2.46.72: CHAT-MODUS FÜR ANGEBOTS-ERSTELLUNG
+   ================================================================= */
+
+/* Phasen der Chat-Konversation. KI führt User der Reihe nach durch.
+   Jeder Step ist eine Reihe von "KI schlägt vor → User bestätigt".
+   Wenn alle Steps durch: PDF-Erzeugung + Versand. */
+const ANG_CHAT_STEPS = [
+  { key: 'intro',       label: 'Einstieg',       sysHint: 'Begrüße kurz. Fasse aus dem Ticket zusammen was du erkennst (Anlage, Standort, Befund). Frage ob du loslegen sollst und ob der Standort/die FN stimmt.' },
+  { key: 'einleitung',  label: 'Einleitung',     sysHint: 'Komponiere die EINLEITUNG des Angebots-Briefs: Empathie-Anker, "Als Ihr Servicepartner", Bezug auf den Anlass. 4-6 Sätze. Frage nach Bestätigung.' },
+  { key: 'befund',      label: 'Befund/Empfehlung', sysHint: 'Komponiere den TECHNISCHEN DETAIL-BLOCK: konkreter Befund, Risiko-Anker (weich), Empfehlung. 4-8 Sätze. Frage nach Bestätigung.' },
+  { key: 'positionen',  label: 'Positionen',     sysHint: 'Komponiere die POSITIONEN-LISTE mit realistischen Preis-Schätzungen. Je Position: Bezeichnung + Menge + Einheit + EP + Kategorie (Material/Montage). Liste sie tabellarisch und frage nach Bestätigung.' },
+  { key: 'konditionen', label: 'Konditionen',    sysHint: 'Schlage Konditionen vor: Lieferzeit, Bindefrist (60T), Zahlungsziel (14T), Gewährleistung (2J). Wenn besondere Lieferzeit nötig — vorschlagen. Frage nach Bestätigung.' },
+  { key: 'schluss',     label: 'Schluss',        sysHint: 'Komponiere den SCHLUSS-BLOCK: warmer Pre-Closing, "Wir hoffen ... sehr gerne für Sie umsetzen würden", "Eine Antwort genügt als Auftragsbestätigung". Frage nach Bestätigung.' },
+  { key: 'final',       label: 'Fertig',         sysHint: 'Alle Daten gesammelt. Fasse die wichtigsten Eckdaten zusammen (Festpreis, Kondition-Highlights). Frage ob PDF erzeugt + an Kunden gesendet werden soll.' },
+];
+
+/* Öffnet das Chat-Modal. */
+async function openAngebotsChatModal(accountId, ticketId) {
+  let host = document.getElementById('subModalHost');
+  if (!host) { host = document.createElement('div'); host.id = 'subModalHost'; document.body.appendChild(host); }
+  document.body.style.overflow = 'hidden';
+  const account = (APP_STATE.accounts || []).find(a => a.id === accountId);
+  if (!account) { toast('Account nicht gefunden', 'error'); return; }
+  const profile = getAngebotsProfile(account);
+  host.innerHTML =
+    '<div class="fixed inset-0 z-[60] flex items-end justify-center bg-black/50">' +
+      '<div class="bg-white w-full max-w-md rounded-t-3xl shadow-2xl p-8 text-center safe-bottom">' +
+        '<div class="spinner inline-block w-7 h-7 border-[3px] text-indigo-500"></div>' +
+        '<p class="text-sm text-ink-500 mt-2">Bereite Chat vor…</p>' +
+      '</div>' +
+    '</div>';
+  try {
+    let ticket = APP_STATE.ticketCache?.get?.(accountId + '|' + ticketId);
+    if (!ticket || !ticket.conversations) {
+      try { ticket = await fetchTicketDetail(accountId, ticketId); } catch (_) {}
+    }
+    if (!ticket) throw new Error('Ticket konnte nicht geladen werden');
+    const anlage = _extractAnlageHybrid(ticket);
+    // State initialisieren
+    window._ANG_CHAT = {
+      accountId, ticketId, ticket, profile, account,
+      stepIdx: 0,
+      history: [],     // [{role:'user'|'assistant', content:'...'}]
+      collected: {     // gesammelte Felder, werden im Lauf der Konversation befüllt
+        standort: anlage.standort || '',
+        fabriknummer: anlage.fabriknummer || '',
+        anrede: '',
+        einleitung: '',
+        befund_detail: '',
+        ablauf_punkte: [],
+        positionen: [],
+        konditionen: {
+          lieferzeit: profile.default_lieferzeit,
+          preisstellung: profile.default_preisstellung,
+          zahlungsziel: profile.default_zahlungsziel,
+          gewaehrleistung: profile.default_gewaehrleistung,
+          bindefrist: profile.default_bindefrist,
+        },
+        mwst_satz: profile.default_mwst || 19,
+        warnung_aktiv: false,
+        warnung_text: '',
+        schluss: '',
+      },
+      stilReferenzen: null, // wird beim ersten Step gefüllt
+    };
+    _renderAngChatShell();
+    // Erste KI-Nachricht triggern
+    await _angChatNextAiTurn();
+  } catch (e) {
+    closeAngebotsChatModal();
+    toast('Fehler: ' + (e.message || e), 'error', 8000);
+  }
+}
+
+function _renderAngChatShell() {
+  const host = document.getElementById('subModalHost');
+  if (!host) return;
+  const s = window._ANG_CHAT;
+  host.innerHTML =
+    '<div class="fixed inset-0 z-[60] flex items-end justify-center bg-black/50">' +
+      '<div class="bg-white w-full max-w-md rounded-t-3xl shadow-2xl flex flex-col safe-bottom" style="max-height:96vh">' +
+        '<div class="safe-top px-4 py-3 border-b border-ink-200 flex items-center justify-between gap-2 shrink-0">' +
+          '<div class="flex-1 min-w-0">' +
+            '<h3 class="font-bold text-ink-900 inline-flex items-center gap-2"><i data-lucide="message-square" class="w-5 h-5 text-indigo-600"></i> Angebot erstellen</h3>' +
+            '<p class="text-[10px] text-ink-500" id="angChatStepLabel">Schritt 1 von ' + ANG_CHAT_STEPS.length + ' · ' + ANG_CHAT_STEPS[0].label + '</p>' +
+          '</div>' +
+          '<button onclick="closeAngebotsChatModal()" class="w-9 h-9 rounded-lg hover:bg-ink-100 flex items-center justify-center"><i data-lucide="x" class="w-5 h-5 text-ink-700"></i></button>' +
+        '</div>' +
+        // Chat-Verlauf
+        '<div id="angChatBubbles" class="flex-1 overflow-y-auto p-3 space-y-2 bg-ink-50"></div>' +
+        // Action-Bar (wird nach jedem KI-Turn neu gerendert)
+        '<div id="angChatActionBar" class="border-t border-ink-200 p-3 bg-white shrink-0"></div>' +
+      '</div>' +
+    '</div>';
+  if (window.lucide) lucide.createIcons();
+}
+
+/* Eine Chat-Bubble (KI oder User) rendern + an Liste anhängen. */
+function _angChatAppendBubble(role, content) {
+  const list = document.getElementById('angChatBubbles');
+  if (!list) return;
+  const isAi = role === 'assistant';
+  const html = isAi
+    ? '<div class="flex justify-start"><div class="bg-white border border-ink-200 rounded-2xl rounded-bl-md p-3 max-w-[85%] shadow-sm">' +
+        '<div class="flex items-center gap-1.5 mb-1 text-[10px] text-indigo-600 font-bold uppercase tracking-wider"><i data-lucide="sparkles" class="w-3 h-3"></i> KI-Assistent</div>' +
+        '<div class="text-[13px] text-ink-800 leading-relaxed whitespace-pre-wrap">' + escapeHtml(content) + '</div>' +
+      '</div></div>'
+    : '<div class="flex justify-end"><div class="bg-indigo-600 text-white rounded-2xl rounded-br-md p-3 max-w-[85%] shadow-sm">' +
+        '<div class="text-[13px] leading-relaxed whitespace-pre-wrap">' + escapeHtml(content) + '</div>' +
+      '</div></div>';
+  list.insertAdjacentHTML('beforeend', html);
+  if (window.lucide) lucide.createIcons();
+  // Auto-scroll
+  list.scrollTop = list.scrollHeight;
+}
+
+/* Render Action-Buttons (👍 / 👎 / Frei-Text). Aufgerufen nach jedem KI-Turn. */
+function _angChatRenderActions(opts) {
+  opts = opts || {};
+  const bar = document.getElementById('angChatActionBar');
+  if (!bar) return;
+  const isFinal = opts.isFinal;
+  bar.innerHTML = isFinal
+    ? '<button onclick="angChatExecuteFinal(this)" class="w-full bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl px-3 py-3 text-sm font-bold inline-flex items-center justify-center gap-1.5 shadow-md"><i data-lucide="file-text" class="w-4 h-4"></i> PDF erzeugen & an Kunden senden</button>' +
+      '<button onclick="angChatShowPdfOnly(this)" class="w-full mt-2 bg-white border border-indigo-300 text-indigo-700 hover:bg-indigo-50 rounded-xl px-3 py-2 text-xs font-semibold inline-flex items-center justify-center gap-1.5"><i data-lucide="eye" class="w-3.5 h-3.5"></i> Nur PDF anzeigen (Vorschau)</button>'
+    : '<div class="flex gap-2 mb-2">' +
+        '<button onclick="angChatUserResponse(\'👍 Passt, weiter\')" class="flex-1 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl px-3 py-3 text-sm font-bold inline-flex items-center justify-center gap-1.5">👍 Passt, weiter</button>' +
+        '<button onclick="angChatShowFeedbackInput()" class="flex-1 bg-white border border-amber-300 text-amber-700 hover:bg-amber-50 rounded-xl px-3 py-3 text-sm font-bold inline-flex items-center justify-center gap-1.5">👎 Mach besser</button>' +
+      '</div>' +
+      '<div id="angChatFeedbackBox" class="hidden">' +
+        '<textarea id="angChatFreeInput" rows="2" placeholder="z.B. „wärmer formulieren" / „Preis runter auf 1.000€" / „Anrede direkter"" class="w-full px-3 py-2 border border-ink-300 rounded-xl text-sm resize-y"></textarea>' +
+        '<button onclick="angChatSubmitFreeFeedback()" class="w-full mt-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl px-3 py-2.5 text-sm font-bold inline-flex items-center justify-center gap-1.5"><i data-lucide="send" class="w-3.5 h-3.5"></i> Senden</button>' +
+      '</div>' +
+      '<details class="mt-1">' +
+        '<summary class="text-[10px] text-ink-400 cursor-pointer">Was wurde bisher gesammelt?</summary>' +
+        '<pre class="mt-1 text-[10px] text-ink-600 bg-ink-50 p-2 rounded max-h-24 overflow-y-auto">' + escapeHtml(JSON.stringify(window._ANG_CHAT?.collected || {}, null, 2)) + '</pre>' +
+      '</details>';
+  if (window.lucide) lucide.createIcons();
+}
+
+function angChatShowFeedbackInput() {
+  const box = document.getElementById('angChatFeedbackBox');
+  if (box) {
+    box.classList.remove('hidden');
+    setTimeout(() => document.getElementById('angChatFreeInput')?.focus(), 50);
+  }
+}
+
+async function angChatSubmitFreeFeedback() {
+  const txt = (document.getElementById('angChatFreeInput')?.value || '').trim();
+  if (!txt) return toast('Bitte etwas Feedback eintippen', 'warn');
+  await angChatUserResponse(txt);
+}
+
+/* Hauptfunktion: User antwortet (egal ob 👍 oder Frei-Text). Schickt an KI weiter. */
+async function angChatUserResponse(userText) {
+  const s = window._ANG_CHAT;
+  if (!s) return;
+  // History + Bubble
+  s.history.push({ role: 'user', content: userText });
+  _angChatAppendBubble('user', userText);
+  // Action-Bar deaktivieren während KI lädt
+  const bar = document.getElementById('angChatActionBar');
+  if (bar) bar.innerHTML = '<div class="text-center py-4"><span class="spinner inline-block w-5 h-5 border-[2px] text-indigo-500"></span><p class="text-[11px] text-ink-500 mt-1">KI überlegt…</p></div>';
+  await _angChatNextAiTurn();
+}
+
+/* Triggert den nächsten KI-Turn (basiert auf history + step). */
+async function _angChatNextAiTurn() {
+  const s = window._ANG_CHAT;
+  if (!s) return;
+  // Stil-Referenzen lazy laden (einmalig pro Session)
+  if (s.stilReferenzen == null) {
+    try {
+      const [lerntexte, eigeneAuftraege] = await Promise.all([
+        loadAngebotsLerntexte(s.accountId, 5),
+        loadAngeboteAuftrag(s.accountId, 3),
+      ]);
+      s.stilReferenzen = [].concat(eigeneAuftraege, lerntexte).slice(0, 5);
+    } catch (_) { s.stilReferenzen = []; }
+  }
+  try {
+    const result = await _angChatCallApi(s);
+    // KI-Antwort: { message: '...', collected_updates: {...}, advance_step: bool, is_final: bool }
+    if (result.collected_updates) {
+      Object.assign(s.collected, result.collected_updates);
+      // Spezial-Merge für ablauf_punkte/positionen wenn als Array kommen
+      if (Array.isArray(result.collected_updates.ablauf_punkte)) s.collected.ablauf_punkte = result.collected_updates.ablauf_punkte;
+      if (Array.isArray(result.collected_updates.positionen)) s.collected.positionen = result.collected_updates.positionen;
+      if (result.collected_updates.konditionen) Object.assign(s.collected.konditionen, result.collected_updates.konditionen);
+    }
+    s.history.push({ role: 'assistant', content: result.message });
+    _angChatAppendBubble('assistant', result.message);
+    // Step-Advance?
+    if (result.advance_step && s.stepIdx < ANG_CHAT_STEPS.length - 1) {
+      s.stepIdx += 1;
+      const lbl = document.getElementById('angChatStepLabel');
+      if (lbl) lbl.textContent = 'Schritt ' + (s.stepIdx + 1) + ' von ' + ANG_CHAT_STEPS.length + ' · ' + ANG_CHAT_STEPS[s.stepIdx].label;
+    }
+    const isFinal = result.is_final || s.stepIdx >= ANG_CHAT_STEPS.length - 1;
+    _angChatRenderActions({ isFinal });
+  } catch (e) {
+    const bar = document.getElementById('angChatActionBar');
+    if (bar) bar.innerHTML = '<div class="bg-red-50 border border-red-200 rounded-xl p-3 text-sm text-red-800"><b>Fehler:</b> ' + escapeHtml(e.message || String(e)) + '</div>' +
+      '<button onclick="_angChatNextAiTurn()" class="w-full mt-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl px-3 py-2 text-xs font-semibold">Nochmal versuchen</button>';
+  }
+}
+
+/* Macht den eigentlichen API-Call zu Sonnet. */
+async function _angChatCallApi(s) {
+  const step = ANG_CHAT_STEPS[s.stepIdx];
+  const { ticket, profile, accountId, ticketId, collected, stilReferenzen } = s;
+  const req = ticket.requester || {};
+  const conv = (ticket.conversations || [])
+    .slice(0, 4)
+    .map(c => (c.incoming ? 'Kunde' : 'Agent') + ': ' + htmlToText(c.body_text || c.body || '').slice(0, 400))
+    .join('\n\n');
+  // Stil-Block (siehe v2.46.71)
+  const stilBlock = (stilReferenzen || []).length
+    ? '\n\nSTIL-REFERENZEN (lerne nur den STIL, übernimm NICHT 1:1):\n' +
+      stilReferenzen.map((r, i) => '\n--- Ref ' + (i + 1) + ' [' + (r.anbieter || '') + '] ---\n' + (r.lerntext || '').slice(0, 1500)).join('\n') +
+      '\n'
+    : '';
+  const sysPrompt =
+    'Du bist ein Vertriebs-Experte für Aufzug-Service-Angebote, im Stil von TK Elevator. ' +
+    'Du führst den User in einem Chat durch die Angebotserstellung. Jeder Schritt:\n' +
+    '1. Komponiere VORSCHLAG für den aktuellen Schritt — fertig formuliert, sodass der User nur 👍 oder 👎 sagen muss.\n' +
+    '2. Wenn der User 👍 gibt → bestätige kurz, gehe zum NÄCHSTEN Schritt + komponiere DIESEN Vorschlag.\n' +
+    '3. Wenn der User 👎/Feedback gibt → passe nur den AKTUELLEN Schritt an, BLEIBE im selben Schritt.\n' +
+    '4. Schreibe PSYCHOLOGISCH WIRKSAM wie TKE: persönlich, empathisch, fakten-basiert, weiche Risiko-Anker, "Als Ihr Servicepartner", Pre-Closing warm.\n' +
+    '5. Schreibe kurze Chat-Nachrichten — max 200 Wörter pro Antwort.\n' +
+    '6. Wenn du den Vorschlag-Text präsentierst, formatiere ihn klar erkennbar (Anführungszeichen oder Block).\n' +
+    '7. Beim Sammeln der Positionen: gib EP-Schätzungen — User korrigiert wenn nötig.\n\n' +
+    'AKTUELLER SCHRITT [' + step.key + '] — ' + step.sysHint + '\n\n' +
+    'TICKET-KONTEXT:\n' +
+    'Betreff: ' + (ticket.subject || '') + '\n' +
+    'Kunde: ' + (req.name || '') + (req.email ? ' <' + req.email + '>' : '') + '\n' +
+    (req.company?.name ? 'Firma: ' + req.company.name + '\n' : '') +
+    'Verlauf:\n' + conv + '\n\n' +
+    'BEREITS GESAMMELT (so weit):\n' + JSON.stringify(collected, null, 2) + '\n' +
+    stilBlock +
+    '\nProfil: ' + (profile.ki_branche_hint || '') + '\n\n' +
+    'Antworte AUSSCHLIESSLICH mit gültigem JSON ohne Markdown:\n' +
+    '{\n' +
+    '  "message": string (deine Chat-Nachricht an den User — die er sieht; max 200 Wörter; nutze \\n für Absätze),\n' +
+    '  "collected_updates": object (alle Felder die du in diesem Turn neu festgehalten hast; nur die GEÄNDERTEN/NEUEN; Schema siehe BEREITS GESAMMELT),\n' +
+    '  "advance_step": boolean (true wenn der User den aktuellen Vorschlag bestätigt hat und du JETZT zum nächsten Step gehst; false wenn nochmal Iteration im selben Step),\n' +
+    '  "is_final": boolean (true wenn alle Schritte durch und du gerade die Zusammenfassung schickst)\n' +
+    '}\n' +
+    'Für POSITIONEN: collected_updates.positionen ist [{bezeichnung, menge, einheit, einzelpreis, kategorie}].\n' +
+    'Für KONDITIONEN: collected_updates.konditionen ist {lieferzeit, preisstellung, zahlungsziel, gewaehrleistung, bindefrist}.';
+  // Messages: bisherige History + nächster Schritt-Auftrag wenn history leer
+  let messages = s.history.slice();
+  if (!messages.length) {
+    messages = [{ role: 'user', content: '(Start der Konversation — Schritt: ' + step.label + '. Beginne!)' }];
+  } else if (messages[messages.length - 1].role === 'assistant') {
+    // History endet mit KI — sollte nicht passieren, aber sicherheitshalber Dummy-User
+    messages.push({ role: 'user', content: '(Bitte fortfahren)' });
+  }
+  const data = await proxyJson('/anthropic/v1/messages', {
+    method: 'POST',
+    body: JSON.stringify({
+      model: 'claude-sonnet-4-5-20250929',
+      max_tokens: 1500,
+      system: sysPrompt,
+      messages: messages,
+    }),
+  });
+  const raw = (data?.content?.[0]?.text || '').trim();
+  const json = raw.replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/i, '').trim();
+  let parsed;
+  try { parsed = JSON.parse(json); }
+  catch (_) {
+    const m = json.match(/\{[\s\S]*\}/);
+    if (m) parsed = JSON.parse(m[0]);
+    else throw new Error('KI-Antwort ist kein gültiges JSON: ' + raw.slice(0, 150));
+  }
+  if (!parsed.message) parsed.message = '(Leere Nachricht)';
+  return parsed;
+}
+
+/* Final: PDF erzeugen + an Kunden senden. */
+async function angChatExecuteFinal(btn) {
+  const s = window._ANG_CHAT;
+  if (!s) return;
+  // Wir bauen das ANGEBOT_CTX-Format um, das _renderAngebotHtml + _angebotSaveAirtable nutzen
+  const ctx = _angChatToCtx(s);
+  if (!confirm('Angebot ANG-' + s.ticketId + ' jetzt als PDF zusammenbauen UND an den Kunden als Antwort senden?')) return;
+  setBusy(btn, true, 'Sende…');
+  try {
+    const html = _renderAngebotHtml(ctx);
+    const replyBody =
+      '<p>vielen Dank für Ihre Anfrage.</p>' +
+      '<p>Anbei senden wir Ihnen unser Angebot <b>ANG-' + s.ticketId + '</b>:</p>' +
+      '<hr style="margin:20px 0">' +
+      html +
+      '<hr style="margin:20px 0">' +
+      '<p style="font-size:9pt;color:#6b7280">Tipp: Eine kurze Antwort an diese Email genügt uns als Auftragsbestätigung.</p>';
+    const payload = { body: replyBody };
+    await proxyJson('/freshdesk/' + encodeURIComponent(s.accountId) + '/api/v2/tickets/' + s.ticketId + '/reply', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+    try { await _angebotSaveAirtable(ctx, 'Versendet'); } catch (e) { console.warn('Airtable-Save fehlgeschlagen:', e.message); }
+    closeAngebotsChatModal();
+    toast('Angebot ANG-' + s.ticketId + ' an Kunde versendet', 'success', 5000);
+  } catch (e) {
+    setBusy(btn, false);
+    toast('Versand fehlgeschlagen: ' + (e.message || e), 'error', 8000);
+  }
+}
+
+async function angChatShowPdfOnly(btn) {
+  const s = window._ANG_CHAT;
+  if (!s) return;
+  const ctx = _angChatToCtx(s);
+  const html = _renderAngebotHtml(ctx);
+  const w = window.open('', '_blank');
+  if (!w) { toast('Browser hat Popup blockiert', 'warn'); return; }
+  w.document.write('<!DOCTYPE html><html><head><meta charset="utf-8"><title>Angebot ANG-' + s.ticketId + '</title></head><body>' + html + '<script>setTimeout(function(){window.print();},400);<\/script></body></html>');
+  w.document.close();
+  toast('PDF-Druck-Dialog öffnet — Cmd+P → „Als PDF speichern"', 'success', 4000);
+}
+
+/* Adapter: Chat-State → ANGEBOT_CTX-Format das die alten Renderer/Saver nutzen. */
+function _angChatToCtx(s) {
+  const plan = {
+    warnung_aktiv: !!s.collected.warnung_aktiv,
+    warnung_text: s.collected.warnung_text || '',
+    anrede: s.collected.anrede || '',
+    einleitung: s.collected.einleitung || '',
+    befund_detail: s.collected.befund_detail || '',
+    ablauf_punkte: s.collected.ablauf_punkte || [],
+    positionen: s.collected.positionen || [],
+    konditionen: s.collected.konditionen || {},
+    mwst_satz: s.collected.mwst_satz || 19,
+    schluss: s.collected.schluss || '',
+  };
+  plan._totals = _angebotCalcTotals(plan);
+  return {
+    accountId: s.accountId,
+    ticketId: s.ticketId,
+    ticket: s.ticket,
+    profile: s.profile,
+    standort: s.collected.standort || '',
+    fabriknummer: s.collected.fabriknummer || '',
+    anlass: '(per Chat zusammengestellt)',
+    hinweise: '',
+    plan: plan,
+  };
+}
+
+function closeAngebotsChatModal() {
+  delete window._ANG_CHAT;
   const host = document.getElementById('subModalHost');
   if (host) host.innerHTML = '';
   document.body.style.overflow = '';
