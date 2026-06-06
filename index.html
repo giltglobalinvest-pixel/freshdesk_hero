@@ -732,7 +732,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.73';
+const APP_VERSION = 'v2.46.74';
 
 /* ============================================================
    GLOBAL THEME — v2.46.12
@@ -21424,8 +21424,8 @@ async function openAngebotsChatModal(accountId, ticketId) {
   if (!account) { toast('Account nicht gefunden', 'error'); return; }
   const profile = getAngebotsProfile(account);
   host.innerHTML =
-    '<div class="fixed inset-0 z-[60] flex items-end justify-center bg-black/50">' +
-      '<div class="bg-white w-full max-w-md rounded-t-3xl shadow-2xl p-8 text-center safe-bottom">' +
+    '<div class="fixed inset-0 z-[60] flex items-end sm:items-center justify-center bg-black/50 sm:p-4">' +
+      '<div class="bg-white w-full max-w-md rounded-t-3xl sm:rounded-3xl shadow-2xl p-8 text-center safe-bottom">' +
         '<div class="spinner inline-block w-7 h-7 border-[3px] text-indigo-500"></div>' +
         '<p class="text-sm text-ink-500 mt-2">Bereite Chat vor…</p>' +
       '</div>' +
@@ -21478,8 +21478,8 @@ function _renderAngChatShell() {
   if (!host) return;
   const s = window._ANG_CHAT;
   host.innerHTML =
-    '<div class="fixed inset-0 z-[60] flex items-end justify-center bg-black/50">' +
-      '<div class="bg-white w-full max-w-md rounded-t-3xl shadow-2xl flex flex-col safe-bottom" style="max-height:96vh">' +
+    '<div class="fixed inset-0 z-[60] flex items-end sm:items-center justify-center bg-black/50 sm:p-4">' +
+      '<div class="bg-white w-full max-w-md rounded-t-3xl sm:rounded-3xl shadow-2xl flex flex-col safe-bottom" style="max-height:96vh">' +
         '<div class="safe-top px-4 py-3 border-b border-ink-200 flex items-center justify-between gap-2 shrink-0">' +
           '<div class="flex-1 min-w-0">' +
             '<h3 class="font-bold text-ink-900 inline-flex items-center gap-2"><i data-lucide="message-square" class="w-5 h-5 text-indigo-600"></i> Angebot erstellen</h3>' +
