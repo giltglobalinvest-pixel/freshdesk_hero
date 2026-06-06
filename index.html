@@ -732,7 +732,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.75';
+const APP_VERSION = 'v2.46.76';
 
 /* ============================================================
    GLOBAL THEME — v2.46.12
@@ -21465,8 +21465,24 @@ async function openAngebotsChatModal(accountId, ticketId) {
       stilReferenzen: null, // wird beim ersten Step gefüllt
     };
     _renderAngChatShell();
-    // Erste KI-Nachricht triggern
-    await _angChatNextAiTurn();
+    // v2.46.76: KI startet NICHT automatisch. User beginnt mit der Beschreibung.
+    // Statt KI-Greeting: statische Hint-Bubble + Input-Field bereit.
+    const subj = ticket.subject || '';
+    const reqName = ticket.requester?.name || '';
+    const profileSubtypen = (s.collected && Array.isArray(s.profile?.subtypen_keys)) ? s.profile.subtypen_keys : [];
+    let subtypHint = '';
+    if (profileSubtypen.length === 1) {
+      const t = ANGEBOTS_SUBTYPEN.find(x => x.key === profileSubtypen[0]);
+      if (t) subtypHint = ' (' + t.label + ')';
+    } else if (profileSubtypen.length > 1) {
+      subtypHint = ' (z.B. Wartungsvertrag, Reparatur Pauschal, Inspektion, …)';
+    }
+    const hintBubble = 'Hallo 👋\n\n' +
+      'Beschreib mir kurz was im Angebot stehen soll' + subtypHint + '.\n\n' +
+      'Z.B. „Türsteuerung tauschen, Pauschal ca. 1.500€" oder „Wartungsvertrag 24 Mon mit Notruf" oder „Sicherheitsinspektion BetrSichV einmalig".\n\n' +
+      'Tipp: Je konkreter du bist, desto besser werden die Vorschläge. Du kannst auch sagen „mach was Sinn macht für ' + (subj || 'dieses Ticket') + '"' + (reqName ? ' für ' + reqName : '') + '.';
+    _angChatAppendBubble('assistant', hintBubble);
+    _angChatRenderActions({ awaitingFirstUserInput: true });
   } catch (e) {
     closeAngebotsChatModal();
     toast('Fehler: ' + (e.message || e), 'error', 8000);
@@ -21515,42 +21531,91 @@ function _angChatAppendBubble(role, content) {
   list.scrollTop = list.scrollHeight;
 }
 
-/* Render Action-Buttons (👍 / 👎 / Frei-Text). Aufgerufen nach jedem KI-Turn. */
+/* v2.46.76: Action-Bar mit IMMER sichtbarem Input-Field + Shortcut-Buttons. */
 function _angChatRenderActions(opts) {
   opts = opts || {};
   const bar = document.getElementById('angChatActionBar');
   if (!bar) return;
   const isFinal = opts.isFinal;
-  bar.innerHTML = isFinal
-    ? '<button onclick="angChatExecuteFinal(this)" class="w-full bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl px-3 py-3 text-sm font-bold inline-flex items-center justify-center gap-1.5 shadow-md"><i data-lucide="file-text" class="w-4 h-4"></i> PDF erzeugen & an Kunden senden</button>' +
-      '<button onclick="angChatShowPdfOnly(this)" class="w-full mt-2 bg-white border border-indigo-300 text-indigo-700 hover:bg-indigo-50 rounded-xl px-3 py-2 text-xs font-semibold inline-flex items-center justify-center gap-1.5"><i data-lucide="eye" class="w-3.5 h-3.5"></i> Nur PDF anzeigen (Vorschau)</button>'
-    : '<div class="flex gap-2 mb-2">' +
-        '<button onclick="angChatUserResponse(\'👍 Passt, weiter\')" class="flex-1 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl px-3 py-3 text-sm font-bold inline-flex items-center justify-center gap-1.5">👍 Passt, weiter</button>' +
-        '<button onclick="angChatShowFeedbackInput()" class="flex-1 bg-white border border-amber-300 text-amber-700 hover:bg-amber-50 rounded-xl px-3 py-3 text-sm font-bold inline-flex items-center justify-center gap-1.5">👎 Mach besser</button>' +
-      '</div>' +
-      '<div id="angChatFeedbackBox" class="hidden">' +
-        '<textarea id="angChatFreeInput" rows="2" placeholder="z.B. „wärmer formulieren" / „Preis runter auf 1.000€" / „Anrede direkter"" class="w-full px-3 py-2 border border-ink-300 rounded-xl text-sm resize-y"></textarea>' +
-        '<button onclick="angChatSubmitFreeFeedback()" class="w-full mt-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl px-3 py-2.5 text-sm font-bold inline-flex items-center justify-center gap-1.5"><i data-lucide="send" class="w-3.5 h-3.5"></i> Senden</button>' +
-      '</div>' +
-      '<details class="mt-1">' +
-        '<summary class="text-[10px] text-ink-400 cursor-pointer">Was wurde bisher gesammelt?</summary>' +
-        '<pre class="mt-1 text-[10px] text-ink-600 bg-ink-50 p-2 rounded max-h-24 overflow-y-auto">' + escapeHtml(JSON.stringify(window._ANG_CHAT?.collected || {}, null, 2)) + '</pre>' +
-      '</details>';
-  if (window.lucide) lucide.createIcons();
-}
-
-function angChatShowFeedbackInput() {
-  const box = document.getElementById('angChatFeedbackBox');
-  if (box) {
-    box.classList.remove('hidden');
-    setTimeout(() => document.getElementById('angChatFreeInput')?.focus(), 50);
+  const isFirstInput = opts.awaitingFirstUserInput;
+  if (isFinal) {
+    bar.innerHTML =
+      '<button onclick="angChatExecuteFinal(this)" class="w-full bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl px-3 py-3 text-sm font-bold inline-flex items-center justify-center gap-1.5 shadow-md"><i data-lucide="file-text" class="w-4 h-4"></i> PDF erzeugen & an Kunden senden</button>' +
+      '<button onclick="angChatShowPdfOnly(this)" class="w-full mt-2 bg-white border border-indigo-300 text-indigo-700 hover:bg-indigo-50 rounded-xl px-3 py-2 text-xs font-semibold inline-flex items-center justify-center gap-1.5"><i data-lucide="eye" class="w-3.5 h-3.5"></i> Nur PDF anzeigen (Vorschau)</button>' +
+      // Auch im Final-Step Input erlaubt — falls User noch anpassen möchte vor PDF
+      '<div class="mt-3 pt-3 border-t border-ink-100">' +
+        '<textarea id="angChatTextInput" rows="2" placeholder="Letzte Änderung wünschen? Z.B. „Preis Position 2 auf 850€"" class="w-full px-3 py-2 border border-ink-300 rounded-xl text-sm resize-y" onkeydown="if(event.key===\'Enter\'&&(event.metaKey||event.ctrlKey)){event.preventDefault();angChatSubmitTextInput()}"></textarea>' +
+        '<button onclick="angChatSubmitTextInput()" class="w-full mt-1.5 bg-ink-100 hover:bg-ink-200 text-ink-700 rounded-xl px-3 py-2 text-xs font-semibold inline-flex items-center justify-center gap-1.5"><i data-lucide="send" class="w-3.5 h-3.5"></i> Anpassen</button>' +
+      '</div>';
+    if (window.lucide) lucide.createIcons();
+    return;
   }
+  // Standard: Input + Shortcut-Buttons (👍 / 👎 nur wenn KI bereits geantwortet hat — nicht beim allerersten User-Input)
+  const speechOn = !!(window.SpeechRecognition || window.webkitSpeechRecognition);
+  const shortcutHtml = isFirstInput ? '' :
+    '<div class="flex gap-2 mb-2">' +
+      '<button onclick="angChatUserResponse(\'👍 Passt, weiter\')" class="flex-1 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl px-3 py-2.5 text-sm font-bold inline-flex items-center justify-center gap-1.5">👍 Passt, weiter</button>' +
+      '<button onclick="angChatUserResponse(\'👎 Mach besser bitte\')" class="flex-1 bg-white border border-amber-300 text-amber-700 hover:bg-amber-50 rounded-xl px-3 py-2.5 text-sm font-bold inline-flex items-center justify-center gap-1.5">👎 Mach besser</button>' +
+    '</div>';
+  bar.innerHTML = shortcutHtml +
+    '<div class="flex gap-1.5 items-end">' +
+      '<textarea id="angChatTextInput" rows="2" placeholder="' + escapeAttr(isFirstInput ? 'Beschreibe was du brauchst… (Cmd+Enter sendet)' : 'Eigene Anmerkung schreiben? z.B. „Preis 1.500€" oder „wärmer"… (Cmd+Enter)') + '" class="flex-1 px-3 py-2 border border-ink-300 rounded-xl text-sm resize-none" onkeydown="if(event.key===\'Enter\'&&(event.metaKey||event.ctrlKey)){event.preventDefault();angChatSubmitTextInput()}"></textarea>' +
+      (speechOn ? '<button onclick="angChatToggleVoice()" id="angChatMicBtn" class="shrink-0 w-10 h-10 rounded-xl bg-purple-50 hover:bg-purple-100 border border-purple-200 text-purple-700 inline-flex items-center justify-center" title="Spracheingabe"><i data-lucide="mic" class="w-4 h-4"></i></button>' : '') +
+      '<button onclick="angChatSubmitTextInput()" class="shrink-0 w-10 h-10 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white inline-flex items-center justify-center" title="Senden"><i data-lucide="send" class="w-4 h-4"></i></button>' +
+    '</div>' +
+    '<details class="mt-2">' +
+      '<summary class="text-[10px] text-ink-400 cursor-pointer">Was wurde bisher gesammelt?</summary>' +
+      '<pre class="mt-1 text-[10px] text-ink-600 bg-ink-50 p-2 rounded max-h-24 overflow-y-auto">' + escapeHtml(JSON.stringify(window._ANG_CHAT?.collected || {}, null, 2)) + '</pre>' +
+    '</details>';
+  if (window.lucide) lucide.createIcons();
+  if (isFirstInput) setTimeout(() => document.getElementById('angChatTextInput')?.focus(), 80);
 }
 
-async function angChatSubmitFreeFeedback() {
-  const txt = (document.getElementById('angChatFreeInput')?.value || '').trim();
-  if (!txt) return toast('Bitte etwas Feedback eintippen', 'warn');
+async function angChatSubmitTextInput() {
+  const ta = document.getElementById('angChatTextInput');
+  const txt = (ta?.value || '').trim();
+  if (!txt) return toast('Bitte etwas eintippen', 'warn');
+  if (ta) ta.value = '';
   await angChatUserResponse(txt);
+}
+
+let ANG_CHAT_REC = null;
+function angChatToggleVoice() {
+  if (ANG_CHAT_REC) { try { ANG_CHAT_REC.stop(); } catch (_) {} ANG_CHAT_REC = null; _angChatMicUI(false); return; }
+  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if (!SR) return toast('Sprach-Eingabe nicht verfügbar', 'warn');
+  ensureMicPermission().then(() => {
+    const rec = new SR();
+    rec.lang = 'de-DE'; rec.continuous = true; rec.interimResults = true;
+    const ta = document.getElementById('angChatTextInput');
+    let baseText = (ta?.value || '');
+    if (baseText && !/\s$/.test(baseText)) baseText += ' ';
+    rec.onresult = (event) => {
+      let final = '', interim = '';
+      for (let i = event.resultIndex; i < event.results.length; i++) {
+        const tr = event.results[i][0].transcript;
+        if (event.results[i].isFinal) final += tr; else interim += tr;
+      }
+      if (ta) ta.value = baseText + final + interim;
+      if (final) baseText += final;
+    };
+    rec.onerror = () => { ANG_CHAT_REC = null; _angChatMicUI(false); };
+    rec.onend = () => { if (ANG_CHAT_REC === rec) { ANG_CHAT_REC = null; _angChatMicUI(false); } };
+    rec.start();
+    ANG_CHAT_REC = rec;
+    _angChatMicUI(true);
+  }).catch(e => toast(e.message, 'error', 6000));
+}
+function _angChatMicUI(isOn) {
+  const btn = document.getElementById('angChatMicBtn');
+  if (!btn) return;
+  btn.innerHTML = isOn
+    ? '<span class="spinner inline-block w-4 h-4 border-[2px] text-purple-700"></span>'
+    : '<i data-lucide="mic" class="w-4 h-4"></i>';
+  btn.className = isOn
+    ? 'shrink-0 w-10 h-10 rounded-xl bg-purple-600 text-white inline-flex items-center justify-center'
+    : 'shrink-0 w-10 h-10 rounded-xl bg-purple-50 hover:bg-purple-100 border border-purple-200 text-purple-700 inline-flex items-center justify-center';
+  if (window.lucide) lucide.createIcons();
 }
 
 /* Hauptfunktion: User antwortet (egal ob 👍 oder Frei-Text). Schickt an KI weiter. */
@@ -21624,14 +21689,19 @@ async function _angChatCallApi(s) {
     : '';
   const sysPrompt =
     'Du bist ein Vertriebs-Experte für Aufzug-Service-Angebote, im Stil von TK Elevator. ' +
-    'Du führst den User in einem Chat durch die Angebotserstellung. Jeder Schritt:\n' +
-    '1. Komponiere VORSCHLAG für den aktuellen Schritt — fertig formuliert, sodass der User nur 👍 oder 👎 sagen muss.\n' +
-    '2. Wenn der User 👍 gibt → bestätige kurz, gehe zum NÄCHSTEN Schritt + komponiere DIESEN Vorschlag.\n' +
-    '3. Wenn der User 👎/Feedback gibt → passe nur den AKTUELLEN Schritt an, BLEIBE im selben Schritt.\n' +
-    '4. Schreibe PSYCHOLOGISCH WIRKSAM wie TKE: persönlich, empathisch, fakten-basiert, weiche Risiko-Anker, "Als Ihr Servicepartner", Pre-Closing warm.\n' +
-    '5. Schreibe kurze Chat-Nachrichten — max 200 Wörter pro Antwort.\n' +
-    '6. Wenn du den Vorschlag-Text präsentierst, formatiere ihn klar erkennbar (Anführungszeichen oder Block).\n' +
-    '7. Beim Sammeln der Positionen: gib EP-Schätzungen — User korrigiert wenn nötig.\n\n' +
+    'Du arbeitest mit dem User in einem Chat zusammen — er sagt dir was er braucht, du komponierst die Texte. ' +
+    'WICHTIG: Der User hat den Chat BEGONNEN — du reagierst REAKTIV auf seine Eingaben, du fragst nicht initiativ.\n\n' +
+    'REGELN:\n' +
+    '1. Lies die User-Nachricht aufmerksam — was hat er konkret gesagt?\n' +
+    '2. Wenn er bereits Details geliefert hat (Pauschal, Preis, Leistung) → übernimm sie 1:1, frage nicht nochmal.\n' +
+    '3. Komponiere für den aktuellen Schritt einen kompletten VORSCHLAG — fertig formuliert.\n' +
+    '4. Wenn der User "👍 Passt" / "passt" / "ok" / "ja" / ähnliches sagt → bestätige kurz, advance_step:true, komponiere den NÄCHSTEN Schritt-Vorschlag.\n' +
+    '5. Wenn der User Korrektur/Feedback gibt → passe den AKTUELLEN Schritt an, advance_step:false, bleibe im selben Step.\n' +
+    '6. Wenn der User eigene Texte/Preise/Daten liefert → übernimm sie in collected_updates UND nutze sie für den Vorschlag.\n' +
+    '7. Schreibe PSYCHOLOGISCH WIRKSAM wie TKE: persönlich, empathisch, fakten-basiert, weiche Risiko-Anker, "Als Ihr Servicepartner", Pre-Closing warm.\n' +
+    '8. Schreibe KURZ — max 150 Wörter pro Antwort. Wenn Vorschlag-Text präsentiert wird, klar als Block kennzeichnen (z.B. ___).\n' +
+    '9. Stelle keine unnötigen Fragen — wenn der User dir sagt "mach was Sinn macht" → trau dich, schlag direkt was vor.\n' +
+    '10. Bei Positionen: gib EP-Schätzungen — User korrigiert wenn nötig. Übernimm Preise die er nennt sofort.\n\n' +
     // v2.46.73: Sub-Typen-Kontext
     (function () {
       const subKeys = profile.subtypen_keys || [];
@@ -21669,13 +21739,13 @@ async function _angChatCallApi(s) {
     '}\n' +
     'Für POSITIONEN: collected_updates.positionen ist [{bezeichnung, menge, einheit, einzelpreis, kategorie}].\n' +
     'Für KONDITIONEN: collected_updates.konditionen ist {lieferzeit, preisstellung, zahlungsziel, gewaehrleistung, bindefrist}.';
-  // Messages: bisherige History + nächster Schritt-Auftrag wenn history leer
+  // v2.46.76: User beginnt — History muss mit einer User-Message starten
   let messages = s.history.slice();
   if (!messages.length) {
-    messages = [{ role: 'user', content: '(Start der Konversation — Schritt: ' + step.label + '. Beginne!)' }];
+    // Sollte nicht passieren (User triggert ersten Turn) — Sicherheits-Fallback
+    messages = [{ role: 'user', content: 'Erstelle bitte ein passendes Angebot für dieses Ticket.' }];
   } else if (messages[messages.length - 1].role === 'assistant') {
-    // History endet mit KI — sollte nicht passieren, aber sicherheitshalber Dummy-User
-    messages.push({ role: 'user', content: '(Bitte fortfahren)' });
+    messages.push({ role: 'user', content: 'Bitte fortfahren.' });
   }
   const data = await proxyJson('/anthropic/v1/messages', {
     method: 'POST',
