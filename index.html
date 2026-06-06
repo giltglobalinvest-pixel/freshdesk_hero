@@ -178,9 +178,15 @@
   /* v2.46.63: FAB im Fullscreen-Stack-Modus ausblenden */
   body.fullscreen-stack #newEmailFab { display: none !important; }
 
-  /* v2.46.79: Wenn das Angebots-Chat-Side-Panel offen ist (Desktop), den Rest
-     der App nach links schieben damit nichts vom Panel verdeckt wird. */
-  @media (min-width: 640px) {
+  /* v2.46.79/.82: Wenn das Angebots-Chat-Side-Panel offen ist (Desktop), den Rest
+     der App nach links schieben damit nichts vom Panel verdeckt wird.
+     v2.46.82: Panel auf 940px (Chat 320 + Vorschau 620). Auf kleineren Bildschirmen
+     bleibt der Body schmal aber das Panel zeigt sich rechts. */
+  @media (min-width: 1280px) {
+    body.ang-side-panel-open #modalHost > div { right: 940px !important; }
+    body.ang-side-panel-open #appShell { padding-right: 940px; }
+  }
+  @media (min-width: 640px) and (max-width: 1279px) {
     body.ang-side-panel-open #modalHost > div { right: 460px !important; }
     body.ang-side-panel-open #appShell { padding-right: 460px; }
   }
@@ -739,7 +745,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.81';
+const APP_VERSION = 'v2.46.82';
 
 /* ============================================================
    GLOBAL THEME — v2.46.12
@@ -21475,24 +21481,17 @@ async function openAngebotsChatModal(accountId, ticketId) {
       stilReferenzen: null, // wird beim ersten Step gefüllt
     };
     _renderAngChatShell();
-    // v2.46.78: KI macht zuerst eine Initial-Analyse des Ticket-Inhalts + Anhänge
-    // damit der User direkt sieht was sie verstanden hat. Loading-State zeigen:
-    _angChatAppendBubble('assistant', '🔍 Lese Ticket-Inhalt und ggf. Anhänge…');
-    try {
-      const analysis = await _angChatInitialAnalysis(accountId, ticketId, ticket, profile);
-      _angChatReplaceLastAiBubble(analysis);
-    } catch (e) {
-      console.warn('Initial-Analyse fehlgeschlagen:', e);
-      // Fallback: statische Hint-Bubble
-      const subj = ticket.subject || '';
-      const reqName = ticket.requester?.name || '';
-      const hintBubble = 'Hallo 👋\n\n' +
-        'Beschreib mir kurz was im Angebot stehen soll.\n\n' +
-        'Z.B. „Türsteuerung tauschen, Pauschal ca. 1.500€" oder „Wartungsvertrag 24 Mon mit Notruf".\n\n' +
-        'Tipp: Je konkreter du bist, desto besser. Oder sag „mach was Sinn macht für ' + (subj || 'dieses Ticket') + '"' + (reqName ? ' für ' + reqName : '') + '.';
-      _angChatReplaceLastAiBubble(hintBubble);
-    }
+    // v2.46.82: User beginnt SOFORT — keine vorgeschaltete KI-Analyse mehr im Chat.
+    // Statt dessen läuft die Ticket-Analyse im HINTERGRUND und wird im State gespeichert.
+    // Erste Bubble: kurzer Hint, dann Input bereit.
+    const subj = ticket.subject || '';
+    _angChatAppendBubble('assistant', 'Hallo 👋\n\nBeschreib einfach, was das Angebot enthalten soll — ich generiere direkt das fertige PDF rechts in der Vorschau.\n\nZ.B.:\n• „Wartungsvertrag 24 Mon, ca. 145€/Mon mit Notruf"\n• „Frequenzumrichter austauschen, Pauschal 8.500€"\n• „Mach was Sinn macht für dieses Ticket"');
     _angChatRenderActions({ awaitingFirstUserInput: true });
+    // Hintergrund-Analyse starten — wenn fertig wird sie ins State geschrieben
+    window._ANG_CHAT.ticket_summary = '';
+    window._ANG_CHAT.bgAnalysisPromise = _angChatInitialAnalysis(accountId, ticketId, ticket, profile)
+      .then(txt => { if (window._ANG_CHAT) window._ANG_CHAT.ticket_summary = txt; })
+      .catch(e => { console.warn('BG-Analyse:', e); });
   } catch (e) {
     closeAngebotsChatModal();
     toast('Fehler: ' + (e.message || e), 'error', 8000);
@@ -21503,20 +21502,39 @@ function _renderAngChatShell() {
   const host = document.getElementById('subModalHost');
   if (!host) return;
   const s = window._ANG_CHAT;
+  // v2.46.82: 2-Spalten-Layout — Chat links, PDF-Vorschau rechts (auf grossen Screens)
   host.innerHTML =
     '<div class="fixed inset-0 sm:inset-y-0 sm:right-0 sm:left-auto z-[60] flex items-end sm:items-stretch justify-center sm:justify-end bg-black/50 sm:bg-transparent sm:pointer-events-none">' +
-      '<div class="bg-white w-full max-w-md sm:w-[460px] sm:max-w-none rounded-t-3xl sm:rounded-none shadow-2xl flex flex-col safe-bottom max-h-[96vh] sm:h-screen sm:max-h-screen sm:border-l sm:border-ink-200 sm:pointer-events-auto">' +
+      '<div class="bg-white w-full max-w-md sm:w-[460px] xl:w-[940px] sm:max-w-none rounded-t-3xl sm:rounded-none shadow-2xl flex flex-col safe-bottom max-h-[96vh] sm:h-screen sm:max-h-screen sm:border-l sm:border-ink-200 sm:pointer-events-auto">' +
         '<div class="safe-top px-4 py-3 border-b border-ink-200 flex items-center justify-between gap-2 shrink-0">' +
           '<div class="flex-1 min-w-0">' +
             '<h3 class="font-bold text-ink-900 inline-flex items-center gap-2"><i data-lucide="message-square" class="w-5 h-5 text-indigo-600"></i> Angebot erstellen</h3>' +
-            '<p class="text-[10px] text-ink-500" id="angChatStepLabel">Schritt 1 von ' + ANG_CHAT_STEPS.length + ' · ' + ANG_CHAT_STEPS[0].label + '</p>' +
+            '<p class="text-[10px] text-ink-500" id="angChatStepLabel">Schreib was du brauchst — KI generiert direkt das PDF</p>' +
           '</div>' +
+          '<button onclick="angChatToggleMobilePreview()" id="angChatMobilePreviewBtn" class="xl:hidden text-[11px] font-semibold text-indigo-600 px-2 py-1 rounded-lg border border-indigo-200 hidden">PDF anzeigen</button>' +
           '<button onclick="closeAngebotsChatModal()" class="w-9 h-9 rounded-lg hover:bg-ink-100 flex items-center justify-center"><i data-lucide="x" class="w-5 h-5 text-ink-700"></i></button>' +
         '</div>' +
-        // Chat-Verlauf
-        '<div id="angChatBubbles" class="flex-1 overflow-y-auto p-3 space-y-2 bg-ink-50"></div>' +
-        // Action-Bar (wird nach jedem KI-Turn neu gerendert)
-        '<div id="angChatActionBar" class="border-t border-ink-200 p-3 bg-white shrink-0"></div>' +
+        // 2-Spalten-Wrapper: Chat | Vorschau
+        '<div class="flex-1 flex overflow-hidden">' +
+          // CHAT-Spalte (links)
+          '<div id="angChatCol" class="flex flex-col xl:w-[340px] xl:shrink-0 xl:border-r xl:border-ink-200 flex-1 min-h-0">' +
+            '<div id="angChatBubbles" class="flex-1 overflow-y-auto p-3 space-y-2 bg-ink-50"></div>' +
+            '<div id="angChatActionBar" class="border-t border-ink-200 p-3 bg-white shrink-0"></div>' +
+          '</div>' +
+          // VORSCHAU-Spalte (rechts, nur auf XL sichtbar; auf Mobile per Toggle)
+          '<div id="angChatPreviewCol" class="hidden xl:flex flex-col flex-1 bg-ink-100 min-h-0">' +
+            '<div class="px-3 py-2 border-b border-ink-200 bg-white flex items-center justify-between text-[11px] shrink-0">' +
+              '<span class="font-semibold text-ink-700 inline-flex items-center gap-1"><i data-lucide="file-text" class="w-3.5 h-3.5"></i> Angebots-Vorschau</span>' +
+              '<span id="angChatIterLabel" class="text-ink-500">Noch keine Daten</span>' +
+            '</div>' +
+            '<div id="angChatPreviewWrap" class="flex-1 overflow-y-auto p-3">' +
+              '<div class="bg-white rounded-lg border border-ink-200 p-8 text-center text-ink-400 text-sm">' +
+                '<i data-lucide="file-text" class="w-10 h-10 mx-auto opacity-30"></i>' +
+                '<p class="mt-2">Sobald du dein erstes Statement schickst,<br>erscheint hier die Angebots-Vorschau.</p>' +
+              '</div>' +
+            '</div>' +
+          '</div>' +
+        '</div>' +
       '</div>' +
     '</div>';
   if (window.lucide) lucide.createIcons();
@@ -21704,13 +21722,15 @@ function _angChatAppendBubble(role, content) {
   list.scrollTop = list.scrollHeight;
 }
 
-/* v2.46.76: Action-Bar mit IMMER sichtbarem Input-Field + Shortcut-Buttons. */
+/* v2.46.76/.82: Action-Bar mit IMMER sichtbarem Input-Field + Shortcut-Buttons.
+   v2.46.82: Wenn bereits ein Plan generiert wurde (hasPlan), zusätzlich „Senden"/„PDF"-Aktionen. */
 function _angChatRenderActions(opts) {
   opts = opts || {};
   const bar = document.getElementById('angChatActionBar');
   if (!bar) return;
   const isFinal = opts.isFinal;
   const isFirstInput = opts.awaitingFirstUserInput;
+  const hasPlan = opts.hasPlan;
   if (isFinal) {
     bar.innerHTML =
       '<button onclick="angChatExecuteFinal(this)" class="w-full bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl px-3 py-3 text-sm font-bold inline-flex items-center justify-center gap-1.5 shadow-md"><i data-lucide="file-text" class="w-4 h-4"></i> PDF erzeugen & an Kunden senden</button>' +
@@ -21723,23 +21743,21 @@ function _angChatRenderActions(opts) {
     if (window.lucide) lucide.createIcons();
     return;
   }
-  // Standard: Input + Shortcut-Buttons (👍 / 👎 nur wenn KI bereits geantwortet hat — nicht beim allerersten User-Input)
+  // Standard: Input + Final-Buttons wenn Plan generiert
   const speechOn = !!(window.SpeechRecognition || window.webkitSpeechRecognition);
-  const shortcutHtml = isFirstInput ? '' :
-    '<div class="flex gap-2 mb-2">' +
-      '<button onclick="angChatUserResponse(\'👍 Passt, weiter\')" class="flex-1 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl px-3 py-2.5 text-sm font-bold inline-flex items-center justify-center gap-1.5">👍 Passt, weiter</button>' +
-      '<button onclick="angChatUserResponse(\'👎 Mach besser bitte\')" class="flex-1 bg-white border border-amber-300 text-amber-700 hover:bg-amber-50 rounded-xl px-3 py-2.5 text-sm font-bold inline-flex items-center justify-center gap-1.5">👎 Mach besser</button>' +
-    '</div>';
-  bar.innerHTML = shortcutHtml +
+  const planActionsHtml = hasPlan
+    ? '<div class="flex gap-2 mb-2">' +
+        '<button onclick="angChatExecuteFinal(this)" class="flex-1 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl px-3 py-2.5 text-xs font-bold inline-flex items-center justify-center gap-1 shadow-sm"><i data-lucide="send" class="w-3.5 h-3.5"></i> An Kunden senden</button>' +
+        '<button onclick="angChatShowPdfOnly(this)" class="shrink-0 bg-white border border-indigo-300 text-indigo-700 hover:bg-indigo-50 rounded-xl px-3 py-2.5 text-xs font-bold inline-flex items-center justify-center gap-1"><i data-lucide="printer" class="w-3.5 h-3.5"></i> Drucken</button>' +
+        '<button onclick="angebotSaveDraft(this)" class="shrink-0 bg-white border border-ink-300 text-ink-700 hover:bg-ink-50 rounded-xl px-3 py-2.5 text-xs font-bold inline-flex items-center justify-center gap-1"><i data-lucide="save" class="w-3.5 h-3.5"></i> Entwurf</button>' +
+      '</div>'
+    : '';
+  bar.innerHTML = planActionsHtml +
     '<div class="flex gap-1.5 items-end">' +
-      '<textarea id="angChatTextInput" rows="2" placeholder="' + escapeAttr(isFirstInput ? 'Beschreibe was du brauchst… (Cmd+Enter sendet)' : 'Eigene Anmerkung schreiben? z.B. „Preis 1.500€" oder „wärmer"… (Cmd+Enter)') + '" class="flex-1 px-3 py-2 border border-ink-300 rounded-xl text-sm resize-none" onkeydown="if(event.key===\'Enter\'&&(event.metaKey||event.ctrlKey)){event.preventDefault();angChatSubmitTextInput()}"></textarea>' +
+      '<textarea id="angChatTextInput" rows="' + (hasPlan ? '1' : '2') + '" placeholder="' + escapeAttr(isFirstInput ? 'Beschreib was du brauchst… (Cmd+Enter sendet)' : 'Anpassung? z.B. „Preis Pos 2 auf 850" / „wärmer" / „andere Lieferzeit"… (Cmd+Enter)') + '" class="flex-1 px-3 py-2 border border-ink-300 rounded-xl text-sm resize-none" onkeydown="if(event.key===\'Enter\'&&(event.metaKey||event.ctrlKey)){event.preventDefault();angChatSubmitTextInput()}"></textarea>' +
       (speechOn ? '<button onclick="angChatToggleVoice()" id="angChatMicBtn" class="shrink-0 w-10 h-10 rounded-xl bg-purple-50 hover:bg-purple-100 border border-purple-200 text-purple-700 inline-flex items-center justify-center" title="Spracheingabe"><i data-lucide="mic" class="w-4 h-4"></i></button>' : '') +
       '<button onclick="angChatSubmitTextInput()" class="shrink-0 w-10 h-10 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white inline-flex items-center justify-center" title="Senden"><i data-lucide="send" class="w-4 h-4"></i></button>' +
-    '</div>' +
-    '<details class="mt-2">' +
-      '<summary class="text-[10px] text-ink-400 cursor-pointer">Was wurde bisher gesammelt?</summary>' +
-      '<pre class="mt-1 text-[10px] text-ink-600 bg-ink-50 p-2 rounded max-h-24 overflow-y-auto">' + escapeHtml(JSON.stringify(window._ANG_CHAT?.collected || {}, null, 2)) + '</pre>' +
-    '</details>';
+    '</div>';
   if (window.lucide) lucide.createIcons();
   if (isFirstInput) setTimeout(() => document.getElementById('angChatTextInput')?.focus(), 80);
 }
@@ -21791,17 +21809,164 @@ function _angChatMicUI(isOn) {
   if (window.lucide) lucide.createIcons();
 }
 
-/* Hauptfunktion: User antwortet (egal ob 👍 oder Frei-Text). Schickt an KI weiter. */
+/* v2.46.82: User antwortet → Single-shot: KI generiert komplettes Angebot, Vorschau wird live geupdated. */
 async function angChatUserResponse(userText) {
   const s = window._ANG_CHAT;
   if (!s) return;
-  // History + Bubble
   s.history.push({ role: 'user', content: userText });
   _angChatAppendBubble('user', userText);
-  // Action-Bar deaktivieren während KI lädt
   const bar = document.getElementById('angChatActionBar');
-  if (bar) bar.innerHTML = '<div class="text-center py-4"><span class="spinner inline-block w-5 h-5 border-[2px] text-indigo-500"></span><p class="text-[11px] text-ink-500 mt-1">KI überlegt…</p></div>';
-  await _angChatNextAiTurn();
+  if (bar) bar.innerHTML = '<div class="text-center py-4"><span class="spinner inline-block w-5 h-5 border-[2px] text-indigo-500"></span><p class="text-[11px] text-ink-500 mt-1">KI generiert Angebot…</p></div>';
+  try {
+    // Hintergrund-Analyse abwarten falls noch nicht fertig
+    if (s.bgAnalysisPromise) { try { await s.bgAnalysisPromise; } catch (_) {} }
+    const result = await _angChatGenerateOffer(s, userText);
+    s.iteration = (s.iteration || 0) + 1;
+    s.collected = result.plan; // alte Variable für PDF-Save kompatibel halten
+    s.history.push({ role: 'assistant', content: result.message });
+    _angChatAppendBubble('assistant', result.message);
+    _angChatRenderPreview();
+    _angChatRenderActions({ hasPlan: true });
+  } catch (e) {
+    if (bar) bar.innerHTML = '<div class="bg-red-50 border border-red-200 rounded-xl p-3 text-sm text-red-800"><b>Fehler:</b> ' + escapeHtml(e.message || String(e)) + '</div>' +
+      '<button onclick="angChatUserResponse(\'' + escapeAttr(userText.replace(/\\/g, '').replace(/\'/g, '')) + '\')" class="w-full mt-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl px-3 py-2 text-xs font-semibold">Nochmal versuchen</button>';
+  }
+}
+
+/* v2.46.82: Single-Shot KI-Call. KI bekommt:
+   - Background-Ticket-Analyse (im Hintergrund vorbereitet)
+   - User-Anweisung (was im Angebot stehen soll)
+   - Bisheriges Angebot (für Iterationen)
+   - Stil-Referenzen
+   → KI generiert KOMPLETTES Angebot als JSON in einem Call. */
+async function _angChatGenerateOffer(s, userText) {
+  const { ticket, profile, accountId, ticketId } = s;
+  const req = ticket.requester || {};
+  // Stil-Referenzen lazy laden
+  if (s.stilReferenzen == null) {
+    try {
+      const [lerntexte, eigeneAuftraege] = await Promise.all([
+        loadAngebotsLerntexte(accountId, 5),
+        loadAngeboteAuftrag(accountId, 3),
+      ]);
+      s.stilReferenzen = [].concat(eigeneAuftraege, lerntexte).slice(0, 5);
+    } catch (_) { s.stilReferenzen = []; }
+  }
+  const stilBlock = (s.stilReferenzen || []).length
+    ? '\n\nSTIL-REFERENZEN (lerne nur den STIL, übernimm NICHT 1:1):\n' +
+      s.stilReferenzen.map((r, i) => '\n--- Ref ' + (i + 1) + ' [' + (r.anbieter || '') + '] ---\n' + (r.lerntext || '').slice(0, 1200)).join('\n') +
+      '\n'
+    : '';
+  const subtypList = ANGEBOTS_SUBTYPEN.filter(t => (profile.subtypen_keys || []).includes(t.key));
+  const subtypBlock = subtypList.length
+    ? '\n\nAKTIVE SUB-TYPEN BEI DIESEM ACCOUNT:\n' + subtypList.map(t => '- ' + t.label + ': ' + t.ki_hint).join('\n') + '\n'
+    : '';
+  const sysPrompt =
+    'Du bist ein Vertriebs-Experte für Aufzug-Service-Angebote im Stil von TK Elevator. ' +
+    'Du generierst aus der User-Anweisung in EINEM Schritt ein VOLLSTÄNDIGES, professionelles Angebot.\n\n' +
+    'STIL-REGELN (psychologisch wirksam):\n' +
+    '1. PERSÖNLICH: Techniker-Name + Datum aus Ticket-Verlauf wenn bekannt\n' +
+    '2. BEZIEHUNGS-ANKER: "Als Ihr Servicepartner..."\n' +
+    '3. EMPATHIE: "Uns liegt viel daran..."\n' +
+    '4. FAKTISCH: konkreter Befund, kein Drama\n' +
+    '5. KOMPETENZ: wenn temporäre Lösung gemacht — erwähnen\n' +
+    '6. WEICHE RISIKO-ANKER: "kann jederzeit wieder kommen"\n' +
+    '7. EMPFEHLUNG STATT FORDERUNG: "Daher empfehlen wir"\n' +
+    '8. TRANSPARENZ: Ausfallzeit kommunizieren\n' +
+    '9. ABLAUF als Bulletpoints\n' +
+    '10. PRE-CLOSING WARM: "Wir hoffen ... sehr gerne für Sie umsetzen würden. Eine kurze Antwort an diese Email genügt uns als Auftragsbestätigung."\n' +
+    '11. KEINE Floskeln, keine CAPS, keine übertriebene Dringlichkeit\n' +
+    '12. Preise: realistisch schätzen wenn nicht vom User vorgegeben — wenn vorgegeben: ÜBERNIMM exakt\n\n' +
+    'Branche: ' + (profile.ki_branche_hint || 'Aufzug-Service') + '\n' +
+    subtypBlock +
+    stilBlock +
+    '\nTICKET-HINTERGRUND (bereits analysiert):\n' + (s.ticket_summary || '(keine Hintergrund-Analyse verfügbar)') + '\n\n' +
+    'Antworte AUSSCHLIESSLICH mit gültigem JSON ohne Markdown-Codeblock:\n' +
+    '{\n' +
+    '  "message": string (KURZE Chat-Nachricht an User, max 3 Sätze — z.B. "Hier dein Angebot. Festpreis 8.450 €. Lieferzeit nach Absprache. Anpassungen?"),\n' +
+    '  "plan": {\n' +
+    '    "warnung_aktiv": boolean,\n' +
+    '    "warnung_text": string,\n' +
+    '    "anrede": string,\n' +
+    '    "einleitung": string,\n' +
+    '    "befund_detail": string,\n' +
+    '    "ablauf_punkte": [string, ...],\n' +
+    '    "positionen": [{"bezeichnung": string, "menge": number, "einheit": "ST"|"STD"|"Pauschal"|"Monat", "einzelpreis": number, "kategorie": "Material"|"Montage"}],\n' +
+    '    "konditionen": {"lieferzeit": string, "preisstellung": string, "zahlungsziel": string, "gewaehrleistung": string, "bindefrist": string},\n' +
+    '    "mwst_satz": number,\n' +
+    '    "schluss": string\n' +
+    '  }\n' +
+    '}';
+  // Conversation-History: alle bisherigen User-Anweisungen + aktuelle
+  const messages = [];
+  // Inkludiere vorheriges Plan-JSON wenn iteriert wird
+  const previousMessages = s.history.slice(0, -1); // ohne den letzten user-text (kommt extra)
+  previousMessages.forEach(m => messages.push({ role: m.role, content: m.content }));
+  messages.push({ role: 'user', content: userText + (s.collected ? '\n\nAktuelles Angebot (bitte anpassen, nicht neu von 0 starten):\n' + JSON.stringify(s.collected) : '') });
+  const data = await proxyJson('/anthropic/v1/messages', {
+    method: 'POST',
+    body: JSON.stringify({
+      model: 'claude-sonnet-4-5-20250929',
+      max_tokens: 4000,
+      system: sysPrompt,
+      messages: messages,
+    }),
+  });
+  const raw = (data?.content?.[0]?.text || '').trim();
+  const json = raw.replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/i, '').trim();
+  let parsed;
+  try { parsed = JSON.parse(json); }
+  catch (_) {
+    const m = json.match(/\{[\s\S]*\}/);
+    if (m) parsed = JSON.parse(m[0]);
+    else throw new Error('KI-Antwort kein gültiges JSON');
+  }
+  if (!parsed.plan) throw new Error('KI lieferte kein Plan-Feld');
+  return parsed;
+}
+
+/* v2.46.82: Aktualisiert die rechte Vorschau-Spalte mit dem aktuellen Angebot. */
+function _angChatRenderPreview() {
+  const s = window._ANG_CHAT;
+  const wrap = document.getElementById('angChatPreviewWrap');
+  const lbl = document.getElementById('angChatIterLabel');
+  if (!s || !wrap || !s.collected) return;
+  // Adapter zum vorhandenen HTML-Renderer
+  const ctx = {
+    accountId: s.accountId,
+    ticketId: s.ticketId,
+    ticket: s.ticket,
+    profile: s.profile,
+    standort: '',
+    fabriknummer: '',
+    plan: Object.assign({}, s.collected, { _totals: _angebotCalcTotals(s.collected) }),
+  };
+  const html = _renderAngebotHtml(ctx);
+  // In iframe mit srcdoc rendern — isolierte Styles
+  wrap.innerHTML = '<iframe id="angChatPreviewFrame" class="w-full bg-white rounded-lg border border-ink-200" style="min-height:80vh" srcdoc="' + escapeAttr(html) + '"></iframe>';
+  if (lbl) lbl.textContent = 'Iteration ' + s.iteration + ' · Brutto: ' + _formatEur(ctx.plan._totals.brutto);
+  // Bei kleineren Bildschirmen Preview-Toggle-Button anzeigen
+  const togBtn = document.getElementById('angChatMobilePreviewBtn');
+  if (togBtn) togBtn.classList.remove('hidden');
+}
+
+function angChatToggleMobilePreview() {
+  const chatCol = document.getElementById('angChatCol');
+  const prevCol = document.getElementById('angChatPreviewCol');
+  const btn = document.getElementById('angChatMobilePreviewBtn');
+  if (!chatCol || !prevCol) return;
+  const prevVisible = !prevCol.classList.contains('hidden');
+  if (prevVisible) {
+    prevCol.classList.add('hidden');
+    chatCol.classList.remove('hidden');
+    chatCol.classList.add('flex');
+    if (btn) btn.textContent = 'PDF anzeigen';
+  } else {
+    prevCol.classList.remove('hidden');
+    prevCol.classList.add('flex');
+    chatCol.classList.add('hidden');
+    if (btn) btn.textContent = 'Chat anzeigen';
+  }
 }
 
 /* Triggert den nächsten KI-Turn (basiert auf history + step). */
@@ -22450,9 +22615,16 @@ async function angebotShowPdf(btn) {
 }
 
 async function angebotSaveDraft(btn) {
-  const ctx = window._ANGEBOT_CTX;
-  if (!ctx) return;
-  _angebotPatch();
+  // v2.46.82: Funktioniert sowohl mit _ANGEBOT_CTX (alter Form-Modus) als auch _ANG_CHAT (Chat-Modus)
+  let ctx = window._ANGEBOT_CTX;
+  const chatState = window._ANG_CHAT;
+  if (ctx) {
+    _angebotPatch();
+  } else if (chatState && chatState.collected) {
+    ctx = _angChatToCtx(chatState);
+  } else {
+    return toast('Kein Angebot zum Speichern', 'warn');
+  }
   setBusy(btn, true, 'Speichere…');
   try {
     await _angebotSaveAirtable(ctx, 'Entwurf');
