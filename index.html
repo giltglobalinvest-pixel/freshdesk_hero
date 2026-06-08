@@ -745,7 +745,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.83';
+const APP_VERSION = 'v2.46.84';
 
 /* ============================================================
    GLOBAL THEME — v2.46.12
@@ -18334,25 +18334,62 @@ async function saveNewAufgabe(btnEl) {
    legt notfalls neuen FD-Kontakt an mit Name + Telefonnummern. */
 async function findOrCreateFdContactByEmail(accountId, data) {
   if (!data?.email) throw new Error('Email-Adresse fehlt');
-  var path = '/freshdesk/' + encodeURIComponent(accountId) + '/api/v2/contacts?email=' + encodeURIComponent(data.email);
+  var base = '/freshdesk/' + encodeURIComponent(accountId) + '/api/v2';
+  var email = data.email;
+  // 1) Standard-Suche per Email-Filter (aktive Contacts)
   try {
-    var list = await proxyJson(path);
-    if (Array.isArray(list) && list.length) {
-      return list[0]; // exakter Email-Match
-    }
-  } catch (_) { /* fall through to create */ }
-  // Kontakt anlegen
+    var list = await proxyJson(base + '/contacts?email=' + encodeURIComponent(email));
+    if (Array.isArray(list) && list.length) return list[0];
+  } catch (_) { /* weiter */ }
+  // 2) Anlegen
   var payload = {
-    name: data.name || data.email.split('@')[0] || 'Unbekannt',
-    email: data.email,
+    name: data.name || email.split('@')[0] || 'Unbekannt',
+    email: email,
   };
   if (data.phone)  payload.phone  = data.phone;
   if (data.mobile) payload.mobile = data.mobile;
-  var created = await proxyJson('/freshdesk/' + encodeURIComponent(accountId) + '/api/v2/contacts', {
-    method: 'POST',
-    body: JSON.stringify(payload),
-  });
-  return created;
+  try {
+    return await proxyJson(base + '/contacts', { method: 'POST', body: JSON.stringify(payload) });
+  } catch (postErr) {
+    // v2.46.84: Bei 409 / "unique value" existiert der Contact irgendwo (deleted/blocked).
+    // Versuche ihn zu finden + wiederherzustellen.
+    var msg = String(postErr.message || '');
+    var isDuplicate = /409|unique value|already exists/i.test(msg);
+    if (!isDuplicate) throw postErr;
+    // 2a) Search-API nutzen (findet auch deleted/blocked)
+    try {
+      var query = 'email:\'' + email + '\'';
+      var sr = await proxyJson(base + '/search/contacts?query=' + encodeURIComponent('"' + query + '"'));
+      var hits = sr?.results || (Array.isArray(sr) ? sr : []);
+      if (hits.length) {
+        var hit = hits[0];
+        // Wenn deleted: restoren
+        if (hit.deleted === true || hit.active === false) {
+          try { await proxyJson(base + '/contacts/' + hit.id + '/restore', { method: 'PUT' }); } catch (_) {}
+        }
+        return hit;
+      }
+    } catch (_) { /* weiter zum Fallback */ }
+    // 2b) Soft-deleted gezielt abfragen
+    try {
+      var deleted = await proxyJson(base + '/contacts?email=' + encodeURIComponent(email) + '&state=deleted');
+      if (Array.isArray(deleted) && deleted.length) {
+        try { await proxyJson(base + '/contacts/' + deleted[0].id + '/restore', { method: 'PUT' }); } catch (_) {}
+        return deleted[0];
+      }
+    } catch (_) {}
+    // 2c) Blocked Contacts
+    try {
+      var blocked = await proxyJson(base + '/contacts?email=' + encodeURIComponent(email) + '&state=blocked');
+      if (Array.isArray(blocked) && blocked.length) return blocked[0];
+    } catch (_) {}
+    // Wirklich nicht auffindbar — klare Meldung
+    throw new Error(
+      'Die Email „' + email + '" existiert bereits in Freshdesk, ist aber nicht abrufbar ' +
+      '(evtl. im Papierkorb oder als „blocked" markiert, oder Soft-Delete nicht über API auflösbar). ' +
+      'Bitte den FD-Admin den Kontakt prüfen lassen ODER eine andere Empfänger-Email verwenden.'
+    );
+  }
 }
 
 function _isoToLocalInput(iso) {
