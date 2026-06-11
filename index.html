@@ -678,6 +678,9 @@
     <button onclick="navTo('automated'); closeMenu();" class="w-full text-left px-3 py-2 text-sm hover:bg-ink-50 flex items-center gap-2">
       <i data-lucide="bot" class="w-4 h-4 text-purple-500"></i> Automatisierte Tickets
     </button>
+    <button onclick="navTo('marketing'); closeMenu();" class="w-full text-left px-3 py-2 text-sm hover:bg-ink-50 flex items-center gap-2">
+      <i data-lucide="megaphone" class="w-4 h-4 text-orange-500"></i> Marketing-Emails
+    </button>
     <button onclick="checkForUpdate(true); closeMenu();" class="w-full text-left px-3 py-2 text-sm hover:bg-ink-50 flex items-center gap-2">
       <i data-lucide="refresh-cw" class="w-4 h-4 text-ink-500"></i> Update prüfen
     </button>
@@ -745,7 +748,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.86';
+const APP_VERSION = 'v2.46.87';
 
 /* ============================================================
    GLOBAL THEME — v2.46.12
@@ -1875,6 +1878,79 @@ const WISSEN_TABLE = 'KI_Wissen';
 const KOSTEN_TABLE = 'KI_Kosten';
 const AUFGABEN_TABLE = 'MeineAufgaben';
 const REGELSTOPP_TABLE = 'RegelStopp';
+const MARKETING_TABLE = 'MarketingEmails'; // v2.46.87
+
+/* v2.46.87: Tracking-Helper für Marketing-Emails (wer hat welche Vorlage erhalten). */
+async function recordMarketingEmail(accountId, data) {
+  if (!accountId || !data?.recipient_email) return;
+  try {
+    const fields = {
+      account_id:         accountId,
+      recipient_email:    String(data.recipient_email).trim().toLowerCase(),
+      recipient_name:     data.recipient_name || '',
+      contact_id_fd:      data.contact_id_fd ? String(data.contact_id_fd) : '',
+      template_id_fd:     data.template_id_fd ? String(data.template_id_fd) : '',
+      template_title:     data.template_title || '',
+      betreff:            data.betreff || '',
+      body_snapshot:      String(data.body_snapshot || '').slice(0, 4000),
+      sent_at:            data.sent_at || nowIso(),
+      sent_by_api_key:    data.sent_by_api_key || APP_KEYS.user?.api_key || '',
+      source_ticket_id:   data.source_ticket_id ? String(data.source_ticket_id) : '',
+      outbound_ticket_id: data.outbound_ticket_id ? String(data.outbound_ticket_id) : '',
+    };
+    await airtableWriteWithAutoField(MARKETING_TABLE, fields, {
+      recipient_email:    'singleLineText',
+      recipient_name:     'singleLineText',
+      contact_id_fd:      'singleLineText',
+      template_id_fd:     'singleLineText',
+      template_title:     'singleLineText',
+      betreff:            'singleLineText',
+      body_snapshot:      'multilineText',
+      sent_at:            'singleLineText',
+      sent_by_api_key:    'singleLineText',
+      source_ticket_id:   'singleLineText',
+      outbound_ticket_id: 'singleLineText',
+    });
+  } catch (e) {
+    console.warn('Marketing-Email-Tracking fehlgeschlagen:', e.message);
+  }
+}
+
+/* Lädt alle Marketing-Emails für eine Empfänger-Email (über alle Accounts).
+   Sortiert nach sent_at desc. */
+async function loadMarketingEmailsForEmail(email) {
+  if (!email) return [];
+  const normalized = String(email).trim().toLowerCase();
+  const filter = "{recipient_email}='" + escapeFormula(normalized) + "'";
+  try {
+    const recs = await airtableRead(MARKETING_TABLE, {
+      filter, sort: [{ field: 'sent_at', direction: 'desc' }], maxRecords: 50,
+    });
+    return recs.map(r => Object.assign({ recordId: r.id }, r.fields));
+  } catch (e) {
+    // Tabelle existiert ggf. noch nicht
+    return [];
+  }
+}
+
+/* Prüft ob eine bestimmte Vorlage bereits an diese Email gesendet wurde.
+   Gibt das jüngste Match zurück oder null. */
+async function hasReceivedMarketingTemplate(email, templateId) {
+  if (!email || !templateId) return null;
+  const list = await loadMarketingEmailsForEmail(email);
+  return list.find(m => String(m.template_id_fd) === String(templateId)) || null;
+}
+
+/* Letzte 200 Marketing-Emails (alle Empfänger) für die Übersicht. */
+async function loadAllMarketingEmails(maxRecords) {
+  try {
+    const recs = await airtableRead(MARKETING_TABLE, {
+      sort: [{ field: 'sent_at', direction: 'desc' }],
+      maxRecords: maxRecords || 200,
+    });
+    return recs.map(r => Object.assign({ recordId: r.id }, r.fields));
+  } catch (_) { return []; }
+}
 
 // Anthropic-Modell-Preise (USD je 1M Tokens). Stand 2026-Q1.
 // Beim Update einer neuen Modell-Version: hier eintragen, sonst wird Default-Eintrag genutzt.
@@ -6736,6 +6812,7 @@ function navTo(page) {
   else if (page === 'costs')     renderFn = renderCostsPage;
   else if (page === 'tasks')     renderFn = renderTasksPage;
   else if (page === 'deals')     renderFn = renderDealsPage;
+  else if (page === 'marketing') renderFn = renderMarketingPage;
   try {
     const result = renderFn();
     if (result && typeof result.catch === 'function') {
@@ -9423,9 +9500,34 @@ async function openQuickContactModal(accountId, ticketId) {
         '<p class="text-[13px] text-ink-700 whitespace-pre-line break-words leading-snug">' + escapeHtml(contact.address) + '</p>' +
       '</div>';
     }
+    // v2.46.87: Marketing-Email-Schnellaktion + Liste der bisherigen Mails
+    const contactEmailForMarketing = (contact.email || reqEmail || '').trim();
+    if (contactEmailForMarketing) {
+      html += '<button onclick="openMarketingFromContactModal(' +
+        '\'' + escapeAttr(accountId) + '\', ' +
+        '\'' + escapeAttr(contactEmailForMarketing) + '\', ' +
+        '\'' + escapeAttr(contact.name || reqName || '') + '\', ' +
+        (contact.id || 'null') + ', ' +
+        ticketId +
+      ')" class="mt-3 w-full flex items-center justify-between gap-3 p-4 bg-orange-50 hover:bg-orange-100 active:bg-orange-200 border-2 border-orange-200 rounded-2xl transition">' +
+        '<div class="w-12 h-12 rounded-xl bg-orange-600 flex items-center justify-center text-white shrink-0 shadow-sm">' +
+          '<i data-lucide="megaphone" class="w-6 h-6"></i>' +
+        '</div>' +
+        '<div class="flex-1 min-w-0 text-left">' +
+          '<p class="text-[13px] font-bold text-orange-900 leading-tight">Marketing-Email senden</p>' +
+          '<p class="text-[11px] text-orange-700 mt-0.5">Vorlage wählen → an ' + escapeHtml(contactEmailForMarketing) + '</p>' +
+        '</div>' +
+        '<i data-lucide="arrow-up-right" class="w-5 h-5 text-orange-600 shrink-0"></i>' +
+      '</button>';
+      html += '<div id="quickContactMarketingHistory" class="mt-2"></div>';
+    }
     const body = $('quickContactActions');
     if (body) body.innerHTML = html;
     if (window.lucide) lucide.createIcons();
+    // History asynchron laden
+    if (contactEmailForMarketing) {
+      _quickContactLoadMarketingHistory(contactEmailForMarketing).catch(e => console.warn(e));
+    }
   } catch (e) {
     const body = $('quickContactActions');
     if (body) body.innerHTML = '<div class="bg-red-50 border border-red-200 rounded-xl p-3 text-sm text-red-800">Kontakt konnte nicht geladen werden: ' + escapeHtml(e.message || String(e)) + '</div>';
@@ -9435,6 +9537,244 @@ function closeQuickContactModal() {
   const host = document.getElementById('subModalHost');
   if (host) host.innerHTML = '';
   document.body.style.overflow = '';
+}
+
+/* v2.46.87: Lädt im Kontakt-Modal die Liste der bereits versandten Marketing-Mails an diese Email. */
+async function _quickContactLoadMarketingHistory(email) {
+  const host = document.getElementById('quickContactMarketingHistory');
+  if (!host) return;
+  const list = await loadMarketingEmailsForEmail(email);
+  if (!list.length) {
+    host.innerHTML = '<p class="text-[10px] text-ink-400 italic mt-2 px-2">Bisher keine Marketing-Email an diesen Kontakt versandt.</p>';
+    return;
+  }
+  host.innerHTML =
+    '<details class="bg-ink-50 border border-ink-200 rounded-xl">' +
+      '<summary class="px-3 py-2 cursor-pointer text-[11px] font-bold text-ink-700 inline-flex items-center gap-1.5">' +
+        '<i data-lucide="history" class="w-3.5 h-3.5"></i> Bisherige Marketing-Mails (' + list.length + ')' +
+      '</summary>' +
+      '<div class="px-3 pb-3 pt-1 space-y-1.5">' +
+        list.slice(0, 10).map(m => {
+          const date = m.sent_at ? new Date(m.sent_at).toLocaleDateString('de-DE') : '?';
+          const tpl = m.template_title || '(freier Text)';
+          return '<div class="bg-white border border-ink-200 rounded-lg px-2 py-1.5 text-[11px]">' +
+            '<div class="flex items-center justify-between gap-2">' +
+              '<span class="font-semibold text-ink-900 truncate">' + escapeHtml(m.betreff || '(ohne Betreff)') + '</span>' +
+              '<span class="text-[10px] text-ink-500 shrink-0">' + escapeHtml(date) + '</span>' +
+            '</div>' +
+            '<p class="text-[10px] text-ink-500 truncate">Vorlage: ' + escapeHtml(tpl) + (m.outbound_ticket_id ? ' · Ticket #' + escapeHtml(m.outbound_ticket_id) : '') + '</p>' +
+          '</div>';
+        }).join('') +
+      '</div>' +
+    '</details>';
+  if (window.lucide) lucide.createIcons();
+}
+
+/* v2.46.87: Modal für direkten Marketing-Email-Versand aus dem Kontakt-Modal heraus.
+   Vorlage wählen + Doublette-Check + Versand via /tickets/outbound_email. */
+async function openMarketingFromContactModal(accountId, recipientEmail, recipientName, contactId, sourceTicketId) {
+  let host = document.getElementById('subModalHost');
+  if (!host) { host = document.createElement('div'); host.id = 'subModalHost'; document.body.appendChild(host); }
+  host.innerHTML =
+    '<div class="fixed inset-0 z-[70] flex items-end justify-center bg-black/60">' +
+      '<div class="bg-white w-full max-w-md rounded-t-3xl shadow-2xl p-8 text-center safe-bottom">' +
+        '<div class="spinner inline-block w-7 h-7 border-[3px] text-orange-500"></div>' +
+        '<p class="text-sm text-ink-500 mt-2">Lade Vorlagen…</p>' +
+      '</div>' +
+    '</div>';
+  try {
+    const [cannedData, configs, history] = await Promise.all([
+      ensureCannedResponsesLoaded(accountId),
+      ensureEmailConfigsLoaded(accountId),
+      loadMarketingEmailsForEmail(recipientEmail),
+    ]);
+    const responses = cannedData?.responses || [];
+    if (!configs.length) {
+      host.innerHTML =
+        '<div class="fixed inset-0 z-[70] flex items-end justify-center bg-black/60">' +
+          '<div class="bg-white w-full max-w-md rounded-t-3xl shadow-2xl p-6 safe-bottom">' +
+            '<h3 class="font-bold mb-2 text-ink-900">Keine Absender-Adressen</h3>' +
+            '<p class="text-sm text-ink-600 mb-4">Keine Email-Configs in Freshdesk gefunden.</p>' +
+            '<button onclick="closeMarketingFromContactModal()" class="w-full bg-ink-100 hover:bg-ink-200 text-ink-700 rounded-xl py-3 text-sm font-bold">OK</button>' +
+          '</div>' +
+        '</div>';
+      return;
+    }
+    _renderMarketingFromContactModal(accountId, recipientEmail, recipientName, contactId, sourceTicketId, responses, configs, history);
+  } catch (e) {
+    closeMarketingFromContactModal();
+    toast('Laden fehlgeschlagen: ' + (e.message || e), 'error', 8000);
+  }
+}
+
+function _renderMarketingFromContactModal(accountId, recipientEmail, recipientName, contactId, sourceTicketId, responses, configs, history) {
+  const host = document.getElementById('subModalHost');
+  if (!host) return;
+  const primaryCfg = configs.find(c => c.primary_role || c.default) || configs[0];
+  const tplOpts = '<option value="">— Vorlage wählen —</option>' +
+    responses.map(r => {
+      const folderSuffix = r._folderName ? ' · ' + r._folderName : '';
+      const isDup = history.some(h => String(h.template_id_fd) === String(r.id));
+      return '<option value="' + r.id + '"' + (isDup ? ' data-duplicate="1"' : '') + '>' +
+        escapeHtml((r.title || ('#' + r.id)) + folderSuffix) + (isDup ? ' ⚠ bereits gesendet' : '') + '</option>';
+    }).join('');
+  const cfgOpts = configs.map(c => {
+    const label = (c.name || '') + ' <' + (c.reply_email || c.support_email || c.email || '') + '>';
+    return '<option value="' + c.id + '"' + (c.id === primaryCfg?.id ? ' selected' : '') + '>' + escapeHtml(label) + '</option>';
+  }).join('');
+  host.innerHTML =
+    '<div class="fixed inset-0 z-[70] flex items-end justify-center bg-black/60" onclick="if(event.target===this)closeMarketingFromContactModal()">' +
+      '<div class="bg-white w-full max-w-md rounded-t-3xl shadow-2xl flex flex-col safe-bottom" style="max-height:94vh">' +
+        '<div class="safe-top px-4 py-3 border-b border-ink-200 flex items-center justify-between gap-2 shrink-0">' +
+          '<h3 class="font-bold text-ink-900 inline-flex items-center gap-2"><i data-lucide="megaphone" class="w-5 h-5 text-orange-600"></i> Marketing-Email</h3>' +
+          '<button onclick="closeMarketingFromContactModal()" class="w-9 h-9 rounded-lg hover:bg-ink-100 flex items-center justify-center"><i data-lucide="x" class="w-5 h-5 text-ink-700"></i></button>' +
+        '</div>' +
+        '<div class="flex-1 overflow-y-auto p-4 space-y-3">' +
+          '<input type="hidden" id="mfcAcc" value="' + escapeAttr(accountId) + '">' +
+          '<input type="hidden" id="mfcContactId" value="' + escapeAttr(String(contactId || '')) + '">' +
+          '<input type="hidden" id="mfcSourceTicketId" value="' + escapeAttr(String(sourceTicketId || '')) + '">' +
+          '<div class="bg-orange-50 border border-orange-200 rounded-xl p-2.5 text-[11px] text-orange-900">' +
+            '<b>An:</b> ' + escapeHtml(recipientName || recipientEmail) + (recipientName ? ' &lt;' + escapeHtml(recipientEmail) + '&gt;' : '') +
+            (history.length ? '<br><b>Bisherige Marketing-Mails:</b> ' + history.length : '') +
+          '</div>' +
+          '<label class="text-xs font-bold text-ink-700 uppercase tracking-wider block">Vorlage *</label>' +
+          '<select id="mfcTemplate" onchange="_mfcTemplateChange()" class="w-full px-3 py-2.5 border border-ink-300 rounded-xl text-sm bg-white">' + tplOpts + '</select>' +
+          '<div id="mfcDupWarning" class="hidden bg-amber-50 border border-amber-200 rounded-xl p-2.5 text-[11px] text-amber-900"></div>' +
+          '<label class="text-xs font-bold text-ink-700 uppercase tracking-wider block">Von</label>' +
+          '<select id="mfcFrom" class="w-full px-3 py-2.5 border border-ink-300 rounded-xl text-sm bg-white">' + cfgOpts + '</select>' +
+          '<label class="text-xs font-bold text-ink-700 uppercase tracking-wider block">Betreff *</label>' +
+          '<input id="mfcSubject" type="text" value="" class="w-full px-3 py-2.5 border border-ink-300 rounded-xl text-sm">' +
+          '<label class="text-xs font-bold text-ink-700 uppercase tracking-wider block">Nachricht *</label>' +
+          '<textarea id="mfcBody" rows="10" placeholder="Vorlage wählen, dann erscheint hier der Text…" class="w-full px-3 py-2.5 border border-ink-300 rounded-xl text-[12px] font-mono leading-snug resize-y"></textarea>' +
+          '<div id="mfcErr" class="hidden bg-red-50 border border-red-200 rounded-xl p-3 text-sm text-red-800"></div>' +
+        '</div>' +
+        '<div class="border-t border-ink-200 p-3 flex gap-2 shrink-0">' +
+          '<button onclick="closeMarketingFromContactModal()" class="flex-1 bg-ink-100 hover:bg-ink-200 text-ink-700 rounded-xl px-3 py-3 text-sm font-bold">Abbrechen</button>' +
+          '<button onclick="processMarketingFromContact(this)" class="flex-[2] bg-orange-600 hover:bg-orange-700 text-white rounded-xl px-3 py-3 text-sm font-bold inline-flex items-center justify-center gap-1.5 shadow-md">' +
+            '<i data-lucide="send" class="w-4 h-4"></i> Senden' +
+          '</button>' +
+        '</div>' +
+      '</div>' +
+    '</div>';
+  window._MFC_CTX = { accountId, recipientEmail, recipientName, contactId, sourceTicketId, responses, history };
+  if (window.lucide) lucide.createIcons();
+}
+
+function _mfcTemplateChange() {
+  const ctx = window._MFC_CTX;
+  if (!ctx) return;
+  const sel = $('mfcTemplate');
+  const tplId = parseInt(sel?.value || '0', 10);
+  const dupBox = $('mfcDupWarning');
+  if (!tplId) {
+    if (dupBox) dupBox.classList.add('hidden');
+    return;
+  }
+  const tpl = (ctx.responses || []).find(r => r.id === tplId);
+  if (!tpl) return;
+  // Platzhalter
+  const userName = APP_KEYS.user?.name || '';
+  const firstNm = full => String(full || '').trim().split(/\s+/)[0] || '';
+  const placeholderCtx = {
+    contactName:      ctx.recipientName || '',
+    contactFirstName: firstNm(ctx.recipientName),
+    contactEmail:     ctx.recipientEmail || '',
+    userName,
+    userFirstName:    firstNm(userName),
+    userEmail:        APP_KEYS.user?.email || '',
+    companyName:      '',
+    dealName:         '',
+    dealAmount:       '',
+    angebotNr:        '',
+  };
+  const subj = _renderPlaceholders(tpl.title_text || tpl.subject || tpl.title || '', placeholderCtx);
+  const bodyHtml = _renderPlaceholders(tpl.content_html || tpl.content || '', placeholderCtx);
+  $('mfcSubject').value = subj;
+  $('mfcBody').value = htmlToText(bodyHtml);
+  // Doublette-Check
+  const dup = (ctx.history || []).find(h => String(h.template_id_fd) === String(tplId));
+  if (dup && dupBox) {
+    const dupDate = dup.sent_at ? new Date(dup.sent_at).toLocaleDateString('de-DE') : '?';
+    dupBox.innerHTML = '<i data-lucide="alert-triangle" class="w-4 h-4 inline mr-1 -mt-0.5"></i> <b>Bereits gesendet:</b> Diese Vorlage wurde am <b>' + escapeHtml(dupDate) + '</b> schon einmal an diesen Kontakt verschickt (Ticket #' + escapeHtml(String(dup.outbound_ticket_id || '?')) + '). Bist du sicher dass du sie nochmal senden willst?';
+    dupBox.classList.remove('hidden');
+    if (window.lucide) lucide.createIcons();
+  } else if (dupBox) {
+    dupBox.classList.add('hidden');
+  }
+}
+
+async function processMarketingFromContact(btn) {
+  const ctx = window._MFC_CTX;
+  if (!ctx) return;
+  const errEl = $('mfcErr');
+  const setErr = msg => { if (errEl) { errEl.textContent = msg; errEl.classList.remove('hidden'); } };
+  if (errEl) errEl.classList.add('hidden');
+  const tplId    = parseInt($('mfcTemplate')?.value || '0', 10);
+  const subject  = ($('mfcSubject')?.value || '').trim();
+  const body     = ($('mfcBody')?.value || '').trim();
+  const fromId   = parseInt($('mfcFrom')?.value || '0', 10);
+  if (!subject) return setErr('Betreff fehlt');
+  if (!body)    return setErr('Nachricht fehlt');
+  if (!fromId)  return setErr('Absender fehlt');
+  // Doublette-Confirmation
+  const dup = (ctx.history || []).find(h => String(h.template_id_fd) === String(tplId));
+  if (dup) {
+    if (!confirm('Diese Vorlage wurde bereits am ' + (dup.sent_at ? new Date(dup.sent_at).toLocaleDateString('de-DE') : '?') + ' an diesen Kontakt gesendet. Trotzdem nochmal senden?')) return;
+  }
+  setBusy(btn, true, 'Sende…');
+  try {
+    const me = await fetchAgentMe(ctx.accountId);
+    const sig = me?.signature || '';
+    const bodyHtml = appendSignatureHtml(textToHtmlForFreshdesk(body), sig);
+    const payload = {
+      subject,
+      description: bodyHtml,
+      email: ctx.recipientEmail,
+      email_config_id: fromId,
+      priority: 1,
+      status: 5,
+    };
+    const created = await proxyJson('/freshdesk/' + encodeURIComponent(ctx.accountId) + '/api/v2/tickets/outbound_email', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+    if (!created?.id) throw new Error('Versand fehlgeschlagen');
+    const tpl = (ctx.responses || []).find(r => r.id === tplId);
+    // Tracking
+    recordMarketingEmail(ctx.accountId, {
+      recipient_email:    ctx.recipientEmail,
+      recipient_name:     ctx.recipientName,
+      contact_id_fd:      ctx.contactId,
+      template_id_fd:     tplId || '',
+      template_title:     tpl?.title || '',
+      betreff:            subject,
+      body_snapshot:      body,
+      source_ticket_id:   ctx.sourceTicketId,
+      outbound_ticket_id: created.id,
+    }).catch(() => {});
+    // Notiz im Source-Ticket falls vorhanden
+    if (ctx.sourceTicketId) {
+      const noteBody = '📣 Marketing-Email gesendet an ' + escapeHtml(ctx.recipientEmail) +
+        '<br>Betreff: ' + escapeHtml(subject) +
+        (tpl ? '<br>Vorlage: ' + escapeHtml(tpl.title || ('#' + tpl.id)) : '') +
+        '<br>Neues Ticket: #' + created.id;
+      proxyJson('/freshdesk/' + encodeURIComponent(ctx.accountId) + '/api/v2/tickets/' + ctx.sourceTicketId + '/notes', {
+        method: 'POST',
+        body: JSON.stringify({ body: noteBody, private: true }),
+      }).catch(() => {});
+    }
+    closeMarketingFromContactModal();
+    toast('Marketing-Email gesendet — Ticket #' + created.id, 'success', 5000);
+  } catch (e) {
+    setBusy(btn, false);
+    setErr(e.message || String(e));
+  }
+}
+
+function closeMarketingFromContactModal() {
+  delete window._MFC_CTX;
+  const host = document.getElementById('subModalHost');
+  if (host) host.innerHTML = '';
 }
 
 /* v2.46.24: Reines Inhalts-Modal — zeigt Erste Anfrage + alle Konversationen
@@ -15015,9 +15355,22 @@ async function executeSingleAssistantAction(ctx, a) {
     try {
       const noteBody = '📣 Marketing-Email gesendet an ' + escapeHtml(a.to) +
         '<br>Betreff: ' + escapeHtml(a.betreff) +
+        (a._template_title ? '<br>Vorlage: ' + escapeHtml(a._template_title) : '') +
         '<br>Neues Ticket: #' + created.id;
       await proxyJson(base + '/notes', { method: 'POST', body: JSON.stringify({ body: noteBody, private: true }) });
     } catch (e) { console.warn('Tracking-Notiz fehlgeschlagen:', e.message); }
+    // v2.46.87: Persistentes Tracking in Airtable MarketingEmails
+    recordMarketingEmail(ctx.accountId, {
+      recipient_email:    a.to,
+      recipient_name:     ctx.ticket?.requester?.name || '',
+      contact_id_fd:      ctx.ticket?.requester_id || '',
+      template_id_fd:     a._template_id || '',
+      template_title:     a._template_title || '',
+      betreff:            a.betreff,
+      body_snapshot:      a.body,
+      source_ticket_id:   ctx.ticketId,
+      outbound_ticket_id: created.id,
+    }).catch(() => {});
     recordKnowledge(ctx.accountId, _t, 'marketing_email', { to: a.to, betreff: a.betreff, new_ticket_id: created.id }, a.body).catch(() => {});
   } else if (a.type === 'forward') {
     const me = await fetchAgentMe(ctx.accountId);
@@ -15131,17 +15484,41 @@ async function _hydrateMarketingTemplateDropdowns() {
   }
 }
 
-/* v2.46.86: User wählt eine Vorlage → Betreff + Body übernehmen mit Platzhalter-Substitution. */
-function _marketingTemplateChange(idx) {
+/* v2.46.86/.87: User wählt eine Vorlage → Betreff + Body übernehmen mit Platzhalter-Substitution.
+   v2.46.87: Doublette-Check — warnt wenn diese Vorlage bereits an diese Email gesendet wurde. */
+async function _marketingTemplateChange(idx) {
   const ctx = ASSISTANT_CTX;
   if (!ctx) return;
   const accountId = ctx.accountId;
   const tplSel = document.getElementById('stepMeTemplate_' + idx);
   const tplId = parseInt(tplSel?.value || '0', 10);
-  if (!tplId) return; // Keine Vorlage → nichts überschreiben
+  // Template-Info in der Action speichern (auch wenn keine Vorlage → zurücksetzen)
+  const a = ctx.plan?.actions?.[idx];
+  if (!tplId) {
+    if (a) { delete a._template_id; delete a._template_title; }
+    if (tplSel) tplSel.classList.remove('border-amber-500', 'bg-amber-50');
+    return;
+  }
   const cache = FD_CANNED_RESPONSES_CACHE[accountId];
   const tpl = (cache?.responses || []).find(r => r.id === tplId);
   if (!tpl) return;
+  // Action mit Template-Info ergänzen (für Tracking)
+  if (a) {
+    a._template_id    = tpl.id;
+    a._template_title = tpl.title || ('#' + tpl.id);
+  }
+  // Doublette-Check
+  const recipientEmail = document.getElementById('stepMeTo_' + idx)?.value || '';
+  if (recipientEmail) {
+    const dup = await hasReceivedMarketingTemplate(recipientEmail, tplId);
+    if (dup) {
+      const dupDate = dup.sent_at ? new Date(dup.sent_at).toLocaleDateString('de-DE') : '?';
+      toast('⚠ Achtung: „' + (tpl.title || ('#' + tplId)) + '" wurde am ' + dupDate + ' bereits an ' + recipientEmail + ' gesendet!', 'warn', 12000);
+      if (tplSel) tplSel.classList.add('border-amber-500', 'bg-amber-50');
+    } else {
+      if (tplSel) tplSel.classList.remove('border-amber-500', 'bg-amber-50');
+    }
+  }
   // Platzhalter-Kontext aufbauen (analog _buildEmailCtx aus Phase 1.0-Vorlagen-Modal)
   const req = ctx.ticket?.requester || {};
   const firstNm = full => String(full || '').trim().split(/\s+/)[0] || '';
@@ -23877,6 +24254,96 @@ async function deleteRule(id) {
   // Aus der Processed-Map entfernen — speicher-hygiene, keine funktionale
   // Auswirkung (gelöschte Regel wird ohnehin nicht mehr evaluiert).
   _clearProcessedForRule(id);
+}
+
+/* v2.46.87: Marketing-Email-Übersicht. Zeigt die letzten 200 Versand-Records.
+   Filtert per Email-Suche. */
+async function renderMarketingPage() {
+  setPageTitle('Marketing-Emails', 'Versand-Übersicht + Doublette-Schutz');
+  $('pageContent').innerHTML = '<div class="space-y-3 max-w-3xl mx-auto">' +
+    '<div class="bg-orange-50 border border-orange-200 rounded-xl p-3 text-[12px] text-orange-900">' +
+      '<i data-lucide="megaphone" class="w-4 h-4 inline mr-1"></i> Liste aller versandten Marketing-Emails. Wer hat welche Vorlage wann erhalten — als Schutz vor doppeltem Versand.' +
+    '</div>' +
+    '<div class="flex gap-2">' +
+      '<input id="mktSearch" type="search" placeholder="Suchen (Email / Betreff / Vorlage)…" oninput="_renderMarketingList()" class="flex-1 px-3 py-2 border border-ink-300 rounded-lg text-sm">' +
+      '<button onclick="_reloadMarketingList(this)" class="px-3 py-2 bg-ink-100 hover:bg-ink-200 text-ink-700 rounded-lg text-sm font-bold inline-flex items-center gap-1"><i data-lucide="refresh-cw" class="w-3.5 h-3.5"></i> Neu laden</button>' +
+    '</div>' +
+    '<div id="marketingList">' +
+      '<div class="bg-white rounded-xl border border-ink-200 p-6 text-center"><span class="spinner inline-block w-5 h-5 border-[2px] text-orange-500"></span><p class="text-sm text-ink-500 mt-2">Lade Versand-Liste…</p></div>' +
+    '</div>' +
+  '</div>';
+  if (window.lucide) lucide.createIcons();
+  try {
+    APP_STATE._marketingList = await loadAllMarketingEmails(200);
+  } catch (e) {
+    $('marketingList').innerHTML = '<div class="bg-red-50 border border-red-200 rounded-xl p-3 text-sm text-red-800">Fehler: ' + escapeHtml(e.message || e) + '</div>';
+    return;
+  }
+  _renderMarketingList();
+}
+
+function _renderMarketingList() {
+  const host = $('marketingList');
+  if (!host) return;
+  const list = APP_STATE._marketingList || [];
+  const q = ($('mktSearch')?.value || '').trim().toLowerCase();
+  const filtered = q
+    ? list.filter(m =>
+        String(m.recipient_email || '').toLowerCase().includes(q) ||
+        String(m.recipient_name  || '').toLowerCase().includes(q) ||
+        String(m.betreff         || '').toLowerCase().includes(q) ||
+        String(m.template_title  || '').toLowerCase().includes(q)
+      )
+    : list;
+  if (!filtered.length) {
+    host.innerHTML = '<div class="bg-white rounded-xl border border-ink-200 p-6 text-center text-sm text-ink-500">' +
+      (list.length ? 'Keine Treffer für „' + escapeHtml(q) + '"' : 'Noch keine Marketing-Emails versandt.') +
+    '</div>';
+    return;
+  }
+  // Gruppieren nach Empfänger-Email für bessere Übersicht
+  const byRecipient = new Map();
+  filtered.forEach(m => {
+    const e = String(m.recipient_email || '').toLowerCase();
+    if (!byRecipient.has(e)) byRecipient.set(e, []);
+    byRecipient.get(e).push(m);
+  });
+  host.innerHTML =
+    '<p class="text-[10px] text-ink-500 uppercase tracking-wider mb-2">' + filtered.length + ' Versand-Eintr' + (filtered.length === 1 ? 'ag' : 'äge') + ' · ' + byRecipient.size + ' Empfänger</p>' +
+    Array.from(byRecipient.entries()).map(([email, items]) => {
+      const first = items[0];
+      return '<div class="bg-white rounded-xl border border-ink-200 mb-2 overflow-hidden">' +
+        '<div class="px-3 py-2 bg-ink-50 border-b border-ink-200 flex items-center justify-between gap-2">' +
+          '<div class="min-w-0 flex-1">' +
+            '<p class="font-bold text-ink-900 text-sm truncate"><i data-lucide="user" class="w-3.5 h-3.5 inline -mt-0.5"></i> ' + escapeHtml(first.recipient_name || email) + '</p>' +
+            '<p class="text-[11px] text-ink-500 truncate">' + escapeHtml(email) + '</p>' +
+          '</div>' +
+          '<span class="text-[10px] bg-orange-100 text-orange-700 px-2 py-0.5 rounded font-bold">' + items.length + ' Mail' + (items.length === 1 ? '' : 's') + '</span>' +
+        '</div>' +
+        '<div class="divide-y divide-ink-100">' +
+          items.slice(0, 10).map(m => {
+            const date = m.sent_at ? new Date(m.sent_at).toLocaleString('de-DE', { day:'2-digit', month:'2-digit', year:'2-digit', hour:'2-digit', minute:'2-digit' }) : '?';
+            return '<div class="px-3 py-2">' +
+              '<div class="flex items-center justify-between gap-2">' +
+                '<p class="font-semibold text-ink-900 text-[12px] truncate">' + escapeHtml(m.betreff || '(ohne Betreff)') + '</p>' +
+                '<span class="text-[10px] text-ink-500 shrink-0">' + escapeHtml(date) + '</span>' +
+              '</div>' +
+              '<p class="text-[10px] text-ink-500 truncate">Vorlage: ' + escapeHtml(m.template_title || '(freier Text)') + (m.outbound_ticket_id ? ' · Out-Ticket #' + escapeHtml(String(m.outbound_ticket_id)) : '') + (m.source_ticket_id ? ' · Quell-Ticket #' + escapeHtml(String(m.source_ticket_id)) : '') + '</p>' +
+            '</div>';
+          }).join('') +
+          (items.length > 10 ? '<div class="px-3 py-1.5 text-[10px] text-ink-500 italic bg-ink-50">+ ' + (items.length - 10) + ' weitere</div>' : '') +
+        '</div>' +
+      '</div>';
+    }).join('');
+  if (window.lucide) lucide.createIcons();
+}
+
+async function _reloadMarketingList(btn) {
+  setBusy(btn, true);
+  try { APP_STATE._marketingList = await loadAllMarketingEmails(200); }
+  catch (_) {}
+  setBusy(btn, false);
+  _renderMarketingList();
 }
 
 async function renderRulesPage() {
