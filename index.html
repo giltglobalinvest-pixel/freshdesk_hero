@@ -681,6 +681,9 @@
     <button onclick="navTo('marketing'); closeMenu();" class="w-full text-left px-3 py-2 text-sm hover:bg-ink-50 flex items-center gap-2">
       <i data-lucide="megaphone" class="w-4 h-4 text-orange-500"></i> Marketing-Emails
     </button>
+    <button onclick="navTo('stats'); closeMenu();" class="w-full text-left px-3 py-2 text-sm hover:bg-ink-50 flex items-center gap-2">
+      <i data-lucide="bar-chart-3" class="w-4 h-4 text-indigo-500"></i> Statistiken
+    </button>
     <button onclick="checkForUpdate(true); closeMenu();" class="w-full text-left px-3 py-2 text-sm hover:bg-ink-50 flex items-center gap-2">
       <i data-lucide="refresh-cw" class="w-4 h-4 text-ink-500"></i> Update prüfen
     </button>
@@ -748,7 +751,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.89';
+const APP_VERSION = 'v2.46.90';
 
 /* ============================================================
    GLOBAL THEME — v2.46.12
@@ -6857,6 +6860,7 @@ function navTo(page) {
   else if (page === 'tasks')     renderFn = renderTasksPage;
   else if (page === 'deals')     renderFn = renderDealsPage;
   else if (page === 'marketing') renderFn = renderMarketingPage;
+  else if (page === 'stats')     renderFn = renderStatsPage;
   try {
     const result = renderFn();
     if (result && typeof result.catch === 'function') {
@@ -24341,6 +24345,271 @@ async function deleteRule(id) {
   // Aus der Processed-Map entfernen — speicher-hygiene, keine funktionale
   // Auswirkung (gelöschte Regel wird ohnehin nicht mehr evaluiert).
   _clearProcessedForRule(id);
+}
+
+/* v2.46.90: Statistik-Seite mit 3 Tabs (Kunden, Mitarbeiter, Marketing).
+   Aggregiert clientseitig aus dem aktuell geladenen Ticket-Cache + Marketing-Tabelle. */
+let STATS_STATE = { tab: 'kunden', range: '30d', accountId: 'all', data: null };
+
+async function renderStatsPage() {
+  setPageTitle('Statistiken', 'Kunden · Mitarbeiter · Marketing');
+  const tabBtn = (key, label, icon) => {
+    const active = STATS_STATE.tab === key;
+    return '<button onclick="STATS_STATE.tab=\'' + key + '\'; renderStatsPage()" class="shrink-0 inline-flex items-center gap-1.5 px-3 py-2 rounded-lg text-[12px] font-bold border ' +
+      (active ? 'bg-indigo-600 text-white border-indigo-600 shadow-sm' : 'bg-white text-ink-700 border-ink-200') + '">' +
+      '<i data-lucide="' + icon + '" class="w-3.5 h-3.5"></i>' + escapeHtml(label) +
+    '</button>';
+  };
+  const rangeBtn = (key, label) => {
+    const active = STATS_STATE.range === key;
+    return '<button onclick="STATS_STATE.range=\'' + key + '\'; renderStatsPage()" class="shrink-0 inline-flex items-center px-2.5 py-1 rounded-full text-[11px] font-semibold border ' +
+      (active ? 'bg-ink-900 text-white border-ink-900' : 'bg-white text-ink-700 border-ink-200') + '">' + escapeHtml(label) + '</button>';
+  };
+  $('pageContent').innerHTML =
+    '<div class="space-y-3 max-w-3xl mx-auto">' +
+      // Tabs
+      '<div class="flex gap-1.5 overflow-x-auto pb-1">' +
+        tabBtn('kunden', 'Kunden', 'users') +
+        tabBtn('mitarbeiter', 'Mitarbeiter', 'user-cog') +
+        tabBtn('marketing', 'Marketing', 'megaphone') +
+      '</div>' +
+      // Zeitraum (nur für Tabs die das brauchen)
+      (STATS_STATE.tab !== 'mitarbeiter' ? (
+        '<div class="flex items-center gap-1.5 overflow-x-auto pb-1">' +
+          '<span class="shrink-0 text-[10px] font-bold uppercase tracking-wider text-ink-400 pr-1">Zeitraum</span>' +
+          rangeBtn('7d',  '7 Tage') +
+          rangeBtn('30d', '30 Tage') +
+          rangeBtn('90d', '90 Tage') +
+          rangeBtn('1y',  '1 Jahr') +
+          rangeBtn('all', 'Alle') +
+        '</div>'
+      ) : '') +
+      '<div id="statsContent">' +
+        '<div class="bg-white rounded-2xl border border-ink-200 p-6 text-center">' +
+          '<span class="spinner inline-block w-6 h-6 border-[2px] text-indigo-500"></span>' +
+          '<p class="text-sm text-ink-500 mt-2">Lade Daten…</p>' +
+        '</div>' +
+      '</div>' +
+    '</div>';
+  if (window.lucide) lucide.createIcons();
+  await _loadStatsData();
+  _renderStatsContent();
+}
+
+async function _loadStatsData() {
+  const data = {};
+  // Tickets: alles was im ticketCache liegt (alle Accounts)
+  const tickets = [];
+  if (APP_STATE.ticketCache instanceof Map) {
+    APP_STATE.ticketCache.forEach(t => tickets.push(t));
+  }
+  // Plus taskTickets falls vorhanden (separat geladen für Tasks-Tab)
+  if (Array.isArray(APP_STATE.taskTickets)) {
+    APP_STATE.taskTickets.forEach(t => {
+      if (!tickets.find(x => x.id === t.id && x._accountId === t._accountId)) tickets.push(t);
+    });
+  }
+  data.tickets = tickets;
+  // Marketing-Emails
+  try { data.marketing = await loadAllMarketingEmails(500); }
+  catch (_) { data.marketing = []; }
+  STATS_STATE.data = data;
+}
+
+function _periodCutoffMs(range) {
+  if (!range || range === 'all') return 0;
+  const ms = { '7d': 7, '30d': 30, '90d': 90, '1y': 365 }[range];
+  if (!ms) return 0;
+  return Date.now() - ms * 86400e3;
+}
+
+function _renderStatsContent() {
+  const host = $('statsContent');
+  if (!host) return;
+  if (STATS_STATE.tab === 'marketing')         _renderStatsMarketing(host);
+  else if (STATS_STATE.tab === 'mitarbeiter')  _renderStatsMitarbeiter(host);
+  else                                          _renderStatsKunden(host);
+}
+
+/* ===== KPI-Card Helper ===== */
+function _statsKpiCard(label, value, sub, color) {
+  color = color || 'indigo';
+  return '<div class="bg-white rounded-xl border border-ink-200 p-3">' +
+    '<p class="text-[10px] font-bold uppercase tracking-wider text-ink-500">' + escapeHtml(label) + '</p>' +
+    '<p class="text-2xl font-extrabold text-' + color + '-700 mt-1">' + escapeHtml(String(value)) + '</p>' +
+    (sub ? '<p class="text-[10px] text-ink-500 mt-0.5">' + escapeHtml(sub) + '</p>' : '') +
+  '</div>';
+}
+
+function _statsBarRow(label, value, max, color, suffix) {
+  color = color || 'indigo';
+  const pct = max ? Math.round((value / max) * 100) : 0;
+  return '<div class="bg-white rounded-lg border border-ink-200 p-2.5 mb-1.5">' +
+    '<div class="flex items-center justify-between gap-2 mb-1">' +
+      '<span class="text-[12px] font-semibold text-ink-900 truncate flex-1 min-w-0">' + escapeHtml(label) + '</span>' +
+      '<span class="text-[11px] font-bold text-' + color + '-700 shrink-0">' + escapeHtml(String(value)) + (suffix ? ' ' + suffix : '') + '</span>' +
+    '</div>' +
+    '<div class="h-1.5 bg-ink-100 rounded-full overflow-hidden"><div class="h-full bg-' + color + '-500 rounded-full" style="width:' + pct + '%"></div></div>' +
+  '</div>';
+}
+
+/* ===== TAB: KUNDEN ===== */
+function _renderStatsKunden(host) {
+  const tickets = STATS_STATE.data?.tickets || [];
+  const cutoff = _periodCutoffMs(STATS_STATE.range);
+  // Filter nach Zeitraum (created_at)
+  const filtered = cutoff
+    ? tickets.filter(t => { const c = new Date(t.created_at || 0).getTime(); return c >= cutoff; })
+    : tickets;
+  // Top-Anfrager
+  const byRequester = new Map();
+  filtered.forEach(t => {
+    const key = (t.requester?.email || t.email || '').toLowerCase() || (t.requester?.name || 'unbekannt');
+    const label = t.requester?.name || t.email || key;
+    if (!byRequester.has(key)) byRequester.set(key, { count: 0, label });
+    byRequester.get(key).count++;
+  });
+  const topRequester = Array.from(byRequester.values()).sort((a, b) => b.count - a.count).slice(0, 10);
+  const maxR = topRequester[0]?.count || 1;
+  // KPIs
+  const uniqueKunden = byRequester.size;
+  const statusCount = { 2: 0, 3: 0, 4: 0, 5: 0 };
+  filtered.forEach(t => { if (statusCount[t.status] != null) statusCount[t.status]++; });
+  // Aktive Kunden (letzte 30T)
+  const activeCutoff = Date.now() - 30 * 86400e3;
+  const activeKunden = new Set();
+  tickets.forEach(t => {
+    const ts = new Date(t.updated_at || t.created_at || 0).getTime();
+    if (ts >= activeCutoff) {
+      const key = (t.requester?.email || t.email || '').toLowerCase();
+      if (key) activeKunden.add(key);
+    }
+  });
+  host.innerHTML =
+    (cutoff ? '<p class="text-[10px] text-ink-500 italic px-1">' + filtered.length + ' Tickets im gewählten Zeitraum (von ' + tickets.length + ' insgesamt im Cache)</p>' : '') +
+    '<div class="grid grid-cols-2 gap-2 mb-3">' +
+      _statsKpiCard('Tickets gesamt', filtered.length, 'im Zeitraum', 'indigo') +
+      _statsKpiCard('Eindeutige Kunden', uniqueKunden, '', 'emerald') +
+      _statsKpiCard('Aktive (30T)', activeKunden.size, 'haben kürzlich Aktivität', 'sky') +
+      _statsKpiCard('Offen + Wartet', statusCount[2] + statusCount[3], 'noch in Bearbeitung', 'amber') +
+    '</div>' +
+    '<div class="bg-white rounded-xl border border-ink-200 p-3 mb-3">' +
+      '<p class="text-[11px] font-bold uppercase tracking-wider text-ink-700 mb-2">Top-Anfrager</p>' +
+      (topRequester.length
+        ? topRequester.map(r => _statsBarRow(r.label, r.count, maxR, 'indigo', 'Tickets')).join('')
+        : '<p class="text-[11px] text-ink-400 italic">Keine Daten</p>') +
+    '</div>' +
+    '<div class="bg-white rounded-xl border border-ink-200 p-3">' +
+      '<p class="text-[11px] font-bold uppercase tracking-wider text-ink-700 mb-2">Tickets nach Status</p>' +
+      '<div class="grid grid-cols-2 gap-2 text-[12px]">' +
+        '<div class="flex items-center gap-2"><span class="w-3 h-3 rounded-full bg-blue-500"></span> Offen: <b>' + statusCount[2] + '</b></div>' +
+        '<div class="flex items-center gap-2"><span class="w-3 h-3 rounded-full bg-amber-500"></span> Wartet: <b>' + statusCount[3] + '</b></div>' +
+        '<div class="flex items-center gap-2"><span class="w-3 h-3 rounded-full bg-emerald-500"></span> Gelöst: <b>' + statusCount[4] + '</b></div>' +
+        '<div class="flex items-center gap-2"><span class="w-3 h-3 rounded-full bg-ink-500"></span> Geschlossen: <b>' + statusCount[5] + '</b></div>' +
+      '</div>' +
+    '</div>';
+}
+
+/* ===== TAB: MITARBEITER ===== */
+function _renderStatsMitarbeiter(host) {
+  const tickets = STATS_STATE.data?.tickets || [];
+  // Pro Agent zählen
+  const byAgent = new Map();
+  let unzugewiesen = 0;
+  const aktivCutoff30 = Date.now() - 30 * 86400e3;
+  tickets.forEach(t => {
+    const rId = t.responder_id;
+    if (!rId) { unzugewiesen++; return; }
+    const accId = t._accountId;
+    const name = getAgentName(accId, rId) || ('Agent #' + rId);
+    const key = accId + ':' + rId;
+    if (!byAgent.has(key)) byAgent.set(key, { name, accId, agentId: rId, total: 0, offen: 0, wartet: 0, geloest30T: 0, geschlossen: 0 });
+    const e = byAgent.get(key);
+    e.total++;
+    if (t.status === 2) e.offen++;
+    else if (t.status === 3) e.wartet++;
+    else if (t.status === 4) {
+      e.geschlossen++;
+      const upd = new Date(t.updated_at || 0).getTime();
+      if (upd >= aktivCutoff30) e.geloest30T++;
+    } else if (t.status === 5) e.geschlossen++;
+  });
+  const agents = Array.from(byAgent.values()).sort((a, b) => (b.offen + b.wartet) - (a.offen + a.wartet));
+  const maxOpen = agents[0] ? (agents[0].offen + agents[0].wartet) : 1;
+  const maxResolved = Math.max(1, ...agents.map(a => a.geloest30T));
+  const totalAgents = agents.length;
+  const totalOpen = agents.reduce((s, a) => s + a.offen + a.wartet, 0);
+  const totalResolved = agents.reduce((s, a) => s + a.geloest30T, 0);
+  host.innerHTML =
+    '<div class="grid grid-cols-2 gap-2 mb-3">' +
+      _statsKpiCard('Aktive Mitarbeiter', totalAgents, 'mit zugewiesenen Tickets', 'indigo') +
+      _statsKpiCard('Offene Last', totalOpen, 'Offen + Wartet', 'amber') +
+      _statsKpiCard('Gelöst (30T)', totalResolved, 'in letzten 30 Tagen', 'emerald') +
+      _statsKpiCard('Unzugewiesen', unzugewiesen, 'kein Bearbeiter', 'red') +
+    '</div>' +
+    '<div class="bg-white rounded-xl border border-ink-200 p-3 mb-3">' +
+      '<p class="text-[11px] font-bold uppercase tracking-wider text-ink-700 mb-2">Aktuelle Last pro Mitarbeiter</p>' +
+      (agents.length
+        ? agents.slice(0, 15).map(a => _statsBarRow(a.name, a.offen + a.wartet, maxOpen, 'amber', '(offen+wartet)')).join('')
+        : '<p class="text-[11px] text-ink-400 italic">Keine Daten</p>') +
+    '</div>' +
+    '<div class="bg-white rounded-xl border border-ink-200 p-3">' +
+      '<p class="text-[11px] font-bold uppercase tracking-wider text-ink-700 mb-2">Gelöste Tickets letzte 30 Tage</p>' +
+      (agents.length
+        ? agents.slice().sort((a, b) => b.geloest30T - a.geloest30T).slice(0, 10).map(a => _statsBarRow(a.name, a.geloest30T, maxResolved, 'emerald', 'gelöst')).join('')
+        : '<p class="text-[11px] text-ink-400 italic">Keine Daten</p>') +
+    '</div>';
+}
+
+/* ===== TAB: MARKETING ===== */
+function _renderStatsMarketing(host) {
+  const marketing = STATS_STATE.data?.marketing || [];
+  const cutoff = _periodCutoffMs(STATS_STATE.range);
+  const filtered = cutoff
+    ? marketing.filter(m => { const c = new Date(m.sent_at || 0).getTime(); return c >= cutoff; })
+    : marketing;
+  // Top-Vorlagen
+  const byTpl = new Map();
+  filtered.forEach(m => {
+    const k = m.template_title || '(freier Text)';
+    byTpl.set(k, (byTpl.get(k) || 0) + 1);
+  });
+  const topTpl = Array.from(byTpl.entries()).sort((a, b) => b[1] - a[1]).slice(0, 10);
+  const maxTpl = topTpl[0]?.[1] || 1;
+  // Top-Empfänger
+  const byRecipient = new Map();
+  filtered.forEach(m => {
+    const k = String(m.recipient_email || '').toLowerCase();
+    if (!byRecipient.has(k)) byRecipient.set(k, { count: 0, name: m.recipient_name || k });
+    byRecipient.get(k).count++;
+  });
+  const topRecipients = Array.from(byRecipient.entries()).sort((a, b) => b[1].count - a[1].count).slice(0, 10);
+  const maxRec = topRecipients[0]?.[1].count || 1;
+  // KPIs
+  const last7 = Date.now() - 7 * 86400e3;
+  const sent7 = marketing.filter(m => new Date(m.sent_at || 0).getTime() >= last7).length;
+  const uniqueRec = byRecipient.size;
+  const withTemplate = filtered.filter(m => m.template_id_fd).length;
+  host.innerHTML =
+    (cutoff ? '<p class="text-[10px] text-ink-500 italic px-1">' + filtered.length + ' Versand-Eintr' + (filtered.length === 1 ? 'ag' : 'äge') + ' im gewählten Zeitraum (von ' + marketing.length + ' insgesamt)</p>' : '') +
+    '<div class="grid grid-cols-2 gap-2 mb-3">' +
+      _statsKpiCard('Versandt', filtered.length, 'im Zeitraum', 'orange') +
+      _statsKpiCard('Letzte 7T', sent7, 'in den letzten 7 Tagen', 'amber') +
+      _statsKpiCard('Eindeutige Empfänger', uniqueRec, 'unique Adressen', 'emerald') +
+      _statsKpiCard('Mit Vorlage', withTemplate, (filtered.length ? Math.round(withTemplate / filtered.length * 100) + '%' : '0%') + ' aller Sends', 'indigo') +
+    '</div>' +
+    '<div class="bg-white rounded-xl border border-ink-200 p-3 mb-3">' +
+      '<p class="text-[11px] font-bold uppercase tracking-wider text-ink-700 mb-2">Beliebteste Vorlagen</p>' +
+      (topTpl.length
+        ? topTpl.map(([name, c]) => _statsBarRow(name, c, maxTpl, 'orange', 'mal')).join('')
+        : '<p class="text-[11px] text-ink-400 italic">Keine Daten</p>') +
+    '</div>' +
+    '<div class="bg-white rounded-xl border border-ink-200 p-3">' +
+      '<p class="text-[11px] font-bold uppercase tracking-wider text-ink-700 mb-2">Top-Empfänger</p>' +
+      (topRecipients.length
+        ? topRecipients.map(([email, info]) => _statsBarRow(info.name + ' (' + email + ')', info.count, maxRec, 'amber', 'Mails')).join('')
+        : '<p class="text-[11px] text-ink-400 italic">Keine Daten</p>') +
+    '</div>';
 }
 
 /* v2.46.87: Marketing-Email-Übersicht. Zeigt die letzten 200 Versand-Records.
