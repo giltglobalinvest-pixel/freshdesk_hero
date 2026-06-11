@@ -751,7 +751,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.90';
+const APP_VERSION = 'v2.46.91';
 
 /* ============================================================
    GLOBAL THEME — v2.46.12
@@ -24350,6 +24350,8 @@ async function deleteRule(id) {
 /* v2.46.90: Statistik-Seite mit 3 Tabs (Kunden, Mitarbeiter, Marketing).
    Aggregiert clientseitig aus dem aktuell geladenen Ticket-Cache + Marketing-Tabelle. */
 let STATS_STATE = { tab: 'kunden', range: '30d', accountId: 'all', data: null };
+// Falls neue Felder fehlen sollten (z.B. nach Hot-Reload), initial defaults setzen
+if (!STATS_STATE.accountId) STATS_STATE.accountId = 'all';
 
 async function renderStatsPage() {
   setPageTitle('Statistiken', 'Kunden · Mitarbeiter · Marketing');
@@ -24365,6 +24367,14 @@ async function renderStatsPage() {
     return '<button onclick="STATS_STATE.range=\'' + key + '\'; renderStatsPage()" class="shrink-0 inline-flex items-center px-2.5 py-1 rounded-full text-[11px] font-semibold border ' +
       (active ? 'bg-ink-900 text-white border-ink-900' : 'bg-white text-ink-700 border-ink-200') + '">' + escapeHtml(label) + '</button>';
   };
+  // v2.46.91: Account-Filter (analog zu Deals/Tasks)
+  const accounts = APP_STATE.accounts || [];
+  const accBtn = (key, label, color) => {
+    const active = STATS_STATE.accountId === key;
+    const dot = color ? '<span class="w-2 h-2 rounded-full inline-block" style="background:' + escapeAttr(color) + '"></span>' : '';
+    return '<button onclick="STATS_STATE.accountId=\'' + escapeAttr(key) + '\'; renderStatsPage()" class="shrink-0 inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full text-[12px] font-semibold ' +
+      (active ? 'bg-ink-900 text-white' : 'bg-white text-ink-700 border border-ink-200') + '">' + dot + escapeHtml(label) + '</button>';
+  };
   $('pageContent').innerHTML =
     '<div class="space-y-3 max-w-3xl mx-auto">' +
       // Tabs
@@ -24373,6 +24383,13 @@ async function renderStatsPage() {
         tabBtn('mitarbeiter', 'Mitarbeiter', 'user-cog') +
         tabBtn('marketing', 'Marketing', 'megaphone') +
       '</div>' +
+      // Account-Filter — Stats pro Firma
+      (accounts.length > 1 ? (
+        '<div class="flex items-center gap-1.5 overflow-x-auto pb-1">' +
+          accBtn('all', 'Alle (' + accounts.length + ')') +
+          accounts.map(a => accBtn(a.id, a.name, a.color)).join('') +
+        '</div>'
+      ) : '') +
       // Zeitraum (nur für Tabs die das brauchen)
       (STATS_STATE.tab !== 'mitarbeiter' ? (
         '<div class="flex items-center gap-1.5 overflow-x-auto pb-1">' +
@@ -24455,7 +24472,11 @@ function _statsBarRow(label, value, max, color, suffix) {
 
 /* ===== TAB: KUNDEN ===== */
 function _renderStatsKunden(host) {
-  const tickets = STATS_STATE.data?.tickets || [];
+  const allTickets = STATS_STATE.data?.tickets || [];
+  // v2.46.91: Account-Filter
+  const tickets = STATS_STATE.accountId === 'all'
+    ? allTickets
+    : allTickets.filter(t => t._accountId === STATS_STATE.accountId);
   const cutoff = _periodCutoffMs(STATS_STATE.range);
   // Filter nach Zeitraum (created_at)
   const filtered = cutoff
@@ -24512,7 +24533,11 @@ function _renderStatsKunden(host) {
 
 /* ===== TAB: MITARBEITER ===== */
 function _renderStatsMitarbeiter(host) {
-  const tickets = STATS_STATE.data?.tickets || [];
+  const allTickets = STATS_STATE.data?.tickets || [];
+  // v2.46.91: Account-Filter
+  const tickets = STATS_STATE.accountId === 'all'
+    ? allTickets
+    : allTickets.filter(t => t._accountId === STATS_STATE.accountId);
   // Pro Agent zählen
   const byAgent = new Map();
   let unzugewiesen = 0;
@@ -24563,7 +24588,11 @@ function _renderStatsMitarbeiter(host) {
 
 /* ===== TAB: MARKETING ===== */
 function _renderStatsMarketing(host) {
-  const marketing = STATS_STATE.data?.marketing || [];
+  const allMarketing = STATS_STATE.data?.marketing || [];
+  // v2.46.91: Account-Filter
+  const marketing = STATS_STATE.accountId === 'all'
+    ? allMarketing
+    : allMarketing.filter(m => String(m.account_id) === String(STATS_STATE.accountId));
   const cutoff = _periodCutoffMs(STATS_STATE.range);
   const filtered = cutoff
     ? marketing.filter(m => { const c = new Date(m.sent_at || 0).getTime(); return c >= cutoff; })
