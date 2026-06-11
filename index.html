@@ -745,7 +745,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.85';
+const APP_VERSION = 'v2.46.86';
 
 /* ============================================================
    GLOBAL THEME — v2.46.12
@@ -14460,7 +14460,8 @@ function renderAssistantPreview() {
         body = `<div class="text-[11px] text-ink-700 whitespace-pre-line bg-white/60 rounded p-2 max-h-32 overflow-y-auto border border-${meta.color}-200">${escapeHtml(a.body || '')}</div>`;
       }
     } else if (a.type === 'marketing_email') {
-      // v2.46.85: Outbound-Email, Empfänger = Ticket-Requester (read-only Anzeige), Betreff + Body editierbar
+      // v2.46.85: Outbound-Email
+      // v2.46.86: Vorlagen-Dropdown (Canned Responses) zur Auswahl
       const recipientEmail = ctx.ticket?.requester?.email || ctx.ticket?.email || '';
       const recipientName  = ctx.ticket?.requester?.name || '';
       if (isActive && isPending) {
@@ -14468,6 +14469,10 @@ function renderAssistantPreview() {
                   <div class="text-orange-800 font-bold mb-0.5"><i data-lucide="info" class="w-3 h-3 inline"></i> Wichtig: Es entsteht ein NEUES Ticket</div>
                   <div class="text-orange-700">Diese Mail geht an den Kunden als eigenständige Email (Marketing/Info), nicht als Antwort auf dieses Ticket.</div>
                 </div>
+                <label class="text-[10px] uppercase font-semibold text-${meta.color}-800 block">Vorlage aus Freshdesk</label>
+                <select id="stepMeTemplate_${i}" onchange="_marketingTemplateChange(${i})" class="w-full text-sm px-3 py-2 border border-${meta.color}-300 bg-white rounded-lg mt-1 mb-2">
+                  <option value="">— Lade Vorlagen… (oder Eigentext verwenden) —</option>
+                </select>
                 <label class="text-[10px] uppercase font-semibold text-${meta.color}-800 block">An (Empfänger)</label>
                 <input id="stepMeTo_${i}" class="w-full text-sm px-3 py-2 border border-${meta.color}-300 bg-ink-50 rounded-lg mt-1 mb-2 font-mono" value="${escapeAttr(recipientEmail)}" ${recipientEmail ? '' : 'placeholder="Empfänger-Email"'}>
                 ${recipientName ? `<p class="text-[10px] text-ink-500 -mt-1 mb-2">Kontakt: ${escapeHtml(recipientName)}</p>` : ''}
@@ -14717,6 +14722,8 @@ function renderAssistantPreview() {
       footer +
     '</div>';
   if (window.lucide) lucide.createIcons();
+  // v2.46.86: Canned-Response-Dropdowns für marketing_email-Steps lazy laden
+  _hydrateMarketingTemplateDropdowns().catch(e => console.warn(e));
 
   // Kunden-Sprache im Hintergrund erkennen + in den Übersetzungs-Block-Labels anzeigen.
   // Wird pro Ticket gecacht — kein wiederholter API-Call beim Re-Render.
@@ -15088,6 +15095,82 @@ async function executeSingleAssistantAction(ctx, a) {
   } else {
     throw new Error('Unbekannter Aktionstyp: ' + a.type);
   }
+}
+
+/* v2.46.86: Lazy-Load der Canned-Responses für das Marketing-Email-Dropdown.
+   Wird nach renderAssistantPreview() für jede aktive marketing_email-Kachel aufgerufen. */
+async function _hydrateMarketingTemplateDropdowns() {
+  const ctx = ASSISTANT_CTX;
+  if (!ctx?.plan?.actions) return;
+  const accountId = ctx.accountId;
+  // Alle Kacheln durchgehen — finde die aktiven marketing_email-Steps
+  for (let i = 0; i < ctx.plan.actions.length; i++) {
+    const a = ctx.plan.actions[i];
+    if (a.type !== 'marketing_email') continue;
+    const sel = document.getElementById('stepMeTemplate_' + i);
+    if (!sel || sel.dataset.hydrated === '1') continue;
+    sel.dataset.hydrated = '1';
+    try {
+      const cannedData = await ensureCannedResponsesLoaded(accountId);
+      const responses = cannedData?.responses || [];
+      if (!responses.length) {
+        sel.innerHTML = '<option value="">— Keine Vorlagen in Freshdesk gefunden —</option>';
+        continue;
+      }
+      // Optionen befüllen
+      let html = '<option value="">— Keine Vorlage (KI-Text behalten) —</option>';
+      responses.forEach(r => {
+        const folderSuffix = r._folderName ? ' · ' + r._folderName : '';
+        html += '<option value="' + r.id + '">' + escapeHtml((r.title || ('#' + r.id)) + folderSuffix) + '</option>';
+      });
+      sel.innerHTML = html;
+    } catch (e) {
+      sel.innerHTML = '<option value="">— Vorlagen konnten nicht geladen werden —</option>';
+      console.warn('Marketing-Template-Load:', e.message);
+    }
+  }
+}
+
+/* v2.46.86: User wählt eine Vorlage → Betreff + Body übernehmen mit Platzhalter-Substitution. */
+function _marketingTemplateChange(idx) {
+  const ctx = ASSISTANT_CTX;
+  if (!ctx) return;
+  const accountId = ctx.accountId;
+  const tplSel = document.getElementById('stepMeTemplate_' + idx);
+  const tplId = parseInt(tplSel?.value || '0', 10);
+  if (!tplId) return; // Keine Vorlage → nichts überschreiben
+  const cache = FD_CANNED_RESPONSES_CACHE[accountId];
+  const tpl = (cache?.responses || []).find(r => r.id === tplId);
+  if (!tpl) return;
+  // Platzhalter-Kontext aufbauen (analog _buildEmailCtx aus Phase 1.0-Vorlagen-Modal)
+  const req = ctx.ticket?.requester || {};
+  const firstNm = full => String(full || '').trim().split(/\s+/)[0] || '';
+  const userName = APP_KEYS.user?.name || '';
+  const userEmail = APP_KEYS.user?.email || '';
+  const contactName = req.name || ctx.ticket?.email || '';
+  const placeholderCtx = {
+    contactName,
+    contactFirstName: req.first_name || firstNm(contactName),
+    contactEmail: req.email || ctx.ticket?.email || '',
+    userName,
+    userFirstName: firstNm(userName),
+    userEmail,
+    companyName: req.company?.name || '',
+    dealName: ctx.ticket?.subject || '',
+    dealAmount: '',
+    angebotNr: '',
+  };
+  const subj = _renderPlaceholders(tpl.title_text || tpl.subject || tpl.title || '', placeholderCtx);
+  const bodyHtml = _renderPlaceholders(tpl.content_html || tpl.content || '', placeholderCtx);
+  // Felder befüllen
+  const betreffEl = document.getElementById('stepMeBetreff_' + idx);
+  const bodyEl = document.getElementById('stepBody_' + idx);
+  if (betreffEl) betreffEl.value = subj;
+  if (bodyEl) {
+    // body als Plain-Text, damit User es editieren kann (HTML wird in execute() konvertiert)
+    bodyEl.value = htmlToText(bodyHtml);
+  }
+  toast('Vorlage „' + (tpl.title || '#' + tpl.id) + '" übernommen', 'success', 2500);
 }
 
 /* Wird gerufen wenn der User „Fertig" tippt nachdem alle Schritte durch sind.
