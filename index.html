@@ -745,7 +745,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.84';
+const APP_VERSION = 'v2.46.85';
 
 /* ============================================================
    GLOBAL THEME — v2.46.12
@@ -14211,7 +14211,8 @@ async function aiInterpretCommand(ticket, command, accountId) {
 
   const sysPrompt = 'Du bist ein präziser AI-Assistent für eine deutschsprachige Freshdesk-Helpdesk-App auf dem Handy. Der User gibt dir einen kurzen Befehl (oft per Sprache). Du erkennst alle erforderlichen Schritte und gibst sie als JSON-Liste zurück.\n\n' +
     'AKTIONSTYPEN (Feld "type"):\n' +
-    '- "reply": öffentliche Antwort an Kunde\n' +
+    '- "reply": öffentliche Antwort an Kunde IM aktuellen Ticket (das Ticket bleibt der Kommunikationsfaden)\n' +
+    '- "marketing_email": NEUE Outbound-Email an den Kunden — erzeugt ein NEUES Ticket, nicht im aktuellen. Nutze diesen Typ wenn der User EXPLIZIT eine Marketing-/Werbe-/Info-Email senden will (NICHT als Antwort auf das aktuelle Anliegen). Erkenne IMMER bei: „Marketing-Mail", „Werbe-Mail", „Info-Mail", „Newsletter", „Aktion bewerben", „Kunden anschreiben wegen X", „neue Email an den Kunden zum Thema Y" (Y ist NICHT das aktuelle Ticket-Anliegen). Felder: "betreff" (Pflicht, prägnante Betreffzeile), "body" (Pflicht, fertiger Email-Text in der Sprache des Kunden). Empfänger ist automatisch der Ticket-Requester.\n' +
     '- "note": interne Notiz (nur Agents sehen sie)\n' +
     '- "forward": E-Mail weiterleiten an externe Adresse\n' +
     '- "assign": Bearbeiter ändern (responder_id setzen) — Feld "agent_id"\n' +
@@ -14279,6 +14280,10 @@ async function aiInterpretCommand(ticket, command, accountId) {
     'KORREKT: drei note-Aktionen (eine pro Kollegen-Aufgabe) ODER eine zusammengefasste note mit Bullet-Liste + assign an den primären Verantwortlichen. NIEMALS reply an den Kunden — das sind alles interne Arbeitsanweisungen.\n\n' +
     'BEFEHL: „Antworte dem Kunden dass wir bis Freitag liefern können"\n' +
     'KORREKT: type="reply" mit „...wir können bis Freitag liefern...". HIER ist reply richtig, weil der User EXPLIZIT sagt „antworte dem Kunden".\n\n' +
+    'BEFEHL: „Schick dem Kunden eine Marketing-Mail über unsere neue Wartungsaktion"\n' +
+    'KORREKT: type="marketing_email" mit "betreff":"Unsere neue Wartungsaktion für Sie" und "body" mit ausformuliertem Werbe-Text. WICHTIG: NICHT type="reply", weil es kein Bezug zum aktuellen Ticket-Anliegen hat. Outbound-Email = neues Ticket.\n\n' +
+    'BEFEHL: „Kunden informieren wegen Tag der offenen Tür am 15.6."\n' +
+    'KORREKT: type="marketing_email" mit Info-Mail-Text. Nicht reply.\n\n' +
     'JSON-FORMAT:\n' +
     '{"overall_summary":"Kurz auf Deutsch was insgesamt passieren soll","actions":[\n' +
     '  {"type":"reply|note|forward|assign|group|status|hide|aufgabe|unknown","body":"...","forward_to":["..."],"agent_id":12345,"group_id":67,"status":4,"days":3,"title":"...","description":"...","task_type":"call","priority":"normal","dueInDays":3,"assigneeHint":"Sandra","summary":"Kurze deutsche Beschreibung dieses Schritts"}\n' +
@@ -14363,9 +14368,10 @@ function renderAssistantPreview() {
 
   const statusMap = { 2: 'Offen', 3: 'Wartet', 4: 'Gelöst', 5: 'Geschlossen' };
   const typeMeta = {
-    reply:   { icon: 'reply',         color: 'emerald', label: 'Antwort an Kunde' },
-    note:    { icon: 'sticky-note',   color: 'amber',   label: 'Interne Notiz' },
-    forward: { icon: 'forward',       color: 'blue',    label: 'Weiterleiten' },
+    reply:           { icon: 'reply',          color: 'emerald', label: 'Antwort an Kunde' },
+    marketing_email: { icon: 'megaphone',      color: 'orange',  label: 'Marketing-Email (Outbound, neues Ticket)' },
+    note:            { icon: 'sticky-note',    color: 'amber',   label: 'Interne Notiz' },
+    forward:         { icon: 'forward',        color: 'blue',    label: 'Weiterleiten' },
     assign:  { icon: 'user',          color: 'brand',   label: 'Bearbeiter zuweisen' },
     group:   { icon: 'users',         color: 'brand',   label: 'Gruppe zuweisen' },
     status:  { icon: 'flag',          color: 'purple',  label: 'Freshdesk-Status setzen (für alle sichtbar)' },
@@ -14452,6 +14458,28 @@ function renderAssistantPreview() {
                 ${showSig ? _sigBlock() : ''}`;
       } else {
         body = `<div class="text-[11px] text-ink-700 whitespace-pre-line bg-white/60 rounded p-2 max-h-32 overflow-y-auto border border-${meta.color}-200">${escapeHtml(a.body || '')}</div>`;
+      }
+    } else if (a.type === 'marketing_email') {
+      // v2.46.85: Outbound-Email, Empfänger = Ticket-Requester (read-only Anzeige), Betreff + Body editierbar
+      const recipientEmail = ctx.ticket?.requester?.email || ctx.ticket?.email || '';
+      const recipientName  = ctx.ticket?.requester?.name || '';
+      if (isActive && isPending) {
+        body = `<div class="bg-orange-50 border border-orange-200 rounded-lg px-2.5 py-2 mb-2 text-[11px]">
+                  <div class="text-orange-800 font-bold mb-0.5"><i data-lucide="info" class="w-3 h-3 inline"></i> Wichtig: Es entsteht ein NEUES Ticket</div>
+                  <div class="text-orange-700">Diese Mail geht an den Kunden als eigenständige Email (Marketing/Info), nicht als Antwort auf dieses Ticket.</div>
+                </div>
+                <label class="text-[10px] uppercase font-semibold text-${meta.color}-800 block">An (Empfänger)</label>
+                <input id="stepMeTo_${i}" class="w-full text-sm px-3 py-2 border border-${meta.color}-300 bg-ink-50 rounded-lg mt-1 mb-2 font-mono" value="${escapeAttr(recipientEmail)}" ${recipientEmail ? '' : 'placeholder="Empfänger-Email"'}>
+                ${recipientName ? `<p class="text-[10px] text-ink-500 -mt-1 mb-2">Kontakt: ${escapeHtml(recipientName)}</p>` : ''}
+                <label class="text-[10px] uppercase font-semibold text-${meta.color}-800 block">Betreff</label>
+                <input id="stepMeBetreff_${i}" class="w-full text-sm px-3 py-2 border border-${meta.color}-300 bg-white rounded-lg mt-1 mb-2" value="${escapeAttr(a.betreff || a.subject || '')}">
+                <label class="text-[10px] uppercase font-semibold text-${meta.color}-800 block">Nachricht — du kannst anpassen</label>
+                <textarea id="stepBody_${i}" class="w-full text-sm px-3 py-2 border border-${meta.color}-300 bg-white rounded-lg whitespace-pre-line mt-1" rows="8">${escapeHtml(a.body || '')}</textarea>
+                ${_sigBlock()}`;
+      } else {
+        body = `<p class="text-[11px] text-ink-600">an <span class="font-mono">${escapeHtml(recipientEmail || '—')}</span></p>
+                <p class="text-[11px] text-ink-800 font-semibold mt-1">Betreff: ${escapeHtml(a.betreff || a.subject || '')}</p>
+                <div class="text-[11px] text-ink-700 whitespace-pre-line bg-white/60 rounded p-2 max-h-32 overflow-y-auto border border-${meta.color}-200 mt-1">${escapeHtml(a.body || '')}</div>`;
       }
     } else if (a.type === 'forward') {
       if (isActive && isPending) {
@@ -14761,7 +14789,7 @@ async function confirmAssistantStep(idx, btnEl) {
   if (!a || a._state !== 'pending') return;
 
   // Edits aus den Eingabefeldern lesen
-  if (a.type === 'reply' || a.type === 'note' || a.type === 'forward') {
+  if (a.type === 'reply' || a.type === 'note' || a.type === 'forward' || a.type === 'marketing_email') {
     const edited = $('stepBody_' + idx)?.value;
     if (edited !== undefined) a.body = edited;
   }
@@ -14769,6 +14797,17 @@ async function confirmAssistantStep(idx, btnEl) {
     const raw = $('stepForwardTo_' + idx)?.value || '';
     a.forward_to = raw.split(',').map(s => s.trim()).filter(Boolean);
     if (!a.forward_to.length) return toast('Empfänger fehlt', 'warn');
+  }
+  if (a.type === 'marketing_email') {
+    // v2.46.85
+    const to     = ($('stepMeTo_' + idx)?.value || '').trim();
+    const betr   = ($('stepMeBetreff_' + idx)?.value || '').trim();
+    if (!to)   return toast('Empfänger-Email fehlt', 'warn');
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(to)) return toast('Empfänger-Email ungültig', 'warn');
+    if (!betr) return toast('Betreff fehlt', 'warn');
+    if (!a.body || !a.body.trim()) return toast('Email-Text fehlt', 'warn');
+    a.to      = to;
+    a.betreff = betr;
   }
   if (a.type === 'assign') {
     const v = $('stepAgent_' + idx)?.value;
@@ -14939,6 +14978,40 @@ async function executeSingleAssistantAction(ctx, a) {
     await proxyJson(base + '/notes', { method: 'POST', body: JSON.stringify({ body: textToHtmlForFreshdesk(a.body), private: true }) });
     recordMyNote(ctx.accountId, ctx.ticketId, a.body, 'assistant').catch(() => {});
     recordKnowledge(ctx.accountId, _t, 'note', { summary: a.summary || '' }, a.body).catch(() => {});
+  } else if (a.type === 'marketing_email') {
+    // v2.46.85: Outbound-Email (neues Ticket) — nicht im aktuellen Ticket-Verlauf
+    const me = await fetchAgentMe(ctx.accountId);
+    const sig = me?.signature || '';
+    const bodyHtml = appendSignatureHtml(textToHtmlForFreshdesk(a.body), sig);
+    // Email-Config (Absender-Adresse) — erste primary verwenden
+    let cfgId = null;
+    try {
+      const cfgs = await ensureEmailConfigsLoaded(ctx.accountId);
+      const primary = (cfgs || []).find(c => c.primary_role || c.default) || cfgs[0];
+      if (primary) cfgId = primary.id;
+    } catch (_) {}
+    if (!cfgId) throw new Error('Keine FD-Email-Config (Absender-Adresse) gefunden');
+    const payload = {
+      subject: a.betreff,
+      description: bodyHtml,
+      email: a.to,
+      email_config_id: cfgId,
+      priority: 1,
+      status: 5, // direkt geschlossen, verschmutzt die Queue nicht
+    };
+    const created = await proxyJson('/freshdesk/' + encodeURIComponent(ctx.accountId) + '/api/v2/tickets/outbound_email', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+    if (!created?.id) throw new Error('Versand fehlgeschlagen (keine Ticket-ID zurueck)');
+    // Tracking-Notiz im AKTUELLEN Ticket
+    try {
+      const noteBody = '📣 Marketing-Email gesendet an ' + escapeHtml(a.to) +
+        '<br>Betreff: ' + escapeHtml(a.betreff) +
+        '<br>Neues Ticket: #' + created.id;
+      await proxyJson(base + '/notes', { method: 'POST', body: JSON.stringify({ body: noteBody, private: true }) });
+    } catch (e) { console.warn('Tracking-Notiz fehlgeschlagen:', e.message); }
+    recordKnowledge(ctx.accountId, _t, 'marketing_email', { to: a.to, betreff: a.betreff, new_ticket_id: created.id }, a.body).catch(() => {});
   } else if (a.type === 'forward') {
     const me = await fetchAgentMe(ctx.accountId);
     const sig = me?.signature || '';
