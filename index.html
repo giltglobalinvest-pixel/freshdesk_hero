@@ -751,7 +751,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.91';
+const APP_VERSION = 'v2.46.92';
 
 /* ============================================================
    GLOBAL THEME — v2.46.12
@@ -24494,8 +24494,13 @@ function _renderStatsKunden(host) {
   const maxR = topRequester[0]?.count || 1;
   // KPIs
   const uniqueKunden = byRequester.size;
-  const statusCount = { 2: 0, 3: 0, 4: 0, 5: 0 };
-  filtered.forEach(t => { if (statusCount[t.status] != null) statusCount[t.status]++; });
+  // v2.46.92: "Gelöst" wird nicht genutzt — Status 4+5 zusammenfassen als "Geschlossen"
+  const statusCount = { 2: 0, 3: 0, geschlossen: 0 };
+  filtered.forEach(t => {
+    if (t.status === 2) statusCount[2]++;
+    else if (t.status === 3) statusCount[3]++;
+    else if (t.status === 4 || t.status === 5) statusCount.geschlossen++;
+  });
   // Aktive Kunden (letzte 30T)
   const activeCutoff = Date.now() - 30 * 86400e3;
   const activeKunden = new Set();
@@ -24522,11 +24527,10 @@ function _renderStatsKunden(host) {
     '</div>' +
     '<div class="bg-white rounded-xl border border-ink-200 p-3">' +
       '<p class="text-[11px] font-bold uppercase tracking-wider text-ink-700 mb-2">Tickets nach Status</p>' +
-      '<div class="grid grid-cols-2 gap-2 text-[12px]">' +
+      '<div class="grid grid-cols-3 gap-2 text-[12px]">' +
         '<div class="flex items-center gap-2"><span class="w-3 h-3 rounded-full bg-blue-500"></span> Offen: <b>' + statusCount[2] + '</b></div>' +
         '<div class="flex items-center gap-2"><span class="w-3 h-3 rounded-full bg-amber-500"></span> Wartet: <b>' + statusCount[3] + '</b></div>' +
-        '<div class="flex items-center gap-2"><span class="w-3 h-3 rounded-full bg-emerald-500"></span> Gelöst: <b>' + statusCount[4] + '</b></div>' +
-        '<div class="flex items-center gap-2"><span class="w-3 h-3 rounded-full bg-ink-500"></span> Geschlossen: <b>' + statusCount[5] + '</b></div>' +
+        '<div class="flex items-center gap-2"><span class="w-3 h-3 rounded-full bg-ink-500"></span> Geschlossen: <b>' + statusCount.geschlossen + '</b></div>' +
       '</div>' +
     '</div>';
 }
@@ -24548,28 +24552,30 @@ function _renderStatsMitarbeiter(host) {
     const accId = t._accountId;
     const name = getAgentName(accId, rId) || ('Agent #' + rId);
     const key = accId + ':' + rId;
-    if (!byAgent.has(key)) byAgent.set(key, { name, accId, agentId: rId, total: 0, offen: 0, wartet: 0, geloest30T: 0, geschlossen: 0 });
+    if (!byAgent.has(key)) byAgent.set(key, { name, accId, agentId: rId, total: 0, offen: 0, wartet: 0, geschlossen30T: 0, geschlossen: 0 });
     const e = byAgent.get(key);
     e.total++;
+    // v2.46.92: User nutzt "gelöst" nicht — Status 4 und 5 beide als "geschlossen" werten,
+    // Hauptmetrik: "geschlossen in den letzten 30 Tagen"
     if (t.status === 2) e.offen++;
     else if (t.status === 3) e.wartet++;
-    else if (t.status === 4) {
+    else if (t.status === 5 || t.status === 4) {
       e.geschlossen++;
       const upd = new Date(t.updated_at || 0).getTime();
-      if (upd >= aktivCutoff30) e.geloest30T++;
-    } else if (t.status === 5) e.geschlossen++;
+      if (upd >= aktivCutoff30) e.geschlossen30T++;
+    }
   });
   const agents = Array.from(byAgent.values()).sort((a, b) => (b.offen + b.wartet) - (a.offen + a.wartet));
   const maxOpen = agents[0] ? (agents[0].offen + agents[0].wartet) : 1;
-  const maxResolved = Math.max(1, ...agents.map(a => a.geloest30T));
+  const maxClosed = Math.max(1, ...agents.map(a => a.geschlossen30T));
   const totalAgents = agents.length;
   const totalOpen = agents.reduce((s, a) => s + a.offen + a.wartet, 0);
-  const totalResolved = agents.reduce((s, a) => s + a.geloest30T, 0);
+  const totalClosed30 = agents.reduce((s, a) => s + a.geschlossen30T, 0);
   host.innerHTML =
     '<div class="grid grid-cols-2 gap-2 mb-3">' +
       _statsKpiCard('Aktive Mitarbeiter', totalAgents, 'mit zugewiesenen Tickets', 'indigo') +
       _statsKpiCard('Offene Last', totalOpen, 'Offen + Wartet', 'amber') +
-      _statsKpiCard('Gelöst (30T)', totalResolved, 'in letzten 30 Tagen', 'emerald') +
+      _statsKpiCard('Geschlossen (30T)', totalClosed30, 'in letzten 30 Tagen', 'emerald') +
       _statsKpiCard('Unzugewiesen', unzugewiesen, 'kein Bearbeiter', 'red') +
     '</div>' +
     '<div class="bg-white rounded-xl border border-ink-200 p-3 mb-3">' +
@@ -24579,9 +24585,9 @@ function _renderStatsMitarbeiter(host) {
         : '<p class="text-[11px] text-ink-400 italic">Keine Daten</p>') +
     '</div>' +
     '<div class="bg-white rounded-xl border border-ink-200 p-3">' +
-      '<p class="text-[11px] font-bold uppercase tracking-wider text-ink-700 mb-2">Gelöste Tickets letzte 30 Tage</p>' +
+      '<p class="text-[11px] font-bold uppercase tracking-wider text-ink-700 mb-2">Geschlossene Tickets letzte 30 Tage</p>' +
       (agents.length
-        ? agents.slice().sort((a, b) => b.geloest30T - a.geloest30T).slice(0, 10).map(a => _statsBarRow(a.name, a.geloest30T, maxResolved, 'emerald', 'gelöst')).join('')
+        ? agents.slice().sort((a, b) => b.geschlossen30T - a.geschlossen30T).slice(0, 10).map(a => _statsBarRow(a.name, a.geschlossen30T, maxClosed, 'emerald', 'geschlossen')).join('')
         : '<p class="text-[11px] text-ink-400 italic">Keine Daten</p>') +
     '</div>';
 }
