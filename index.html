@@ -748,7 +748,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.88';
+const APP_VERSION = 'v2.46.89';
 
 /* ============================================================
    GLOBAL THEME — v2.46.12
@@ -3746,7 +3746,10 @@ async function fetchContact(accountId, contactId) {
   try {
     return await proxyJson('/freshdesk/' + encodeURIComponent(accountId) + '/api/v2/contacts/' + contactId);
   } catch (e) {
-    console.warn('Contact-Fetch fehlgeschlagen für #' + contactId + ':', e.message);
+    // v2.46.89: 404 (gelöschter Kontakt) ist normal — kein Console-Spam
+    if (!/404/.test(e.message || '')) {
+      console.warn('Contact-Fetch fehlgeschlagen für #' + contactId + ':', e.message);
+    }
     return null;
   }
 }
@@ -7533,9 +7536,52 @@ function setCurrentAccount(id) {
     }
   }
   APP_STATE.currentAccount = id;
-  localStorage.setItem(LAST_ACCOUNT_KEY, id);
+  // v2.46.89: setItem in try/catch — QuotaExceededError darf den Account-Switch nicht blockieren
+  try { localStorage.setItem(LAST_ACCOUNT_KEY, id); }
+  catch (e) {
+    console.warn('localStorage voll, last-account nicht persistiert:', e.message);
+    _tryFreeLocalStorage();
+    try { localStorage.setItem(LAST_ACCOUNT_KEY, id); } catch (_) {}
+  }
   renderTicketsPage();
 }
+
+/* v2.46.89: localStorage aufräumen wenn Quota voll. Entfernt veraltete/große Items. */
+function _tryFreeLocalStorage() {
+  try {
+    const candidates = [];
+    // 1. Größten Verdächtigen ZUERST komplett räumen: fdh_processed_rules_* (kann mehrere MB sein)
+    // Die App funktioniert ohne diese Map — Regeln werden ggf. erneut evaluiert, das ist OK.
+    for (let i = 0; i < localStorage.length; i++) {
+      const k = localStorage.key(i);
+      if (!k) continue;
+      if (/^fdh_processed_rules_/.test(k)) candidates.push(k);
+      else if (/^ai-?costs|cache|sw-cache|fdh_lang_cache|fdh_phone_validate|tailwind/.test(k)) candidates.push(k);
+    }
+    candidates.forEach(k => { try { localStorage.removeItem(k); } catch (_) {} });
+    if (candidates.length) console.log('[ls-cleanup] entfernt:', candidates.length, 'Items');
+  } catch (_) {}
+}
+
+/* v2.46.89: Beim Boot prüfen ob localStorage knapp voll ist → präventiv aufräumen
+   wenn fdh_processed_rules größer als 2 MB wird. */
+(function _preventiveLocalStorageCleanup() {
+  try {
+    let totalSize = 0;
+    for (let i = 0; i < localStorage.length; i++) {
+      const k = localStorage.key(i);
+      if (!k) continue;
+      if (/^fdh_processed_rules_/.test(k)) {
+        const v = localStorage.getItem(k) || '';
+        totalSize += v.length;
+        if (v.length > 2 * 1024 * 1024) {
+          try { localStorage.removeItem(k); } catch (_) {}
+          console.log('[ls-preventive] zu großes fdh_processed_rules entfernt (' + Math.round(v.length / 1024) + ' KB)');
+        }
+      }
+    }
+  } catch (_) {}
+})();
 
 function resetFilters() {
   APP_STATE.filters = { status: 'all', groupId: null, type: null, responderId: null, visibility: 'active' };
@@ -24999,12 +25045,21 @@ function _getProcessedMap() {
   catch (_) { return {}; }
 }
 function _saveProcessedMap(m) {
+  // v2.46.89: Cleanup: alt > 30 Tage raus. Bei Quota-Fehler: aggressiv kürzen auf 7 Tage.
+  const cutoff30 = Date.now() - 30 * 86400e3;
+  Object.keys(m).forEach(k => { if ((m[k].at || 0) < cutoff30) delete m[k]; });
   try {
-    // Cleanup: alles älter als 30 Tage rauswerfen, damit localStorage nicht explodiert
-    const cutoff = Date.now() - 30 * 86400e3;
-    Object.keys(m).forEach(k => { if ((m[k].at || 0) < cutoff) delete m[k]; });
     localStorage.setItem(PROCESSED_RULES_KEY, JSON.stringify(m));
-  } catch (_) {}
+  } catch (e) {
+    // Quota erreicht — aggressiv ausdünnen auf letzte 7 Tage und nochmal versuchen
+    const cutoff7 = Date.now() - 7 * 86400e3;
+    Object.keys(m).forEach(k => { if ((m[k].at || 0) < cutoff7) delete m[k]; });
+    try { localStorage.setItem(PROCESSED_RULES_KEY, JSON.stringify(m)); }
+    catch (_) {
+      // Immer noch zu voll — komplett verwerfen, App-Funktion bleibt erhalten
+      try { localStorage.removeItem(PROCESSED_RULES_KEY); } catch (_) {}
+    }
+  }
 }
 /* Per-Rule-Tracking statt globalem Rule-Set-Hash (v2.45.2):
    Storage-Shape: { "accId|ticketId": { rules: { "ruleId": ts, ... }, at: ts } }
