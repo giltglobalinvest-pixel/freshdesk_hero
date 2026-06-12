@@ -751,7 +751,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.93';
+const APP_VERSION = 'v2.46.94';
 
 /* ============================================================
    GLOBAL THEME — v2.46.12
@@ -14392,7 +14392,7 @@ let ASSISTANT_CTX = null;
 let ASSISTANT_REC = null;
 
 async function openAssistantModal(accountId, ticketId) {
-  ASSISTANT_CTX = { accountId, ticketId, ticket: null, command: '', action: null };
+  ASSISTANT_CTX = { accountId, ticketId, ticket: null, command: '', action: null, preAttachments: [] };
   let host = document.getElementById('subModalHost');
   if (!host) {
     host = document.createElement('div');
@@ -14523,6 +14523,32 @@ function renderAssistantInput() {
         ` : '<p class="text-[11px] text-ink-500 italic mt-2">Sprach-Eingabe in diesem Browser nicht verfügbar — nutze das Textfeld.</p>'}
         <textarea id="assistantCommand" placeholder="… oder hier tippen: z.B. „Antworte freundlich dass wir bis morgen Bescheid geben" / „Weise Sandra zu" / „Auf Gelöst setzen""
                   class="mt-2 w-full px-3 py-2.5 border border-ink-200 rounded-xl text-sm focus:ring-2 focus:ring-brand-500/30 focus:border-brand-500 resize-none" rows="3"></textarea>
+
+        <!-- v2.46.94: Anhang-Picker schon in der Eingabe-Phase. Die hier ausgewählten
+             Dateien werden nach der KI-Verarbeitung automatisch der ersten passenden
+             Aktion (reply/note/forward/marketing_email) zugeordnet. -->
+        ${(() => {
+          const atts = ASSISTANT_CTX?.preAttachments || [];
+          const list = atts.length ? `<ul class="mt-1 space-y-0.5">${atts.map((f, fi) => {
+            const sizeKb = Math.round((f.size || 0) / 1024);
+            return `<li class="flex items-center justify-between gap-2 bg-white border border-brand-200 rounded px-2 py-1 text-[11px]">
+              <span class="truncate text-ink-800"><i data-lucide="paperclip" class="w-3 h-3 inline -mt-0.5 mr-1 text-ink-500"></i>${escapeHtml(f.name)} <span class="text-ink-400">(${sizeKb} KB)</span></span>
+              <button type="button" onclick="_assistantRemovePreFile(${fi})" class="text-red-600 hover:text-red-700 shrink-0" title="Entfernen"><i data-lucide="x" class="w-3 h-3"></i></button>
+            </li>`;
+          }).join('')}</ul>` : '';
+          return `<div class="mt-2 bg-brand-50/40 border border-brand-200 rounded-lg px-2 py-1.5">
+            <div class="flex items-center justify-between gap-2 mb-1">
+              <span class="text-[10px] uppercase tracking-wider text-brand-800 font-bold inline-flex items-center gap-1"><i data-lucide="paperclip" class="w-3 h-3"></i> Anhänge ${atts.length ? '(' + atts.length + ')' : ''}</span>
+              <label class="text-[11px] text-brand-700 font-semibold cursor-pointer inline-flex items-center gap-1 hover:opacity-80">
+                <i data-lucide="plus" class="w-3 h-3"></i> Datei
+                <input type="file" multiple class="hidden" onchange="_assistantAddPreFiles(this)">
+              </label>
+            </div>
+            ${list}
+            <p class="text-[9px] text-ink-500 mt-1">Werden automatisch an die generierte Antwort/Notiz/Email gehängt. Max 20 MB pro Datei.</p>
+          </div>`;
+        })()}
+
         <button onclick="processAssistantCommand(this)" class="mt-2 w-full bg-brand-500 hover:bg-brand-600 text-white px-4 py-2.5 rounded-lg text-sm font-semibold inline-flex items-center justify-center gap-2">
           <i data-lucide="sparkles" class="w-4 h-4"></i> Verarbeiten
         </button>
@@ -14612,6 +14638,16 @@ async function processAssistantCommand(btn) {
   setBusy(btn, true, 'Claude analysiert…');
   try {
     const plan = await aiInterpretCommand(ctx.ticket, cmd, ctx.accountId);
+    // v2.46.94: Pre-Anhänge aus der Eingabe-Phase an die erste passende Action übergeben
+    if (ctx.preAttachments?.length) {
+      const target = plan.actions.find(a => ['reply', 'note', 'forward', 'marketing_email'].includes(a.type));
+      if (target) {
+        target._attachments = ctx.preAttachments.slice();
+        ctx.preAttachments = []; // verbraucht
+      } else {
+        toast('Anhänge konnten keiner passenden Aktion zugeordnet werden — sie werden ignoriert.', 'warn', 7000);
+      }
+    }
     ctx.plan = plan;
     // Backward-Compat für Stellen die noch ctx.action lesen
     ctx.action = plan.actions[0] || null;
@@ -15711,6 +15747,32 @@ async function _marketingTemplateChange(idx) {
 /* v2.46.93: Anhang-Handling im KI-Assistent.
    Files werden direkt im Action-State gehalten (a._attachments = [{name, type, size, blob}]).
    Beim Senden werden sie via FormData/multipart an FD geschickt. */
+/* v2.46.94: Pre-Phase-Anhänge (vor KI-Verarbeitung in der Eingabe ausgewählt).
+   Werden nach processAssistantCommand automatisch an die erste passende Action gehängt. */
+function _assistantAddPreFiles(inputEl) {
+  const ctx = ASSISTANT_CTX;
+  if (!ctx) return;
+  if (!ctx.preAttachments) ctx.preAttachments = [];
+  const files = Array.from(inputEl?.files || []);
+  const MAX_BYTES = 20 * 1024 * 1024;
+  for (const f of files) {
+    if (f.size > MAX_BYTES) {
+      toast('„' + f.name + '" ist zu groß (' + Math.round(f.size / 1024 / 1024) + ' MB) — max 20 MB', 'warn', 6000);
+      continue;
+    }
+    ctx.preAttachments.push({ name: f.name, type: f.type || 'application/octet-stream', size: f.size, blob: f });
+  }
+  if (inputEl) inputEl.value = '';
+  renderAssistantInput();
+}
+
+function _assistantRemovePreFile(fileIdx) {
+  const ctx = ASSISTANT_CTX;
+  if (!ctx?.preAttachments) return;
+  ctx.preAttachments.splice(fileIdx, 1);
+  renderAssistantInput();
+}
+
 async function _assistantAddFiles(idx, inputEl) {
   const ctx = ASSISTANT_CTX;
   if (!ctx?.plan?.actions?.[idx]) return;
