@@ -755,7 +755,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.101';
+const APP_VERSION = 'v2.46.102';
 
 /* ============================================================
    GLOBAL THEME — v2.46.12
@@ -25131,11 +25131,16 @@ const CONTACTS_STATE = {
   marketingByEmail: null,      // Map<email, MarketingEmail[]>
   showHidden: false,           // Versteckte mit anzeigen
   sort: 'name',                // 'name' | 'recent' | 'mails'
-  searchAccountId: 'all',      // 'all' oder Account-ID — in welchem Mandanten gesucht wird
+  searchAccountId: 'all',      // 'all' oder Account-ID
+  templateFilter: '',          // Marketing-Vorlage als Filter (template_title)
+  templateFilterMode: 'has',   // 'has' = hat Vorlage erhalten · 'missing' = hat NICHT erhalten
   busy: false,
   lastError: '',
   open: new Set(),             // Aufgeklappte Emails
   fsCheckCache: new Map(),     // email -> { checked:true, inFs:bool, contactId:'' }
+  searchCtrl: null,            // { aborted: false } — wird beim Suchen gesetzt, Stop kippt aborted=true
+  displayCount: 30,            // Wie viele Treffer aktuell sichtbar (Paging)
+  selected: new Set(),         // Email-Set für Massenversand-Auswahl
 };
 
 /* Lädt + cached die ContactFlags-Map. */
@@ -25257,8 +25262,11 @@ async function _searchFdContactsByParams(accountId, params, maxPerAccount) {
     }
   };
   const safe = (s) => String(s || '').replace(/'/g, "\\'").trim();
+  const ctrl = CONTACTS_STATE.searchCtrl;
+  const aborted = () => !!(ctrl && ctrl.aborted);
 
   // 1. Email direkt
+  if (aborted()) return [];
   if (params.email) {
     try {
       const q = '"email:\'' + safe(params.email) + '\'"';
@@ -25268,6 +25276,7 @@ async function _searchFdContactsByParams(accountId, params, maxPerAccount) {
   }
 
   // 2. Email-Domain — Autocomplete ist tolerant für Substring
+  if (aborted()) return found;
   if (params.email_domain && found.length < limit) {
     try {
       const term = String(params.email_domain).replace(/^@/, '');
@@ -25284,6 +25293,7 @@ async function _searchFdContactsByParams(accountId, params, maxPerAccount) {
   //    Trick: FDs /search/companies kennt KEIN name-Feld (nur domain + custom_fields).
   //    Strategie A: wenn email_domain bekannt → domain:'X' in search-DSL (erlaubt)
   //    Strategie B: /companies?per_page=100 paginated + clientside name-Filter
+  if (aborted()) return found;
   if (params.company && found.length < limit) {
     const companies = [];
     const seenCo = new Set();
@@ -25303,6 +25313,7 @@ async function _searchFdContactsByParams(accountId, params, maxPerAccount) {
       const needle = String(params.company).toLowerCase();
       let pages = 0;
       for (let page = 1; page <= 5; page++) {
+        if (aborted()) break;
         try {
           const list = await proxyJson(base + '/companies?per_page=100&page=' + page);
           const arr = Array.isArray(list) ? list : (list?.companies || []);
@@ -25321,6 +25332,7 @@ async function _searchFdContactsByParams(accountId, params, maxPerAccount) {
     if (!companies.length) errs.push('company: keine Firma „' + params.company + '" gefunden');
     // Pro Treffer Contacts laden
     for (const co of companies.slice(0, 10)) {
+      if (aborted()) break;
       if (found.length >= limit) break;
       try {
         const list = await proxyJson(base + '/contacts?company_id=' + encodeURIComponent(co.id) + '&per_page=100');
@@ -25333,6 +25345,7 @@ async function _searchFdContactsByParams(accountId, params, maxPerAccount) {
   }
 
   // 4. Name → Search-DSL + Autocomplete-Fallback
+  if (aborted()) return found;
   if (params.name && found.length < limit) {
     try {
       const q = '"name:\'' + safe(params.name) + '\'"';
@@ -25413,8 +25426,8 @@ async function renderContactsPage() {
           '</select>' +
         '</label>' +
       '</div>' +
-      '<div class="flex flex-wrap gap-2 items-center">' +
-        '<button onclick="_runContactSearch(this)" class="flex-1 min-w-[140px] px-3 py-2 bg-gradient-to-br from-orange-500 to-amber-600 hover:from-orange-600 hover:to-amber-700 text-white rounded-lg text-sm font-bold inline-flex items-center justify-center gap-1"><i data-lucide="search" class="w-4 h-4"></i> Suchen</button>' +
+      '<div id="contactsActionRow" class="flex flex-wrap gap-2 items-center">' +
+        '<button id="contactsSearchBtn" onclick="_runContactSearch(this)" class="flex-1 min-w-[140px] px-3 py-2 bg-gradient-to-br from-orange-500 to-amber-600 hover:from-orange-600 hover:to-amber-700 text-white rounded-lg text-sm font-bold inline-flex items-center justify-center gap-1"><i data-lucide="search" class="w-4 h-4"></i> Suchen</button>' +
         '<select id="contactsSort" onchange="_onContactsSort(this.value)" class="px-2 py-2 border border-ink-300 rounded-lg text-sm bg-white">' +
           '<option value="name"'   + (CONTACTS_STATE.sort === 'name'   ? ' selected' : '') + '>A → Z</option>' +
           '<option value="recent"' + (CONTACTS_STATE.sort === 'recent' ? ' selected' : '') + '>Letzte Marketing-Mail</option>' +
@@ -25425,6 +25438,32 @@ async function renderContactsPage() {
           'Versteckte anzeigen' +
         '</label>' +
       '</div>' +
+      '<div class="flex flex-wrap gap-2 items-center pt-1 border-t border-ink-100">' +
+        '<label class="text-[11px] inline-flex items-center gap-1.5 flex-1 min-w-[180px]">' +
+          '<i data-lucide="filter" class="w-3.5 h-3.5 text-ink-500"></i>' +
+          '<span class="font-semibold text-ink-600 uppercase tracking-wider">Mkt-Filter:</span>' +
+          '<select id="contactsTplFilter" onchange="_onTplFilter(this.value)" class="flex-1 px-2 py-1.5 border border-ink-300 rounded-lg text-[11px] bg-white">' +
+            '<option value="">— keine Filterung —</option>' +
+            _contactTplFilterOptions() +
+          '</select>' +
+        '</label>' +
+        '<label class="text-[11px] inline-flex items-center gap-2 select-none">' +
+          '<span class="text-ink-500">Modus:</span>' +
+          '<select id="contactsTplFilterMode" onchange="_onTplFilterMode(this.value)" class="px-2 py-1.5 border border-ink-300 rounded-lg text-[11px] bg-white">' +
+            '<option value="has"'     + (CONTACTS_STATE.templateFilterMode === 'has'     ? ' selected' : '') + '>hat erhalten</option>' +
+            '<option value="missing"' + (CONTACTS_STATE.templateFilterMode === 'missing' ? ' selected' : '') + '>hat NICHT erhalten</option>' +
+          '</select>' +
+        '</label>' +
+      '</div>' +
+    '</div>' +
+    // Massenversand-Toolbar (versteckt bis Auswahl > 0)
+    '<div id="contactsBulkBar" class="hidden bg-orange-600 text-white rounded-xl px-3 py-2 flex flex-wrap items-center gap-2 shadow-md">' +
+      '<i data-lucide="check-square" class="w-4 h-4"></i>' +
+      '<span id="contactsBulkLabel" class="text-sm font-bold">0 ausgewählt</span>' +
+      '<div class="flex-1"></div>' +
+      '<button onclick="_selectAllVisible()" class="text-[11px] bg-white/15 hover:bg-white/25 px-2 py-1 rounded inline-flex items-center gap-1"><i data-lucide="list-checks" class="w-3.5 h-3.5"></i> Alle sichtbaren</button>' +
+      '<button onclick="_clearSelection()" class="text-[11px] bg-white/15 hover:bg-white/25 px-2 py-1 rounded inline-flex items-center gap-1"><i data-lucide="x" class="w-3.5 h-3.5"></i> Leeren</button>' +
+      '<button onclick="_openBulkMarketing()" class="text-[11px] bg-white text-orange-700 hover:bg-orange-50 px-3 py-1 rounded font-bold inline-flex items-center gap-1"><i data-lucide="megaphone" class="w-3.5 h-3.5"></i> Marketing-Mail senden</button>' +
     '</div>' +
     '<div id="contactsResults">' +
       '<div class="bg-white rounded-xl border border-dashed border-ink-300 p-6 text-center text-sm text-ink-500">' +
@@ -25471,6 +25510,356 @@ function _onShowHiddenToggle(v) {
 function _onContactsSearchAccount(v) {
   CONTACTS_STATE.searchAccountId = v || 'all';
 }
+function _onTplFilter(v) {
+  CONTACTS_STATE.templateFilter = v || '';
+  _renderContactsResults();
+}
+function _onTplFilterMode(v) {
+  CONTACTS_STATE.templateFilterMode = v === 'missing' ? 'missing' : 'has';
+  _renderContactsResults();
+}
+function _contactTplFilterOptions() {
+  const mkt = CONTACTS_STATE.marketingByEmail || new Map();
+  const tplSet = new Set();
+  mkt.forEach(list => list.forEach(m => { if (m.template_title) tplSet.add(m.template_title); }));
+  const titles = Array.from(tplSet).sort((a, b) => a.localeCompare(b, 'de'));
+  const sel = CONTACTS_STATE.templateFilter;
+  return titles.map(t =>
+    '<option value="' + escapeAttr(t) + '"' + (t === sel ? ' selected' : '') + '>' + escapeHtml(t) + '</option>'
+  ).join('');
+}
+
+function _stopContactSearch() {
+  if (CONTACTS_STATE.searchCtrl) CONTACTS_STATE.searchCtrl.aborted = true;
+  toast('Suche wird abgebrochen…', 'warn', 2000);
+}
+
+function _loadMoreContacts() {
+  CONTACTS_STATE.displayCount = (CONTACTS_STATE.displayCount || 30) + 30;
+  _renderContactsResults();
+}
+
+function _toggleSelect(email) {
+  const e = String(email || '').toLowerCase();
+  if (!e) return;
+  if (CONTACTS_STATE.selected.has(e)) CONTACTS_STATE.selected.delete(e);
+  else CONTACTS_STATE.selected.add(e);
+  _updateBulkBar();
+}
+
+function _updateBulkBar() {
+  const bar = document.getElementById('contactsBulkBar');
+  const lbl = document.getElementById('contactsBulkLabel');
+  if (!bar || !lbl) return;
+  const n = CONTACTS_STATE.selected.size;
+  if (n === 0) { bar.classList.add('hidden'); return; }
+  bar.classList.remove('hidden');
+  lbl.textContent = n + ' ausgewählt';
+}
+
+function _selectAllVisible() {
+  // Wende dieselben Filter wie der Renderer an, dann markiere die ersten displayCount
+  const flags = CONTACTS_STATE.flags || new Map();
+  const mkt = CONTACTS_STATE.marketingByEmail || new Map();
+  let pool = CONTACTS_STATE.results.map(c => {
+    const e = String(c.email || '').toLowerCase();
+    const flag = flags.get(e) || null;
+    const mails = mkt.get(e) || [];
+    return { c, e, flag, mails, hidden: flag?.no_sales_potential === 'true' };
+  });
+  if (!CONTACTS_STATE.showHidden) pool = pool.filter(x => !x.hidden);
+  if (CONTACTS_STATE.templateFilter) {
+    const t = CONTACTS_STATE.templateFilter;
+    if (CONTACTS_STATE.templateFilterMode === 'missing') {
+      pool = pool.filter(x => !x.mails.some(m => String(m.template_title) === t));
+    } else {
+      pool = pool.filter(x => x.mails.some(m => String(m.template_title) === t));
+    }
+  }
+  pool.slice(0, CONTACTS_STATE.displayCount).forEach(row => {
+    if (row.e) CONTACTS_STATE.selected.add(row.e);
+  });
+  _renderContactsResults();
+}
+
+function _clearSelection() {
+  CONTACTS_STATE.selected.clear();
+  _renderContactsResults();
+}
+
+/* === v2.46.102: Bulk-Marketing-Send ========================================
+   Öffnet einen Versand-Modal mit der gewählten Vorlage für alle ausgewählten
+   Kontakte. Constraint: alle Empfänger müssen demselben Account angehören —
+   Vorlagen, Absender und Signatur kommen aus diesem Account.
+   Pro Empfänger wird vor dem Versand die Doublette geprüft. */
+async function _openBulkMarketing() {
+  const emails = Array.from(CONTACTS_STATE.selected);
+  if (!emails.length) { toast('Keine Kontakte ausgewählt.', 'warn'); return; }
+  // Selected → resolved contacts
+  const byEmail = new Map();
+  CONTACTS_STATE.results.forEach(c => { byEmail.set(String(c.email || '').toLowerCase(), c); });
+  const contacts = emails.map(e => byEmail.get(e)).filter(Boolean);
+  if (!contacts.length) { toast('Auswahl wurde inzwischen ausgeblendet.', 'warn'); return; }
+  // Account-Konsistenz
+  const accIds = Array.from(new Set(contacts.map(c => String(c._accountId))));
+  if (accIds.length > 1) {
+    toast('Massenversand benötigt Kontakte aus EINEM Mandanten. Bitte zuerst Mandant filtern oder Auswahl bereinigen.', 'error', 7000);
+    return;
+  }
+  const accountId = accIds[0];
+  // Modal-Skelett
+  let host = document.getElementById('subModalHost');
+  if (!host) { host = document.createElement('div'); host.id = 'subModalHost'; document.body.appendChild(host); }
+  host.innerHTML =
+    '<div class="fixed inset-0 z-[70] flex items-end justify-center bg-black/60">' +
+      '<div class="bg-white w-full max-w-lg rounded-t-3xl shadow-2xl p-8 text-center safe-bottom">' +
+        '<div class="spinner inline-block w-7 h-7 border-[3px] text-orange-500"></div>' +
+        '<p class="text-sm text-ink-500 mt-2">Lade Vorlagen + Absender…</p>' +
+      '</div>' +
+    '</div>';
+  try {
+    const [cannedData, configs] = await Promise.all([
+      ensureCannedResponsesLoaded(accountId),
+      ensureEmailConfigsLoaded(accountId),
+    ]);
+    const responses = cannedData?.responses || [];
+    if (!configs.length) {
+      _bulkClose();
+      toast('Keine Absender-Adressen für diesen Mandanten konfiguriert.', 'error', 6000);
+      return;
+    }
+    // History pro Empfänger laden
+    const histories = await Promise.all(contacts.map(c =>
+      loadMarketingEmailsForEmail(c.email).catch(() => [])
+    ));
+    window._BULK_CTX = { accountId, contacts, histories, responses, configs };
+    _renderBulkMarketingModal();
+  } catch (e) {
+    _bulkClose();
+    toast('Laden fehlgeschlagen: ' + (e.message || e), 'error', 8000);
+  }
+}
+
+function _bulkClose() {
+  delete window._BULK_CTX;
+  const host = document.getElementById('subModalHost');
+  if (host) host.innerHTML = '';
+}
+
+function _renderBulkMarketingModal() {
+  const ctx = window._BULK_CTX;
+  if (!ctx) return;
+  const host = document.getElementById('subModalHost');
+  if (!host) return;
+  const acc = (APP_STATE.accounts || []).find(a => a.id === ctx.accountId);
+  const primaryCfg = ctx.configs.find(c => c.primary_role || c.default) || ctx.configs[0];
+  const tplOpts = '<option value="">— Vorlage wählen —</option>' +
+    ctx.responses.map(r => {
+      const folderSuffix = r._folderName ? ' · ' + r._folderName : '';
+      return '<option value="' + r.id + '">' + escapeHtml((r.title || ('#' + r.id)) + folderSuffix) + '</option>';
+    }).join('');
+  const cfgOpts = ctx.configs.map(c => {
+    const label = (c.name || '') + ' <' + (c.reply_email || c.support_email || c.email || '') + '>';
+    return '<option value="' + c.id + '"' + (c.id === primaryCfg?.id ? ' selected' : '') + '>' + escapeHtml(label) + '</option>';
+  }).join('');
+  host.innerHTML =
+    '<div class="fixed inset-0 z-[70] flex items-end justify-center bg-black/60" onclick="if(event.target===this)_bulkClose()">' +
+      '<div class="bg-white w-full max-w-2xl rounded-t-3xl shadow-2xl flex flex-col safe-bottom" style="max-height:94vh">' +
+        '<div class="safe-top px-4 py-3 border-b border-ink-200 flex items-center justify-between gap-2 shrink-0">' +
+          '<h3 class="font-bold text-ink-900 inline-flex items-center gap-2"><i data-lucide="megaphone" class="w-5 h-5 text-orange-600"></i> Massenversand · ' + ctx.contacts.length + ' Empfänger · ' + escapeHtml(acc?.name || ctx.accountId) + '</h3>' +
+          '<button onclick="_bulkClose()" class="w-9 h-9 rounded-lg hover:bg-ink-100 flex items-center justify-center"><i data-lucide="x" class="w-5 h-5 text-ink-700"></i></button>' +
+        '</div>' +
+        '<div class="flex-1 overflow-y-auto p-4 space-y-3">' +
+          '<label class="text-xs font-bold text-ink-700 uppercase tracking-wider block">Vorlage *</label>' +
+          '<select id="bulkTemplate" onchange="_bulkTemplateChange()" class="w-full px-3 py-2.5 border border-ink-300 rounded-xl text-sm bg-white">' + tplOpts + '</select>' +
+          '<label class="text-xs font-bold text-ink-700 uppercase tracking-wider block">Von</label>' +
+          '<select id="bulkFrom" class="w-full px-3 py-2.5 border border-ink-300 rounded-xl text-sm bg-white">' + cfgOpts + '</select>' +
+          '<label class="text-xs font-bold text-ink-700 uppercase tracking-wider block">Betreff *</label>' +
+          '<input id="bulkSubject" type="text" value="" class="w-full px-3 py-2.5 border border-ink-300 rounded-xl text-sm">' +
+          '<label class="text-xs font-bold text-ink-700 uppercase tracking-wider block">Nachricht (Platzhalter werden pro Empfänger ersetzt) *</label>' +
+          '<textarea id="bulkBody" rows="8" placeholder="Vorlage wählen, dann erscheint hier der Text…" class="w-full px-3 py-2.5 border border-ink-300 rounded-xl text-[12px] font-mono leading-snug resize-y"></textarea>' +
+          '<div class="bg-ink-50 border border-ink-200 rounded-xl p-2.5">' +
+            '<p class="text-[11px] font-bold text-ink-700 mb-1 inline-flex items-center gap-1"><i data-lucide="users" class="w-3.5 h-3.5"></i> Empfänger (' + ctx.contacts.length + ')</p>' +
+            '<div id="bulkRecipientsList" class="space-y-1 max-h-40 overflow-y-auto">' +
+              ctx.contacts.map((c, i) => {
+                const dupTpl = ctx.histories[i] || [];
+                const hasDup = false; // wird beim Template-Change live aktualisiert
+                return '<div class="text-[11px] text-ink-700 flex items-center justify-between gap-2 px-1.5 py-0.5">' +
+                  '<span class="truncate"><b>' + escapeHtml(c.name || c.email) + '</b> &lt;' + escapeHtml(c.email) + '&gt;</span>' +
+                  '<span id="bulkDup_' + i + '" class="text-[9px] shrink-0"></span>' +
+                '</div>';
+              }).join('') +
+            '</div>' +
+          '</div>' +
+          '<div id="bulkErr" class="hidden bg-red-50 border border-red-200 rounded-xl p-3 text-sm text-red-800"></div>' +
+          '<div id="bulkProgress" class="hidden bg-amber-50 border border-amber-200 rounded-xl p-3"><div class="flex justify-between text-[11px] font-bold text-amber-900 mb-1"><span id="bulkProgressLabel">Sende 0/' + ctx.contacts.length + '…</span><span id="bulkProgressPct">0%</span></div><div class="w-full bg-amber-200 rounded-full h-2 overflow-hidden"><div id="bulkProgressBar" class="bg-amber-600 h-full transition-all" style="width:0%"></div></div></div>' +
+        '</div>' +
+        '<div class="border-t border-ink-200 p-3 flex gap-2 shrink-0">' +
+          '<button id="bulkCancelBtn" onclick="_bulkClose()" class="flex-1 bg-ink-100 hover:bg-ink-200 text-ink-700 rounded-xl px-3 py-3 text-sm font-bold">Abbrechen</button>' +
+          '<button id="bulkSendBtn" onclick="_processBulkMarketing(this)" class="flex-[2] bg-orange-600 hover:bg-orange-700 text-white rounded-xl px-3 py-3 text-sm font-bold inline-flex items-center justify-center gap-1.5 shadow-md">' +
+            '<i data-lucide="send" class="w-4 h-4"></i> An ' + ctx.contacts.length + ' senden' +
+          '</button>' +
+        '</div>' +
+      '</div>' +
+    '</div>';
+  if (window.lucide) lucide.createIcons();
+}
+
+function _bulkTemplateChange() {
+  const ctx = window._BULK_CTX;
+  if (!ctx) return;
+  const sel = document.getElementById('bulkTemplate');
+  const tplId = parseInt(sel?.value || '0', 10);
+  if (!tplId) {
+    // Reset Doublette-Badges
+    ctx.contacts.forEach((_, i) => {
+      const el = document.getElementById('bulkDup_' + i);
+      if (el) el.innerHTML = '';
+    });
+    return;
+  }
+  const tpl = ctx.responses.find(r => r.id === tplId);
+  if (!tpl) return;
+  // Betreff + Body initialisieren — Platzhalter werden pro Empfänger erst beim Versand ersetzt
+  const subj = String(tpl.title_text || tpl.subject || tpl.title || '');
+  const bodyHtml = String(tpl.content_html || tpl.content || '');
+  document.getElementById('bulkSubject').value = subj;
+  document.getElementById('bulkBody').value = htmlToText(bodyHtml);
+  // Doublette pro Empfänger anzeigen
+  ctx.contacts.forEach((c, i) => {
+    const hist = ctx.histories[i] || [];
+    const dup = hist.find(h => String(h.template_id_fd) === String(tplId));
+    const el = document.getElementById('bulkDup_' + i);
+    if (!el) return;
+    if (dup) {
+      const dt = dup.sent_at ? new Date(dup.sent_at).toLocaleDateString('de-DE') : '?';
+      el.innerHTML = '<span class="bg-amber-100 text-amber-800 px-1.5 py-0.5 rounded">⚠ bereits ' + escapeHtml(dt) + '</span>';
+    } else {
+      el.innerHTML = '<span class="bg-emerald-50 text-emerald-700 px-1.5 py-0.5 rounded">neu</span>';
+    }
+  });
+}
+
+async function _processBulkMarketing(btn) {
+  const ctx = window._BULK_CTX;
+  if (!ctx) return;
+  const errEl = document.getElementById('bulkErr');
+  const setErr = msg => { if (errEl) { errEl.textContent = msg; errEl.classList.remove('hidden'); } };
+  if (errEl) errEl.classList.add('hidden');
+  const tplId    = parseInt(document.getElementById('bulkTemplate')?.value || '0', 10);
+  const subject  = (document.getElementById('bulkSubject')?.value || '').trim();
+  const body     = (document.getElementById('bulkBody')?.value || '').trim();
+  const fromId   = parseInt(document.getElementById('bulkFrom')?.value || '0', 10);
+  if (!subject) return setErr('Betreff fehlt');
+  if (!body)    return setErr('Nachricht fehlt');
+  if (!fromId)  return setErr('Absender fehlt');
+  // Zähle Doubletten
+  const tpl = ctx.responses.find(r => r.id === tplId);
+  let dupCount = 0;
+  ctx.contacts.forEach((c, i) => {
+    const hist = ctx.histories[i] || [];
+    if (hist.find(h => String(h.template_id_fd) === String(tplId))) dupCount++;
+  });
+  const sendMsg = dupCount
+    ? 'Bist du sicher? ' + ctx.contacts.length + ' Mails werden gesendet — davon ' + dupCount + ' Empfänger, die diese Vorlage schon bekommen haben.'
+    : 'Bist du sicher? ' + ctx.contacts.length + ' Marketing-Mails werden gesendet.';
+  if (!confirm(sendMsg)) return;
+  // Senden
+  setBusy(btn, true, 'Sende…');
+  document.getElementById('bulkCancelBtn').textContent = 'Stoppen';
+  const progress = document.getElementById('bulkProgress');
+  const bar = document.getElementById('bulkProgressBar');
+  const lbl = document.getElementById('bulkProgressLabel');
+  const pct = document.getElementById('bulkProgressPct');
+  progress.classList.remove('hidden');
+  const total = ctx.contacts.length;
+  let ok = 0, fail = 0;
+  const failed = [];
+  const me = await fetchAgentMe(ctx.accountId).catch(() => null);
+  const sig = me?.signature || '';
+  const userName = APP_KEYS.user?.name || '';
+  const firstNm = full => String(full || '').trim().split(/\s+/)[0] || '';
+  ctx._abort = false;
+  // Stop-Verhalten: 2. Klick auf "Stoppen" kippt abort
+  document.getElementById('bulkCancelBtn').onclick = () => { ctx._abort = true; };
+  for (let i = 0; i < ctx.contacts.length; i++) {
+    if (ctx._abort) break;
+    const c = ctx.contacts[i];
+    const placeholderCtx = {
+      contactName:      c.name || '',
+      contactFirstName: firstNm(c.name),
+      contactEmail:     c.email || '',
+      userName,
+      userFirstName:    firstNm(userName),
+      userEmail:        APP_KEYS.user?.email || '',
+      companyName:      c.company_name || '',
+      dealName:         '',
+      dealAmount:       '',
+      angebotNr:        '',
+    };
+    const subjI = _renderPlaceholders(subject, placeholderCtx);
+    const bodyI = _renderPlaceholders(body, placeholderCtx);
+    const bodyHtml = appendSignatureHtml(textToHtmlForFreshdesk(bodyI), sig);
+    try {
+      const created = await proxyJson('/freshdesk/' + encodeURIComponent(ctx.accountId) + '/api/v2/tickets/outbound_email', {
+        method: 'POST',
+        body: JSON.stringify({
+          subject: subjI,
+          description: bodyHtml,
+          email: c.email,
+          email_config_id: fromId,
+          priority: 1,
+          status: 5,
+        }),
+      });
+      if (!created?.id) throw new Error('keine Ticket-ID');
+      ok++;
+      recordMarketingEmail(ctx.accountId, {
+        recipient_email:    c.email,
+        recipient_name:     c.name || '',
+        contact_id_fd:      c.id || '',
+        template_id_fd:     tplId || '',
+        template_title:     tpl?.title || '',
+        betreff:            subjI,
+        body_snapshot:      bodyI,
+        source_ticket_id:   '',
+        outbound_ticket_id: created.id,
+      }).catch(() => {});
+    } catch (e) {
+      fail++;
+      failed.push({ email: c.email, name: c.name || '', err: e.message || String(e) });
+    }
+    const done = i + 1;
+    const p = Math.round(done / total * 100);
+    bar.style.width = p + '%';
+    lbl.textContent = 'Sende ' + done + '/' + total + (fail ? ' · ' + fail + ' Fehler' : '');
+    pct.textContent = p + '%';
+  }
+  setBusy(btn, false);
+  // Cache invalidieren damit die History up-to-date ist
+  CONTACTS_STATE.marketingByEmail = null;
+  loadAllMarketingEmails(2000).then(list => {
+    const map = new Map();
+    list.forEach(m => {
+      const e = String(m.recipient_email || '').trim().toLowerCase();
+      if (!e) return;
+      if (!map.has(e)) map.set(e, []);
+      map.get(e).push(m);
+    });
+    CONTACTS_STATE.marketingByEmail = map;
+    _renderContactsResults();
+  }).catch(() => {});
+  // Ergebnis-Toast
+  if (fail) {
+    toast(ok + ' gesendet, ' + fail + ' Fehler. Details in Console.', 'warn', 6000);
+    console.warn('Bulk-Versand Fehler:', failed);
+  } else {
+    toast('Alle ' + ok + ' Mails erfolgreich versandt.', 'success', 5000);
+  }
+  // Selection leeren
+  CONTACTS_STATE.selected.clear();
+  _bulkClose();
+}
 
 async function _runContactSearch(btn) {
   const txt = (document.getElementById('contactsPrompt')?.value || '').trim();
@@ -25479,6 +25868,16 @@ async function _runContactSearch(btn) {
   CONTACTS_STATE.busy = true;
   CONTACTS_STATE.lastError = '';
   CONTACTS_STATE.open.clear();
+  CONTACTS_STATE.selected.clear();
+  CONTACTS_STATE.displayCount = 30;
+  CONTACTS_STATE.searchCtrl = { aborted: false };
+  // Such-Button durch Stop-Button ersetzen
+  const row = document.getElementById('contactsActionRow');
+  const origBtn = document.getElementById('contactsSearchBtn');
+  if (row && origBtn) {
+    origBtn.outerHTML = '<button id="contactsSearchBtn" onclick="_stopContactSearch()" class="flex-1 min-w-[140px] px-3 py-2 bg-red-600 hover:bg-red-700 text-white rounded-lg text-sm font-bold inline-flex items-center justify-center gap-1"><i data-lucide="square" class="w-4 h-4"></i> Stoppen</button>';
+    if (window.lucide) lucide.createIcons();
+  }
   setBusy(btn, true, 'KI parsed…');
   const host = $('contactsResults');
   if (host) host.innerHTML = '<div class="bg-white rounded-xl border border-ink-200 p-6 text-center"><span class="spinner inline-block w-6 h-6 border-[3px] text-orange-500"></span><p class="text-sm text-ink-500 mt-2">KI parsed Suchanfrage…</p></div>';
@@ -25538,7 +25937,20 @@ async function _runContactSearch(btn) {
     CONTACTS_STATE.results = [];
   } finally {
     CONTACTS_STATE.busy = false;
+    const wasAborted = !!(CONTACTS_STATE.searchCtrl?.aborted);
+    CONTACTS_STATE.searchCtrl = null;
     setBusy(btn, false);
+    // Stop-Button zurück zu Such-Button
+    const stopBtn = document.getElementById('contactsSearchBtn');
+    if (stopBtn) {
+      stopBtn.outerHTML = '<button id="contactsSearchBtn" onclick="_runContactSearch(this)" class="flex-1 min-w-[140px] px-3 py-2 bg-gradient-to-br from-orange-500 to-amber-600 hover:from-orange-600 hover:to-amber-700 text-white rounded-lg text-sm font-bold inline-flex items-center justify-center gap-1"><i data-lucide="search" class="w-4 h-4"></i> Suchen</button>';
+      if (window.lucide) lucide.createIcons();
+    }
+    if (wasAborted && CONTACTS_STATE.results.length) {
+      toast('Suche abgebrochen — ' + CONTACTS_STATE.results.length + ' Teil-Treffer geladen.', 'warn', 4000);
+    } else if (wasAborted) {
+      CONTACTS_STATE.lastError = 'Suche abgebrochen.';
+    }
     _renderContactsResults();
   }
 }
@@ -25588,6 +26000,7 @@ function _renderContactsResults() {
   if (CONTACTS_STATE.busy) return; // Spinner bleibt
   if (CONTACTS_STATE.lastError && !CONTACTS_STATE.results.length) {
     host.innerHTML = '<div class="bg-amber-50 border border-amber-200 rounded-xl p-3 text-sm text-amber-900">' + escapeHtml(CONTACTS_STATE.lastError) + '</div>';
+    _updateBulkBar();
     return;
   }
   if (!CONTACTS_STATE.results.length) {
@@ -25597,6 +26010,7 @@ function _renderContactsResults() {
       '<p class="text-[11px] text-ink-400 mt-1">Geladene Kontakte siehst du hier — mit Marketing-History und Sync-Status.</p>' +
     '</div>';
     if (window.lucide) lucide.createIcons();
+    _updateBulkBar();
     return;
   }
   const flags = CONTACTS_STATE.flags || new Map();
@@ -25610,6 +26024,15 @@ function _renderContactsResults() {
     return { c, e, flag, mails, lastTs, hidden: flag?.no_sales_potential === 'true' };
   });
   if (!CONTACTS_STATE.showHidden) list = list.filter(x => !x.hidden);
+  // Template-Filter
+  if (CONTACTS_STATE.templateFilter) {
+    const t = CONTACTS_STATE.templateFilter;
+    if (CONTACTS_STATE.templateFilterMode === 'missing') {
+      list = list.filter(x => !x.mails.some(m => String(m.template_title) === t));
+    } else {
+      list = list.filter(x => x.mails.some(m => String(m.template_title) === t));
+    }
+  }
   // Sortieren
   if (CONTACTS_STATE.sort === 'recent') {
     list.sort((a, b) => b.lastTs - a.lastTs || (a.c.name || '').localeCompare(b.c.name || '', 'de'));
@@ -25619,22 +26042,40 @@ function _renderContactsResults() {
     list.sort((a, b) => (a.c.name || a.e).localeCompare(b.c.name || b.e, 'de'));
   }
   const totalHits = CONTACTS_STATE.results.length;
+  const filteredCount = list.length;
   const hiddenCount = CONTACTS_STATE.results.filter(c => {
     const f = flags.get(String(c.email || '').toLowerCase());
     return f?.no_sales_potential === 'true';
   }).length;
+  // Pagination-Slice
+  const display = CONTACTS_STATE.displayCount || 30;
+  const visible = list.slice(0, display);
+  const hasMore = filteredCount > display;
+  // Vorlagen-Filter-Dropdown nachfüllen (falls sich History geändert hat)
+  const tplSel = document.getElementById('contactsTplFilter');
+  if (tplSel) {
+    const v = tplSel.value;
+    tplSel.innerHTML = '<option value="">— keine Filterung —</option>' + _contactTplFilterOptions();
+    tplSel.value = v;
+  }
   host.innerHTML =
     '<p class="text-[10px] text-ink-500 uppercase tracking-wider mb-2 px-1">' +
-      list.length + ' angezeigt · ' + totalHits + ' Treffer' +
+      visible.length + ' angezeigt · ' + filteredCount + ' im Filter · ' + totalHits + ' Treffer gesamt' +
       (hiddenCount ? ' · ' + hiddenCount + ' ohne Sales-Potenzial' + (CONTACTS_STATE.showHidden ? '' : ' (ausgeblendet)') : '') +
+      (CONTACTS_STATE.templateFilter ? ' · Filter: ' + escapeHtml(CONTACTS_STATE.templateFilterMode === 'missing' ? 'OHNE ' : 'MIT ') + '„' + escapeHtml(CONTACTS_STATE.templateFilter) + '"' : '') +
     '</p>' +
-    list.map(row => _renderContactSearchCard(row)).join('');
+    visible.map(row => _renderContactSearchCard(row)).join('') +
+    (hasMore
+      ? '<button onclick="_loadMoreContacts()" class="w-full mt-2 px-3 py-3 bg-white hover:bg-ink-50 border-2 border-dashed border-ink-300 text-ink-700 rounded-xl text-sm font-bold inline-flex items-center justify-center gap-2"><i data-lucide="chevron-down" class="w-4 h-4"></i> Nächste 30 anzeigen (' + (filteredCount - display) + ' verbleibend)</button>'
+      : '');
   if (window.lucide) lucide.createIcons();
+  _updateBulkBar();
 }
 
 function _renderContactSearchCard(row) {
   const c = row.c;
   const isOpen = CONTACTS_STATE.open.has(row.e);
+  const isSel = CONTACTS_STATE.selected.has(row.e);
   const acc = (APP_STATE.accounts || []).find(a => a.id === c._accountId);
   const accName = acc?.name || c._accountId;
   const mails = row.mails.slice().sort((a, b) =>
@@ -25656,32 +26097,56 @@ function _renderContactSearchCard(row) {
   } else if (isOpen) {
     syncBadge = '<span class="text-[9px] bg-ink-100 text-ink-500 px-1.5 py-0.5 rounded inline-flex items-center gap-1"><span class="spinner inline-block w-2.5 h-2.5 border-[1.5px]"></span> Sync?</span>';
   }
-  const mktBadge = mails.length
-    ? '<span class="text-[9px] bg-orange-100 text-orange-700 px-1.5 py-0.5 rounded font-bold" title="Marketing-Mails versandt">' + mails.length + '× Mkt</span>'
-    : '<span class="text-[9px] bg-emerald-50 text-emerald-700 px-1.5 py-0.5 rounded" title="Noch keine Marketing-Mail">neu</span>';
+  // Marketing-Tags: pro eindeutiger Vorlage ein Chip mit Datum
+  const uniqueTpl = new Map();
+  mails.forEach(m => {
+    const t = String(m.template_title || '(freier Text)');
+    if (!uniqueTpl.has(t) || new Date(m.sent_at || 0) > new Date(uniqueTpl.get(t).sent_at || 0)) {
+      uniqueTpl.set(t, m);
+    }
+  });
+  const tplFilterActive = CONTACTS_STATE.templateFilter;
+  const mktTags = mails.length
+    ? '<div class="flex flex-wrap gap-1 mt-1">' +
+        Array.from(uniqueTpl.entries()).slice(0, 6).map(([title, m]) => {
+          const isFiltered = tplFilterActive && title === tplFilterActive;
+          const dt = m.sent_at ? new Date(m.sent_at).toLocaleDateString('de-DE', { day:'2-digit', month:'2-digit', year:'2-digit' }) : '';
+          return '<span class="text-[9px] ' + (isFiltered ? 'bg-orange-200 text-orange-900 ring-1 ring-orange-400' : 'bg-orange-50 text-orange-700 border border-orange-200') + ' px-1.5 py-0.5 rounded" title="' + escapeAttr(title + (dt ? ' · ' + dt : '')) + '"><i data-lucide="megaphone" class="w-2.5 h-2.5 inline -mt-0.5"></i> ' + escapeHtml(title.length > 24 ? title.slice(0, 22) + '…' : title) + (dt ? ' <span class="opacity-60">· ' + escapeHtml(dt) + '</span>' : '') + '</span>';
+        }).join('') +
+        (uniqueTpl.size > 6 ? '<span class="text-[9px] text-ink-400 px-1">+' + (uniqueTpl.size - 6) + '</span>' : '') +
+      '</div>'
+    : '<span class="text-[9px] bg-emerald-50 text-emerald-700 px-1.5 py-0.5 rounded mt-1 inline-block" title="Noch keine Marketing-Mail">neu — noch keine Marketing-Mail</span>';
+  // Action-Buttons rechts
+  const sendBtn = '<button onclick="event.stopPropagation();openMarketingFromContactModal(' + JSON.stringify(c._accountId) + ',' + JSON.stringify(row.e) + ',' + JSON.stringify(c.name || '') + ',' + Number(c.id || 0) + ', null)" class="text-[10px] bg-orange-50 hover:bg-orange-100 border border-orange-300 text-orange-700 px-2 py-1 rounded inline-flex items-center gap-1" title="Marketing-Email an diesen Kontakt"><i data-lucide="megaphone" class="w-3 h-3"></i></button>';
   const hideBtn = row.hidden
-    ? '<button onclick="event.stopPropagation();_toggleHideContact(' + JSON.stringify(row.e) + ', this)" class="text-[10px] bg-ink-200 hover:bg-ink-300 text-ink-700 px-2 py-1 rounded inline-flex items-center gap-1" title="Wieder einblenden"><i data-lucide="eye" class="w-3 h-3"></i> ausgeblendet</button>'
+    ? '<button onclick="event.stopPropagation();_toggleHideContact(' + JSON.stringify(row.e) + ', this)" class="text-[10px] bg-ink-200 hover:bg-ink-300 text-ink-700 px-2 py-1 rounded inline-flex items-center gap-1" title="Wieder einblenden"><i data-lucide="eye" class="w-3 h-3"></i></button>'
     : '<button onclick="event.stopPropagation();_toggleHideContact(' + JSON.stringify(row.e) + ', this)" class="text-[10px] bg-white hover:bg-ink-100 border border-ink-300 text-ink-600 px-2 py-1 rounded inline-flex items-center gap-1" title="Kein Sales-Potenzial — ausblenden"><i data-lucide="eye-off" class="w-3 h-3"></i></button>';
+  // Checkbox links für Mass-Select
+  const selBox = '<input type="checkbox" ' + (isSel ? 'checked' : '') + ' onclick="event.stopPropagation();_toggleSelect(' + JSON.stringify(row.e) + ')" class="w-4 h-4 accent-orange-600 mt-1 shrink-0" title="Für Massenversand auswählen">';
   const head =
-    '<button type="button" onclick="_toggleContact(' + JSON.stringify(row.e) + ')" class="w-full text-left px-3 py-2.5 ' + (row.hidden ? 'bg-ink-50/60 opacity-70' : (fresh ? 'bg-orange-50' : 'bg-white')) + ' border-b border-ink-200 flex items-start justify-between gap-2 hover:bg-ink-50">' +
-      '<div class="min-w-0 flex-1">' +
+    '<div class="w-full px-3 py-2.5 ' + (row.hidden ? 'bg-ink-50/60 opacity-70' : (fresh ? 'bg-orange-50' : 'bg-white')) + ' border-b border-ink-200 flex items-start gap-2 ' + (isSel ? 'ring-2 ring-orange-400 ring-inset' : '') + '">' +
+      selBox +
+      '<button type="button" onclick="_toggleContact(' + JSON.stringify(row.e) + ')" class="flex-1 min-w-0 text-left hover:bg-ink-50/50 -m-1 p-1 rounded">' +
         '<div class="flex items-center gap-1.5 flex-wrap">' +
           '<p class="font-bold text-ink-900 text-sm truncate">' + escapeHtml(c.name || row.e.split('@')[0]) + '</p>' +
-          syncBadge + mktBadge +
+          syncBadge +
         '</div>' +
         '<p class="text-[11px] text-ink-600 truncate">' + escapeHtml(row.e) + '</p>' +
-        '<p class="text-[10px] text-ink-500 truncate">' +
-          (c.company_name ? escapeHtml(c.company_name) + ' · ' : '') +
-          (c.job_title ? escapeHtml(c.job_title) + ' · ' : '') +
+        (c.job_title
+          ? '<p class="text-[11px] text-brand-700 font-semibold truncate inline-flex items-center gap-1 mt-0.5"><i data-lucide="briefcase" class="w-3 h-3"></i> ' + escapeHtml(c.job_title) + '</p>'
+          : '') +
+        '<p class="text-[10px] text-ink-500 truncate mt-0.5">' +
+          (c.company_name ? '<i data-lucide="building-2" class="w-2.5 h-2.5 inline -mt-0.5"></i> ' + escapeHtml(c.company_name) + ' · ' : '') +
           escapeHtml(accName) +
-          (last ? ' · letzte Mkt-Mail vor ' + daysSince + ' T' : '') +
+          (last ? ' · letzte Mkt vor ' + daysSince + ' T' : '') +
         '</p>' +
+        mktTags +
+      '</button>' +
+      '<div class="flex flex-col items-end gap-1 shrink-0">' +
+        '<div class="flex items-center gap-1">' + sendBtn + hideBtn + '</div>' +
+        '<button type="button" onclick="_toggleContact(' + JSON.stringify(row.e) + ')" class="p-0.5"><i data-lucide="' + (isOpen ? 'chevron-up' : 'chevron-down') + '" class="w-4 h-4 text-ink-500"></i></button>' +
       '</div>' +
-      '<div class="flex items-center gap-1 shrink-0">' +
-        hideBtn +
-        '<i data-lucide="' + (isOpen ? 'chevron-up' : 'chevron-down') + '" class="w-4 h-4 text-ink-500 mt-1"></i>' +
-      '</div>' +
-    '</button>';
+    '</div>';
   if (!isOpen) {
     return '<div class="bg-white rounded-xl border border-ink-200 mb-2 overflow-hidden">' + head + '</div>';
   }
@@ -25697,6 +26162,7 @@ function _renderContactSearchCard(row) {
   const actions =
     '<div class="px-3 py-2 bg-white border-b border-ink-100 flex flex-wrap gap-1.5">' +
       '<button onclick="openContactEditModal(' + JSON.stringify(c._accountId) + ', ' + Number(c.id) + ')" class="text-[10px] bg-brand-50 hover:bg-brand-100 text-brand-700 px-2 py-1 rounded inline-flex items-center gap-1"><i data-lucide="user-cog" class="w-3 h-3"></i> Bearbeiten</button>' +
+      '<button onclick="openMarketingFromContactModal(' + JSON.stringify(c._accountId) + ',' + JSON.stringify(row.e) + ',' + JSON.stringify(c.name || '') + ',' + Number(c.id || 0) + ', null)" class="text-[10px] bg-orange-50 hover:bg-orange-100 text-orange-700 px-2 py-1 rounded inline-flex items-center gap-1"><i data-lucide="megaphone" class="w-3 h-3"></i> Marketing senden</button>' +
     '</div>';
   const history = mails.length
     ? '<div class="divide-y divide-ink-100">' +
