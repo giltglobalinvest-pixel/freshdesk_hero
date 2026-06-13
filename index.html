@@ -751,7 +751,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.95';
+const APP_VERSION = 'v2.46.96';
 
 /* ============================================================
    GLOBAL THEME — v2.46.12
@@ -14969,6 +14969,8 @@ function renderAssistantPreview() {
                   <div class="text-orange-800 font-bold mb-0.5"><i data-lucide="info" class="w-3 h-3 inline"></i> Wichtig: Es entsteht ein NEUES Ticket</div>
                   <div class="text-orange-700">Diese Mail geht an den Kunden als eigenständige Email (Marketing/Info), nicht als Antwort auf dieses Ticket.</div>
                 </div>
+                <!-- v2.46.96: Persistente Marketing-History-Warnung (lazy hydrated) -->
+                <div id="stepMeHistory_${i}"></div>
                 <label class="text-[10px] uppercase font-semibold text-${meta.color}-800 block">Vorlage aus Freshdesk</label>
                 <select id="stepMeTemplate_${i}" onchange="_marketingTemplateChange(${i})" class="w-full text-sm px-3 py-2 border border-${meta.color}-300 bg-white rounded-lg mt-1 mb-2">
                   <option value="">— Lade Vorlagen… (oder Eigentext verwenden) —</option>
@@ -15226,6 +15228,8 @@ function renderAssistantPreview() {
   if (window.lucide) lucide.createIcons();
   // v2.46.86: Canned-Response-Dropdowns für marketing_email-Steps lazy laden
   _hydrateMarketingTemplateDropdowns().catch(e => console.warn(e));
+  // v2.46.96: Marketing-History-Warnungen für Doublette-Schutz lazy laden
+  _hydrateMarketingHistoryWarnings().catch(e => console.warn(e));
 
   // Kunden-Sprache im Hintergrund erkennen + in den Übersetzungs-Block-Labels anzeigen.
   // Wird pro Ticket gecacht — kein wiederholter API-Call beim Re-Render.
@@ -15498,6 +15502,34 @@ async function executeSingleAssistantAction(ctx, a) {
     recordKnowledge(ctx.accountId, _t, 'note', { summary: a.summary || '', attachments: (a._attachments || []).map(f => f.name) }, a.body).catch(() => {});
   } else if (a.type === 'marketing_email') {
     // v2.46.85: Outbound-Email (neues Ticket) — nicht im aktuellen Ticket-Verlauf
+    // v2.46.96: Doublette-Check beim Senden — wenn diese Vorlage oder Betreff bereits an
+    // diesen Empfänger ging, Confirm-Dialog statt stillem Versand.
+    {
+      let history = a._marketingHistory;
+      if (history == null) {
+        try { history = await loadMarketingEmailsForEmail(a.to); }
+        catch (_) { history = []; }
+      }
+      let dup = null;
+      if (a._template_id) {
+        dup = (history || []).find(m => String(m.template_id_fd) === String(a._template_id));
+      }
+      if (!dup && a.betreff) {
+        // Fallback: gleicher Betreff = wahrscheinlich gleicher Content
+        dup = (history || []).find(m => String(m.betreff || '').trim().toLowerCase() === String(a.betreff).trim().toLowerCase());
+      }
+      if (dup) {
+        const dupDate = dup.sent_at ? new Date(dup.sent_at).toLocaleDateString('de-DE') : '?';
+        const ok = confirm(
+          '⚠ Achtung — Doublette möglich!\n\n' +
+          'Diese Email ' + (a._template_id ? '(Vorlage „' + (a._template_title || '') + '")' : '(gleicher Betreff)') +
+          ' wurde am ' + dupDate + ' bereits an ' + a.to + ' gesendet' +
+          (dup.outbound_ticket_id ? ' (Ticket #' + dup.outbound_ticket_id + ')' : '') + '.\n\n' +
+          'Trotzdem nochmal senden?'
+        );
+        if (!ok) throw new Error('Versand abgebrochen (Doublette)');
+      }
+    }
     const me = await fetchAgentMe(ctx.accountId);
     const sig = me?.signature || '';
     const bodyHtml = appendSignatureHtml(textToHtmlForFreshdesk(a.body), sig);
@@ -15679,6 +15711,49 @@ async function _hydrateMarketingTemplateDropdowns() {
     } catch (e) {
       sel.innerHTML = '<option value="">— Vorlagen konnten nicht geladen werden —</option>';
       console.warn('Marketing-Template-Load:', e.message);
+    }
+  }
+}
+
+/* v2.46.96: Lazy-Load der Marketing-History pro Empfänger für marketing_email-Aktionen.
+   Setzt einen persistenten Hinweis in stepMeHistory_<idx> wenn der Kontakt bereits
+   Marketing-Mails erhalten hat. */
+async function _hydrateMarketingHistoryWarnings() {
+  const ctx = ASSISTANT_CTX;
+  if (!ctx?.plan?.actions) return;
+  for (let i = 0; i < ctx.plan.actions.length; i++) {
+    const a = ctx.plan.actions[i];
+    if (a.type !== 'marketing_email') continue;
+    const host = document.getElementById('stepMeHistory_' + i);
+    if (!host || host.dataset.hydrated === '1') continue;
+    host.dataset.hydrated = '1';
+    const toEl = document.getElementById('stepMeTo_' + i);
+    const recipient = (toEl?.value || a.to || ctx.ticket?.requester?.email || '').trim();
+    if (!recipient) continue;
+    try {
+      const list = await loadMarketingEmailsForEmail(recipient);
+      // Cache an Action hängen für Doublette-Check beim Senden
+      a._marketingHistory = list;
+      if (!list.length) {
+        host.innerHTML = '';
+        continue;
+      }
+      const items = list.slice(0, 5).map(m => {
+        const date = m.sent_at ? new Date(m.sent_at).toLocaleDateString('de-DE') : '?';
+        return '<li class="text-[10px] text-amber-900 truncate"><b>' + escapeHtml(date) + '</b> · ' + escapeHtml(m.template_title || '(freier Text)') + ' — <i>' + escapeHtml((m.betreff || '').slice(0, 80)) + '</i></li>';
+      }).join('');
+      host.innerHTML =
+        '<div class="bg-amber-50 border-2 border-amber-300 rounded-lg p-2 my-2">' +
+          '<p class="text-[11px] font-bold text-amber-900 inline-flex items-center gap-1">' +
+            '<i data-lucide="alert-triangle" class="w-3.5 h-3.5"></i> Achtung: Kontakt hat bereits ' + list.length + ' Marketing-Mail' + (list.length === 1 ? '' : 's') + ' erhalten' +
+          '</p>' +
+          '<ul class="mt-1 space-y-0.5 pl-1">' + items + '</ul>' +
+          (list.length > 5 ? '<p class="text-[10px] text-amber-700 mt-1 italic">+ ' + (list.length - 5) + ' weitere</p>' : '') +
+        '</div>';
+      if (window.lucide) lucide.createIcons();
+    } catch (e) {
+      // Tabelle nicht da → still
+      host.innerHTML = '';
     }
   }
 }
