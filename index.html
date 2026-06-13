@@ -755,7 +755,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.104';
+const APP_VERSION = 'v2.46.105';
 
 /* ============================================================
    GLOBAL THEME — v2.46.12
@@ -25159,6 +25159,7 @@ const CONTACTS_STATE = {
   searchCtrl: null,            // { aborted: false } — wird beim Suchen gesetzt, Stop kippt aborted=true
   displayCount: 30,            // Wie viele Treffer aktuell sichtbar (Paging)
   selected: new Set(),         // Email-Set für Massenversand-Auswahl
+  jobTitleCache: new Map(),    // email -> { jobTitle, source: 'fd_field'|'signature'|'unknown'|'checking', checked:bool }
 };
 
 /* Lädt + cached die ContactFlags-Map. */
@@ -25390,6 +25391,84 @@ async function _searchFdContactsByParams(accountId, params, maxPerAccount) {
     console.info('FD-Search (' + accountId + ') keine Treffer — Hinweise:', errs);
   }
   return final.slice(0, limit);
+}
+
+/* Lazy: Ermittelt die Funktion/Position eines Kontakts.
+   Strategie:
+     1) /contacts/<id> voll laden — manchmal hat das Feld einen Wert auch wenn
+        der Search-Result es nicht zurückgegeben hat.
+     2) Wenn weiterhin leer: letztes Ticket des Kontakts holen, in Description +
+        Conversations am Ende nach Signatur-Block suchen, Claude Haiku extrahiert
+        die Position.
+   Cache pro Email; mehrfacher Lookup wird vermieden. */
+async function _fetchContactJobTitle(accountId, contactId, email) {
+  const norm = String(email || '').trim().toLowerCase();
+  if (!norm || !accountId) return null;
+  const existing = CONTACTS_STATE.jobTitleCache.get(norm);
+  if (existing && existing.checked) return existing;
+  // Marker: läuft gerade
+  CONTACTS_STATE.jobTitleCache.set(norm, { jobTitle: '', source: 'checking', checked: false });
+  let jobTitle = '';
+  let source = 'unknown';
+  // Step 1: voller Contact-Record
+  if (contactId) {
+    try {
+      const full = await proxyJson('/freshdesk/' + encodeURIComponent(accountId) + '/api/v2/contacts/' + contactId);
+      if (full?.job_title) { jobTitle = String(full.job_title).trim(); source = 'fd_field'; }
+    } catch (_) {}
+  }
+  // Step 2: Ticket-Signatur via KI
+  if (!jobTitle && contactId) {
+    try {
+      const tlist = await proxyJson('/freshdesk/' + encodeURIComponent(accountId) + '/api/v2/contacts/' + contactId + '/tickets?per_page=1');
+      const arr = Array.isArray(tlist) ? tlist : (tlist?.tickets || []);
+      if (arr.length) {
+        const tid = arr[0].id;
+        const ticket = await proxyJson('/freshdesk/' + encodeURIComponent(accountId) + '/api/v2/tickets/' + tid + '?include=conversations');
+        const parts = [];
+        if (ticket?.description_text) parts.push(ticket.description_text);
+        else if (ticket?.description) parts.push(htmlToText(ticket.description));
+        (ticket?.conversations || []).forEach(co => {
+          if (co.body_text) parts.push(co.body_text);
+          else if (co.body) parts.push(htmlToText(co.body));
+        });
+        const blob = parts.join('\n---\n');
+        // Letzte ~1500 Zeichen — Signatur sitzt meist am Ende
+        const snippet = blob.slice(-1800).trim();
+        if (snippet.length > 30) {
+          const sys = 'Du extrahierst die Berufsbezeichnung/Funktion einer Person aus dem Email-Text. ' +
+            'Antworte AUSSCHLIESSLICH mit der Funktion in 1-4 Worten auf Deutsch (z.B. "Geschäftsführer", "Vertriebsleiter", "Mitarbeiter Service", "Leitung Wartung") ' +
+            'oder mit dem Wort "unknown" wenn keine Position erkennbar ist. KEIN Markdown, KEINE Anführungszeichen, KEIN zusätzlicher Text.';
+          const userMsg = 'Funktion des Absenders dieser Email „' + norm + '" extrahieren — typischerweise unter dem Namen in der Signatur:\n\n' + snippet;
+          const data = await proxyJson('/anthropic/v1/messages', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              model: 'claude-haiku-4-5-20251001',
+              max_tokens: 40,
+              system: sys,
+              messages: [{ role: 'user', content: userMsg }],
+            })
+          });
+          recordAiUsage({
+            model: 'claude-haiku-4-5-20251001',
+            input_tokens:  data?.usage?.input_tokens || 0,
+            output_tokens: data?.usage?.output_tokens || 0,
+            feature: 'contacts_job_title',
+            accountId,
+          });
+          const raw = (data?.content?.[0]?.text || '').trim().replace(/^["'„]|["'"]$/g, '');
+          if (raw && raw.length <= 60 && raw.toLowerCase() !== 'unknown' && !/unbekannt|nicht erkennbar/i.test(raw)) {
+            jobTitle = raw;
+            source = 'signature';
+          }
+        }
+      }
+    } catch (_) {}
+  }
+  const result = { jobTitle, source: jobTitle ? source : 'unknown', checked: true };
+  CONTACTS_STATE.jobTitleCache.set(norm, result);
+  return result;
 }
 
 /* Lazy: Prüft ob die Email in Freshsales existiert (für Sync-Status-Badge). */
@@ -25988,10 +26067,26 @@ function _toggleContact(email) {
   if (CONTACTS_STATE.open.has(email)) CONTACTS_STATE.open.delete(email);
   else {
     CONTACTS_STATE.open.add(email);
-    // Lazy FS-Sync-Check anstoßen
+    // Lazy FS-Sync-Check + Job-Title-Lookup parallel anstoßen
     const c = CONTACTS_STATE.results.find(x => String(x.email || '').toLowerCase() === email);
-    if (c) _checkFsForEmail(c._accountId, email).then(() => _renderContactsResults());
+    if (c) {
+      _checkFsForEmail(c._accountId, email).then(() => _renderContactsResults());
+      if (!c.job_title && !CONTACTS_STATE.jobTitleCache.get(email)?.checked) {
+        _fetchContactJobTitle(c._accountId, c.id, email).then(() => _renderContactsResults());
+      }
+    }
   }
+  _renderContactsResults();
+}
+
+/* Manueller Trigger ohne Aufklappen — hilfreich für Massen-Hover bei dünnen Karten. */
+async function _resolveJobTitleNow(email, btn) {
+  const c = CONTACTS_STATE.results.find(x => String(x.email || '').toLowerCase() === email);
+  if (!c) return;
+  setBusy(btn, true);
+  try { await _fetchContactJobTitle(c._accountId, c.id, email); }
+  catch (_) {}
+  setBusy(btn, false);
   _renderContactsResults();
 }
 
@@ -26153,9 +26248,24 @@ function _renderContactSearchCard(row) {
           syncBadge +
         '</div>' +
         '<p class="text-[11px] text-ink-600 truncate">' + escapeHtml(row.e) + '</p>' +
-        (c.job_title
-          ? '<p class="text-[11px] text-brand-700 font-semibold truncate inline-flex items-center gap-1 mt-0.5"><i data-lucide="briefcase" class="w-3 h-3"></i> ' + escapeHtml(c.job_title) + '</p>'
-          : '') +
+        (function () {
+          // v2.46.105: Job-Title aus FD-Feld ODER Cache (KI-Signatur-Extraktion)
+          if (c.job_title) {
+            return '<p class="text-[11px] text-brand-700 font-semibold truncate inline-flex items-center gap-1 mt-0.5"><i data-lucide="briefcase" class="w-3 h-3"></i> ' + escapeHtml(c.job_title) + '</p>';
+          }
+          const cached = CONTACTS_STATE.jobTitleCache.get(row.e);
+          if (cached?.source === 'checking') {
+            return '<p class="text-[11px] text-ink-500 inline-flex items-center gap-1 mt-0.5"><span class="spinner inline-block w-2.5 h-2.5 border-[1.5px]"></span> Funktion wird ermittelt…</p>';
+          }
+          if (cached?.jobTitle) {
+            return '<p class="text-[11px] text-brand-700 font-semibold truncate inline-flex items-center gap-1 mt-0.5"><i data-lucide="briefcase" class="w-3 h-3"></i> ' + escapeHtml(cached.jobTitle) + (cached.source === 'signature' ? ' <span class="text-[9px] font-normal text-ink-400">· aus Signatur</span>' : '') + '</p>';
+          }
+          if (cached?.checked && !cached.jobTitle) {
+            return '<p class="text-[10px] text-ink-400 italic mt-0.5">Funktion nicht ermittelbar</p>';
+          }
+          // Kein Cache, kein FD-Feld → manuell triggerbar
+          return '<button onclick="event.stopPropagation();_resolveJobTitleNow(' + js(row.e) + ', this)" class="text-[10px] text-brand-600 hover:text-brand-800 inline-flex items-center gap-1 mt-0.5 underline-offset-2 hover:underline"><i data-lucide="sparkles" class="w-2.5 h-2.5"></i> Funktion ermitteln</button>';
+        })() +
         '<p class="text-[10px] text-ink-500 truncate mt-0.5">' +
           (c.company_name ? '<i data-lucide="building-2" class="w-2.5 h-2.5 inline -mt-0.5"></i> ' + escapeHtml(c.company_name) + ' · ' : '') +
           escapeHtml(accName) +
