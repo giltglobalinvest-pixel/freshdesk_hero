@@ -722,6 +722,10 @@
         <i data-lucide="building-2" class="w-5 h-5"></i>
         <span class="text-[10px] font-medium">Accounts</span>
       </button>
+      <button data-nav="contacts" onclick="navTo('contacts')" class="flex-1 py-2 flex flex-col items-center gap-0.5 text-ink-500">
+        <i data-lucide="contact" class="w-5 h-5"></i>
+        <span class="text-[10px] font-medium">Kontakte</span>
+      </button>
       <button data-nav="profile"  onclick="navTo('profile')"  class="flex-1 py-2 flex flex-col items-center gap-0.5 text-ink-500">
         <i data-lucide="user" class="w-5 h-5"></i>
         <span class="text-[10px] font-medium">Profil</span>
@@ -751,7 +755,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.96';
+const APP_VERSION = 'v2.46.97';
 
 /* ============================================================
    GLOBAL THEME — v2.46.12
@@ -6839,7 +6843,7 @@ function setActiveNav(name) {
 }
 function navTo(page) {
   APP_STATE.page = page;
-  setActiveNav(['tickets','tasks','accounts','profile'].includes(page) ? page : '');
+  setActiveNav(['tickets','tasks','accounts','contacts','profile'].includes(page) ? page : '');
   // v2.46.63: FAB nur auf Seiten zeigen wo "Neue Email schreiben" sinnvoll ist
   const fab = document.getElementById('newEmailFab');
   if (fab) {
@@ -6860,6 +6864,7 @@ function navTo(page) {
   else if (page === 'tasks')     renderFn = renderTasksPage;
   else if (page === 'deals')     renderFn = renderDealsPage;
   else if (page === 'marketing') renderFn = renderMarketingPage;
+  else if (page === 'contacts')  renderFn = renderContactsPage;
   else if (page === 'stats')     renderFn = renderStatsPage;
   try {
     const result = renderFn();
@@ -25108,6 +25113,213 @@ async function _reloadMarketingList(btn) {
   catch (_) {}
   setBusy(btn, false);
   _renderMarketingList();
+}
+
+/* === v2.46.97: Kontaktübersicht ============================================
+   Eigene Seite in der Bottom-Nav. Aggregiert ALLE MarketingEmails-Records nach
+   Empfänger-Email. Pro Kontakt eine zusammenklappbare Karte mit voller
+   Versand-History (Datum, Vorlage, Betreff, Quell-/Out-Ticket).
+   Suche, Sortierung, Account-Filter sind unabhängig vom Marketing-Tab. */
+const CONTACTS_STATE = {
+  list: null,        // Roh-Records (alle)
+  q: '',             // Suche
+  sort: 'recent',    // 'recent' | 'count' | 'name'
+  accountId: 'all',  // Account-Filter
+  open: new Set(),   // Aufgeklappte Empfänger-Emails
+};
+
+async function renderContactsPage() {
+  setPageTitle('Kontakte', 'Wer hat welche Mail bekommen');
+  const accountOptions = (APP_KEYS.accounts || []).map(a =>
+    '<option value="' + escapeAttr(a.id) + '"' + (String(CONTACTS_STATE.accountId) === String(a.id) ? ' selected' : '') + '>' + escapeHtml(a.name || a.id) + '</option>'
+  ).join('');
+  $('pageContent').innerHTML = '<div class="space-y-3 max-w-3xl mx-auto">' +
+    '<div class="bg-orange-50 border border-orange-200 rounded-xl p-3 text-[12px] text-orange-900">' +
+      '<i data-lucide="contact" class="w-4 h-4 inline mr-1"></i> Alle Kontakte, an die je eine Marketing-Mail verschickt wurde — mit voller Versand-History. Wer hat schon welche Vorlage erhalten, wann zuletzt.' +
+    '</div>' +
+    '<div class="flex gap-2 flex-wrap">' +
+      '<input id="contactsSearch" type="search" placeholder="Suchen (Name / Email / Betreff)…" oninput="_onContactsSearch(this.value)" class="flex-1 min-w-[180px] px-3 py-2 border border-ink-300 rounded-lg text-sm">' +
+      '<select id="contactsSort" onchange="_onContactsSort(this.value)" class="px-2 py-2 border border-ink-300 rounded-lg text-sm bg-white">' +
+        '<option value="recent"' + (CONTACTS_STATE.sort === 'recent' ? ' selected' : '') + '>Letzte Aktivität</option>' +
+        '<option value="count"'  + (CONTACTS_STATE.sort === 'count'  ? ' selected' : '') + '>Meiste Mails</option>' +
+        '<option value="name"'   + (CONTACTS_STATE.sort === 'name'   ? ' selected' : '') + '>A → Z</option>' +
+      '</select>' +
+      '<button onclick="_reloadContacts(this)" class="px-3 py-2 bg-ink-100 hover:bg-ink-200 text-ink-700 rounded-lg text-sm font-bold inline-flex items-center gap-1"><i data-lucide="refresh-cw" class="w-3.5 h-3.5"></i></button>' +
+    '</div>' +
+    (accountOptions
+      ? '<div class="flex items-center gap-2 text-[11px] text-ink-600">' +
+          '<span class="font-semibold uppercase tracking-wider">Mandant:</span>' +
+          '<select id="contactsAccount" onchange="_onContactsAccount(this.value)" class="px-2 py-1.5 border border-ink-300 rounded-lg text-[11px] bg-white">' +
+            '<option value="all"' + (CONTACTS_STATE.accountId === 'all' ? ' selected' : '') + '>Alle</option>' +
+            accountOptions +
+          '</select>' +
+        '</div>'
+      : '') +
+    '<div id="contactsList">' +
+      '<div class="bg-white rounded-xl border border-ink-200 p-6 text-center"><span class="spinner inline-block w-5 h-5 border-[2px] text-orange-500"></span><p class="text-sm text-ink-500 mt-2">Lade Kontakte…</p></div>' +
+    '</div>' +
+  '</div>';
+  if (window.lucide) lucide.createIcons();
+  // Wiederherstellen der letzten Suche im Input
+  const searchEl = document.getElementById('contactsSearch');
+  if (searchEl && CONTACTS_STATE.q) searchEl.value = CONTACTS_STATE.q;
+  try {
+    if (!CONTACTS_STATE.list || CONTACTS_STATE.list.length === 0) {
+      CONTACTS_STATE.list = await loadAllMarketingEmails(2000);
+    }
+  } catch (e) {
+    const host = $('contactsList');
+    if (host) host.innerHTML = '<div class="bg-red-50 border border-red-200 rounded-xl p-3 text-sm text-red-800">Fehler beim Laden: ' + escapeHtml(e.message || e) + '</div>';
+    return;
+  }
+  _renderContactsList();
+}
+
+function _onContactsSearch(v) {
+  CONTACTS_STATE.q = String(v || '').trim().toLowerCase();
+  _renderContactsList();
+}
+function _onContactsSort(v) {
+  CONTACTS_STATE.sort = v || 'recent';
+  _renderContactsList();
+}
+function _onContactsAccount(v) {
+  CONTACTS_STATE.accountId = v || 'all';
+  _renderContactsList();
+}
+async function _reloadContacts(btn) {
+  setBusy(btn, true);
+  try { CONTACTS_STATE.list = await loadAllMarketingEmails(2000); }
+  catch (_) {}
+  setBusy(btn, false);
+  _renderContactsList();
+}
+function _toggleContact(email) {
+  if (CONTACTS_STATE.open.has(email)) CONTACTS_STATE.open.delete(email);
+  else CONTACTS_STATE.open.add(email);
+  _renderContactsList();
+}
+
+function _renderContactsList() {
+  const host = $('contactsList');
+  if (!host) return;
+  let list = CONTACTS_STATE.list || [];
+  // Account-Filter
+  if (CONTACTS_STATE.accountId && CONTACTS_STATE.accountId !== 'all') {
+    list = list.filter(m => String(m.account_id) === String(CONTACTS_STATE.accountId));
+  }
+  // Such-Filter
+  const q = CONTACTS_STATE.q;
+  if (q) {
+    list = list.filter(m =>
+      String(m.recipient_email || '').toLowerCase().includes(q) ||
+      String(m.recipient_name  || '').toLowerCase().includes(q) ||
+      String(m.betreff         || '').toLowerCase().includes(q) ||
+      String(m.template_title  || '').toLowerCase().includes(q)
+    );
+  }
+  // Gruppieren
+  const byRecipient = new Map();
+  list.forEach(m => {
+    const e = String(m.recipient_email || '').toLowerCase();
+    if (!e) return;
+    if (!byRecipient.has(e)) {
+      byRecipient.set(e, { email: e, name: m.recipient_name || '', items: [], lastTs: 0 });
+    }
+    const g = byRecipient.get(e);
+    g.items.push(m);
+    if (!g.name && m.recipient_name) g.name = m.recipient_name;
+    const ts = new Date(m.sent_at || 0).getTime();
+    if (ts > g.lastTs) g.lastTs = ts;
+  });
+  // Sortieren
+  let groups = Array.from(byRecipient.values());
+  if (CONTACTS_STATE.sort === 'count') {
+    groups.sort((a, b) => b.items.length - a.items.length || b.lastTs - a.lastTs);
+  } else if (CONTACTS_STATE.sort === 'name') {
+    groups.sort((a, b) => (a.name || a.email).localeCompare(b.name || b.email, 'de'));
+  } else {
+    groups.sort((a, b) => b.lastTs - a.lastTs);
+  }
+  if (!groups.length) {
+    host.innerHTML = '<div class="bg-white rounded-xl border border-ink-200 p-6 text-center text-sm text-ink-500">' +
+      (CONTACTS_STATE.list?.length
+        ? (q ? 'Keine Treffer für „' + escapeHtml(q) + '"' : 'Keine Kontakte im gewählten Mandanten.')
+        : 'Noch keine Marketing-Mails versandt — sobald die erste raus ist, taucht der Empfänger hier auf.') +
+    '</div>';
+    return;
+  }
+  const totalMails = groups.reduce((s, g) => s + g.items.length, 0);
+  host.innerHTML =
+    '<p class="text-[10px] text-ink-500 uppercase tracking-wider mb-2 px-1">' +
+      groups.length + ' Kontakt' + (groups.length === 1 ? '' : 'e') + ' · ' + totalMails + ' Mail' + (totalMails === 1 ? '' : 's') +
+    '</p>' +
+    groups.map(g => _renderContactCard(g)).join('');
+  if (window.lucide) lucide.createIcons();
+}
+
+function _renderContactCard(g) {
+  const isOpen = CONTACTS_STATE.open.has(g.email);
+  // Items chronologisch (jüngste zuerst)
+  const items = g.items.slice().sort((a, b) =>
+    new Date(b.sent_at || 0).getTime() - new Date(a.sent_at || 0).getTime()
+  );
+  const last = items[0];
+  const lastDate = last?.sent_at ? new Date(last.sent_at).toLocaleDateString('de-DE') : '?';
+  const daysSince = last?.sent_at
+    ? Math.floor((Date.now() - new Date(last.sent_at).getTime()) / 86400e3)
+    : null;
+  // Eindeutige Vorlagen
+  const uniqueTpl = new Set(items.map(m => String(m.template_title || '(freier Text)')));
+  // Account-Hinweise wenn quer
+  const accountIds = Array.from(new Set(items.map(m => String(m.account_id || '')).filter(Boolean)));
+  const accountLabels = accountIds.map(id => {
+    const acc = (APP_KEYS.accounts || []).find(a => String(a.id) === id);
+    return acc?.name || id;
+  });
+  const headerColor = daysSince != null && daysSince < 7 ? 'orange' : (daysSince != null && daysSince < 30 ? 'amber' : 'ink');
+  const head =
+    '<button type="button" onclick="_toggleContact(' + JSON.stringify(g.email) + ')" class="w-full text-left px-3 py-2.5 bg-' + (headerColor === 'ink' ? 'ink-50' : headerColor + '-50') + ' border-b border-' + (headerColor === 'ink' ? 'ink-200' : headerColor + '-200') + ' flex items-center justify-between gap-2 hover:bg-' + (headerColor === 'ink' ? 'ink-100' : headerColor + '-100') + '">' +
+      '<div class="min-w-0 flex-1">' +
+        '<p class="font-bold text-ink-900 text-sm truncate inline-flex items-center gap-1"><i data-lucide="user" class="w-3.5 h-3.5"></i> ' + escapeHtml(g.name || g.email.split('@')[0]) + '</p>' +
+        '<p class="text-[11px] text-ink-600 truncate">' + escapeHtml(g.email) + '</p>' +
+        '<p class="text-[10px] text-ink-500 truncate">' +
+          'Letzte Mail: ' + escapeHtml(lastDate) +
+          (daysSince != null ? ' · vor ' + daysSince + ' T' : '') +
+          ' · ' + uniqueTpl.size + ' Vorlage' + (uniqueTpl.size === 1 ? '' : 'n') +
+          (accountLabels.length > 1 ? ' · ' + accountLabels.length + ' Mandanten' : (accountLabels.length === 1 ? ' · ' + escapeHtml(accountLabels[0]) : '')) +
+        '</p>' +
+      '</div>' +
+      '<div class="flex items-center gap-2 shrink-0">' +
+        '<span class="text-[10px] bg-orange-100 text-orange-700 px-2 py-0.5 rounded font-bold">' + items.length + ' Mail' + (items.length === 1 ? '' : 's') + '</span>' +
+        '<i data-lucide="' + (isOpen ? 'chevron-up' : 'chevron-down') + '" class="w-4 h-4 text-ink-500"></i>' +
+      '</div>' +
+    '</button>';
+  if (!isOpen) {
+    return '<div class="bg-white rounded-xl border border-ink-200 mb-2 overflow-hidden">' + head + '</div>';
+  }
+  const body =
+    '<div class="divide-y divide-ink-100">' +
+      items.map(m => {
+        const date = m.sent_at
+          ? new Date(m.sent_at).toLocaleString('de-DE', { day:'2-digit', month:'2-digit', year:'2-digit', hour:'2-digit', minute:'2-digit' })
+          : '?';
+        const acc = (APP_KEYS.accounts || []).find(a => String(a.id) === String(m.account_id || ''));
+        return '<div class="px-3 py-2">' +
+          '<div class="flex items-center justify-between gap-2">' +
+            '<p class="font-semibold text-ink-900 text-[12px] truncate flex-1">' + escapeHtml(m.betreff || '(ohne Betreff)') + '</p>' +
+            '<span class="text-[10px] text-ink-500 shrink-0">' + escapeHtml(date) + '</span>' +
+          '</div>' +
+          '<p class="text-[10px] text-ink-500 truncate">' +
+            'Vorlage: ' + escapeHtml(m.template_title || '(freier Text)') +
+            (acc ? ' · ' + escapeHtml(acc.name) : '') +
+            (m.outbound_ticket_id ? ' · Out #' + escapeHtml(String(m.outbound_ticket_id)) : '') +
+            (m.source_ticket_id ? ' · Quelle #' + escapeHtml(String(m.source_ticket_id)) : '') +
+          '</p>' +
+        '</div>';
+      }).join('') +
+    '</div>';
+  return '<div class="bg-white rounded-xl border border-ink-200 mb-2 overflow-hidden">' + head + body + '</div>';
 }
 
 async function renderRulesPage() {
