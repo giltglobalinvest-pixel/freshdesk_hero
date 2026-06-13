@@ -755,7 +755,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.97';
+const APP_VERSION = 'v2.46.98';
 
 /* ============================================================
    GLOBAL THEME — v2.46.12
@@ -25115,211 +25115,482 @@ async function _reloadMarketingList(btn) {
   _renderMarketingList();
 }
 
-/* === v2.46.97: Kontaktübersicht ============================================
-   Eigene Seite in der Bottom-Nav. Aggregiert ALLE MarketingEmails-Records nach
-   Empfänger-Email. Pro Kontakt eine zusammenklappbare Karte mit voller
-   Versand-History (Datum, Vorlage, Betreff, Quell-/Out-Ticket).
-   Suche, Sortierung, Account-Filter sind unabhängig vom Marketing-Tab. */
+/* === v2.46.98: Kontakt-Hub mit KI-Suche ====================================
+   Eigene Seite in der Bottom-Nav. KI-Prompt-Eingabe (z.B. "alle Kontakte bei
+   KONE"), die Anfrage wird an Haiku 4.5 gegeben → strukturierte Suchparams →
+   Freshdesk-Search pro aktivem Mandanten (max 30 Treffer/Account). Pro Treffer
+   wird die Marketing-History (aus MarketingEmails) angedockt und beim Aufklappen
+   ein lazy FS-Sync-Check ausgeführt. Hide-Icon schreibt nach ContactFlags
+   (no_sales_potential), persistent für alle Nutzer. */
+const CONTACT_FLAGS_TABLE = 'ContactFlags';
 const CONTACTS_STATE = {
-  list: null,        // Roh-Records (alle)
-  q: '',             // Suche
-  sort: 'recent',    // 'recent' | 'count' | 'name'
-  accountId: 'all',  // Account-Filter
-  open: new Set(),   // Aufgeklappte Empfänger-Emails
+  prompt: '',                  // Roh-Eingabe des Users
+  params: null,                // Geparste Such-Parameter (KI)
+  results: [],                 // Gefundene Kontakte (gemerged über Accounts)
+  flags: null,                 // Map<email, {no_sales_potential, hidden_by, hidden_at}>
+  marketingByEmail: null,      // Map<email, MarketingEmail[]>
+  showHidden: false,           // Versteckte mit anzeigen
+  sort: 'name',                // 'name' | 'recent' | 'mails'
+  busy: false,
+  lastError: '',
+  open: new Set(),             // Aufgeklappte Emails
+  fsCheckCache: new Map(),     // email -> { checked:true, inFs:bool, contactId:'' }
 };
 
+/* Lädt + cached die ContactFlags-Map. */
+async function loadContactFlags(force) {
+  if (CONTACTS_STATE.flags && !force) return CONTACTS_STATE.flags;
+  const map = new Map();
+  try {
+    const recs = await airtableRead(CONTACT_FLAGS_TABLE, { maxRecords: 5000 });
+    recs.forEach(r => {
+      const e = String(r.fields.email || '').trim().toLowerCase();
+      if (!e) return;
+      map.set(e, Object.assign({ recordId: r.id }, r.fields));
+    });
+  } catch (_) { /* Tabelle existiert ggf. noch nicht */ }
+  CONTACTS_STATE.flags = map;
+  return map;
+}
+
+/* Setzt/Löscht no_sales_potential für eine Email. */
+async function setContactFlag(email, patch) {
+  const norm = String(email || '').trim().toLowerCase();
+  if (!norm) return;
+  const me = APP_KEYS.user || {};
+  const fields = Object.assign({
+    email:               norm,
+    no_sales_potential:  '',
+    hidden_by:           '',
+    hidden_at:           '',
+    notes:               '',
+  }, patch);
+  // Default-Audit
+  if (patch.no_sales_potential === 'true') {
+    fields.hidden_by = me.email || '';
+    fields.hidden_at = nowIso();
+  }
+  await airtableWriteWithAutoField(CONTACT_FLAGS_TABLE, fields, {
+    email:              'singleLineText',
+    no_sales_potential: 'singleLineText',
+    hidden_by:          'singleLineText',
+    hidden_at:          'singleLineText',
+    notes:              'multilineText',
+  });
+  // Local cache nachziehen
+  await loadContactFlags(true);
+}
+
+/* KI-Parsing: Natural-Language-Prompt → Suchparameter. */
+async function parseContactSearchPrompt(promptText) {
+  const cleaned = String(promptText || '').trim();
+  if (!cleaned) return null;
+  // Direkter Email-Shortcut: braucht keine KI
+  const emailMatch = cleaned.match(/[\w.+-]+@[\w-]+\.[\w.-]+/);
+  if (emailMatch && cleaned.length <= emailMatch[0].length + 4) {
+    return { email: emailMatch[0].toLowerCase(), limit: 30 };
+  }
+  const sys = 'Du extrahierst Suchparameter für eine Kontakt-Suche in Freshdesk CRM.\n' +
+    'Antworte AUSSCHLIESSLICH mit einem JSON-Objekt mit Feldern:\n' +
+    '{ "company": string|null, "name": string|null, "email": string|null, "email_domain": string|null, "job_title": string|null, "limit": number }\n' +
+    'limit: standardmäßig 30, höher wenn der User explizit eine größere Anzahl nennt.\n' +
+    'company: Firmenname (z.B. "KONE", "Otis"). name: Personenname. email_domain: nur Domain (z.B. "kone.com").\n' +
+    'Lass Felder null wenn der User sie nicht erwähnt. KEIN Markdown, KEIN Text drumherum.';
+  try {
+    const data = await proxyJson('/anthropic/v1/messages', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: 'claude-haiku-4-5-20251001',
+        max_tokens: 256,
+        system: sys,
+        messages: [{ role: 'user', content: cleaned }]
+      })
+    });
+    recordAiUsage({
+      model: 'claude-haiku-4-5-20251001',
+      input_tokens:  data?.usage?.input_tokens || 0,
+      output_tokens: data?.usage?.output_tokens || 0,
+      feature: 'contacts_search_parse',
+    });
+    const raw = (data?.content?.[0]?.text || '').trim();
+    const json = raw.replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/i, '').trim();
+    let plan;
+    try { plan = JSON.parse(json); }
+    catch (_) {
+      const m = json.match(/\{[\s\S]*\}/);
+      if (m) plan = JSON.parse(m[0]);
+      else throw new Error('KI-Antwort ist kein gültiges JSON');
+    }
+    plan.limit = Math.max(1, Math.min(100, Number(plan.limit) || 30));
+    return plan;
+  } catch (e) {
+    // Fallback: Volltext als Name-Query
+    return { name: cleaned, limit: 30 };
+  }
+}
+
+/* FD-Search pro Account. Baut die verschiedenen Such-Strategien aus den
+   geparsten Params zusammen und gibt unique-Treffer zurück. */
+async function _searchFdContactsByParams(accountId, params, maxPerAccount) {
+  const base = '/freshdesk/' + encodeURIComponent(accountId) + '/api/v2';
+  const queries = [];
+  if (params.email)        queries.push('"email:\'' + params.email.replace(/'/g, "\\'") + '\'"');
+  if (params.email_domain) queries.push('"email:\'' + params.email_domain.replace(/'/g, "\\'") + '\'"');
+  if (params.company)      queries.push('"company_name:\'' + params.company.replace(/'/g, "\\'") + '\'"');
+  if (params.name)         queries.push('"name:\'' + params.name.replace(/'/g, "\\'") + '\'"');
+  if (params.job_title)    queries.push('"job_title:\'' + params.job_title.replace(/'/g, "\\'") + '\'"');
+  const found = [];
+  const seen = new Set();
+  for (const q of queries) {
+    try {
+      const res = await proxyJson(base + '/search/contacts?query=' + encodeURIComponent(q));
+      const list = Array.isArray(res?.results) ? res.results : [];
+      for (const c of list) {
+        const e = String(c.email || '').toLowerCase();
+        if (!e || seen.has(e)) continue;
+        seen.add(e);
+        found.push(Object.assign({}, c, { _accountId: accountId, _source: 'fd' }));
+        if (found.length >= (maxPerAccount || 30)) break;
+      }
+      if (found.length >= (maxPerAccount || 30)) break;
+    } catch (e) {
+      console.warn('FD-Suche fehlgeschlagen für', accountId, q, e.message);
+    }
+  }
+  return found;
+}
+
+/* Lazy: Prüft ob die Email in Freshsales existiert (für Sync-Status-Badge). */
+async function _checkFsForEmail(accountId, email) {
+  const cacheKey = accountId + '|' + email;
+  if (CONTACTS_STATE.fsCheckCache.has(cacheKey)) return CONTACTS_STATE.fsCheckCache.get(cacheKey);
+  const acc = (APP_STATE.accounts || []).find(a => a.id === accountId);
+  if (!acc || !accountHasFreshsales(acc)) {
+    const r = { checked: true, hasFs: false, inFs: false };
+    CONTACTS_STATE.fsCheckCache.set(cacheKey, r);
+    return r;
+  }
+  try {
+    const data = await proxyJson('/freshsales/' + encodeURIComponent(accountId) + '/api/lookup?q=' + encodeURIComponent(email) + '&f=email&entities=contact');
+    const list = data?.contacts?.contacts || [];
+    const hit = list.find(c => String(c.email || '').toLowerCase() === email);
+    const r = { checked: true, hasFs: true, inFs: !!hit, contactId: hit?.id || '' };
+    CONTACTS_STATE.fsCheckCache.set(cacheKey, r);
+    return r;
+  } catch (_) {
+    const r = { checked: true, hasFs: true, inFs: false };
+    CONTACTS_STATE.fsCheckCache.set(cacheKey, r);
+    return r;
+  }
+}
+
 async function renderContactsPage() {
-  setPageTitle('Kontakte', 'Wer hat welche Mail bekommen');
-  const accountOptions = (APP_KEYS.accounts || []).map(a =>
-    '<option value="' + escapeAttr(a.id) + '"' + (String(CONTACTS_STATE.accountId) === String(a.id) ? ' selected' : '') + '>' + escapeHtml(a.name || a.id) + '</option>'
-  ).join('');
+  setPageTitle('Kontakte', 'KI-Suche · Marketing-History · Sales-Filter');
+  const accountsCount = (APP_STATE.accounts || []).length;
   $('pageContent').innerHTML = '<div class="space-y-3 max-w-3xl mx-auto">' +
-    '<div class="bg-orange-50 border border-orange-200 rounded-xl p-3 text-[12px] text-orange-900">' +
-      '<i data-lucide="contact" class="w-4 h-4 inline mr-1"></i> Alle Kontakte, an die je eine Marketing-Mail verschickt wurde — mit voller Versand-History. Wer hat schon welche Vorlage erhalten, wann zuletzt.' +
+    '<div class="bg-gradient-to-br from-orange-50 to-amber-50 border border-orange-200 rounded-xl p-3 text-[12px] text-orange-900">' +
+      '<p class="font-bold inline-flex items-center gap-1 mb-1"><i data-lucide="sparkles" class="w-4 h-4"></i> KI-Suche über alle ' + accountsCount + ' Mandanten</p>' +
+      '<p>Beschreib in Worten welche Kontakte du sehen willst. Beispiele:</p>' +
+      '<div class="mt-1.5 flex flex-wrap gap-1">' +
+        '<button onclick="_useContactPrompt(\'alle Kontakte bei KONE\')" class="text-[10px] bg-white border border-orange-300 hover:bg-orange-100 text-orange-800 px-2 py-0.5 rounded">alle Kontakte bei KONE</button>' +
+        '<button onclick="_useContactPrompt(\'Geschäftsführer bei Aufzugsfirmen\')" class="text-[10px] bg-white border border-orange-300 hover:bg-orange-100 text-orange-800 px-2 py-0.5 rounded">Geschäftsführer bei Aufzugsfirmen</button>' +
+        '<button onclick="_useContactPrompt(\'@otis.com\')" class="text-[10px] bg-white border border-orange-300 hover:bg-orange-100 text-orange-800 px-2 py-0.5 rounded">@otis.com</button>' +
+      '</div>' +
     '</div>' +
-    '<div class="flex gap-2 flex-wrap">' +
-      '<input id="contactsSearch" type="search" placeholder="Suchen (Name / Email / Betreff)…" oninput="_onContactsSearch(this.value)" class="flex-1 min-w-[180px] px-3 py-2 border border-ink-300 rounded-lg text-sm">' +
-      '<select id="contactsSort" onchange="_onContactsSort(this.value)" class="px-2 py-2 border border-ink-300 rounded-lg text-sm bg-white">' +
-        '<option value="recent"' + (CONTACTS_STATE.sort === 'recent' ? ' selected' : '') + '>Letzte Aktivität</option>' +
-        '<option value="count"'  + (CONTACTS_STATE.sort === 'count'  ? ' selected' : '') + '>Meiste Mails</option>' +
-        '<option value="name"'   + (CONTACTS_STATE.sort === 'name'   ? ' selected' : '') + '>A → Z</option>' +
-      '</select>' +
-      '<button onclick="_reloadContacts(this)" class="px-3 py-2 bg-ink-100 hover:bg-ink-200 text-ink-700 rounded-lg text-sm font-bold inline-flex items-center gap-1"><i data-lucide="refresh-cw" class="w-3.5 h-3.5"></i></button>' +
+    '<div class="bg-white rounded-xl border border-ink-200 p-2.5 space-y-2">' +
+      '<textarea id="contactsPrompt" rows="2" placeholder="z.B. „alle Kontakte bei KONE" oder „max@example.com"…" class="w-full px-3 py-2 border border-ink-300 rounded-lg text-sm resize-none">' + escapeHtml(CONTACTS_STATE.prompt) + '</textarea>' +
+      '<div class="flex flex-wrap gap-2 items-center">' +
+        '<button onclick="_runContactSearch(this)" class="flex-1 min-w-[140px] px-3 py-2 bg-gradient-to-br from-orange-500 to-amber-600 hover:from-orange-600 hover:to-amber-700 text-white rounded-lg text-sm font-bold inline-flex items-center justify-center gap-1"><i data-lucide="search" class="w-4 h-4"></i> Suchen</button>' +
+        '<select id="contactsSort" onchange="_onContactsSort(this.value)" class="px-2 py-2 border border-ink-300 rounded-lg text-sm bg-white">' +
+          '<option value="name"'   + (CONTACTS_STATE.sort === 'name'   ? ' selected' : '') + '>A → Z</option>' +
+          '<option value="recent"' + (CONTACTS_STATE.sort === 'recent' ? ' selected' : '') + '>Letzte Marketing-Mail</option>' +
+          '<option value="mails"'  + (CONTACTS_STATE.sort === 'mails'  ? ' selected' : '') + '>Meiste Mails</option>' +
+        '</select>' +
+        '<label class="text-[11px] inline-flex items-center gap-1 cursor-pointer select-none">' +
+          '<input type="checkbox" id="contactsShowHidden" ' + (CONTACTS_STATE.showHidden ? 'checked' : '') + ' onchange="_onShowHiddenToggle(this.checked)" class="w-3.5 h-3.5 accent-orange-600">' +
+          'Versteckte anzeigen' +
+        '</label>' +
+      '</div>' +
     '</div>' +
-    (accountOptions
-      ? '<div class="flex items-center gap-2 text-[11px] text-ink-600">' +
-          '<span class="font-semibold uppercase tracking-wider">Mandant:</span>' +
-          '<select id="contactsAccount" onchange="_onContactsAccount(this.value)" class="px-2 py-1.5 border border-ink-300 rounded-lg text-[11px] bg-white">' +
-            '<option value="all"' + (CONTACTS_STATE.accountId === 'all' ? ' selected' : '') + '>Alle</option>' +
-            accountOptions +
-          '</select>' +
-        '</div>'
-      : '') +
-    '<div id="contactsList">' +
-      '<div class="bg-white rounded-xl border border-ink-200 p-6 text-center"><span class="spinner inline-block w-5 h-5 border-[2px] text-orange-500"></span><p class="text-sm text-ink-500 mt-2">Lade Kontakte…</p></div>' +
+    '<div id="contactsResults">' +
+      '<div class="bg-white rounded-xl border border-dashed border-ink-300 p-6 text-center text-sm text-ink-500">' +
+        '<i data-lucide="users" class="w-8 h-8 inline text-ink-400"></i>' +
+        '<p class="mt-2">Gib einen Suchbegriff ein und klick auf <b>Suchen</b>.</p>' +
+        '<p class="text-[11px] text-ink-400 mt-1">Geladene Kontakte siehst du hier — mit Marketing-History und Sync-Status.</p>' +
+      '</div>' +
     '</div>' +
   '</div>';
   if (window.lucide) lucide.createIcons();
-  // Wiederherstellen der letzten Suche im Input
-  const searchEl = document.getElementById('contactsSearch');
-  if (searchEl && CONTACTS_STATE.q) searchEl.value = CONTACTS_STATE.q;
+  // ContactFlags + Marketing-Cache parallel laden (für künftige Renders)
+  loadContactFlags().catch(() => {});
+  if (!CONTACTS_STATE.marketingByEmail) {
+    loadAllMarketingEmails(2000).then(list => {
+      const map = new Map();
+      list.forEach(m => {
+        const e = String(m.recipient_email || '').trim().toLowerCase();
+        if (!e) return;
+        if (!map.has(e)) map.set(e, []);
+        map.get(e).push(m);
+      });
+      CONTACTS_STATE.marketingByEmail = map;
+      _renderContactsResults();
+    }).catch(() => {});
+  }
+  // Wenn schon Ergebnisse vorhanden (Tab-Wechsel) → direkt rendern
+  if (CONTACTS_STATE.results.length || CONTACTS_STATE.lastError) _renderContactsResults();
+}
+
+function _useContactPrompt(s) {
+  CONTACTS_STATE.prompt = s;
+  const el = document.getElementById('contactsPrompt');
+  if (el) el.value = s;
+}
+
+function _onContactsSort(v) {
+  CONTACTS_STATE.sort = v || 'name';
+  _renderContactsResults();
+}
+function _onShowHiddenToggle(v) {
+  CONTACTS_STATE.showHidden = !!v;
+  _renderContactsResults();
+}
+
+async function _runContactSearch(btn) {
+  const txt = (document.getElementById('contactsPrompt')?.value || '').trim();
+  CONTACTS_STATE.prompt = txt;
+  if (!txt) { toast('Bitte einen Suchbegriff oder eine Beschreibung eingeben.', 'warn'); return; }
+  CONTACTS_STATE.busy = true;
+  CONTACTS_STATE.lastError = '';
+  CONTACTS_STATE.open.clear();
+  setBusy(btn, true, 'KI parsed…');
+  const host = $('contactsResults');
+  if (host) host.innerHTML = '<div class="bg-white rounded-xl border border-ink-200 p-6 text-center"><span class="spinner inline-block w-6 h-6 border-[3px] text-orange-500"></span><p class="text-sm text-ink-500 mt-2">KI parsed Suchanfrage…</p></div>';
   try {
-    if (!CONTACTS_STATE.list || CONTACTS_STATE.list.length === 0) {
-      CONTACTS_STATE.list = await loadAllMarketingEmails(2000);
+    const params = await parseContactSearchPrompt(txt);
+    if (!params) throw new Error('Suchanfrage konnte nicht verstanden werden.');
+    CONTACTS_STATE.params = params;
+    setBusy(btn, true, 'Durchsuche FD…');
+    if (host) host.innerHTML = '<div class="bg-white rounded-xl border border-ink-200 p-6 text-center"><span class="spinner inline-block w-6 h-6 border-[3px] text-orange-500"></span><p class="text-sm text-ink-500 mt-2">Durchsuche Freshdesk je Mandant…</p><p class="text-[10px] text-ink-400 mt-1">' + escapeHtml(_paramsToLabel(params)) + '</p></div>';
+    // Pro aktivem Account FD-Search starten (parallel)
+    const accounts = APP_STATE.accounts || [];
+    const tasks = accounts.map(acc => _searchFdContactsByParams(acc.id, params, params.limit).catch(() => []));
+    const perAccount = await Promise.all(tasks);
+    const allHits = [];
+    const seenEmail = new Set();
+    perAccount.forEach(arr => {
+      arr.forEach(c => {
+        const e = String(c.email || '').toLowerCase();
+        if (!e || seenEmail.has(e)) return;
+        seenEmail.add(e);
+        allHits.push(c);
+      });
+    });
+    // Marketing-Cache nochmal sichern
+    if (!CONTACTS_STATE.marketingByEmail) {
+      try {
+        const list = await loadAllMarketingEmails(2000);
+        const map = new Map();
+        list.forEach(m => {
+          const e = String(m.recipient_email || '').trim().toLowerCase();
+          if (!e) return;
+          if (!map.has(e)) map.set(e, []);
+          map.get(e).push(m);
+        });
+        CONTACTS_STATE.marketingByEmail = map;
+      } catch (_) {}
+    }
+    await loadContactFlags();
+    CONTACTS_STATE.results = allHits;
+    if (!allHits.length) {
+      CONTACTS_STATE.lastError = 'Keine Treffer in Freshdesk für „' + txt + '".';
     }
   } catch (e) {
-    const host = $('contactsList');
-    if (host) host.innerHTML = '<div class="bg-red-50 border border-red-200 rounded-xl p-3 text-sm text-red-800">Fehler beim Laden: ' + escapeHtml(e.message || e) + '</div>';
-    return;
+    CONTACTS_STATE.lastError = 'Fehler: ' + (e.message || String(e));
+    CONTACTS_STATE.results = [];
+  } finally {
+    CONTACTS_STATE.busy = false;
+    setBusy(btn, false);
+    _renderContactsResults();
   }
-  _renderContactsList();
 }
 
-function _onContactsSearch(v) {
-  CONTACTS_STATE.q = String(v || '').trim().toLowerCase();
-  _renderContactsList();
+function _paramsToLabel(p) {
+  if (!p) return '';
+  const parts = [];
+  if (p.company)      parts.push('Firma: ' + p.company);
+  if (p.name)         parts.push('Name: ' + p.name);
+  if (p.email)        parts.push('Email: ' + p.email);
+  if (p.email_domain) parts.push('Domain: ' + p.email_domain);
+  if (p.job_title)    parts.push('Job: ' + p.job_title);
+  return parts.join(' · ') || 'Volltext';
 }
-function _onContactsSort(v) {
-  CONTACTS_STATE.sort = v || 'recent';
-  _renderContactsList();
-}
-function _onContactsAccount(v) {
-  CONTACTS_STATE.accountId = v || 'all';
-  _renderContactsList();
-}
-async function _reloadContacts(btn) {
-  setBusy(btn, true);
-  try { CONTACTS_STATE.list = await loadAllMarketingEmails(2000); }
-  catch (_) {}
-  setBusy(btn, false);
-  _renderContactsList();
-}
+
 function _toggleContact(email) {
   if (CONTACTS_STATE.open.has(email)) CONTACTS_STATE.open.delete(email);
-  else CONTACTS_STATE.open.add(email);
-  _renderContactsList();
+  else {
+    CONTACTS_STATE.open.add(email);
+    // Lazy FS-Sync-Check anstoßen
+    const c = CONTACTS_STATE.results.find(x => String(x.email || '').toLowerCase() === email);
+    if (c) _checkFsForEmail(c._accountId, email).then(() => _renderContactsResults());
+  }
+  _renderContactsResults();
 }
 
-function _renderContactsList() {
-  const host = $('contactsList');
+async function _toggleHideContact(email, btn) {
+  const norm = String(email || '').trim().toLowerCase();
+  if (!norm) return;
+  setBusy(btn, true);
+  try {
+    const flag = (CONTACTS_STATE.flags || new Map()).get(norm);
+    const isHidden = flag?.no_sales_potential === 'true';
+    await setContactFlag(norm, { no_sales_potential: isHidden ? 'false' : 'true' });
+    toast(isHidden ? 'Wieder eingeblendet.' : 'Als „kein Sales-Potenzial" markiert.', 'success', 3000);
+  } catch (e) {
+    toast('Konnte Markierung nicht speichern: ' + (e.message || e), 'error');
+  } finally {
+    setBusy(btn, false);
+    _renderContactsResults();
+  }
+}
+
+function _renderContactsResults() {
+  const host = $('contactsResults');
   if (!host) return;
-  let list = CONTACTS_STATE.list || [];
-  // Account-Filter
-  if (CONTACTS_STATE.accountId && CONTACTS_STATE.accountId !== 'all') {
-    list = list.filter(m => String(m.account_id) === String(CONTACTS_STATE.accountId));
-  }
-  // Such-Filter
-  const q = CONTACTS_STATE.q;
-  if (q) {
-    list = list.filter(m =>
-      String(m.recipient_email || '').toLowerCase().includes(q) ||
-      String(m.recipient_name  || '').toLowerCase().includes(q) ||
-      String(m.betreff         || '').toLowerCase().includes(q) ||
-      String(m.template_title  || '').toLowerCase().includes(q)
-    );
-  }
-  // Gruppieren
-  const byRecipient = new Map();
-  list.forEach(m => {
-    const e = String(m.recipient_email || '').toLowerCase();
-    if (!e) return;
-    if (!byRecipient.has(e)) {
-      byRecipient.set(e, { email: e, name: m.recipient_name || '', items: [], lastTs: 0 });
-    }
-    const g = byRecipient.get(e);
-    g.items.push(m);
-    if (!g.name && m.recipient_name) g.name = m.recipient_name;
-    const ts = new Date(m.sent_at || 0).getTime();
-    if (ts > g.lastTs) g.lastTs = ts;
-  });
-  // Sortieren
-  let groups = Array.from(byRecipient.values());
-  if (CONTACTS_STATE.sort === 'count') {
-    groups.sort((a, b) => b.items.length - a.items.length || b.lastTs - a.lastTs);
-  } else if (CONTACTS_STATE.sort === 'name') {
-    groups.sort((a, b) => (a.name || a.email).localeCompare(b.name || b.email, 'de'));
-  } else {
-    groups.sort((a, b) => b.lastTs - a.lastTs);
-  }
-  if (!groups.length) {
-    host.innerHTML = '<div class="bg-white rounded-xl border border-ink-200 p-6 text-center text-sm text-ink-500">' +
-      (CONTACTS_STATE.list?.length
-        ? (q ? 'Keine Treffer für „' + escapeHtml(q) + '"' : 'Keine Kontakte im gewählten Mandanten.')
-        : 'Noch keine Marketing-Mails versandt — sobald die erste raus ist, taucht der Empfänger hier auf.') +
-    '</div>';
+  if (CONTACTS_STATE.busy) return; // Spinner bleibt
+  if (CONTACTS_STATE.lastError && !CONTACTS_STATE.results.length) {
+    host.innerHTML = '<div class="bg-amber-50 border border-amber-200 rounded-xl p-3 text-sm text-amber-900">' + escapeHtml(CONTACTS_STATE.lastError) + '</div>';
     return;
   }
-  const totalMails = groups.reduce((s, g) => s + g.items.length, 0);
+  if (!CONTACTS_STATE.results.length) {
+    host.innerHTML = '<div class="bg-white rounded-xl border border-dashed border-ink-300 p-6 text-center text-sm text-ink-500">' +
+      '<i data-lucide="users" class="w-8 h-8 inline text-ink-400"></i>' +
+      '<p class="mt-2">Gib einen Suchbegriff ein und klick auf <b>Suchen</b>.</p>' +
+      '<p class="text-[11px] text-ink-400 mt-1">Geladene Kontakte siehst du hier — mit Marketing-History und Sync-Status.</p>' +
+    '</div>';
+    if (window.lucide) lucide.createIcons();
+    return;
+  }
+  const flags = CONTACTS_STATE.flags || new Map();
+  const mkt = CONTACTS_STATE.marketingByEmail || new Map();
+  // Anreichern + Filter Hidden
+  let list = CONTACTS_STATE.results.map(c => {
+    const e = String(c.email || '').toLowerCase();
+    const flag = flags.get(e) || null;
+    const mails = mkt.get(e) || [];
+    const lastTs = mails.reduce((m, x) => Math.max(m, new Date(x.sent_at || 0).getTime()), 0);
+    return { c, e, flag, mails, lastTs, hidden: flag?.no_sales_potential === 'true' };
+  });
+  if (!CONTACTS_STATE.showHidden) list = list.filter(x => !x.hidden);
+  // Sortieren
+  if (CONTACTS_STATE.sort === 'recent') {
+    list.sort((a, b) => b.lastTs - a.lastTs || (a.c.name || '').localeCompare(b.c.name || '', 'de'));
+  } else if (CONTACTS_STATE.sort === 'mails') {
+    list.sort((a, b) => b.mails.length - a.mails.length || b.lastTs - a.lastTs);
+  } else {
+    list.sort((a, b) => (a.c.name || a.e).localeCompare(b.c.name || b.e, 'de'));
+  }
+  const totalHits = CONTACTS_STATE.results.length;
+  const hiddenCount = CONTACTS_STATE.results.filter(c => {
+    const f = flags.get(String(c.email || '').toLowerCase());
+    return f?.no_sales_potential === 'true';
+  }).length;
   host.innerHTML =
     '<p class="text-[10px] text-ink-500 uppercase tracking-wider mb-2 px-1">' +
-      groups.length + ' Kontakt' + (groups.length === 1 ? '' : 'e') + ' · ' + totalMails + ' Mail' + (totalMails === 1 ? '' : 's') +
+      list.length + ' angezeigt · ' + totalHits + ' Treffer' +
+      (hiddenCount ? ' · ' + hiddenCount + ' ohne Sales-Potenzial' + (CONTACTS_STATE.showHidden ? '' : ' (ausgeblendet)') : '') +
     '</p>' +
-    groups.map(g => _renderContactCard(g)).join('');
+    list.map(row => _renderContactSearchCard(row)).join('');
   if (window.lucide) lucide.createIcons();
 }
 
-function _renderContactCard(g) {
-  const isOpen = CONTACTS_STATE.open.has(g.email);
-  // Items chronologisch (jüngste zuerst)
-  const items = g.items.slice().sort((a, b) =>
+function _renderContactSearchCard(row) {
+  const c = row.c;
+  const isOpen = CONTACTS_STATE.open.has(row.e);
+  const acc = (APP_STATE.accounts || []).find(a => a.id === c._accountId);
+  const accName = acc?.name || c._accountId;
+  const mails = row.mails.slice().sort((a, b) =>
     new Date(b.sent_at || 0).getTime() - new Date(a.sent_at || 0).getTime()
   );
-  const last = items[0];
-  const lastDate = last?.sent_at ? new Date(last.sent_at).toLocaleDateString('de-DE') : '?';
+  const last = mails[0];
   const daysSince = last?.sent_at
     ? Math.floor((Date.now() - new Date(last.sent_at).getTime()) / 86400e3)
     : null;
-  // Eindeutige Vorlagen
-  const uniqueTpl = new Set(items.map(m => String(m.template_title || '(freier Text)')));
-  // Account-Hinweise wenn quer
-  const accountIds = Array.from(new Set(items.map(m => String(m.account_id || '')).filter(Boolean)));
-  const accountLabels = accountIds.map(id => {
-    const acc = (APP_KEYS.accounts || []).find(a => String(a.id) === id);
-    return acc?.name || id;
-  });
-  const headerColor = daysSince != null && daysSince < 7 ? 'orange' : (daysSince != null && daysSince < 30 ? 'amber' : 'ink');
+  const fresh = daysSince != null && daysSince < 30;
+  // Sync-Status (lazy)
+  const cacheKey = c._accountId + '|' + row.e;
+  const fsRes = CONTACTS_STATE.fsCheckCache.get(cacheKey);
+  let syncBadge = '<span class="text-[9px] bg-ink-100 text-ink-500 px-1.5 py-0.5 rounded">FD</span>';
+  if (fsRes?.checked) {
+    if (!fsRes.hasFs) syncBadge = '<span class="text-[9px] bg-ink-100 text-ink-500 px-1.5 py-0.5 rounded" title="Mandant ohne Freshsales">FD</span>';
+    else if (fsRes.inFs) syncBadge = '<span class="text-[9px] bg-emerald-100 text-emerald-700 px-1.5 py-0.5 rounded font-bold" title="In FD + FS vorhanden">✓ sync</span>';
+    else syncBadge = '<span class="text-[9px] bg-amber-100 text-amber-700 px-1.5 py-0.5 rounded" title="Nur in Freshdesk, nicht in Freshsales">FD only</span>';
+  } else if (isOpen) {
+    syncBadge = '<span class="text-[9px] bg-ink-100 text-ink-500 px-1.5 py-0.5 rounded inline-flex items-center gap-1"><span class="spinner inline-block w-2.5 h-2.5 border-[1.5px]"></span> Sync?</span>';
+  }
+  const mktBadge = mails.length
+    ? '<span class="text-[9px] bg-orange-100 text-orange-700 px-1.5 py-0.5 rounded font-bold" title="Marketing-Mails versandt">' + mails.length + '× Mkt</span>'
+    : '<span class="text-[9px] bg-emerald-50 text-emerald-700 px-1.5 py-0.5 rounded" title="Noch keine Marketing-Mail">neu</span>';
+  const hideBtn = row.hidden
+    ? '<button onclick="event.stopPropagation();_toggleHideContact(' + JSON.stringify(row.e) + ', this)" class="text-[10px] bg-ink-200 hover:bg-ink-300 text-ink-700 px-2 py-1 rounded inline-flex items-center gap-1" title="Wieder einblenden"><i data-lucide="eye" class="w-3 h-3"></i> ausgeblendet</button>'
+    : '<button onclick="event.stopPropagation();_toggleHideContact(' + JSON.stringify(row.e) + ', this)" class="text-[10px] bg-white hover:bg-ink-100 border border-ink-300 text-ink-600 px-2 py-1 rounded inline-flex items-center gap-1" title="Kein Sales-Potenzial — ausblenden"><i data-lucide="eye-off" class="w-3 h-3"></i></button>';
   const head =
-    '<button type="button" onclick="_toggleContact(' + JSON.stringify(g.email) + ')" class="w-full text-left px-3 py-2.5 bg-' + (headerColor === 'ink' ? 'ink-50' : headerColor + '-50') + ' border-b border-' + (headerColor === 'ink' ? 'ink-200' : headerColor + '-200') + ' flex items-center justify-between gap-2 hover:bg-' + (headerColor === 'ink' ? 'ink-100' : headerColor + '-100') + '">' +
+    '<button type="button" onclick="_toggleContact(' + JSON.stringify(row.e) + ')" class="w-full text-left px-3 py-2.5 ' + (row.hidden ? 'bg-ink-50/60 opacity-70' : (fresh ? 'bg-orange-50' : 'bg-white')) + ' border-b border-ink-200 flex items-start justify-between gap-2 hover:bg-ink-50">' +
       '<div class="min-w-0 flex-1">' +
-        '<p class="font-bold text-ink-900 text-sm truncate inline-flex items-center gap-1"><i data-lucide="user" class="w-3.5 h-3.5"></i> ' + escapeHtml(g.name || g.email.split('@')[0]) + '</p>' +
-        '<p class="text-[11px] text-ink-600 truncate">' + escapeHtml(g.email) + '</p>' +
+        '<div class="flex items-center gap-1.5 flex-wrap">' +
+          '<p class="font-bold text-ink-900 text-sm truncate">' + escapeHtml(c.name || row.e.split('@')[0]) + '</p>' +
+          syncBadge + mktBadge +
+        '</div>' +
+        '<p class="text-[11px] text-ink-600 truncate">' + escapeHtml(row.e) + '</p>' +
         '<p class="text-[10px] text-ink-500 truncate">' +
-          'Letzte Mail: ' + escapeHtml(lastDate) +
-          (daysSince != null ? ' · vor ' + daysSince + ' T' : '') +
-          ' · ' + uniqueTpl.size + ' Vorlage' + (uniqueTpl.size === 1 ? '' : 'n') +
-          (accountLabels.length > 1 ? ' · ' + accountLabels.length + ' Mandanten' : (accountLabels.length === 1 ? ' · ' + escapeHtml(accountLabels[0]) : '')) +
+          (c.company_name ? escapeHtml(c.company_name) + ' · ' : '') +
+          (c.job_title ? escapeHtml(c.job_title) + ' · ' : '') +
+          escapeHtml(accName) +
+          (last ? ' · letzte Mkt-Mail vor ' + daysSince + ' T' : '') +
         '</p>' +
       '</div>' +
-      '<div class="flex items-center gap-2 shrink-0">' +
-        '<span class="text-[10px] bg-orange-100 text-orange-700 px-2 py-0.5 rounded font-bold">' + items.length + ' Mail' + (items.length === 1 ? '' : 's') + '</span>' +
-        '<i data-lucide="' + (isOpen ? 'chevron-up' : 'chevron-down') + '" class="w-4 h-4 text-ink-500"></i>' +
+      '<div class="flex items-center gap-1 shrink-0">' +
+        hideBtn +
+        '<i data-lucide="' + (isOpen ? 'chevron-up' : 'chevron-down') + '" class="w-4 h-4 text-ink-500 mt-1"></i>' +
       '</div>' +
     '</button>';
   if (!isOpen) {
     return '<div class="bg-white rounded-xl border border-ink-200 mb-2 overflow-hidden">' + head + '</div>';
   }
-  const body =
-    '<div class="divide-y divide-ink-100">' +
-      items.map(m => {
-        const date = m.sent_at
-          ? new Date(m.sent_at).toLocaleString('de-DE', { day:'2-digit', month:'2-digit', year:'2-digit', hour:'2-digit', minute:'2-digit' })
-          : '?';
-        const acc = (APP_KEYS.accounts || []).find(a => String(a.id) === String(m.account_id || ''));
-        return '<div class="px-3 py-2">' +
-          '<div class="flex items-center justify-between gap-2">' +
-            '<p class="font-semibold text-ink-900 text-[12px] truncate flex-1">' + escapeHtml(m.betreff || '(ohne Betreff)') + '</p>' +
-            '<span class="text-[10px] text-ink-500 shrink-0">' + escapeHtml(date) + '</span>' +
-          '</div>' +
-          '<p class="text-[10px] text-ink-500 truncate">' +
-            'Vorlage: ' + escapeHtml(m.template_title || '(freier Text)') +
-            (acc ? ' · ' + escapeHtml(acc.name) : '') +
-            (m.outbound_ticket_id ? ' · Out #' + escapeHtml(String(m.outbound_ticket_id)) : '') +
-            (m.source_ticket_id ? ' · Quelle #' + escapeHtml(String(m.source_ticket_id)) : '') +
-          '</p>' +
-        '</div>';
-      }).join('') +
+  // Body: Stammdaten + Marketing-History + Aktionen
+  const stamm =
+    '<div class="px-3 py-2 bg-ink-50/50 border-b border-ink-100 text-[11px] text-ink-700 grid grid-cols-2 gap-x-3 gap-y-1">' +
+      (c.phone ? '<p><b>Tel:</b> ' + escapeHtml(c.phone) + '</p>' : '') +
+      (c.mobile ? '<p><b>Mobil:</b> ' + escapeHtml(c.mobile) + '</p>' : '') +
+      (c.company_name ? '<p class="col-span-2"><b>Firma:</b> ' + escapeHtml(c.company_name) + '</p>' : '') +
+      (c.job_title ? '<p class="col-span-2"><b>Position:</b> ' + escapeHtml(c.job_title) + '</p>' : '') +
+      (c.address ? '<p class="col-span-2"><b>Adresse:</b> ' + escapeHtml(String(c.address).replace(/\n/g, ', ')) + '</p>' : '') +
     '</div>';
-  return '<div class="bg-white rounded-xl border border-ink-200 mb-2 overflow-hidden">' + head + body + '</div>';
+  const actions =
+    '<div class="px-3 py-2 bg-white border-b border-ink-100 flex flex-wrap gap-1.5">' +
+      '<button onclick="openContactEditModal(' + JSON.stringify(c._accountId) + ', ' + Number(c.id) + ')" class="text-[10px] bg-brand-50 hover:bg-brand-100 text-brand-700 px-2 py-1 rounded inline-flex items-center gap-1"><i data-lucide="user-cog" class="w-3 h-3"></i> Bearbeiten</button>' +
+    '</div>';
+  const history = mails.length
+    ? '<div class="divide-y divide-ink-100">' +
+        mails.map(m => {
+          const date = m.sent_at
+            ? new Date(m.sent_at).toLocaleString('de-DE', { day:'2-digit', month:'2-digit', year:'2-digit', hour:'2-digit', minute:'2-digit' })
+            : '?';
+          return '<div class="px-3 py-2">' +
+            '<div class="flex items-center justify-between gap-2">' +
+              '<p class="font-semibold text-ink-900 text-[12px] truncate flex-1">' + escapeHtml(m.betreff || '(ohne Betreff)') + '</p>' +
+              '<span class="text-[10px] text-ink-500 shrink-0">' + escapeHtml(date) + '</span>' +
+            '</div>' +
+            '<p class="text-[10px] text-ink-500 truncate">' +
+              'Vorlage: ' + escapeHtml(m.template_title || '(freier Text)') +
+              (m.outbound_ticket_id ? ' · Out #' + escapeHtml(String(m.outbound_ticket_id)) : '') +
+              (m.source_ticket_id ? ' · Quelle #' + escapeHtml(String(m.source_ticket_id)) : '') +
+            '</p>' +
+          '</div>';
+        }).join('') +
+      '</div>'
+    : '<div class="px-3 py-3 text-[11px] text-ink-500 italic text-center">Noch keine Marketing-Mail an diesen Kontakt versandt.</div>';
+  return '<div class="bg-white rounded-xl border border-ink-200 mb-2 overflow-hidden">' + head + stamm + actions + history + '</div>';
 }
 
 async function renderRulesPage() {
