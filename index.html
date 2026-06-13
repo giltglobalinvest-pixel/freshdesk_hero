@@ -755,7 +755,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.103';
+const APP_VERSION = 'v2.46.104';
 
 /* ============================================================
    GLOBAL THEME — v2.46.12
@@ -1257,6 +1257,7 @@ function _extractMissingFieldName(errMsg) {
       zwischen Create und Retry vermeidet einen falschen „UNKNOWN_FIELD_NAME"-Retry. */
 async function _runWithAutoField(opLabel, runFn, fields, defaultTypes) {
   const seen = new Set();
+  let tableTried = false;
   const maxAttempts = 6;
   let lastErr = null;
   for (let attempt = 0; attempt < maxAttempts; attempt++) {
@@ -1264,6 +1265,23 @@ async function _runWithAutoField(opLabel, runFn, fields, defaultTypes) {
       return await runFn();
     } catch (e) {
       lastErr = e;
+      // v2.46.104: Tabelle existiert nicht → automatisch anlegen aus defaultTypes-Schema
+      const missingTable = /INVALID_PERMISSIONS_OR_MODEL_NOT_FOUND|TABLE_NOT_FOUND|MODEL_NOT_FOUND/i.test(e.message);
+      if (missingTable && !tableTried && defaultTypes) {
+        tableTried = true;
+        console.log('Auto-Tabelle anlegen: ' + opLabel);
+        try {
+          const tableFields = Object.entries(defaultTypes).map(([name, type]) => ({ name, type: type || 'singleLineText' }));
+          if (!tableFields.length) throw new Error('Kein Schema in defaultTypes — kann Tabelle nicht anlegen');
+          await ensureTable(opLabel, tableFields);
+          // Längere Pause, damit Airtable die neue Tabelle propagiert
+          await new Promise(r => setTimeout(r, 800));
+          continue;
+        } catch (createErr) {
+          console.warn('Auto-Tabelle „' + opLabel + '" konnte nicht angelegt werden:', createErr.message);
+          throw new Error('Tabelle „' + opLabel + '" fehlt und konnte nicht automatisch angelegt werden (' + (createErr.message || '').slice(0, 120) + '). Bitte einmalig manuell anlegen mit Feldern: ' + Object.keys(defaultTypes).join(', '));
+        }
+      }
       const missingField = _extractMissingFieldName(e.message);
       if (!missingField || fields[missingField] === undefined) throw e;
       if (seen.has(missingField)) {
