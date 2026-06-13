@@ -751,7 +751,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.94';
+const APP_VERSION = 'v2.46.95';
 
 /* ============================================================
    GLOBAL THEME — v2.46.12
@@ -11618,10 +11618,15 @@ function renderTicketDetailBody(ticket) {
                 <p class="font-semibold text-ink-900 truncate mt-0.5">${escapeHtml(req.name || '–')}</p>
                 ${req.email ? `<span class="text-brand-600 truncate text-[11px] inline-flex items-center gap-1"><i data-lucide="mail" class="w-3 h-3"></i>${escapeHtml(req.email)}</span>` : ''}
               </button>
-              ${ticket.requester_id ? `
-                <button onclick="openContactEditModal('${escapeAttr(ticket._accountId)}', ${ticket.requester_id})" class="shrink-0 inline-flex items-center gap-1 px-2 py-1 bg-brand-50 hover:bg-brand-100 active:bg-brand-200 border border-brand-200 text-brand-700 rounded-lg text-[11px] font-medium" title="Kontaktdaten bearbeiten">
-                  <i data-lucide="user-cog" class="w-3 h-3"></i> Bearbeiten
-                </button>` : ''}
+              <div class="shrink-0 flex flex-col gap-1">
+                ${ticket.requester_id ? `
+                  <button onclick="openContactEditModal('${escapeAttr(ticket._accountId)}', ${ticket.requester_id})" class="inline-flex items-center gap-1 px-2 py-1 bg-brand-50 hover:bg-brand-100 active:bg-brand-200 border border-brand-200 text-brand-700 rounded-lg text-[11px] font-medium" title="Kontaktdaten bearbeiten">
+                    <i data-lucide="user-cog" class="w-3 h-3"></i> Bearbeiten
+                  </button>` : ''}
+                <button onclick="openChangeRequesterModal('${escapeAttr(ticket._accountId)}', ${ticket.id})" class="inline-flex items-center gap-1 px-2 py-1 bg-amber-50 hover:bg-amber-100 active:bg-amber-200 border border-amber-200 text-amber-700 rounded-lg text-[11px] font-medium" title="Anderen Kunden als Anfragenden setzen">
+                  <i data-lucide="users" class="w-3 h-3"></i> Wechseln
+                </button>
+              </div>
             </div>
             ${detailPhones.length ? `
               <div class="flex flex-wrap gap-1.5 mt-2" data-detail-phones>
@@ -19204,6 +19209,109 @@ async function findOrCreateFdContactByEmail(accountId, data) {
       'Bitte den FD-Admin den Kontakt prüfen lassen ODER eine andere Empfänger-Email verwenden.'
     );
   }
+}
+
+/* v2.46.95: Anfragenden eines Tickets manuell auf einen anderen Kontakt ändern.
+   Suche-Logik:
+   1. User tippt Email (Pflicht) + optional Name/Tel
+   2. App sucht in FD per Email-Filter — existiert Contact? → nutze direkt
+   3. Sonst: legt Contact an (via findOrCreateFdContactByEmail mit Fallback-Suche bei 409)
+   4. PUT /tickets/<id> mit {requester_id: newId}
+   5. Lokalen Cache + UI aktualisieren */
+async function openChangeRequesterModal(accountId, ticketId) {
+  let host = document.getElementById('subModalHost');
+  if (!host) { host = document.createElement('div'); host.id = 'subModalHost'; document.body.appendChild(host); }
+  const ticket = APP_STATE.ticketCache?.get?.(accountId + '|' + ticketId) ||
+    (APP_STATE.pageState?.tickets || []).find(t => t._accountId === accountId && t.id === ticketId);
+  const currentName  = ticket?.requester?.name  || '';
+  const currentEmail = ticket?.requester?.email || ticket?.email || '';
+  host.innerHTML =
+    '<div class="fixed inset-0 z-[60] flex items-end sm:items-center justify-center bg-black/50 sm:p-4" onclick="if(event.target===this)closeChangeRequesterModal()">' +
+      '<div class="bg-white w-full max-w-md rounded-t-3xl sm:rounded-2xl shadow-2xl flex flex-col safe-bottom" style="max-height:92vh">' +
+        '<div class="safe-top px-4 py-3 border-b border-ink-200 flex items-center justify-between gap-2 shrink-0">' +
+          '<h3 class="font-bold text-ink-900 inline-flex items-center gap-2"><i data-lucide="users" class="w-5 h-5 text-amber-600"></i> Anfragenden wechseln</h3>' +
+          '<button onclick="closeChangeRequesterModal()" class="w-9 h-9 rounded-lg hover:bg-ink-100 flex items-center justify-center"><i data-lucide="x" class="w-5 h-5 text-ink-700"></i></button>' +
+        '</div>' +
+        '<div class="flex-1 overflow-y-auto p-4 space-y-3">' +
+          '<input type="hidden" id="crAcc" value="' + escapeAttr(accountId) + '">' +
+          '<input type="hidden" id="crTicketId" value="' + ticketId + '">' +
+          '<div class="bg-ink-50 rounded-xl p-2.5 text-[11px]">' +
+            '<p class="text-ink-500 uppercase tracking-wider text-[9px] font-bold">Aktuell</p>' +
+            '<p class="font-semibold text-ink-900 mt-0.5">' + escapeHtml(currentName || '–') + '</p>' +
+            (currentEmail ? '<p class="text-ink-600 mt-0.5">' + escapeHtml(currentEmail) + '</p>' : '') +
+          '</div>' +
+          '<div class="bg-amber-50 border border-amber-200 rounded-xl p-2.5 text-[11px] text-amber-900">' +
+            '<i data-lucide="alert-circle" class="w-3.5 h-3.5 inline -mt-0.5"></i> Der neue Anfragender wird mit Email gesucht. Existiert er nicht in Freshdesk, wird er automatisch angelegt.' +
+          '</div>' +
+          '<label class="text-xs font-bold text-ink-700 uppercase tracking-wider block">Email *</label>' +
+          '<input id="crEmail" type="email" placeholder="kunde@firma.de" class="w-full px-3 py-2.5 border border-ink-300 rounded-xl text-sm">' +
+          '<label class="text-xs font-bold text-ink-700 uppercase tracking-wider block">Name <span class="text-ink-400 font-normal">(optional, nur bei Neuanlage)</span></label>' +
+          '<input id="crName" type="text" placeholder="Max Mustermann" class="w-full px-3 py-2.5 border border-ink-300 rounded-xl text-sm">' +
+          '<label class="text-xs font-bold text-ink-700 uppercase tracking-wider block">Telefon <span class="text-ink-400 font-normal">(optional, nur bei Neuanlage)</span></label>' +
+          '<input id="crPhone" type="text" placeholder="+49 …" class="w-full px-3 py-2.5 border border-ink-300 rounded-xl text-sm">' +
+          '<div id="crErr" class="hidden bg-red-50 border border-red-200 rounded-xl p-3 text-sm text-red-800"></div>' +
+        '</div>' +
+        '<div class="border-t border-ink-200 p-3 flex gap-2 shrink-0">' +
+          '<button onclick="closeChangeRequesterModal()" class="flex-1 bg-ink-100 hover:bg-ink-200 text-ink-700 rounded-xl px-3 py-3 text-sm font-bold">Abbrechen</button>' +
+          '<button onclick="processChangeRequester(this)" class="flex-[2] bg-amber-600 hover:bg-amber-700 text-white rounded-xl px-3 py-3 text-sm font-bold inline-flex items-center justify-center gap-1.5 shadow-md">' +
+            '<i data-lucide="check" class="w-4 h-4"></i> Übernehmen' +
+          '</button>' +
+        '</div>' +
+      '</div>' +
+    '</div>';
+  if (window.lucide) lucide.createIcons();
+  document.body.style.overflow = 'hidden';
+  setTimeout(() => $('crEmail')?.focus(), 80);
+}
+
+async function processChangeRequester(btn) {
+  const errEl = $('crErr');
+  const setErr = msg => { if (errEl) { errEl.textContent = msg; errEl.classList.remove('hidden'); } };
+  if (errEl) errEl.classList.add('hidden');
+  const accountId = $('crAcc')?.value;
+  const ticketId  = parseInt($('crTicketId')?.value, 10);
+  const email     = ($('crEmail')?.value || '').trim();
+  const name      = ($('crName')?.value || '').trim();
+  const phone     = ($('crPhone')?.value || '').trim();
+  if (!email) return setErr('Email ist Pflicht');
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return setErr('Email-Adresse sieht ungültig aus');
+  setBusy(btn, true, 'Ändere…');
+  try {
+    // 1. Contact finden/anlegen
+    const contact = await findOrCreateFdContactByEmail(accountId, { email, name, phone });
+    if (!contact?.id) throw new Error('Contact konnte nicht ermittelt werden');
+    // 2. Ticket-Update
+    const path = '/freshdesk/' + encodeURIComponent(accountId) + '/api/v2/tickets/' + ticketId;
+    await proxyJson(path, { method: 'PUT', body: JSON.stringify({ requester_id: contact.id }) });
+    // 3. Lokalen Cache + UI patchen
+    const patch = {
+      requester_id: contact.id,
+      email: contact.email,
+      requester: { id: contact.id, name: contact.name, email: contact.email, phone: contact.phone || '', mobile: contact.mobile || '' },
+    };
+    if (typeof patchTicketInList === 'function') patchTicketInList(accountId, ticketId, patch);
+    const cached = APP_STATE.ticketCache?.get?.(accountId + '|' + ticketId);
+    if (cached) Object.assign(cached, patch);
+    if (CURRENT_TICKET && CURRENT_TICKET.id === ticketId && CURRENT_TICKET._accountId === accountId) {
+      Object.assign(CURRENT_TICKET, patch);
+      // Detail neu rendern wenn offen
+      if (typeof openTicketDetail === 'function' && document.getElementById('modalHost')?.children?.length) {
+        try { openTicketDetail(accountId, ticketId); } catch (_) {}
+      }
+    }
+    if (typeof refreshTicketsListFromCache === 'function') refreshTicketsListFromCache();
+    closeChangeRequesterModal();
+    toast('Anfragender geändert: ' + (contact.name || contact.email), 'success', 4000);
+  } catch (e) {
+    setBusy(btn, false);
+    setErr(e.message || String(e));
+  }
+}
+
+function closeChangeRequesterModal() {
+  const host = document.getElementById('subModalHost');
+  if (host) host.innerHTML = '';
+  document.body.style.overflow = '';
 }
 
 function _isoToLocalInput(iso) {
