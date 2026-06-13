@@ -755,7 +755,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.105';
+const APP_VERSION = 'v2.46.106';
 
 /* ============================================================
    GLOBAL THEME — v2.46.12
@@ -25160,6 +25160,8 @@ const CONTACTS_STATE = {
   displayCount: 30,            // Wie viele Treffer aktuell sichtbar (Paging)
   selected: new Set(),         // Email-Set für Massenversand-Auswahl
   jobTitleCache: new Map(),    // email -> { jobTitle, source: 'fd_field'|'signature'|'unknown'|'checking', checked:bool }
+  fdPageOffset: 0,             // Wie oft "Weitere aus FD laden" schon geklickt wurde
+  noMoreFromFd: false,         // True wenn letzter Page-Fetch keine neuen Treffer brachte
 };
 
 /* Lädt + cached die ContactFlags-Map. */
@@ -25265,9 +25267,11 @@ async function parseContactSearchPrompt(promptText) {
      4) name (search-DSL + autocomplete fallback)
      5) job_title → clientside Filter NACH allen Strategien
    Ergebnis ist über die Strategien dedupliziert per Email. */
-async function _searchFdContactsByParams(accountId, params, maxPerAccount) {
+async function _searchFdContactsByParams(accountId, params, maxPerAccount, pageOffset) {
   const base = '/freshdesk/' + encodeURIComponent(accountId) + '/api/v2';
   const limit = maxPerAccount || 30;
+  const off = Math.max(0, parseInt(pageOffset || 0, 10));
+  const pageQ = off > 0 ? '&page=' + (1 + off) : '';
   const found = [];
   const seen = new Set();
   const errs = [];
@@ -25289,14 +25293,14 @@ async function _searchFdContactsByParams(accountId, params, maxPerAccount) {
   if (params.email) {
     try {
       const q = '"email:\'' + safe(params.email) + '\'"';
-      const res = await proxyJson(base + '/search/contacts?query=' + encodeURIComponent(q));
+      const res = await proxyJson(base + '/search/contacts?query=' + encodeURIComponent(q) + pageQ);
       addList(res?.results || []);
     } catch (e) { errs.push('email: ' + e.message); }
   }
 
-  // 2. Email-Domain — Autocomplete ist tolerant für Substring
+  // 2. Email-Domain — Autocomplete (nicht paginatable, nur bei erstem Fetch)
   if (aborted()) return found;
-  if (params.email_domain && found.length < limit) {
+  if (params.email_domain && found.length < limit && off === 0) {
     try {
       const term = String(params.email_domain).replace(/^@/, '');
       const res = await proxyJson(base + '/contacts/autocomplete?term=' + encodeURIComponent(term));
@@ -25349,12 +25353,12 @@ async function _searchFdContactsByParams(accountId, params, maxPerAccount) {
       if (!pages && !companies.length) errs.push('company: /companies-Endpunkt nicht erreichbar (evtl. fehlende Admin-Permission)');
     }
     if (!companies.length) errs.push('company: keine Firma „' + params.company + '" gefunden');
-    // Pro Treffer Contacts laden
+    // Pro Treffer Contacts laden — bei Pagination tiefere Pages je Company holen
     for (const co of companies.slice(0, 10)) {
       if (aborted()) break;
       if (found.length >= limit) break;
       try {
-        const list = await proxyJson(base + '/contacts?company_id=' + encodeURIComponent(co.id) + '&per_page=100');
+        const list = await proxyJson(base + '/contacts?company_id=' + encodeURIComponent(co.id) + '&per_page=100' + (off > 0 ? '&page=' + (1 + off) : ''));
         const arr = Array.isArray(list) ? list : (list?.contacts || []);
         // Company-Namen nachziehen für die Anzeige
         arr.forEach(c => { if (!c.company_name) c.company_name = co.name; });
@@ -25363,15 +25367,15 @@ async function _searchFdContactsByParams(accountId, params, maxPerAccount) {
     }
   }
 
-  // 4. Name → Search-DSL + Autocomplete-Fallback
+  // 4. Name → Search-DSL (paginatable) + Autocomplete-Fallback (nicht paginatable)
   if (aborted()) return found;
   if (params.name && found.length < limit) {
     try {
       const q = '"name:\'' + safe(params.name) + '\'"';
-      const res = await proxyJson(base + '/search/contacts?query=' + encodeURIComponent(q));
+      const res = await proxyJson(base + '/search/contacts?query=' + encodeURIComponent(q) + pageQ);
       addList(res?.results || []);
     } catch (e) { errs.push('name-search: ' + e.message); }
-    if (found.length < limit) {
+    if (found.length < limit && off === 0) {
       try {
         const res = await proxyJson(base + '/contacts/autocomplete?term=' + encodeURIComponent(params.name));
         const list = Array.isArray(res) ? res : (res?.results || res?.contacts || []);
@@ -25634,6 +25638,63 @@ function _stopContactSearch() {
 function _loadMoreContacts() {
   CONTACTS_STATE.displayCount = (CONTACTS_STATE.displayCount || 30) + 30;
   _renderContactsResults();
+}
+
+/* Lädt eine weitere FD-Page für die aktive Suche und merged neue Treffer.
+   Setzt noMoreFromFd wenn der letzte Fetch nichts Neues brachte. */
+async function _loadMoreFromFd(btn) {
+  if (!CONTACTS_STATE.params) return;
+  CONTACTS_STATE.fdPageOffset = (CONTACTS_STATE.fdPageOffset || 0) + 1;
+  CONTACTS_STATE.searchCtrl = { aborted: false };
+  setBusy(btn, true, 'Lade weitere…');
+  // Visuell zeigen, dass nachgeladen wird
+  const host = $('contactsResults');
+  if (host) {
+    const append = document.createElement('div');
+    append.id = 'contactsLoadingMore';
+    append.className = 'mt-2 bg-white rounded-xl border border-ink-200 p-4 text-center';
+    append.innerHTML = '<span class="spinner inline-block w-5 h-5 border-[2px] text-orange-500"></span><p class="text-[11px] text-ink-500 mt-1">Lade weitere Treffer aus Freshdesk (Page ' + (1 + CONTACTS_STATE.fdPageOffset) + ')…</p>';
+    host.appendChild(append);
+  }
+  try {
+    const allAccounts = APP_STATE.accounts || [];
+    const accounts = CONTACTS_STATE.searchAccountId === 'all'
+      ? allAccounts
+      : allAccounts.filter(a => String(a.id) === String(CONTACTS_STATE.searchAccountId));
+    const tasks = accounts.map(acc =>
+      _searchFdContactsByParams(acc.id, CONTACTS_STATE.params, CONTACTS_STATE.params.limit, CONTACTS_STATE.fdPageOffset)
+        .catch(() => [])
+    );
+    const perAccount = await Promise.all(tasks);
+    // Merge nur die neuen (per Email-Dedupe)
+    const seen = new Set(CONTACTS_STATE.results.map(c => String(c.email || '').toLowerCase()));
+    let added = 0;
+    perAccount.forEach(arr => {
+      arr.forEach(c => {
+        const e = String(c.email || '').toLowerCase();
+        if (!e || seen.has(e)) return;
+        seen.add(e);
+        CONTACTS_STATE.results.push(c);
+        added++;
+      });
+    });
+    if (added === 0) {
+      CONTACTS_STATE.noMoreFromFd = true;
+      toast('Keine weiteren Treffer in Freshdesk.', 'warn', 3000);
+    } else {
+      CONTACTS_STATE.displayCount = (CONTACTS_STATE.displayCount || 30) + Math.min(added, 30);
+      toast('+' + added + ' weitere Kontakte aus Freshdesk.', 'success', 2500);
+    }
+  } catch (e) {
+    toast('Nachladen fehlgeschlagen: ' + (e.message || e), 'error', 5000);
+  } finally {
+    CONTACTS_STATE.searchCtrl = null;
+    setBusy(btn, false);
+    const sp = document.getElementById('contactsLoadingMore');
+    if (sp) sp.remove();
+    // Marketing-History für neu geladene Emails ist im Cache (loadAllMarketingEmails reicht für alle)
+    _renderContactsResults();
+  }
 }
 
 function _toggleSelect(email) {
@@ -25967,6 +26028,8 @@ async function _runContactSearch(btn) {
   CONTACTS_STATE.open.clear();
   CONTACTS_STATE.selected.clear();
   CONTACTS_STATE.displayCount = 30;
+  CONTACTS_STATE.fdPageOffset = 0;
+  CONTACTS_STATE.noMoreFromFd = false;
   CONTACTS_STATE.searchCtrl = { aborted: false };
   // Such-Button durch Stop-Button ersetzen
   const row = document.getElementById('contactsActionRow');
@@ -26180,7 +26243,13 @@ function _renderContactsResults() {
     visible.map(row => _renderContactSearchCard(row)).join('') +
     (hasMore
       ? '<button onclick="_loadMoreContacts()" class="w-full mt-2 px-3 py-3 bg-white hover:bg-ink-50 border-2 border-dashed border-ink-300 text-ink-700 rounded-xl text-sm font-bold inline-flex items-center justify-center gap-2"><i data-lucide="chevron-down" class="w-4 h-4"></i> Nächste 30 anzeigen (' + (filteredCount - display) + ' verbleibend)</button>'
-      : '');
+      : '') +
+    // v2.46.106: "Weitere aus Freshdesk laden" — paginiert die FD-API um den Pool zu erweitern
+    (CONTACTS_STATE.params && !CONTACTS_STATE.noMoreFromFd && CONTACTS_STATE.results.length > 0
+      ? '<button onclick="_loadMoreFromFd(this)" class="w-full mt-2 px-3 py-3 bg-orange-50 hover:bg-orange-100 border-2 border-dashed border-orange-300 text-orange-700 rounded-xl text-sm font-bold inline-flex items-center justify-center gap-2"><i data-lucide="download-cloud" class="w-4 h-4"></i> Weitere aus Freshdesk laden (aktuell ' + CONTACTS_STATE.results.length + ' geladen · Page ' + (CONTACTS_STATE.fdPageOffset + 2) + ')</button>'
+      : (CONTACTS_STATE.noMoreFromFd
+        ? '<p class="text-center text-[11px] text-ink-400 italic mt-2">Keine weiteren Treffer in Freshdesk verfügbar.</p>'
+        : ''));
   if (window.lucide) lucide.createIcons();
   _updateBulkBar();
 }
