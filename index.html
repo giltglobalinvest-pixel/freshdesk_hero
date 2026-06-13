@@ -755,7 +755,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.102';
+const APP_VERSION = 'v2.46.103';
 
 /* ============================================================
    GLOBAL THEME — v2.46.12
@@ -26078,6 +26078,9 @@ function _renderContactSearchCard(row) {
   const isSel = CONTACTS_STATE.selected.has(row.e);
   const acc = (APP_STATE.accounts || []).find(a => a.id === c._accountId);
   const accName = acc?.name || c._accountId;
+  // v2.46.103: JSON.stringify innerhalb von onclick="..." Attributen muss HTML-escaped sein,
+  // sonst killt ein eingebettetes " (z.B. JSON.stringify('PSR Ost 4') → "PSR Ost 4") das Attribut.
+  const js = (v) => escapeAttr(JSON.stringify(v));
   const mails = row.mails.slice().sort((a, b) =>
     new Date(b.sent_at || 0).getTime() - new Date(a.sent_at || 0).getTime()
   );
@@ -26117,16 +26120,16 @@ function _renderContactSearchCard(row) {
       '</div>'
     : '<span class="text-[9px] bg-emerald-50 text-emerald-700 px-1.5 py-0.5 rounded mt-1 inline-block" title="Noch keine Marketing-Mail">neu — noch keine Marketing-Mail</span>';
   // Action-Buttons rechts
-  const sendBtn = '<button onclick="event.stopPropagation();openMarketingFromContactModal(' + JSON.stringify(c._accountId) + ',' + JSON.stringify(row.e) + ',' + JSON.stringify(c.name || '') + ',' + Number(c.id || 0) + ', null)" class="text-[10px] bg-orange-50 hover:bg-orange-100 border border-orange-300 text-orange-700 px-2 py-1 rounded inline-flex items-center gap-1" title="Marketing-Email an diesen Kontakt"><i data-lucide="megaphone" class="w-3 h-3"></i></button>';
+  const sendBtn = '<button onclick="event.stopPropagation();openMarketingFromContactModal(' + js(c._accountId) + ',' + js(row.e) + ',' + js(c.name || '') + ',' + Number(c.id || 0) + ', null)" class="text-[10px] bg-orange-50 hover:bg-orange-100 border border-orange-300 text-orange-700 px-2 py-1 rounded inline-flex items-center gap-1" title="Marketing-Email an diesen Kontakt"><i data-lucide="megaphone" class="w-3 h-3"></i></button>';
   const hideBtn = row.hidden
-    ? '<button onclick="event.stopPropagation();_toggleHideContact(' + JSON.stringify(row.e) + ', this)" class="text-[10px] bg-ink-200 hover:bg-ink-300 text-ink-700 px-2 py-1 rounded inline-flex items-center gap-1" title="Wieder einblenden"><i data-lucide="eye" class="w-3 h-3"></i></button>'
-    : '<button onclick="event.stopPropagation();_toggleHideContact(' + JSON.stringify(row.e) + ', this)" class="text-[10px] bg-white hover:bg-ink-100 border border-ink-300 text-ink-600 px-2 py-1 rounded inline-flex items-center gap-1" title="Kein Sales-Potenzial — ausblenden"><i data-lucide="eye-off" class="w-3 h-3"></i></button>';
+    ? '<button onclick="event.stopPropagation();_toggleHideContact(' + js(row.e) + ', this)" class="text-[10px] bg-ink-200 hover:bg-ink-300 text-ink-700 px-2 py-1 rounded inline-flex items-center gap-1" title="Wieder einblenden"><i data-lucide="eye" class="w-3 h-3"></i></button>'
+    : '<button onclick="event.stopPropagation();_toggleHideContact(' + js(row.e) + ', this)" class="text-[10px] bg-white hover:bg-ink-100 border border-ink-300 text-ink-600 px-2 py-1 rounded inline-flex items-center gap-1" title="Kein Sales-Potenzial — ausblenden"><i data-lucide="eye-off" class="w-3 h-3"></i></button>';
   // Checkbox links für Mass-Select
-  const selBox = '<input type="checkbox" ' + (isSel ? 'checked' : '') + ' onclick="event.stopPropagation();_toggleSelect(' + JSON.stringify(row.e) + ')" class="w-4 h-4 accent-orange-600 mt-1 shrink-0" title="Für Massenversand auswählen">';
+  const selBox = '<input type="checkbox" ' + (isSel ? 'checked' : '') + ' onclick="event.stopPropagation();_toggleSelect(' + js(row.e) + ')" class="w-4 h-4 accent-orange-600 mt-1 shrink-0" title="Für Massenversand auswählen">';
   const head =
     '<div class="w-full px-3 py-2.5 ' + (row.hidden ? 'bg-ink-50/60 opacity-70' : (fresh ? 'bg-orange-50' : 'bg-white')) + ' border-b border-ink-200 flex items-start gap-2 ' + (isSel ? 'ring-2 ring-orange-400 ring-inset' : '') + '">' +
       selBox +
-      '<button type="button" onclick="_toggleContact(' + JSON.stringify(row.e) + ')" class="flex-1 min-w-0 text-left hover:bg-ink-50/50 -m-1 p-1 rounded">' +
+      '<button type="button" onclick="_toggleContact(' + js(row.e) + ')" class="flex-1 min-w-0 text-left hover:bg-ink-50/50 -m-1 p-1 rounded">' +
         '<div class="flex items-center gap-1.5 flex-wrap">' +
           '<p class="font-bold text-ink-900 text-sm truncate">' + escapeHtml(c.name || row.e.split('@')[0]) + '</p>' +
           syncBadge +
@@ -26144,7 +26147,7 @@ function _renderContactSearchCard(row) {
       '</button>' +
       '<div class="flex flex-col items-end gap-1 shrink-0">' +
         '<div class="flex items-center gap-1">' + sendBtn + hideBtn + '</div>' +
-        '<button type="button" onclick="_toggleContact(' + JSON.stringify(row.e) + ')" class="p-0.5"><i data-lucide="' + (isOpen ? 'chevron-up' : 'chevron-down') + '" class="w-4 h-4 text-ink-500"></i></button>' +
+        '<button type="button" onclick="_toggleContact(' + js(row.e) + ')" class="p-0.5"><i data-lucide="' + (isOpen ? 'chevron-up' : 'chevron-down') + '" class="w-4 h-4 text-ink-500"></i></button>' +
       '</div>' +
     '</div>';
   if (!isOpen) {
@@ -26161,8 +26164,8 @@ function _renderContactSearchCard(row) {
     '</div>';
   const actions =
     '<div class="px-3 py-2 bg-white border-b border-ink-100 flex flex-wrap gap-1.5">' +
-      '<button onclick="openContactEditModal(' + JSON.stringify(c._accountId) + ', ' + Number(c.id) + ')" class="text-[10px] bg-brand-50 hover:bg-brand-100 text-brand-700 px-2 py-1 rounded inline-flex items-center gap-1"><i data-lucide="user-cog" class="w-3 h-3"></i> Bearbeiten</button>' +
-      '<button onclick="openMarketingFromContactModal(' + JSON.stringify(c._accountId) + ',' + JSON.stringify(row.e) + ',' + JSON.stringify(c.name || '') + ',' + Number(c.id || 0) + ', null)" class="text-[10px] bg-orange-50 hover:bg-orange-100 text-orange-700 px-2 py-1 rounded inline-flex items-center gap-1"><i data-lucide="megaphone" class="w-3 h-3"></i> Marketing senden</button>' +
+      '<button onclick="openContactEditModal(' + js(c._accountId) + ', ' + Number(c.id) + ')" class="text-[10px] bg-brand-50 hover:bg-brand-100 text-brand-700 px-2 py-1 rounded inline-flex items-center gap-1"><i data-lucide="user-cog" class="w-3 h-3"></i> Bearbeiten</button>' +
+      '<button onclick="openMarketingFromContactModal(' + js(c._accountId) + ',' + js(row.e) + ',' + js(c.name || '') + ',' + Number(c.id || 0) + ', null)" class="text-[10px] bg-orange-50 hover:bg-orange-100 text-orange-700 px-2 py-1 rounded inline-flex items-center gap-1"><i data-lucide="megaphone" class="w-3 h-3"></i> Marketing senden</button>' +
     '</div>';
   const history = mails.length
     ? '<div class="divide-y divide-ink-100">' +
