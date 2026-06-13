@@ -755,7 +755,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.100';
+const APP_VERSION = 'v2.46.101';
 
 /* ============================================================
    GLOBAL THEME — v2.46.12
@@ -25281,20 +25281,55 @@ async function _searchFdContactsByParams(accountId, params, maxPerAccount) {
   }
 
   // 3. Firma → companies suchen → pro company_id contacts laden
+  //    Trick: FDs /search/companies kennt KEIN name-Feld (nur domain + custom_fields).
+  //    Strategie A: wenn email_domain bekannt → domain:'X' in search-DSL (erlaubt)
+  //    Strategie B: /companies?per_page=100 paginated + clientside name-Filter
   if (params.company && found.length < limit) {
-    try {
-      const q = '"name:\'' + safe(params.company) + '\'"';
-      const cRes = await proxyJson(base + '/search/companies?query=' + encodeURIComponent(q));
-      const companies = (cRes?.results || []).slice(0, 10);
-      for (const co of companies) {
-        if (found.length >= limit) break;
+    const companies = [];
+    const seenCo = new Set();
+    const addCo = (arr) => arr.forEach(co => {
+      if (co?.id && !seenCo.has(co.id)) { seenCo.add(co.id); companies.push(co); }
+    });
+    // A) Domain-Suche via search-DSL (das einzige was /search/companies erlaubt)
+    if (params.email_domain) {
+      try {
+        const q = '"domain:\'' + safe(String(params.email_domain).replace(/^@/, '')) + '\'"';
+        const res = await proxyJson(base + '/search/companies?query=' + encodeURIComponent(q));
+        addCo(res?.results || []);
+      } catch (_) {}
+    }
+    // B) Paginierte Liste + clientside-Filter — funktioniert auch ohne Domain
+    if (companies.length < 10) {
+      const needle = String(params.company).toLowerCase();
+      let pages = 0;
+      for (let page = 1; page <= 5; page++) {
         try {
-          const list = await proxyJson(base + '/contacts?company_id=' + encodeURIComponent(co.id) + '&per_page=100');
-          addList(Array.isArray(list) ? list : []);
-        } catch (_) {}
+          const list = await proxyJson(base + '/companies?per_page=100&page=' + page);
+          const arr = Array.isArray(list) ? list : (list?.companies || []);
+          if (!arr.length) break;
+          pages++;
+          arr.forEach(co => {
+            const n = String(co.name || '').toLowerCase();
+            const d = String(co.domains?.[0] || '').toLowerCase();
+            if (n.includes(needle) || (d && d.includes(needle))) addCo([co]);
+          });
+          if (arr.length < 100) break;
+        } catch (e) { errs.push('companies-list: ' + e.message); break; }
       }
-      if (!companies.length) errs.push('company: keine Firma „' + params.company + '" gefunden');
-    } catch (e) { errs.push('company: ' + e.message); }
+      if (!pages && !companies.length) errs.push('company: /companies-Endpunkt nicht erreichbar (evtl. fehlende Admin-Permission)');
+    }
+    if (!companies.length) errs.push('company: keine Firma „' + params.company + '" gefunden');
+    // Pro Treffer Contacts laden
+    for (const co of companies.slice(0, 10)) {
+      if (found.length >= limit) break;
+      try {
+        const list = await proxyJson(base + '/contacts?company_id=' + encodeURIComponent(co.id) + '&per_page=100');
+        const arr = Array.isArray(list) ? list : (list?.contacts || []);
+        // Company-Namen nachziehen für die Anzeige
+        arr.forEach(c => { if (!c.company_name) c.company_name = co.name; });
+        addList(arr);
+      } catch (e) { errs.push('contacts(co=' + co.id + '): ' + e.message); }
+    }
   }
 
   // 4. Name → Search-DSL + Autocomplete-Fallback
