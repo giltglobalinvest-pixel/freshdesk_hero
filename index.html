@@ -755,7 +755,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.106';
+const APP_VERSION = 'v2.46.107';
 
 /* ============================================================
    GLOBAL THEME — v2.46.12
@@ -25790,7 +25790,7 @@ async function _openBulkMarketing() {
     const histories = await Promise.all(contacts.map(c =>
       loadMarketingEmailsForEmail(c.email).catch(() => [])
     ));
-    window._BULK_CTX = { accountId, contacts, histories, responses, configs };
+    window._BULK_CTX = { accountId, contacts, histories, responses, configs, attachments: [], aiPrompt: '', aiGenerated: false };
     _renderBulkMarketingModal();
   } catch (e) {
     _bulkClose();
@@ -25828,14 +25828,26 @@ function _renderBulkMarketingModal() {
           '<button onclick="_bulkClose()" class="w-9 h-9 rounded-lg hover:bg-ink-100 flex items-center justify-center"><i data-lucide="x" class="w-5 h-5 text-ink-700"></i></button>' +
         '</div>' +
         '<div class="flex-1 overflow-y-auto p-4 space-y-3">' +
-          '<label class="text-xs font-bold text-ink-700 uppercase tracking-wider block">Vorlage *</label>' +
+          '<label class="text-xs font-bold text-ink-700 uppercase tracking-wider block">Vorlage (optional)</label>' +
           '<select id="bulkTemplate" onchange="_bulkTemplateChange()" class="w-full px-3 py-2.5 border border-ink-300 rounded-xl text-sm bg-white">' + tplOpts + '</select>' +
+          // KI-Generator
+          '<div class="bg-gradient-to-br from-purple-50 to-brand-50 border border-purple-200 rounded-xl p-2.5 space-y-2">' +
+            '<p class="text-[11px] font-bold text-purple-800 inline-flex items-center gap-1"><i data-lucide="sparkles" class="w-3.5 h-3.5"></i> ODER per KI individuell schreiben</p>' +
+            '<textarea id="bulkAiPrompt" rows="2" placeholder="z.B. „Hinweis dass wir ein neues Produkt im Sortiment haben und einladen wollen es kennenzulernen"" class="w-full px-3 py-2 border border-purple-300 rounded-lg text-[12px] resize-none">' + escapeHtml(window._BULK_CTX?.aiPrompt || '') + '</textarea>' +
+            '<button onclick="_bulkAiGenerate(this)" class="w-full px-3 py-2 bg-gradient-to-br from-purple-600 to-brand-600 hover:opacity-90 text-white rounded-lg text-xs font-bold inline-flex items-center justify-center gap-1"><i data-lucide="wand-2" class="w-3.5 h-3.5"></i> Betreff + Body generieren</button>' +
+          '</div>' +
           '<label class="text-xs font-bold text-ink-700 uppercase tracking-wider block">Von</label>' +
           '<select id="bulkFrom" class="w-full px-3 py-2.5 border border-ink-300 rounded-xl text-sm bg-white">' + cfgOpts + '</select>' +
           '<label class="text-xs font-bold text-ink-700 uppercase tracking-wider block">Betreff *</label>' +
           '<input id="bulkSubject" type="text" value="" class="w-full px-3 py-2.5 border border-ink-300 rounded-xl text-sm">' +
-          '<label class="text-xs font-bold text-ink-700 uppercase tracking-wider block">Nachricht (Platzhalter werden pro Empfänger ersetzt) *</label>' +
-          '<textarea id="bulkBody" rows="8" placeholder="Vorlage wählen, dann erscheint hier der Text…" class="w-full px-3 py-2.5 border border-ink-300 rounded-xl text-[12px] font-mono leading-snug resize-y"></textarea>' +
+          '<label class="text-xs font-bold text-ink-700 uppercase tracking-wider block">Nachricht (Platzhalter wie {{contactFirstName}} werden pro Empfänger ersetzt) *</label>' +
+          '<textarea id="bulkBody" rows="8" placeholder="Vorlage wählen oder per KI generieren, oder direkt tippen…" class="w-full px-3 py-2.5 border border-ink-300 rounded-xl text-[12px] font-mono leading-snug resize-y"></textarea>' +
+          // Anhänge
+          '<div class="bg-ink-50 border border-ink-200 rounded-xl p-2.5">' +
+            '<p class="text-[11px] font-bold text-ink-700 mb-1 inline-flex items-center gap-1"><i data-lucide="paperclip" class="w-3.5 h-3.5"></i> Anhänge (gehen an alle ' + ctx.contacts.length + ' Empfänger · max 20 MB pro Datei)</p>' +
+            '<input type="file" id="bulkAttachInput" multiple onchange="_bulkAddFiles(this)" class="text-[11px] block w-full text-ink-700 file:mr-2 file:py-1 file:px-2 file:rounded-md file:border-0 file:text-[11px] file:font-bold file:bg-orange-50 file:text-orange-700 hover:file:bg-orange-100 cursor-pointer">' +
+            '<div id="bulkAttachList" class="mt-1.5 space-y-1">' + _bulkAttachListHtml() + '</div>' +
+          '</div>' +
           '<div class="bg-ink-50 border border-ink-200 rounded-xl p-2.5">' +
             '<p class="text-[11px] font-bold text-ink-700 mb-1 inline-flex items-center gap-1"><i data-lucide="users" class="w-3.5 h-3.5"></i> Empfänger (' + ctx.contacts.length + ')</p>' +
             '<div id="bulkRecipientsList" class="space-y-1 max-h-40 overflow-y-auto">' +
@@ -25861,6 +25873,116 @@ function _renderBulkMarketingModal() {
       '</div>' +
     '</div>';
   if (window.lucide) lucide.createIcons();
+}
+
+function _bulkFormatBytes(n) {
+  if (n < 1024) return n + ' B';
+  if (n < 1024 * 1024) return (n / 1024).toFixed(1) + ' KB';
+  return (n / 1024 / 1024).toFixed(1) + ' MB';
+}
+
+function _bulkAttachListHtml() {
+  const ctx = window._BULK_CTX;
+  if (!ctx?.attachments?.length) return '<p class="text-[10px] text-ink-400 italic">Noch keine Anhänge ausgewählt.</p>';
+  return ctx.attachments.map((f, i) =>
+    '<div class="flex items-center justify-between gap-2 text-[11px] bg-white border border-ink-200 rounded px-2 py-1">' +
+      '<span class="truncate flex-1 inline-flex items-center gap-1"><i data-lucide="file" class="w-3 h-3 shrink-0"></i> ' + escapeHtml(f.name) + ' <span class="text-ink-400 shrink-0">(' + _bulkFormatBytes(f.size) + ')</span></span>' +
+      '<button onclick="_bulkRemoveFile(' + i + ')" class="text-red-500 hover:text-red-700 shrink-0" title="Entfernen"><i data-lucide="x" class="w-3 h-3"></i></button>' +
+    '</div>'
+  ).join('');
+}
+
+function _bulkAddFiles(inputEl) {
+  const ctx = window._BULK_CTX;
+  if (!ctx) return;
+  if (!ctx.attachments) ctx.attachments = [];
+  const files = Array.from(inputEl?.files || []);
+  const MAX_BYTES = 20 * 1024 * 1024;
+  for (const f of files) {
+    if (f.size > MAX_BYTES) {
+      toast('„' + f.name + '" ist zu groß (' + _bulkFormatBytes(f.size) + ') — max 20 MB pro Datei.', 'warn', 6000);
+      continue;
+    }
+    ctx.attachments.push({ name: f.name, type: f.type || 'application/octet-stream', size: f.size, blob: f });
+  }
+  if (inputEl) inputEl.value = '';
+  const host = document.getElementById('bulkAttachList');
+  if (host) host.innerHTML = _bulkAttachListHtml();
+  if (window.lucide) lucide.createIcons();
+}
+
+function _bulkRemoveFile(idx) {
+  const ctx = window._BULK_CTX;
+  if (!ctx?.attachments) return;
+  ctx.attachments.splice(idx, 1);
+  const host = document.getElementById('bulkAttachList');
+  if (host) host.innerHTML = _bulkAttachListHtml();
+  if (window.lucide) lucide.createIcons();
+}
+
+async function _bulkAiGenerate(btn) {
+  const ctx = window._BULK_CTX;
+  if (!ctx) return;
+  const prompt = (document.getElementById('bulkAiPrompt')?.value || '').trim();
+  if (!prompt) { toast('Bitte beschreib was die Email aussagen soll.', 'warn', 4000); return; }
+  ctx.aiPrompt = prompt;
+  setBusy(btn, true, 'KI schreibt…');
+  try {
+    const acc = (APP_STATE.accounts || []).find(a => a.id === ctx.accountId);
+    const me = APP_KEYS.user || {};
+    const sampleNames = ctx.contacts.slice(0, 3).map(c => c.name || c.email).join(', ');
+    const sampleCompanies = Array.from(new Set(ctx.contacts.map(c => c.company_name).filter(Boolean))).slice(0, 5).join(', ');
+    const sys = 'Du schreibst Sales-/Marketing-Emails auf Deutsch im Geschäftskontext.\n' +
+      'Antworte AUSSCHLIESSLICH mit JSON: {"subject":"…","body":"…"}\n' +
+      'Regeln für body:\n' +
+      '- Plain-Text mit Zeilenumbrüchen (\\n), KEIN HTML, KEIN Markdown\n' +
+      '- Verwende die Platzhalter {{contactFirstName}} (Vorname) als Anrede und {{userFirstName}} für deinen Namen\n' +
+      '- Maximal 180 Wörter, sachlich, freundlich, kein Marketing-Slang\n' +
+      '- Keine Signatur am Ende — die wird automatisch angefügt\n' +
+      '- Falls passend, kurzer CTA am Ende (z.B. „Rufen Sie uns gern an" oder „Antworten Sie auf diese Mail")\n' +
+      'Kontext für die Tonart:\n' +
+      '- Absender-Firma: ' + (acc?.name || '') + '\n' +
+      '- Absender-Name: ' + (me.name || '') + '\n' +
+      '- Beispiel-Empfänger: ' + sampleNames + '\n' +
+      (sampleCompanies ? '- Empfänger-Firmen: ' + sampleCompanies + '\n' : '') +
+      '- Anzahl Empfänger gesamt: ' + ctx.contacts.length;
+    const data = await proxyJson('/anthropic/v1/messages', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: 'claude-haiku-4-5-20251001',
+        max_tokens: 900,
+        system: sys,
+        messages: [{ role: 'user', content: prompt }]
+      })
+    });
+    recordAiUsage({
+      model: 'claude-haiku-4-5-20251001',
+      input_tokens:  data?.usage?.input_tokens || 0,
+      output_tokens: data?.usage?.output_tokens || 0,
+      feature: 'bulk_marketing_ai',
+      accountId: ctx.accountId,
+    });
+    const raw = (data?.content?.[0]?.text || '').trim().replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/i, '');
+    let obj;
+    try { obj = JSON.parse(raw); }
+    catch (_) {
+      const m = raw.match(/\{[\s\S]*\}/);
+      if (m) obj = JSON.parse(m[0]); else throw new Error('KI-Antwort ist kein gültiges JSON');
+    }
+    const subjEl = document.getElementById('bulkSubject');
+    const bodyEl = document.getElementById('bulkBody');
+    const tplEl = document.getElementById('bulkTemplate');
+    if (subjEl) subjEl.value = obj.subject || '';
+    if (bodyEl) bodyEl.value = obj.body || '';
+    if (tplEl) { tplEl.value = ''; }
+    ctx.aiGenerated = true;
+    toast('Betreff + Body von KI erzeugt — gerne nochmal überprüfen.', 'success', 4000);
+  } catch (e) {
+    toast('KI-Generierung fehlgeschlagen: ' + (e.message || e), 'error', 7000);
+  } finally {
+    setBusy(btn, false);
+  }
 }
 
 function _bulkTemplateChange() {
@@ -25959,17 +26081,30 @@ async function _processBulkMarketing(btn) {
     const bodyI = _renderPlaceholders(body, placeholderCtx);
     const bodyHtml = appendSignatureHtml(textToHtmlForFreshdesk(bodyI), sig);
     try {
-      const created = await proxyJson('/freshdesk/' + encodeURIComponent(ctx.accountId) + '/api/v2/tickets/outbound_email', {
-        method: 'POST',
-        body: JSON.stringify({
+      let created;
+      if (ctx.attachments && ctx.attachments.length) {
+        // multipart/form-data — gleichen Anhänge an alle Empfänger
+        created = await _fdPostMultipart(ctx.accountId, 'tickets/outbound_email', {
           subject: subjI,
           description: bodyHtml,
           email: c.email,
-          email_config_id: fromId,
-          priority: 1,
-          status: 5,
-        }),
-      });
+          email_config_id: String(fromId),
+          priority: '1',
+          status: '5',
+        }, ctx.attachments);
+      } else {
+        created = await proxyJson('/freshdesk/' + encodeURIComponent(ctx.accountId) + '/api/v2/tickets/outbound_email', {
+          method: 'POST',
+          body: JSON.stringify({
+            subject: subjI,
+            description: bodyHtml,
+            email: c.email,
+            email_config_id: fromId,
+            priority: 1,
+            status: 5,
+          }),
+        });
+      }
       if (!created?.id) throw new Error('keine Ticket-ID');
       ok++;
       recordMarketingEmail(ctx.accountId, {
