@@ -755,7 +755,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.98';
+const APP_VERSION = 'v2.46.99';
 
 /* ============================================================
    GLOBAL THEME — v2.46.12
@@ -25230,35 +25230,99 @@ async function parseContactSearchPrompt(promptText) {
   }
 }
 
-/* FD-Search pro Account. Baut die verschiedenen Such-Strategien aus den
-   geparsten Params zusammen und gibt unique-Treffer zurück. */
+/* FD-Search pro Account — mehrstufige Pipeline.
+   Wichtig: FDs /search/contacts kennt NUR die Felder name/email/phone/mobile/
+   twitter_id/company_id/tag/cf_*. company_name und job_title gibt's NICHT.
+   Strategien (jeweils mit try/catch, alle Strategien laufen durch):
+     1) email (search-DSL email:'X')
+     2) email_domain (contacts/autocomplete?term=@domain)
+     3) company → erst search/companies, dann pro company_id /contacts?company_id=
+     4) name (search-DSL + autocomplete fallback)
+     5) job_title → clientside Filter NACH allen Strategien
+   Ergebnis ist über die Strategien dedupliziert per Email. */
 async function _searchFdContactsByParams(accountId, params, maxPerAccount) {
   const base = '/freshdesk/' + encodeURIComponent(accountId) + '/api/v2';
-  const queries = [];
-  if (params.email)        queries.push('"email:\'' + params.email.replace(/'/g, "\\'") + '\'"');
-  if (params.email_domain) queries.push('"email:\'' + params.email_domain.replace(/'/g, "\\'") + '\'"');
-  if (params.company)      queries.push('"company_name:\'' + params.company.replace(/'/g, "\\'") + '\'"');
-  if (params.name)         queries.push('"name:\'' + params.name.replace(/'/g, "\\'") + '\'"');
-  if (params.job_title)    queries.push('"job_title:\'' + params.job_title.replace(/'/g, "\\'") + '\'"');
+  const limit = maxPerAccount || 30;
   const found = [];
   const seen = new Set();
-  for (const q of queries) {
+  const errs = [];
+  const addList = (list) => {
+    if (!Array.isArray(list)) return;
+    for (const c of list) {
+      const e = String(c.email || '').toLowerCase();
+      if (!e || seen.has(e)) continue;
+      seen.add(e);
+      found.push(Object.assign({}, c, { _accountId: accountId, _source: 'fd' }));
+    }
+  };
+  const safe = (s) => String(s || '').replace(/'/g, "\\'").trim();
+
+  // 1. Email direkt
+  if (params.email) {
     try {
+      const q = '"email:\'' + safe(params.email) + '\'"';
       const res = await proxyJson(base + '/search/contacts?query=' + encodeURIComponent(q));
-      const list = Array.isArray(res?.results) ? res.results : [];
-      for (const c of list) {
-        const e = String(c.email || '').toLowerCase();
-        if (!e || seen.has(e)) continue;
-        seen.add(e);
-        found.push(Object.assign({}, c, { _accountId: accountId, _source: 'fd' }));
-        if (found.length >= (maxPerAccount || 30)) break;
+      addList(res?.results || []);
+    } catch (e) { errs.push('email: ' + e.message); }
+  }
+
+  // 2. Email-Domain — Autocomplete ist tolerant für Substring
+  if (params.email_domain && found.length < limit) {
+    try {
+      const term = String(params.email_domain).replace(/^@/, '');
+      const res = await proxyJson(base + '/contacts/autocomplete?term=' + encodeURIComponent(term));
+      const list = Array.isArray(res) ? res : (res?.results || res?.contacts || []);
+      // Filter nochmal clientside auf Domain
+      const tlc = term.toLowerCase();
+      addList(list.filter(c => String(c.email || '').toLowerCase().endsWith('@' + tlc) ||
+                                String(c.email || '').toLowerCase().includes(tlc)));
+    } catch (e) { errs.push('domain: ' + e.message); }
+  }
+
+  // 3. Firma → companies suchen → pro company_id contacts laden
+  if (params.company && found.length < limit) {
+    try {
+      const q = '"name:\'' + safe(params.company) + '\'"';
+      const cRes = await proxyJson(base + '/search/companies?query=' + encodeURIComponent(q));
+      const companies = (cRes?.results || []).slice(0, 10);
+      for (const co of companies) {
+        if (found.length >= limit) break;
+        try {
+          const list = await proxyJson(base + '/contacts?company_id=' + encodeURIComponent(co.id) + '&per_page=100');
+          addList(Array.isArray(list) ? list : []);
+        } catch (_) {}
       }
-      if (found.length >= (maxPerAccount || 30)) break;
-    } catch (e) {
-      console.warn('FD-Suche fehlgeschlagen für', accountId, q, e.message);
+      if (!companies.length) errs.push('company: keine Firma „' + params.company + '" gefunden');
+    } catch (e) { errs.push('company: ' + e.message); }
+  }
+
+  // 4. Name → Search-DSL + Autocomplete-Fallback
+  if (params.name && found.length < limit) {
+    try {
+      const q = '"name:\'' + safe(params.name) + '\'"';
+      const res = await proxyJson(base + '/search/contacts?query=' + encodeURIComponent(q));
+      addList(res?.results || []);
+    } catch (e) { errs.push('name-search: ' + e.message); }
+    if (found.length < limit) {
+      try {
+        const res = await proxyJson(base + '/contacts/autocomplete?term=' + encodeURIComponent(params.name));
+        const list = Array.isArray(res) ? res : (res?.results || res?.contacts || []);
+        addList(list);
+      } catch (e) { errs.push('name-ac: ' + e.message); }
     }
   }
-  return found;
+
+  // 5. job_title → clientside Filter (FD-Suche kennt das Feld nicht)
+  let final = found;
+  if (params.job_title) {
+    const jt = String(params.job_title).toLowerCase();
+    final = found.filter(c => String(c.job_title || '').toLowerCase().includes(jt));
+  }
+
+  if (errs.length && !final.length) {
+    console.info('FD-Search (' + accountId + ') keine Treffer — Hinweise:', errs);
+  }
+  return final.slice(0, limit);
 }
 
 /* Lazy: Prüft ob die Email in Freshsales existiert (für Sync-Status-Badge). */
@@ -25294,8 +25358,9 @@ async function renderContactsPage() {
       '<p>Beschreib in Worten welche Kontakte du sehen willst. Beispiele:</p>' +
       '<div class="mt-1.5 flex flex-wrap gap-1">' +
         '<button onclick="_useContactPrompt(\'alle Kontakte bei KONE\')" class="text-[10px] bg-white border border-orange-300 hover:bg-orange-100 text-orange-800 px-2 py-0.5 rounded">alle Kontakte bei KONE</button>' +
-        '<button onclick="_useContactPrompt(\'Geschäftsführer bei Aufzugsfirmen\')" class="text-[10px] bg-white border border-orange-300 hover:bg-orange-100 text-orange-800 px-2 py-0.5 rounded">Geschäftsführer bei Aufzugsfirmen</button>' +
+        '<button onclick="_useContactPrompt(\'Geschäftsführer bei KONE\')" class="text-[10px] bg-white border border-orange-300 hover:bg-orange-100 text-orange-800 px-2 py-0.5 rounded">Geschäftsführer bei KONE</button>' +
         '<button onclick="_useContactPrompt(\'@otis.com\')" class="text-[10px] bg-white border border-orange-300 hover:bg-orange-100 text-orange-800 px-2 py-0.5 rounded">@otis.com</button>' +
+        '<button onclick="_useContactPrompt(\'Müller\')" class="text-[10px] bg-white border border-orange-300 hover:bg-orange-100 text-orange-800 px-2 py-0.5 rounded">Müller</button>' +
       '</div>' +
     '</div>' +
     '<div class="bg-white rounded-xl border border-ink-200 p-2.5 space-y-2">' +
@@ -25403,7 +25468,12 @@ async function _runContactSearch(btn) {
     await loadContactFlags();
     CONTACTS_STATE.results = allHits;
     if (!allHits.length) {
-      CONTACTS_STATE.lastError = 'Keine Treffer in Freshdesk für „' + txt + '".';
+      const tooAbstract = params.job_title && !params.company && !params.email && !params.email_domain;
+      const onlyAbstractCompany = params.company && /firmen|branche|unternehmen/i.test(params.company);
+      let tip = '';
+      if (tooAbstract) tip = ' Tipp: Nur nach „' + params.job_title + '" zu suchen ist zu allgemein — gib zusätzlich eine konkrete Firma oder Email-Domain an (z.B. „Geschäftsführer bei KONE" oder „Geschäftsführer @kone.com").';
+      else if (onlyAbstractCompany) tip = ' Tipp: „' + params.company + '" ist als Firmenname zu abstrakt — Freshdesk sucht nach exakten Firmennamen. Versuch konkrete Firmen wie „KONE", „Otis" oder „Schindler".';
+      CONTACTS_STATE.lastError = 'Keine Treffer in Freshdesk für „' + txt + '" (KI verstand: ' + _paramsToLabel(params) + ').' + tip;
     }
   } catch (e) {
     CONTACTS_STATE.lastError = 'Fehler: ' + (e.message || String(e));
