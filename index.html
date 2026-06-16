@@ -758,7 +758,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.113';
+const APP_VERSION = 'v2.46.114';
 
 /* ============================================================
    GLOBAL THEME — v2.46.12
@@ -9835,9 +9835,17 @@ async function _mfcLoadPromptTpl(recordId) {
   if (!rec) return;
   const promptEl = document.getElementById('mfcAiPrompt');
   if (promptEl) promptEl.value = rec.prompt || '';
+  // Library-Anhänge wiederherstellen (Ad-hoc-Files bleiben)
+  let attCount = 0;
+  try {
+    attCount = await _restoreLibAttachmentsFromTpl(ctx.accountId, ctx.attachments, rec.attachment_lib_ids);
+    const host = document.getElementById('mfcAttachList');
+    if (host) host.innerHTML = _mfcAttachListHtml();
+    if (window.lucide) lucide.createIcons();
+  } catch (e) { console.warn('Lib-Anhang-Restore fehlgeschlagen:', e); }
   _mfcSaveDraft();
   bumpAiPromptUsage(recordId, ctx.accountId).catch(() => {});
-  toast('Vorlage „' + (rec.title || '?') + '" geladen.', 'success', 2500);
+  toast('Vorlage „' + (rec.title || '?') + '" geladen' + (attCount ? ' (+' + attCount + ' Anhang' + (attCount === 1 ? '' : 'e') + ')' : '') + '.', 'success', 2800);
 }
 
 async function _mfcSavePromptTpl(btn) {
@@ -9846,15 +9854,20 @@ async function _mfcSavePromptTpl(btn) {
   const promptEl = document.getElementById('mfcAiPrompt');
   const prompt = (promptEl?.value || '').trim();
   if (!prompt) { toast('Erst einen Prompt eingeben.', 'warn', 4000); return; }
-  const title = window.prompt('Vorlagen-Titel (z.B. „Produkt-Ankündigung"):', '');
+  const libIds = (ctx.attachments || []).filter(a => a._libRecordId).map(a => a._libRecordId);
+  const adhocCount = (ctx.attachments || []).filter(a => !a._libRecordId).length;
+  let titleHint = '';
+  if (libIds.length) titleHint = ' (' + libIds.length + ' Bibliothek-Anhang' + (libIds.length === 1 ? '' : 'e') + ' wird mitgespeichert)';
+  if (adhocCount) titleHint += ' — Hinweis: ' + adhocCount + ' Ad-hoc-Datei' + (adhocCount === 1 ? '' : 'en') + ' wird NICHT mitgespeichert (erst in Bibliothek hochladen).';
+  const title = window.prompt('Vorlagen-Titel (z.B. „Produkt-Ankündigung")' + titleHint + ':', '');
   if (title === null) return;
   if (!title.trim()) { toast('Titel fehlt — Vorlage nicht gespeichert.', 'warn', 3000); return; }
   const makeGlobal = window.confirm('Vorlage global verfügbar machen (in allen Mandanten sichtbar)?\n\nOK = global\nAbbrechen = nur für „' + (((APP_STATE.accounts || []).find(a => a.id === ctx.accountId) || {}).name || 'aktueller Mandant') + '"');
   setBusy(btn, true);
   try {
-    await saveAiPromptTemplate(ctx.accountId, title.trim(), prompt, makeGlobal);
+    await saveAiPromptTemplate(ctx.accountId, title.trim(), prompt, makeGlobal, libIds);
     await _mfcRefreshPromptTpls();
-    toast('Vorlage „' + title.trim() + '" gespeichert.', 'success', 3500);
+    toast('Vorlage „' + title.trim() + '" gespeichert' + (libIds.length ? ' (+' + libIds.length + ' Anhang' + (libIds.length === 1 ? '' : 'e') + ')' : '') + '.', 'success', 3800);
   } catch (e) {
     toast('Speichern fehlgeschlagen: ' + (e.message || e), 'error', 6000);
   } finally {
@@ -25855,33 +25868,60 @@ async function loadAiPromptsForAccount(accountId, force) {
   return list;
 }
 
-async function saveAiPromptTemplate(accountId, title, prompt, makeGlobal) {
+async function saveAiPromptTemplate(accountId, title, prompt, makeGlobal, attachmentLibIds) {
   const t = String(title || '').trim();
   const p = String(prompt || '').trim();
   if (!t) throw new Error('Bitte einen Titel angeben.');
   if (!p) throw new Error('Prompt ist leer.');
   const me = APP_KEYS.user || {};
+  const libIds = Array.isArray(attachmentLibIds) ? attachmentLibIds.filter(Boolean) : [];
   const fields = {
-    title:        t,
-    prompt:       p,
-    account_id:   makeGlobal ? '' : (accountId || ''),
-    tags:         '',
-    created_by:   me.email || '',
-    created_at:   nowIso(),
-    last_used_at: nowIso(),
-    usage_count:  1,
+    title:              t,
+    prompt:             p,
+    account_id:         makeGlobal ? '' : (accountId || ''),
+    tags:               '',
+    attachment_lib_ids: libIds.join(','),
+    created_by:         me.email || '',
+    created_at:         nowIso(),
+    last_used_at:       nowIso(),
+    usage_count:        1,
   };
   await airtableWriteWithAutoField(AI_PROMPTS_TABLE, fields, {
-    title:        'singleLineText',
-    prompt:       'multilineText',
-    account_id:   'singleLineText',
-    tags:         'singleLineText',
-    created_by:   'singleLineText',
-    created_at:   'singleLineText',
-    last_used_at: 'singleLineText',
-    usage_count:  'number',
+    title:              'singleLineText',
+    prompt:             'multilineText',
+    account_id:         'singleLineText',
+    tags:               'singleLineText',
+    attachment_lib_ids: 'multilineText',
+    created_by:         'singleLineText',
+    created_at:         'singleLineText',
+    last_used_at:       'singleLineText',
+    usage_count:        'number',
   });
   AI_PROMPTS_STATE.byAccount.delete(accountId);
+}
+
+/* Lädt Library-Anhänge aus einem Vorlagen-Record und ersetzt die aktuelle
+   Library-Anhang-Auswahl in der Attachments-Liste. Ad-hoc-Files bleiben unangetastet. */
+async function _restoreLibAttachmentsFromTpl(accountId, attachmentsArr, libIdsStr) {
+  const libIds = String(libIdsStr || '').split(',').map(s => s.trim()).filter(Boolean);
+  // Bisherige Library-Anhänge raus, Ad-hoc bleibt
+  for (let i = attachmentsArr.length - 1; i >= 0; i--) {
+    if (attachmentsArr[i]._libRecordId) attachmentsArr.splice(i, 1);
+  }
+  if (!libIds.length) return 0;
+  await loadAttachmentsForAccount(accountId);
+  const list = ATTACHMENTS_STATE.byAccount.get(accountId) || [];
+  let added = 0;
+  for (const id of libIds) {
+    const r = list.find(x => x.recordId === id);
+    if (!r) continue;
+    try {
+      const blob = await fetchLibraryAttachmentBlob(r);
+      attachmentsArr.push(Object.assign({}, blob, { _libRecordId: r.recordId }));
+      added++;
+    } catch (_) {}
+  }
+  return added;
 }
 
 async function deleteAiPromptTemplate(recordId, accountId) {
@@ -26913,8 +26953,17 @@ async function _bulkLoadPromptTpl(recordId) {
   const promptEl = document.getElementById('bulkAiPrompt');
   if (promptEl) promptEl.value = rec.prompt || '';
   ctx.aiPrompt = rec.prompt || '';
+  // Library-Anhänge wiederherstellen (Ad-hoc bleibt)
+  let attCount = 0;
+  try {
+    if (!ctx.attachments) ctx.attachments = [];
+    attCount = await _restoreLibAttachmentsFromTpl(ctx.accountId, ctx.attachments, rec.attachment_lib_ids);
+    const host = document.getElementById('bulkAttachList');
+    if (host) host.innerHTML = _bulkAttachListHtml();
+    if (window.lucide) lucide.createIcons();
+  } catch (e) { console.warn('Lib-Anhang-Restore fehlgeschlagen:', e); }
   bumpAiPromptUsage(recordId, ctx.accountId).catch(() => {});
-  toast('Vorlage „' + (rec.title || '?') + '" geladen.', 'success', 2500);
+  toast('Vorlage „' + (rec.title || '?') + '" geladen' + (attCount ? ' (+' + attCount + ' Anhang' + (attCount === 1 ? '' : 'e') + ')' : '') + '.', 'success', 2800);
 }
 
 async function _bulkSavePromptTpl(btn) {
@@ -26923,15 +26972,20 @@ async function _bulkSavePromptTpl(btn) {
   const promptEl = document.getElementById('bulkAiPrompt');
   const prompt = (promptEl?.value || '').trim();
   if (!prompt) { toast('Erst einen Prompt eingeben.', 'warn', 4000); return; }
-  const title = window.prompt('Vorlagen-Titel (z.B. „Produkt-Ankündigung"):', '');
+  const libIds = (ctx.attachments || []).filter(a => a._libRecordId).map(a => a._libRecordId);
+  const adhocCount = (ctx.attachments || []).filter(a => !a._libRecordId).length;
+  let titleHint = '';
+  if (libIds.length) titleHint = ' (' + libIds.length + ' Bibliothek-Anhang' + (libIds.length === 1 ? '' : 'e') + ' wird mitgespeichert)';
+  if (adhocCount) titleHint += ' — Hinweis: ' + adhocCount + ' Ad-hoc-Datei' + (adhocCount === 1 ? '' : 'en') + ' wird NICHT mitgespeichert (erst in Bibliothek hochladen).';
+  const title = window.prompt('Vorlagen-Titel (z.B. „Produkt-Ankündigung")' + titleHint + ':', '');
   if (title === null) return;
   if (!title.trim()) { toast('Titel fehlt — Vorlage nicht gespeichert.', 'warn', 3000); return; }
   const makeGlobal = window.confirm('Vorlage global verfügbar machen (in allen Mandanten sichtbar)?\n\nOK = global\nAbbrechen = nur für „' + (((APP_STATE.accounts || []).find(a => a.id === ctx.accountId) || {}).name || 'aktueller Mandant') + '"');
   setBusy(btn, true);
   try {
-    await saveAiPromptTemplate(ctx.accountId, title.trim(), prompt, makeGlobal);
+    await saveAiPromptTemplate(ctx.accountId, title.trim(), prompt, makeGlobal, libIds);
     await _bulkRefreshPromptTpls();
-    toast('Vorlage „' + title.trim() + '" gespeichert.', 'success', 3500);
+    toast('Vorlage „' + title.trim() + '" gespeichert' + (libIds.length ? ' (+' + libIds.length + ' Anhang' + (libIds.length === 1 ? '' : 'e') + ')' : '') + '.', 'success', 3800);
   } catch (e) {
     toast('Speichern fehlgeschlagen: ' + (e.message || e), 'error', 6000);
   } finally {
