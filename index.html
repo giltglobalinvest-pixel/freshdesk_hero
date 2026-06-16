@@ -681,6 +681,9 @@
     <button onclick="navTo('marketing'); closeMenu();" class="w-full text-left px-3 py-2 text-sm hover:bg-ink-50 flex items-center gap-2">
       <i data-lucide="megaphone" class="w-4 h-4 text-orange-500"></i> Marketing-Emails
     </button>
+    <button onclick="navTo('attachments'); closeMenu();" class="w-full text-left px-3 py-2 text-sm hover:bg-ink-50 flex items-center gap-2">
+      <i data-lucide="paperclip" class="w-4 h-4 text-orange-500"></i> Email-Anhänge
+    </button>
     <button onclick="navTo('stats'); closeMenu();" class="w-full text-left px-3 py-2 text-sm hover:bg-ink-50 flex items-center gap-2">
       <i data-lucide="bar-chart-3" class="w-4 h-4 text-indigo-500"></i> Statistiken
     </button>
@@ -755,7 +758,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.107';
+const APP_VERSION = 'v2.46.108';
 
 /* ============================================================
    GLOBAL THEME — v2.46.12
@@ -6882,6 +6885,7 @@ function navTo(page) {
   else if (page === 'tasks')     renderFn = renderTasksPage;
   else if (page === 'deals')     renderFn = renderDealsPage;
   else if (page === 'marketing') renderFn = renderMarketingPage;
+  else if (page === 'attachments') renderFn = renderAttachmentsPage;
   else if (page === 'contacts')  renderFn = renderContactsPage;
   else if (page === 'stats')     renderFn = renderStatsPage;
   try {
@@ -9751,15 +9755,30 @@ function _renderMarketingFromContactModal(accountId, recipientEmail, recipientNa
             '<b>An:</b> ' + escapeHtml(recipientName || recipientEmail) + (recipientName ? ' &lt;' + escapeHtml(recipientEmail) + '&gt;' : '') +
             (history.length ? '<br><b>Bisherige Marketing-Mails:</b> ' + history.length : '') +
           '</div>' +
-          '<label class="text-xs font-bold text-ink-700 uppercase tracking-wider block">Vorlage *</label>' +
+          '<label class="text-xs font-bold text-ink-700 uppercase tracking-wider block">Vorlage (optional)</label>' +
           '<select id="mfcTemplate" onchange="_mfcTemplateChange()" class="w-full px-3 py-2.5 border border-ink-300 rounded-xl text-sm bg-white">' + tplOpts + '</select>' +
           '<div id="mfcDupWarning" class="hidden bg-amber-50 border border-amber-200 rounded-xl p-2.5 text-[11px] text-amber-900"></div>' +
+          // v2.46.108: KI-Generator
+          '<div class="bg-gradient-to-br from-purple-50 to-brand-50 border border-purple-200 rounded-xl p-2.5 space-y-2">' +
+            '<p class="text-[11px] font-bold text-purple-800 inline-flex items-center gap-1"><i data-lucide="sparkles" class="w-3.5 h-3.5"></i> ODER mit KI individuell schreiben</p>' +
+            '<textarea id="mfcAiPrompt" rows="2" placeholder="z.B. „Hinweis dass wir ein neues Produkt haben"" class="w-full px-3 py-2 border border-purple-300 rounded-lg text-[12px] resize-none"></textarea>' +
+            '<button onclick="_mfcAiGenerate(this)" class="w-full px-3 py-2 bg-gradient-to-br from-purple-600 to-brand-600 hover:opacity-90 text-white rounded-lg text-xs font-bold inline-flex items-center justify-center gap-1"><i data-lucide="wand-2" class="w-3.5 h-3.5"></i> Betreff + Body generieren</button>' +
+          '</div>' +
           '<label class="text-xs font-bold text-ink-700 uppercase tracking-wider block">Von</label>' +
           '<select id="mfcFrom" class="w-full px-3 py-2.5 border border-ink-300 rounded-xl text-sm bg-white">' + cfgOpts + '</select>' +
           '<label class="text-xs font-bold text-ink-700 uppercase tracking-wider block">Betreff *</label>' +
           '<input id="mfcSubject" type="text" value="" class="w-full px-3 py-2.5 border border-ink-300 rounded-xl text-sm">' +
           '<label class="text-xs font-bold text-ink-700 uppercase tracking-wider block">Nachricht *</label>' +
-          '<textarea id="mfcBody" rows="10" placeholder="Vorlage wählen, dann erscheint hier der Text…" class="w-full px-3 py-2.5 border border-ink-300 rounded-xl text-[12px] font-mono leading-snug resize-y"></textarea>' +
+          '<textarea id="mfcBody" rows="10" placeholder="Vorlage wählen, mit KI generieren oder direkt tippen…" class="w-full px-3 py-2.5 border border-ink-300 rounded-xl text-[12px] font-mono leading-snug resize-y"></textarea>' +
+          // v2.46.108: Anhänge
+          '<div class="bg-ink-50 border border-ink-200 rounded-xl p-2.5">' +
+            '<p class="text-[11px] font-bold text-ink-700 mb-1 inline-flex items-center gap-1"><i data-lucide="paperclip" class="w-3.5 h-3.5"></i> Anhänge (max 20 MB pro Datei)</p>' +
+            '<div class="flex gap-1.5 flex-wrap">' +
+              '<button type="button" onclick="_mfcPickFromLibrary()" class="text-[11px] bg-white hover:bg-orange-50 border border-orange-300 text-orange-700 px-2 py-1 rounded inline-flex items-center gap-1 font-bold"><i data-lucide="book-open" class="w-3 h-3"></i> Aus Bibliothek</button>' +
+              '<input type="file" id="mfcAttachInput" multiple onchange="_mfcAddFiles(this)" class="text-[11px] flex-1 min-w-[160px] text-ink-700 file:mr-2 file:py-1 file:px-2 file:rounded-md file:border-0 file:text-[11px] file:font-bold file:bg-ink-100 file:text-ink-700 hover:file:bg-ink-200 cursor-pointer">' +
+            '</div>' +
+            '<div id="mfcAttachList" class="mt-1.5 space-y-1">' + _mfcAttachListHtml() + '</div>' +
+          '</div>' +
           '<div id="mfcErr" class="hidden bg-red-50 border border-red-200 rounded-xl p-3 text-sm text-red-800"></div>' +
         '</div>' +
         '<div class="border-t border-ink-200 p-3 flex gap-2 shrink-0">' +
@@ -9770,8 +9789,129 @@ function _renderMarketingFromContactModal(accountId, recipientEmail, recipientNa
         '</div>' +
       '</div>' +
     '</div>';
-  window._MFC_CTX = { accountId, recipientEmail, recipientName, contactId, sourceTicketId, responses, history };
+  window._MFC_CTX = { accountId, recipientEmail, recipientName, contactId, sourceTicketId, responses, history, attachments: [] };
   if (window.lucide) lucide.createIcons();
+}
+
+/* v2.46.108: Anhang-Helpers für Single-Marketing-Modal */
+function _mfcAttachListHtml() {
+  const ctx = window._MFC_CTX;
+  if (!ctx?.attachments?.length) return '<p class="text-[10px] text-ink-400 italic">Noch keine Anhänge.</p>';
+  return ctx.attachments.map((f, i) => {
+    const sz = f.size < 1024 ? f.size + ' B' : (f.size < 1024 * 1024 ? (f.size / 1024).toFixed(1) + ' KB' : (f.size / 1024 / 1024).toFixed(1) + ' MB');
+    return '<div class="flex items-center justify-between gap-2 text-[11px] bg-white border border-ink-200 rounded px-2 py-1">' +
+      '<span class="truncate flex-1 inline-flex items-center gap-1"><i data-lucide="file" class="w-3 h-3 shrink-0"></i> ' + escapeHtml(f.name) + ' <span class="text-ink-400 shrink-0">(' + sz + ')</span>' + (f._libRecordId ? ' <span class="text-orange-500 text-[9px]">📚</span>' : '') + '</span>' +
+      '<button onclick="_mfcRemoveFile(' + i + ')" class="text-red-500 hover:text-red-700 shrink-0"><i data-lucide="x" class="w-3 h-3"></i></button>' +
+    '</div>';
+  }).join('');
+}
+
+function _mfcAddFiles(inputEl) {
+  const ctx = window._MFC_CTX;
+  if (!ctx) return;
+  if (!ctx.attachments) ctx.attachments = [];
+  const files = Array.from(inputEl?.files || []);
+  const MAX = 20 * 1024 * 1024;
+  for (const f of files) {
+    if (f.size > MAX) {
+      toast('„' + f.name + '" ist zu groß (max 20 MB).', 'warn', 5000);
+      continue;
+    }
+    ctx.attachments.push({ name: f.name, type: f.type || 'application/octet-stream', size: f.size, blob: f });
+  }
+  if (inputEl) inputEl.value = '';
+  const host = document.getElementById('mfcAttachList');
+  if (host) host.innerHTML = _mfcAttachListHtml();
+  if (window.lucide) lucide.createIcons();
+}
+
+function _mfcRemoveFile(idx) {
+  const ctx = window._MFC_CTX;
+  if (!ctx?.attachments) return;
+  ctx.attachments.splice(idx, 1);
+  const host = document.getElementById('mfcAttachList');
+  if (host) host.innerHTML = _mfcAttachListHtml();
+  if (window.lucide) lucide.createIcons();
+}
+
+async function _mfcPickFromLibrary() {
+  const ctx = window._MFC_CTX;
+  if (!ctx) return;
+  const alreadyIds = (ctx.attachments || []).filter(a => a._libRecordId).map(a => a._libRecordId);
+  await _openAttachmentPicker(ctx.accountId, alreadyIds, async (recs) => {
+    const keepIds = new Set(recs.map(r => r.recordId));
+    ctx.attachments = (ctx.attachments || []).filter(a => !a._libRecordId || keepIds.has(a._libRecordId));
+    const existingIds = new Set(ctx.attachments.filter(a => a._libRecordId).map(a => a._libRecordId));
+    for (const r of recs) {
+      if (existingIds.has(r.recordId)) continue;
+      try {
+        const blob = await fetchLibraryAttachmentBlob(r);
+        ctx.attachments.push(Object.assign({}, blob, { _libRecordId: r.recordId }));
+      } catch (e) {
+        toast('„' + (r.name || '?') + '" konnte nicht geladen werden: ' + (e.message || e), 'warn', 5000);
+      }
+    }
+    const host = document.getElementById('mfcAttachList');
+    if (host) host.innerHTML = _mfcAttachListHtml();
+    if (window.lucide) lucide.createIcons();
+  });
+}
+
+async function _mfcAiGenerate(btn) {
+  const ctx = window._MFC_CTX;
+  if (!ctx) return;
+  const promptTxt = (document.getElementById('mfcAiPrompt')?.value || '').trim();
+  if (!promptTxt) { toast('Bitte beschreib was die Email aussagen soll.', 'warn', 4000); return; }
+  setBusy(btn, true, 'KI schreibt…');
+  try {
+    const acc = (APP_STATE.accounts || []).find(a => a.id === ctx.accountId);
+    const me = APP_KEYS.user || {};
+    const sys = 'Du schreibst Sales-/Marketing-Emails auf Deutsch im Geschäftskontext.\n' +
+      'Antworte AUSSCHLIESSLICH mit JSON: {"subject":"…","body":"…"}\n' +
+      'Regeln für body:\n' +
+      '- Plain-Text mit Zeilenumbrüchen (\\n), KEIN HTML, KEIN Markdown\n' +
+      '- Direkte Anrede mit Vornamen wenn passend\n' +
+      '- Maximal 180 Wörter, sachlich, freundlich, kurz\n' +
+      '- Keine Signatur am Ende — die wird automatisch angefügt\n' +
+      '- Kurzer CTA am Ende\n' +
+      'Kontext:\n' +
+      '- Absender-Firma: ' + (acc?.name || '') + '\n' +
+      '- Absender-Name: ' + (me.name || '') + '\n' +
+      '- Empfänger: ' + (ctx.recipientName || ctx.recipientEmail);
+    const data = await proxyJson('/anthropic/v1/messages', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: 'claude-haiku-4-5-20251001',
+        max_tokens: 900,
+        system: sys,
+        messages: [{ role: 'user', content: promptTxt }]
+      })
+    });
+    recordAiUsage({
+      model: 'claude-haiku-4-5-20251001',
+      input_tokens:  data?.usage?.input_tokens || 0,
+      output_tokens: data?.usage?.output_tokens || 0,
+      feature: 'single_marketing_ai',
+      accountId: ctx.accountId,
+    });
+    const raw = (data?.content?.[0]?.text || '').trim().replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/i, '');
+    let obj;
+    try { obj = JSON.parse(raw); }
+    catch (_) {
+      const m = raw.match(/\{[\s\S]*\}/);
+      if (m) obj = JSON.parse(m[0]); else throw new Error('KI-Antwort ist kein gültiges JSON');
+    }
+    document.getElementById('mfcSubject').value = obj.subject || '';
+    document.getElementById('mfcBody').value = obj.body || '';
+    const tplEl = document.getElementById('mfcTemplate');
+    if (tplEl) tplEl.value = '';
+    toast('Betreff + Body von KI erzeugt.', 'success', 3000);
+  } catch (e) {
+    toast('KI-Generierung fehlgeschlagen: ' + (e.message || e), 'error', 7000);
+  } finally {
+    setBusy(btn, false);
+  }
 }
 
 function _mfcTemplateChange() {
@@ -9840,18 +9980,29 @@ async function processMarketingFromContact(btn) {
     const me = await fetchAgentMe(ctx.accountId);
     const sig = me?.signature || '';
     const bodyHtml = appendSignatureHtml(textToHtmlForFreshdesk(body), sig);
-    const payload = {
-      subject,
-      description: bodyHtml,
-      email: ctx.recipientEmail,
-      email_config_id: fromId,
-      priority: 1,
-      status: 5,
-    };
-    const created = await proxyJson('/freshdesk/' + encodeURIComponent(ctx.accountId) + '/api/v2/tickets/outbound_email', {
-      method: 'POST',
-      body: JSON.stringify(payload),
-    });
+    let created;
+    if (ctx.attachments && ctx.attachments.length) {
+      created = await _fdPostMultipart(ctx.accountId, 'tickets/outbound_email', {
+        subject,
+        description: bodyHtml,
+        email: ctx.recipientEmail,
+        email_config_id: String(fromId),
+        priority: '1',
+        status: '5',
+      }, ctx.attachments);
+    } else {
+      created = await proxyJson('/freshdesk/' + encodeURIComponent(ctx.accountId) + '/api/v2/tickets/outbound_email', {
+        method: 'POST',
+        body: JSON.stringify({
+          subject,
+          description: bodyHtml,
+          email: ctx.recipientEmail,
+          email_config_id: fromId,
+          priority: 1,
+          status: 5,
+        }),
+      });
+    }
     if (!created?.id) throw new Error('Versand fehlgeschlagen');
     const tpl = (ctx.responses || []).find(r => r.id === tplId);
     // Tracking
@@ -25208,6 +25359,451 @@ async function setContactFlag(email, patch) {
   await loadContactFlags(true);
 }
 
+/* === v2.46.108: Anhang-Bibliothek pro Mandant ============================
+   Zentrale, persistente Bibliothek wiederverwendbarer Email-Anhänge — pro
+   Account separat geführt (Airtable: MarketingAttachments, gefiltert via
+   account_id). Datei liegt im Airtable-Attachment-Feld „file" (5 MB Limit
+   pro Datei).
+   Verwendung:
+     - Verwaltungs-Seite (renderAttachmentsPage)
+     - Auswahl-Picker in Single-/Bulk-Marketing-Modal */
+const ATTACHMENTS_TABLE = 'MarketingAttachments';
+const ATTACHMENTS_STATE = {
+  byAccount: new Map(),    // accountId → Array<record>
+  q: '',                   // Suchfilter
+  accountId: '',           // aktueller Mandant
+  uploading: false,
+};
+
+function _abToBase64(buf) {
+  let binary = '';
+  const bytes = new Uint8Array(buf);
+  const CHUNK = 0x8000;
+  for (let i = 0; i < bytes.length; i += CHUNK) {
+    binary += String.fromCharCode.apply(null, bytes.subarray(i, i + CHUNK));
+  }
+  return btoa(binary);
+}
+
+async function _ensureAttachmentsTable() {
+  if (!APP_KEYS.airtableWriteKey) throw new Error('Schreib-Key fehlt');
+  const metaRes = await fetch(
+    'https://api.airtable.com/v0/meta/bases/' + APP_CONFIG.APP_BASE_ID + '/tables',
+    { headers: { 'Authorization': 'Bearer ' + APP_KEYS.airtableWriteKey } }
+  );
+  if (!metaRes.ok) throw new Error('Meta-API: ' + metaRes.status);
+  const meta = await metaRes.json();
+  let table = (meta.tables || []).find(t => t.name === ATTACHMENTS_TABLE);
+  if (!table) {
+    const createRes = await fetch(
+      'https://api.airtable.com/v0/meta/bases/' + APP_CONFIG.APP_BASE_ID + '/tables',
+      {
+        method: 'POST',
+        headers: { 'Authorization': 'Bearer ' + APP_KEYS.airtableWriteKey, 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          name: ATTACHMENTS_TABLE,
+          fields: [
+            { name: 'name', type: 'singleLineText' },
+            { name: 'account_id', type: 'singleLineText' },
+            { name: 'original_filename', type: 'singleLineText' },
+            { name: 'mime_type', type: 'singleLineText' },
+            { name: 'size_bytes', type: 'number', options: { precision: 0 } },
+            { name: 'description', type: 'multilineText' },
+            { name: 'tags', type: 'singleLineText' },
+            { name: 'uploaded_by', type: 'singleLineText' },
+            { name: 'uploaded_at', type: 'singleLineText' },
+            { name: 'file', type: 'multipleAttachments' },
+          ]
+        })
+      }
+    );
+    if (!createRes.ok) { const t = await createRes.text(); throw new Error('Tabelle anlegen: ' + t.slice(0, 200)); }
+    table = await createRes.json();
+    await new Promise(r => setTimeout(r, 900));
+  }
+  const fileField = (table.fields || []).find(f => f.name === 'file');
+  if (!fileField) throw new Error('Attachment-Feld „file" fehlt in Tabelle');
+  return { tableId: table.id, fileFieldId: fileField.id };
+}
+
+async function loadAttachmentsForAccount(accountId, force) {
+  if (!accountId) return [];
+  if (!force && ATTACHMENTS_STATE.byAccount.has(accountId)) return ATTACHMENTS_STATE.byAccount.get(accountId);
+  let list = [];
+  try {
+    const recs = await airtableRead(ATTACHMENTS_TABLE, {
+      filter: "{account_id}='" + escapeFormula(accountId) + "'",
+      sort: [{ field: 'uploaded_at', direction: 'desc' }],
+      maxRecords: 500,
+    });
+    list = recs.map(r => Object.assign({ recordId: r.id }, r.fields));
+  } catch (_) { /* Tabelle gibt's noch nicht */ }
+  ATTACHMENTS_STATE.byAccount.set(accountId, list);
+  return list;
+}
+
+async function uploadAttachmentToLibrary(accountId, file, displayName, description) {
+  if (!accountId) throw new Error('Bitte Mandant wählen');
+  const MAX = 5 * 1024 * 1024;
+  if (file.size > MAX) throw new Error('Datei zu groß (' + Math.round(file.size / 1024 / 1024) + ' MB) — Bibliothek erlaubt max 5 MB pro Datei.');
+  const { tableId, fileFieldId } = await _ensureAttachmentsTable();
+  const me = APP_KEYS.user || {};
+  // Step 1: Record mit Metadaten anlegen (ohne file)
+  const rec = await airtableWriteWithAutoField(ATTACHMENTS_TABLE, {
+    name:              displayName || file.name,
+    account_id:        accountId,
+    original_filename: file.name,
+    mime_type:         file.type || 'application/octet-stream',
+    size_bytes:        file.size,
+    description:       description || '',
+    tags:              '',
+    uploaded_by:       me.email || '',
+    uploaded_at:       nowIso(),
+  }, {
+    name: 'singleLineText', account_id: 'singleLineText', original_filename: 'singleLineText',
+    mime_type: 'singleLineText', size_bytes: 'number', description: 'multilineText',
+    tags: 'singleLineText', uploaded_by: 'singleLineText', uploaded_at: 'singleLineText',
+  });
+  // Step 2: Datei via content.airtable.com hochladen
+  const buf = await file.arrayBuffer();
+  const base64 = _abToBase64(buf);
+  const uploadRes = await fetch(
+    'https://content.airtable.com/v0/' + APP_CONFIG.APP_BASE_ID + '/' + rec.id + '/' + fileFieldId + '/uploadAttachment',
+    {
+      method: 'POST',
+      headers: {
+        'Authorization': 'Bearer ' + APP_KEYS.airtableWriteKey,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        contentType: file.type || 'application/octet-stream',
+        file: base64,
+        filename: file.name,
+      }),
+    }
+  );
+  if (!uploadRes.ok) {
+    const t = await uploadRes.text();
+    // Record wieder löschen, sonst bleibt Karteileiche
+    try { await airtableDelete(ATTACHMENTS_TABLE, rec.id); } catch (_) {}
+    throw new Error('Datei-Upload fehlgeschlagen: ' + t.slice(0, 200));
+  }
+  ATTACHMENTS_STATE.byAccount.delete(accountId);
+  return await uploadRes.json();
+}
+
+async function renameLibraryAttachment(recordId, accountId, newName) {
+  await airtableUpdate(ATTACHMENTS_TABLE, recordId, { name: newName });
+  ATTACHMENTS_STATE.byAccount.delete(accountId);
+}
+
+async function updateLibraryAttachmentMeta(recordId, accountId, patch) {
+  await airtableUpdate(ATTACHMENTS_TABLE, recordId, patch);
+  ATTACHMENTS_STATE.byAccount.delete(accountId);
+}
+
+async function deleteLibraryAttachment(recordId, accountId) {
+  await airtableDelete(ATTACHMENTS_TABLE, recordId);
+  ATTACHMENTS_STATE.byAccount.delete(accountId);
+}
+
+/* Holt eine Bibliothek-Datei als Blob (für den Versand). Der Name wird auf den
+   editierten „name"-Wert gesetzt, damit der Empfänger den angepassten Dateinamen
+   sieht, nicht den Original-Filename. */
+async function fetchLibraryAttachmentBlob(rec) {
+  const att = (rec.file || [])[0];
+  if (!att?.url) throw new Error('Datei nicht verfügbar — neu hochladen?');
+  const res = await fetch(att.url);
+  if (!res.ok) throw new Error('Download fehlgeschlagen: HTTP ' + res.status);
+  const blob = await res.blob();
+  const baseName = rec.name || att.filename || 'anhang';
+  // Wenn der display name keine Extension hat, dranhängen
+  const origExt = (att.filename || '').match(/\.[^.]+$/)?.[0] || '';
+  const finalName = /\.[^.]+$/.test(baseName) ? baseName : (baseName + origExt);
+  return {
+    name: finalName,
+    type: rec.mime_type || att.type || blob.type || 'application/octet-stream',
+    size: rec.size_bytes || att.size || blob.size,
+    blob,
+  };
+}
+
+/* === Verwaltungs-Seite für die Anhang-Bibliothek =========================== */
+async function renderAttachmentsPage() {
+  setPageTitle('Email-Anhänge', 'Bibliothek pro Mandant — verwalten + umbenennen');
+  const accounts = APP_STATE.accounts || [];
+  if (!ATTACHMENTS_STATE.accountId || !accounts.find(a => a.id === ATTACHMENTS_STATE.accountId)) {
+    ATTACHMENTS_STATE.accountId = APP_STATE.currentAccount && APP_STATE.currentAccount !== 'all'
+      ? APP_STATE.currentAccount
+      : (accounts[0]?.id || '');
+  }
+  const accountOpts = accounts.map(a =>
+    '<option value="' + escapeAttr(a.id) + '"' + (a.id === ATTACHMENTS_STATE.accountId ? ' selected' : '') + '>' + escapeHtml(a.name || a.id) + '</option>'
+  ).join('');
+  $('pageContent').innerHTML = '<div class="space-y-3 max-w-3xl mx-auto">' +
+    '<div class="bg-gradient-to-br from-orange-50 to-amber-50 border border-orange-200 rounded-xl p-3 text-[12px] text-orange-900">' +
+      '<p class="font-bold inline-flex items-center gap-1 mb-1"><i data-lucide="paperclip" class="w-4 h-4"></i> Anhang-Bibliothek</p>' +
+      '<p>Lade Dateien zentral hoch und benutze sie in jeder Marketing-Mail. Bibliothek wird <b>pro Mandant</b> geführt — z.B. Aufzugshandwerk-PDFs sind nicht in FLP-Liste sichtbar.</p>' +
+      '<p class="text-[10px] text-orange-700 mt-1">Größenlimit: 5 MB pro Datei (Airtable-Storage).</p>' +
+    '</div>' +
+    '<div class="bg-white rounded-xl border border-ink-200 p-3 space-y-2">' +
+      '<label class="text-[11px] inline-flex items-center gap-1.5 w-full">' +
+        '<i data-lucide="building-2" class="w-3.5 h-3.5 text-ink-500"></i>' +
+        '<span class="font-semibold text-ink-600 uppercase tracking-wider">Mandant:</span>' +
+        '<select id="attAccount" onchange="_onAttAccountChange(this.value)" class="flex-1 px-2 py-1.5 border border-ink-300 rounded-lg text-sm bg-white">' +
+          accountOpts +
+        '</select>' +
+      '</label>' +
+    '</div>' +
+    '<div class="bg-white rounded-xl border-2 border-dashed border-orange-300 p-3">' +
+      '<p class="text-[11px] font-bold text-ink-700 mb-1 inline-flex items-center gap-1"><i data-lucide="upload" class="w-3.5 h-3.5"></i> Neue Datei hochladen</p>' +
+      '<input type="file" id="attUploadInput" multiple onchange="_uploadAttachments(this)" class="text-[11px] block w-full text-ink-700 file:mr-2 file:py-1.5 file:px-3 file:rounded-md file:border-0 file:text-[11px] file:font-bold file:bg-orange-600 file:text-white hover:file:bg-orange-700 cursor-pointer">' +
+      '<div id="attUploadStatus" class="mt-1 text-[11px] text-ink-500"></div>' +
+    '</div>' +
+    '<div class="flex gap-2 items-center">' +
+      '<input id="attSearch" type="search" placeholder="Suchen (Name / Beschreibung / Tags)…" oninput="_onAttSearch(this.value)" class="flex-1 px-3 py-2 border border-ink-300 rounded-lg text-sm">' +
+      '<button onclick="_reloadAttachments(this)" class="px-3 py-2 bg-ink-100 hover:bg-ink-200 text-ink-700 rounded-lg text-sm font-bold inline-flex items-center gap-1"><i data-lucide="refresh-cw" class="w-3.5 h-3.5"></i></button>' +
+    '</div>' +
+    '<div id="attList">' +
+      '<div class="bg-white rounded-xl border border-ink-200 p-6 text-center"><span class="spinner inline-block w-5 h-5 border-[2px] text-orange-500"></span><p class="text-sm text-ink-500 mt-2">Lade Bibliothek…</p></div>' +
+    '</div>' +
+  '</div>';
+  if (window.lucide) lucide.createIcons();
+  if (ATTACHMENTS_STATE.q) document.getElementById('attSearch').value = ATTACHMENTS_STATE.q;
+  await loadAttachmentsForAccount(ATTACHMENTS_STATE.accountId);
+  _renderAttachmentsList();
+}
+
+function _onAttAccountChange(v) {
+  ATTACHMENTS_STATE.accountId = v;
+  loadAttachmentsForAccount(v).then(_renderAttachmentsList);
+}
+function _onAttSearch(v) {
+  ATTACHMENTS_STATE.q = String(v || '').trim().toLowerCase();
+  _renderAttachmentsList();
+}
+async function _reloadAttachments(btn) {
+  setBusy(btn, true);
+  await loadAttachmentsForAccount(ATTACHMENTS_STATE.accountId, true);
+  setBusy(btn, false);
+  _renderAttachmentsList();
+}
+
+async function _uploadAttachments(inputEl) {
+  const accountId = ATTACHMENTS_STATE.accountId;
+  if (!accountId) { toast('Bitte zuerst einen Mandanten wählen.', 'warn'); inputEl.value=''; return; }
+  const files = Array.from(inputEl?.files || []);
+  if (!files.length) return;
+  const statusEl = document.getElementById('attUploadStatus');
+  let ok = 0, fail = 0;
+  const failures = [];
+  for (let i = 0; i < files.length; i++) {
+    const f = files[i];
+    if (statusEl) statusEl.innerHTML = '<span class="spinner inline-block w-3 h-3 border-[1.5px]"></span> Lade ' + (i + 1) + '/' + files.length + ' hoch: ' + escapeHtml(f.name) + '…';
+    try {
+      await uploadAttachmentToLibrary(accountId, f, f.name, '');
+      ok++;
+    } catch (e) {
+      fail++;
+      failures.push(f.name + ': ' + (e.message || e));
+    }
+  }
+  if (inputEl) inputEl.value = '';
+  if (statusEl) {
+    if (fail) statusEl.innerHTML = '<span class="text-amber-700">' + ok + ' hochgeladen, ' + fail + ' Fehler: ' + escapeHtml(failures.join(' · ')) + '</span>';
+    else statusEl.innerHTML = '<span class="text-emerald-700">' + ok + ' Datei' + (ok === 1 ? '' : 'en') + ' hochgeladen.</span>';
+    setTimeout(() => { if (statusEl) statusEl.innerHTML = ''; }, 6000);
+  }
+  await loadAttachmentsForAccount(accountId, true);
+  _renderAttachmentsList();
+}
+
+function _renderAttachmentsList() {
+  const host = document.getElementById('attList');
+  if (!host) return;
+  const list = (ATTACHMENTS_STATE.byAccount.get(ATTACHMENTS_STATE.accountId) || []).slice();
+  const q = ATTACHMENTS_STATE.q;
+  const filtered = q
+    ? list.filter(r =>
+        String(r.name || '').toLowerCase().includes(q) ||
+        String(r.description || '').toLowerCase().includes(q) ||
+        String(r.tags || '').toLowerCase().includes(q) ||
+        String(r.original_filename || '').toLowerCase().includes(q))
+    : list;
+  if (!filtered.length) {
+    host.innerHTML = '<div class="bg-white rounded-xl border border-ink-200 p-6 text-center text-sm text-ink-500">' +
+      (list.length ? 'Keine Treffer für „' + escapeHtml(q) + '"' : 'Noch keine Anhänge hochgeladen. Datei oben auswählen → wird automatisch in die Bibliothek geladen.') +
+    '</div>';
+    return;
+  }
+  host.innerHTML = '<p class="text-[10px] text-ink-500 uppercase tracking-wider mb-2 px-1">' + filtered.length + ' Datei' + (filtered.length === 1 ? '' : 'en') + '</p>' +
+    filtered.map(r => _renderAttachmentCard(r)).join('');
+  if (window.lucide) lucide.createIcons();
+}
+
+function _renderAttachmentCard(rec) {
+  const att = (rec.file || [])[0];
+  const mime = String(rec.mime_type || att?.type || '').toLowerCase();
+  let icon = 'file';
+  if (mime.includes('pdf')) icon = 'file-text';
+  else if (mime.includes('image')) icon = 'image';
+  else if (mime.includes('sheet') || mime.includes('excel') || mime.includes('csv')) icon = 'sheet';
+  else if (mime.includes('word') || mime.includes('document')) icon = 'file-text';
+  else if (mime.includes('zip') || mime.includes('compress')) icon = 'archive';
+  const sizeKB = rec.size_bytes ? Math.round(rec.size_bytes / 1024) : 0;
+  const sizeLabel = sizeKB > 1024 ? (sizeKB / 1024).toFixed(1) + ' MB' : sizeKB + ' KB';
+  const id = JSON.stringify(rec.recordId);
+  return '<div class="bg-white rounded-xl border border-ink-200 mb-2 p-3 flex items-start gap-3">' +
+    '<div class="w-10 h-10 rounded-lg bg-orange-50 border border-orange-200 flex items-center justify-center shrink-0">' +
+      '<i data-lucide="' + icon + '" class="w-5 h-5 text-orange-600"></i>' +
+    '</div>' +
+    '<div class="flex-1 min-w-0">' +
+      '<input type="text" value="' + escapeAttr(rec.name || '') + '" onblur="_renameAtt(' + escapeAttr(id) + ', this.value)" class="w-full font-bold text-ink-900 text-sm bg-transparent border-b border-transparent hover:border-ink-200 focus:border-orange-400 focus:outline-none px-0">' +
+      '<p class="text-[10px] text-ink-500 mt-0.5">' + escapeHtml(rec.original_filename || '?') + ' · ' + sizeLabel + ' · ' + escapeHtml(rec.uploaded_at ? new Date(rec.uploaded_at).toLocaleDateString('de-DE') : '?') + '</p>' +
+      (rec.description ? '<p class="text-[11px] text-ink-600 mt-1">' + escapeHtml(rec.description) + '</p>' : '') +
+      '<div class="flex gap-1 mt-1.5">' +
+        (att?.url ? '<a href="' + escapeAttr(att.url) + '" target="_blank" class="text-[10px] bg-brand-50 hover:bg-brand-100 text-brand-700 px-2 py-1 rounded inline-flex items-center gap-1"><i data-lucide="download" class="w-3 h-3"></i> Download</a>' : '') +
+        '<button onclick="_editAttDescription(' + escapeAttr(id) + ')" class="text-[10px] bg-ink-50 hover:bg-ink-100 text-ink-700 px-2 py-1 rounded inline-flex items-center gap-1"><i data-lucide="pen-line" class="w-3 h-3"></i> Beschreibung</button>' +
+        '<button onclick="_deleteAtt(' + escapeAttr(id) + ')" class="text-[10px] bg-red-50 hover:bg-red-100 text-red-700 px-2 py-1 rounded inline-flex items-center gap-1"><i data-lucide="trash-2" class="w-3 h-3"></i></button>' +
+      '</div>' +
+    '</div>' +
+  '</div>';
+}
+
+async function _renameAtt(recordId, newName) {
+  const trimmed = String(newName || '').trim();
+  if (!trimmed) return;
+  try {
+    await renameLibraryAttachment(recordId, ATTACHMENTS_STATE.accountId, trimmed);
+    await loadAttachmentsForAccount(ATTACHMENTS_STATE.accountId, true);
+    _renderAttachmentsList();
+  } catch (e) {
+    toast('Umbenennen fehlgeschlagen: ' + (e.message || e), 'error', 5000);
+  }
+}
+
+async function _editAttDescription(recordId) {
+  const list = ATTACHMENTS_STATE.byAccount.get(ATTACHMENTS_STATE.accountId) || [];
+  const rec = list.find(r => r.recordId === recordId);
+  if (!rec) return;
+  const newDesc = prompt('Beschreibung (optional):', rec.description || '');
+  if (newDesc === null) return;
+  try {
+    await updateLibraryAttachmentMeta(recordId, ATTACHMENTS_STATE.accountId, { description: newDesc });
+    await loadAttachmentsForAccount(ATTACHMENTS_STATE.accountId, true);
+    _renderAttachmentsList();
+  } catch (e) {
+    toast('Speichern fehlgeschlagen: ' + (e.message || e), 'error', 5000);
+  }
+}
+
+async function _deleteAtt(recordId) {
+  if (!confirm('Diese Datei aus der Bibliothek entfernen?')) return;
+  try {
+    await deleteLibraryAttachment(recordId, ATTACHMENTS_STATE.accountId);
+    await loadAttachmentsForAccount(ATTACHMENTS_STATE.accountId, true);
+    _renderAttachmentsList();
+    toast('Gelöscht.', 'success', 2000);
+  } catch (e) {
+    toast('Löschen fehlgeschlagen: ' + (e.message || e), 'error', 5000);
+  }
+}
+
+/* === Anhang-Picker-Modal: wird vom Single- und Bulk-Send aus aufgerufen ===
+   onPicked(records[]) wird mit den ausgewählten Library-Records aufgerufen.
+   Der aufrufende Code muss selbst fetchLibraryAttachmentBlob() nutzen, um die
+   Blobs an seine attachments-Liste zu hängen. */
+let _ATT_PICKER_CTX = null;
+async function _openAttachmentPicker(accountId, alreadyPickedRecordIds, onPicked) {
+  _ATT_PICKER_CTX = { accountId, selected: new Set(alreadyPickedRecordIds || []), onPicked };
+  let host = document.getElementById('subModalHost');
+  if (!host) { host = document.createElement('div'); host.id = 'subModalHost'; document.body.appendChild(host); }
+  host.innerHTML =
+    '<div class="fixed inset-0 z-[80] flex items-end justify-center bg-black/60" onclick="if(event.target===this)_closeAttPicker()">' +
+      '<div class="bg-white w-full max-w-lg rounded-t-3xl shadow-2xl flex flex-col safe-bottom" style="max-height:90vh">' +
+        '<div class="safe-top px-4 py-3 border-b border-ink-200 flex items-center justify-between gap-2 shrink-0">' +
+          '<h3 class="font-bold text-ink-900 inline-flex items-center gap-2"><i data-lucide="paperclip" class="w-5 h-5 text-orange-600"></i> Aus Bibliothek wählen</h3>' +
+          '<button onclick="_closeAttPicker()" class="w-9 h-9 rounded-lg hover:bg-ink-100 flex items-center justify-center"><i data-lucide="x" class="w-5 h-5 text-ink-700"></i></button>' +
+        '</div>' +
+        '<div class="px-4 pt-3 pb-2 shrink-0">' +
+          '<input id="attPickerSearch" type="search" placeholder="Suchen…" oninput="_renderAttPicker()" class="w-full px-3 py-2 border border-ink-300 rounded-lg text-sm">' +
+        '</div>' +
+        '<div id="attPickerList" class="flex-1 overflow-y-auto p-4 pt-0 space-y-1">' +
+          '<div class="text-center py-6"><span class="spinner inline-block w-5 h-5 border-[2px] text-orange-500"></span><p class="text-sm text-ink-500 mt-2">Lade Bibliothek…</p></div>' +
+        '</div>' +
+        '<div class="border-t border-ink-200 p-3 flex gap-2 shrink-0">' +
+          '<button onclick="_closeAttPicker()" class="flex-1 bg-ink-100 hover:bg-ink-200 text-ink-700 rounded-xl px-3 py-3 text-sm font-bold">Abbrechen</button>' +
+          '<button onclick="_confirmAttPicker(this)" class="flex-[2] bg-orange-600 hover:bg-orange-700 text-white rounded-xl px-3 py-3 text-sm font-bold inline-flex items-center justify-center gap-1.5"><i data-lucide="check" class="w-4 h-4"></i> <span id="attPickerConfirmLabel">Übernehmen</span></button>' +
+        '</div>' +
+      '</div>' +
+    '</div>';
+  if (window.lucide) lucide.createIcons();
+  await loadAttachmentsForAccount(accountId);
+  _renderAttPicker();
+}
+
+function _closeAttPicker() {
+  _ATT_PICKER_CTX = null;
+  const host = document.getElementById('subModalHost');
+  if (host) host.innerHTML = '';
+}
+
+function _renderAttPicker() {
+  if (!_ATT_PICKER_CTX) return;
+  const host = document.getElementById('attPickerList');
+  if (!host) return;
+  const list = (ATTACHMENTS_STATE.byAccount.get(_ATT_PICKER_CTX.accountId) || []);
+  const q = (document.getElementById('attPickerSearch')?.value || '').trim().toLowerCase();
+  const filtered = q
+    ? list.filter(r => String(r.name || '').toLowerCase().includes(q) || String(r.description || '').toLowerCase().includes(q) || String(r.tags || '').toLowerCase().includes(q))
+    : list;
+  if (!filtered.length) {
+    host.innerHTML = '<div class="text-center py-6 text-sm text-ink-500">' +
+      (list.length ? 'Keine Treffer.' : 'Bibliothek ist leer — erst Anhänge unter Menü → „Email-Anhänge" hochladen.') +
+    '</div>';
+    return;
+  }
+  const sel = _ATT_PICKER_CTX.selected;
+  host.innerHTML = filtered.map(r => {
+    const isSel = sel.has(r.recordId);
+    const sizeKB = r.size_bytes ? Math.round(r.size_bytes / 1024) : 0;
+    const sizeLabel = sizeKB > 1024 ? (sizeKB / 1024).toFixed(1) + ' MB' : sizeKB + ' KB';
+    return '<label class="flex items-center gap-2 py-2 px-2 rounded-lg cursor-pointer hover:bg-ink-50 ' + (isSel ? 'bg-orange-50 border border-orange-200' : 'border border-transparent') + '">' +
+      '<input type="checkbox" ' + (isSel ? 'checked' : '') + ' onclick="_attPickerToggle(' + escapeAttr(JSON.stringify(r.recordId)) + ')" class="w-4 h-4 accent-orange-600">' +
+      '<div class="flex-1 min-w-0">' +
+        '<p class="text-sm font-bold text-ink-900 truncate">' + escapeHtml(r.name || r.original_filename || '?') + '</p>' +
+        '<p class="text-[10px] text-ink-500 truncate">' + escapeHtml(r.original_filename || '?') + ' · ' + sizeLabel + (r.description ? ' · ' + escapeHtml(r.description) : '') + '</p>' +
+      '</div>' +
+    '</label>';
+  }).join('');
+  const cnt = sel.size;
+  const lbl = document.getElementById('attPickerConfirmLabel');
+  if (lbl) lbl.textContent = cnt ? cnt + ' übernehmen' : 'Übernehmen';
+}
+
+function _attPickerToggle(recordId) {
+  if (!_ATT_PICKER_CTX) return;
+  if (_ATT_PICKER_CTX.selected.has(recordId)) _ATT_PICKER_CTX.selected.delete(recordId);
+  else _ATT_PICKER_CTX.selected.add(recordId);
+  _renderAttPicker();
+}
+
+async function _confirmAttPicker(btn) {
+  if (!_ATT_PICKER_CTX) return;
+  const ids = Array.from(_ATT_PICKER_CTX.selected);
+  const list = ATTACHMENTS_STATE.byAccount.get(_ATT_PICKER_CTX.accountId) || [];
+  const recs = ids.map(id => list.find(r => r.recordId === id)).filter(Boolean);
+  const cb = _ATT_PICKER_CTX.onPicked;
+  setBusy(btn, true, 'Lade Dateien…');
+  try {
+    if (typeof cb === 'function') await cb(recs);
+    _closeAttPicker();
+  } catch (e) {
+    setBusy(btn, false);
+    toast('Anhang-Auswahl fehlgeschlagen: ' + (e.message || e), 'error', 5000);
+  }
+}
+
 /* KI-Parsing: Natural-Language-Prompt → Suchparameter. */
 async function parseContactSearchPrompt(promptText) {
   const cleaned = String(promptText || '').trim();
@@ -25845,7 +26441,10 @@ function _renderBulkMarketingModal() {
           // Anhänge
           '<div class="bg-ink-50 border border-ink-200 rounded-xl p-2.5">' +
             '<p class="text-[11px] font-bold text-ink-700 mb-1 inline-flex items-center gap-1"><i data-lucide="paperclip" class="w-3.5 h-3.5"></i> Anhänge (gehen an alle ' + ctx.contacts.length + ' Empfänger · max 20 MB pro Datei)</p>' +
-            '<input type="file" id="bulkAttachInput" multiple onchange="_bulkAddFiles(this)" class="text-[11px] block w-full text-ink-700 file:mr-2 file:py-1 file:px-2 file:rounded-md file:border-0 file:text-[11px] file:font-bold file:bg-orange-50 file:text-orange-700 hover:file:bg-orange-100 cursor-pointer">' +
+            '<div class="flex gap-1.5 flex-wrap">' +
+              '<button type="button" onclick="_bulkPickFromLibrary()" class="text-[11px] bg-white hover:bg-orange-50 border border-orange-300 text-orange-700 px-2 py-1 rounded inline-flex items-center gap-1 font-bold"><i data-lucide="book-open" class="w-3 h-3"></i> Aus Bibliothek</button>' +
+              '<input type="file" id="bulkAttachInput" multiple onchange="_bulkAddFiles(this)" class="text-[11px] flex-1 min-w-[160px] text-ink-700 file:mr-2 file:py-1 file:px-2 file:rounded-md file:border-0 file:text-[11px] file:font-bold file:bg-ink-100 file:text-ink-700 hover:file:bg-ink-200 cursor-pointer">' +
+            '</div>' +
             '<div id="bulkAttachList" class="mt-1.5 space-y-1">' + _bulkAttachListHtml() + '</div>' +
           '</div>' +
           '<div class="bg-ink-50 border border-ink-200 rounded-xl p-2.5">' +
@@ -25918,6 +26517,30 @@ function _bulkRemoveFile(idx) {
   const host = document.getElementById('bulkAttachList');
   if (host) host.innerHTML = _bulkAttachListHtml();
   if (window.lucide) lucide.createIcons();
+}
+
+async function _bulkPickFromLibrary() {
+  const ctx = window._BULK_CTX;
+  if (!ctx) return;
+  const alreadyIds = (ctx.attachments || []).filter(a => a._libRecordId).map(a => a._libRecordId);
+  await _openAttachmentPicker(ctx.accountId, alreadyIds, async (recs) => {
+    // Bereits angehängte Library-Items, die nicht mehr gewählt sind, entfernen
+    const keepIds = new Set(recs.map(r => r.recordId));
+    ctx.attachments = (ctx.attachments || []).filter(a => !a._libRecordId || keepIds.has(a._libRecordId));
+    const existingIds = new Set(ctx.attachments.filter(a => a._libRecordId).map(a => a._libRecordId));
+    for (const r of recs) {
+      if (existingIds.has(r.recordId)) continue;
+      try {
+        const blob = await fetchLibraryAttachmentBlob(r);
+        ctx.attachments.push(Object.assign({}, blob, { _libRecordId: r.recordId }));
+      } catch (e) {
+        toast('„' + (r.name || '?') + '" konnte nicht geladen werden: ' + (e.message || e), 'warn', 5000);
+      }
+    }
+    const host = document.getElementById('bulkAttachList');
+    if (host) host.innerHTML = _bulkAttachListHtml();
+    if (window.lucide) lucide.createIcons();
+  });
 }
 
 async function _bulkAiGenerate(btn) {
