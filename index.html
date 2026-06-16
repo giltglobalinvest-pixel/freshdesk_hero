@@ -758,7 +758,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.111';
+const APP_VERSION = 'v2.46.112';
 
 /* ============================================================
    GLOBAL THEME — v2.46.12
@@ -1118,10 +1118,16 @@ async function airtableRead(table, opts = {}) {
   // Pagination-fähig: Airtable liefert pro Page max. 100 Records + ggf. `offset`.
   // Vor v2.45.5 ging nur die erste Page — d.h. ab 101 WV-/Regel-/Notiz-Records waren
   // die zusätzlichen unsichtbar (z.B. WV-Tickets erschienen nach Reload wieder).
+  // v2.46.112: Wenn der READ_KEY nur eingeschränkten Tabellen-Scope hat (was bei
+  // neueren Tabellen wie MarketingEmails/ContactFlags/MarketingAttachments der
+  // Fall ist), gibt's 403/404. Wir versuchen dann automatisch den WRITE-Key als
+  // Fallback — der hat üblicherweise mehr Tabellen-Scope.
   const baseUrl = 'https://api.airtable.com/v0/' + APP_CONFIG.APP_BASE_ID + '/' + encodeURIComponent(table);
   const all = [];
   let offset = null;
   const HARD_CAP = opts.maxRecords ? parseInt(opts.maxRecords, 10) : 5000; // Sicherheitslimit gegen Endlos-Loops
+  let token = APP_CONFIG.AIRTABLE_READ_KEY;
+  let triedFallback = false;
   do {
     const params = new URLSearchParams();
     if (opts.filter)    params.set('filterByFormula', opts.filter);
@@ -1134,8 +1140,16 @@ async function airtableRead(table, opts = {}) {
     if (offset) params.set('offset', offset);
     const qs = params.toString();
     const url = qs ? baseUrl + '?' + qs : baseUrl;
-    const res = await fetch(url, { headers: { 'Authorization': 'Bearer ' + APP_CONFIG.AIRTABLE_READ_KEY } });
-    if (!res.ok) throw new Error('Airtable read fehlgeschlagen (' + res.status + ')');
+    const res = await fetch(url, { headers: { 'Authorization': 'Bearer ' + token } });
+    if (!res.ok) {
+      // Permissions/Scope-Fallback: bei 403/404 mit Write-Key nochmal versuchen
+      if ((res.status === 403 || res.status === 404) && !triedFallback && APP_KEYS.airtableWriteKey && APP_KEYS.airtableWriteKey !== token) {
+        token = APP_KEYS.airtableWriteKey;
+        triedFallback = true;
+        continue; // gleiche Page mit Write-Key wiederholen
+      }
+      throw new Error('Airtable read fehlgeschlagen (' + res.status + ')');
+    }
     const data = await res.json();
     (data.records || []).forEach(r => all.push(r));
     offset = data.offset || null;
