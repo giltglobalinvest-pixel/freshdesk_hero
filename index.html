@@ -758,7 +758,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.109';
+const APP_VERSION = 'v2.46.110';
 
 /* ============================================================
    GLOBAL THEME — v2.46.12
@@ -25385,6 +25385,128 @@ function _abToBase64(buf) {
   return btoa(binary);
 }
 
+/* === v2.46.110: Automatische Datei-Komprimierung vor Upload ===============
+   Quell-Limit für Bibliothek-Upload: 30 MB. Ziel nach Komprimierung: 6.5 MB.
+   PDF-Strategie: PDF.js rendert jede Seite zu JPEG, jsPDF baut neues PDF aus
+   den Bildern. Text wird zu Bild — für Prospekte/Visuals OK.
+   Bild-Strategie: Canvas-Recompression mit reduzierter JPEG-Quality + ggf.
+   Resize.
+   Libs werden lazy via CDN nachgeladen (pdf.js ~600 KB + jspdf ~300 KB). */
+const _SCRIPT_CACHE = new Set();
+async function _loadScriptOnce(url) {
+  if (_SCRIPT_CACHE.has(url)) return;
+  await new Promise((res, rej) => {
+    const s = document.createElement('script');
+    s.src = url; s.async = true;
+    s.onload = res;
+    s.onerror = () => rej(new Error('Konnte Script nicht laden: ' + url));
+    document.head.appendChild(s);
+  });
+  _SCRIPT_CACHE.add(url);
+}
+const PDFJS_URL = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js';
+const PDFJS_WORKER_URL = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+const JSPDF_URL = 'https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.2/jspdf.umd.min.js';
+
+async function _ensurePdfLibs() {
+  await _loadScriptOnce(PDFJS_URL);
+  await _loadScriptOnce(JSPDF_URL);
+  if (window.pdfjsLib && !window.pdfjsLib.GlobalWorkerOptions.workerSrc) {
+    window.pdfjsLib.GlobalWorkerOptions.workerSrc = PDFJS_WORKER_URL;
+  }
+}
+
+async function _renderPdfPagesToCompressed(arrayBuf, cfg) {
+  const pdfjsLib = window.pdfjsLib;
+  const jsPDFCls = window.jspdf?.jsPDF || window.jsPDF;
+  if (!pdfjsLib || !jsPDFCls) throw new Error('PDF-Libs nicht geladen');
+  const pdf = await pdfjsLib.getDocument({ data: arrayBuf }).promise;
+  let writer = null;
+  for (let p = 1; p <= pdf.numPages; p++) {
+    const page = await pdf.getPage(p);
+    const scale = cfg.dpi / 72;
+    const viewport = page.getViewport({ scale });
+    const canvas = document.createElement('canvas');
+    canvas.width = viewport.width;
+    canvas.height = viewport.height;
+    const ctx = canvas.getContext('2d');
+    await page.render({ canvasContext: ctx, viewport }).promise;
+    const imgData = canvas.toDataURL('image/jpeg', cfg.quality);
+    const wPt = viewport.width / scale;
+    const hPt = viewport.height / scale;
+    const orient = wPt > hPt ? 'l' : 'p';
+    if (!writer) {
+      writer = new jsPDFCls({ orientation: orient, unit: 'pt', format: [wPt, hPt] });
+    } else {
+      writer.addPage([wPt, hPt], orient);
+    }
+    writer.addImage(imgData, 'JPEG', 0, 0, wPt, hPt);
+    canvas.width = 0; canvas.height = 0; // free memory
+  }
+  return writer.output('blob');
+}
+
+async function _compressPdfToTarget(file, targetBytes, onProgress) {
+  await _ensurePdfLibs();
+  const arrayBuf = await file.arrayBuffer();
+  // Versuche absteigende Quality-Stufen bis Target-Größe oder bis Schluss
+  const attempts = [
+    { dpi: 144, quality: 0.85 },
+    { dpi: 120, quality: 0.75 },
+    { dpi: 100, quality: 0.68 },
+    { dpi: 90, quality: 0.60 },
+    { dpi: 80, quality: 0.55 },
+  ];
+  let best = null;
+  for (let i = 0; i < attempts.length; i++) {
+    const cfg = attempts[i];
+    if (onProgress) onProgress('Komprimiere PDF (Stufe ' + (i + 1) + '/' + attempts.length + ', DPI ' + cfg.dpi + ')…');
+    const blob = await _renderPdfPagesToCompressed(arrayBuf, cfg);
+    if (!best || blob.size < best.size) best = blob;
+    if (blob.size <= targetBytes) return new File([blob], file.name, { type: 'application/pdf' });
+  }
+  return new File([best], file.name, { type: 'application/pdf' });
+}
+
+async function _compressImageToTarget(file, targetBytes, onProgress) {
+  if (onProgress) onProgress('Komprimiere Bild…');
+  const bitmap = await createImageBitmap(file);
+  const canvas = document.createElement('canvas');
+  canvas.width = bitmap.width;
+  canvas.height = bitmap.height;
+  const ctx = canvas.getContext('2d');
+  ctx.drawImage(bitmap, 0, 0);
+  for (const q of [0.85, 0.75, 0.65, 0.55, 0.45]) {
+    const blob = await new Promise(r => canvas.toBlob(r, 'image/jpeg', q));
+    if (blob.size <= targetBytes) {
+      const nm = file.name.replace(/\.[^.]+$/, '') + '.jpg';
+      return new File([blob], nm, { type: 'image/jpeg' });
+    }
+  }
+  // Resize-Schleife
+  for (const scale of [0.8, 0.65, 0.5, 0.4]) {
+    const w2 = Math.max(1, Math.floor(bitmap.width * scale));
+    const h2 = Math.max(1, Math.floor(bitmap.height * scale));
+    canvas.width = w2; canvas.height = h2;
+    ctx.drawImage(bitmap, 0, 0, w2, h2);
+    const blob = await new Promise(r => canvas.toBlob(r, 'image/jpeg', 0.7));
+    if (blob.size <= targetBytes) {
+      const nm = file.name.replace(/\.[^.]+$/, '') + '.jpg';
+      return new File([blob], nm, { type: 'image/jpeg' });
+    }
+  }
+  return file;
+}
+
+async function _maybeCompressFile(file, targetBytes, onProgress) {
+  if (file.size <= targetBytes) return file;
+  const isPdf = file.type === 'application/pdf' || /\.pdf$/i.test(file.name);
+  const isImg = (file.type || '').startsWith('image/') || /\.(jpe?g|png|webp|bmp|tiff?)$/i.test(file.name);
+  if (isPdf) return await _compressPdfToTarget(file, targetBytes, onProgress);
+  if (isImg) return await _compressImageToTarget(file, targetBytes, onProgress);
+  return file; // andere Typen: nicht komprimierbar
+}
+
 async function _ensureAttachmentsTable() {
   if (!APP_KEYS.airtableWriteKey) throw new Error('Schreib-Key fehlt');
   const metaRes = await fetch(
@@ -25445,7 +25567,7 @@ async function loadAttachmentsForAccount(accountId, force) {
 async function uploadAttachmentToLibrary(accountId, file, displayName, description) {
   if (!accountId) throw new Error('Bitte Mandant wählen');
   const MAX = 7 * 1024 * 1024;
-  if (file.size > MAX) throw new Error('Datei zu groß (' + Math.round(file.size / 1024 / 1024) + ' MB) — Bibliothek erlaubt max 7 MB pro Datei.');
+  if (file.size > MAX) throw new Error('Datei nach Komprimierung immer noch zu groß (' + Math.round(file.size / 1024 / 1024) + ' MB) — bitte selbst auf < 7 MB reduzieren.');
   const { tableId, fileFieldId } = await _ensureAttachmentsTable();
   const me = APP_KEYS.user || {};
   // Step 1: Record mit Metadaten anlegen (ohne file)
@@ -25544,7 +25666,7 @@ async function renderAttachmentsPage() {
     '<div class="bg-gradient-to-br from-orange-50 to-amber-50 border border-orange-200 rounded-xl p-3 text-[12px] text-orange-900">' +
       '<p class="font-bold inline-flex items-center gap-1 mb-1"><i data-lucide="paperclip" class="w-4 h-4"></i> Anhang-Bibliothek</p>' +
       '<p>Lade Dateien zentral hoch und benutze sie in jeder Marketing-Mail. Bibliothek wird <b>pro Mandant</b> geführt — z.B. Aufzugshandwerk-PDFs sind nicht in FLP-Liste sichtbar.</p>' +
-      '<p class="text-[10px] text-orange-700 mt-1">Größenlimit: 7 MB pro Datei (Airtable-Storage).</p>' +
+      '<p class="text-[10px] text-orange-700 mt-1">Quell-Datei max 30 MB · wird bei Bedarf automatisch komprimiert (PDF/Bild) auf ≤ 6.5 MB für den Storage.</p>' +
     '</div>' +
     '<div class="bg-white rounded-xl border border-ink-200 p-3 space-y-2">' +
       '<label class="text-[11px] inline-flex items-center gap-1.5 w-full">' +
@@ -25597,15 +25719,25 @@ async function _uploadAttachments(inputEl) {
   const statusEl = document.getElementById('attUploadStatus');
   let ok = 0, fail = 0;
   const failures = [];
+  const TARGET = 6.5 * 1024 * 1024;
+  const SOURCE_MAX = 30 * 1024 * 1024;
   for (let i = 0; i < files.length; i++) {
-    const f = files[i];
-    if (statusEl) statusEl.innerHTML = '<span class="spinner inline-block w-3 h-3 border-[1.5px]"></span> Lade ' + (i + 1) + '/' + files.length + ' hoch: ' + escapeHtml(f.name) + '…';
+    let f = files[i];
+    if (statusEl) statusEl.innerHTML = '<span class="spinner inline-block w-3 h-3 border-[1.5px]"></span> ' + (i + 1) + '/' + files.length + ': ' + escapeHtml(f.name) + '…';
     try {
+      if (f.size > SOURCE_MAX) throw new Error('Datei zu groß (' + Math.round(f.size / 1024 / 1024) + ' MB) — max 30 MB Quelle.');
+      const origSize = f.size;
+      if (f.size > TARGET) {
+        f = await _maybeCompressFile(f, TARGET, (msg) => {
+          if (statusEl) statusEl.innerHTML = '<span class="spinner inline-block w-3 h-3 border-[1.5px]"></span> ' + (i + 1) + '/' + files.length + ': ' + escapeHtml(files[i].name) + ' · ' + escapeHtml(msg);
+        });
+        if (statusEl) statusEl.innerHTML = '<span class="spinner inline-block w-3 h-3 border-[1.5px]"></span> ' + (i + 1) + '/' + files.length + ': ' + escapeHtml(f.name) + ' · komprimiert ' + Math.round(origSize / 1024 / 1024) + ' MB → ' + (f.size / 1024 / 1024).toFixed(1) + ' MB · lade hoch…';
+      }
       await uploadAttachmentToLibrary(accountId, f, f.name, '');
       ok++;
     } catch (e) {
       fail++;
-      failures.push(f.name + ': ' + (e.message || e));
+      failures.push(files[i].name + ': ' + (e.message || e));
     }
   }
   if (inputEl) inputEl.value = '';
