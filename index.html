@@ -758,7 +758,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.110';
+const APP_VERSION = 'v2.46.111';
 
 /* ============================================================
    GLOBAL THEME — v2.46.12
@@ -9761,15 +9761,15 @@ function _renderMarketingFromContactModal(accountId, recipientEmail, recipientNa
           // v2.46.108: KI-Generator
           '<div class="bg-gradient-to-br from-purple-50 to-brand-50 border border-purple-200 rounded-xl p-2.5 space-y-2">' +
             '<p class="text-[11px] font-bold text-purple-800 inline-flex items-center gap-1"><i data-lucide="sparkles" class="w-3.5 h-3.5"></i> ODER mit KI individuell schreiben</p>' +
-            '<textarea id="mfcAiPrompt" rows="2" placeholder="z.B. „Hinweis dass wir ein neues Produkt haben"" class="w-full px-3 py-2 border border-purple-300 rounded-lg text-[12px] resize-none"></textarea>' +
+            '<textarea id="mfcAiPrompt" oninput="_mfcSaveDraft()" rows="2" placeholder="z.B. „Hinweis dass wir ein neues Produkt haben"" class="w-full px-3 py-2 border border-purple-300 rounded-lg text-[12px] resize-none"></textarea>' +
             '<button onclick="_mfcAiGenerate(this)" class="w-full px-3 py-2 bg-gradient-to-br from-purple-600 to-brand-600 hover:opacity-90 text-white rounded-lg text-xs font-bold inline-flex items-center justify-center gap-1"><i data-lucide="wand-2" class="w-3.5 h-3.5"></i> Betreff + Body generieren</button>' +
           '</div>' +
           '<label class="text-xs font-bold text-ink-700 uppercase tracking-wider block">Von</label>' +
           '<select id="mfcFrom" class="w-full px-3 py-2.5 border border-ink-300 rounded-xl text-sm bg-white">' + cfgOpts + '</select>' +
           '<label class="text-xs font-bold text-ink-700 uppercase tracking-wider block">Betreff *</label>' +
-          '<input id="mfcSubject" type="text" value="" class="w-full px-3 py-2.5 border border-ink-300 rounded-xl text-sm">' +
+          '<input id="mfcSubject" type="text" value="" oninput="_mfcSaveDraft()" class="w-full px-3 py-2.5 border border-ink-300 rounded-xl text-sm">' +
           '<label class="text-xs font-bold text-ink-700 uppercase tracking-wider block">Nachricht *</label>' +
-          '<textarea id="mfcBody" rows="10" placeholder="Vorlage wählen, mit KI generieren oder direkt tippen…" class="w-full px-3 py-2.5 border border-ink-300 rounded-xl text-[12px] font-mono leading-snug resize-y"></textarea>' +
+          '<textarea id="mfcBody" rows="10" oninput="_mfcSaveDraft()" placeholder="Vorlage wählen, mit KI generieren oder direkt tippen…" class="w-full px-3 py-2.5 border border-ink-300 rounded-xl text-[12px] font-mono leading-snug resize-y"></textarea>' +
           // v2.46.108: Anhänge
           '<div class="bg-ink-50 border border-ink-200 rounded-xl p-2.5">' +
             '<p class="text-[11px] font-bold text-ink-700 mb-1 inline-flex items-center gap-1"><i data-lucide="paperclip" class="w-3.5 h-3.5"></i> Anhänge (max 20 MB pro Datei)</p>' +
@@ -9791,6 +9791,8 @@ function _renderMarketingFromContactModal(accountId, recipientEmail, recipientNa
     '</div>';
   window._MFC_CTX = { accountId, recipientEmail, recipientName, contactId, sourceTicketId, responses, history, attachments: [] };
   if (window.lucide) lucide.createIcons();
+  // Entwurf wiederherstellen (falls vorhanden) — async damit Anhänge nachgeladen werden
+  _mfcApplyDraft().catch(e => console.warn('Draft-Restore fehlgeschlagen:', e));
 }
 
 /* v2.46.108: Anhang-Helpers für Single-Marketing-Modal */
@@ -9823,6 +9825,7 @@ function _mfcAddFiles(inputEl) {
   const host = document.getElementById('mfcAttachList');
   if (host) host.innerHTML = _mfcAttachListHtml();
   if (window.lucide) lucide.createIcons();
+  _mfcSaveDraft();
 }
 
 function _mfcRemoveFile(idx) {
@@ -9832,6 +9835,7 @@ function _mfcRemoveFile(idx) {
   const host = document.getElementById('mfcAttachList');
   if (host) host.innerHTML = _mfcAttachListHtml();
   if (window.lucide) lucide.createIcons();
+  _mfcSaveDraft();
 }
 
 async function _mfcPickFromLibrary() {
@@ -9854,7 +9858,104 @@ async function _mfcPickFromLibrary() {
     const host = document.getElementById('mfcAttachList');
     if (host) host.innerHTML = _mfcAttachListHtml();
     if (window.lucide) lucide.createIcons();
+    _mfcSaveDraft();
   });
+}
+
+/* === v2.46.111: Auto-Save Draft für Single-Marketing-Modal =================
+   Jeder Tastendruck wird in localStorage persistiert (pro Account+Empfänger).
+   Beim Öffnen des Modals: Draft wiederherstellen + Banner zeigen.
+   Bei erfolgreichem Versand: Draft löschen.
+   Ad-hoc-File-Anhänge bleiben in-memory (zu groß für localStorage) — Bibliothek-
+   Anhänge werden via Record-ID persistiert und beim Reopen neu geladen. */
+function _mfcDraftKey(accountId, email) {
+  return 'fdh_mfc_draft_' + String(accountId || '') + '_' + String(email || '').toLowerCase();
+}
+function _mfcSaveDraft() {
+  const ctx = window._MFC_CTX;
+  if (!ctx) return;
+  const subject = document.getElementById('mfcSubject')?.value || '';
+  const body = document.getElementById('mfcBody')?.value || '';
+  const aiPrompt = document.getElementById('mfcAiPrompt')?.value || '';
+  const tplId = document.getElementById('mfcTemplate')?.value || '';
+  const libIds = (ctx.attachments || []).filter(a => a._libRecordId).map(a => a._libRecordId);
+  const key = _mfcDraftKey(ctx.accountId, ctx.recipientEmail);
+  if (!subject.trim() && !body.trim() && !aiPrompt.trim() && !libIds.length && !tplId) {
+    try { localStorage.removeItem(key); } catch (_) {}
+    return;
+  }
+  const payload = { subject, body, aiPrompt, tplId, libIds, savedAt: Date.now() };
+  try { localStorage.setItem(key, JSON.stringify(payload)); } catch (_) {}
+}
+async function _mfcApplyDraft() {
+  const ctx = window._MFC_CTX;
+  if (!ctx) return;
+  let draft = null;
+  try {
+    const raw = localStorage.getItem(_mfcDraftKey(ctx.accountId, ctx.recipientEmail));
+    if (raw) draft = JSON.parse(raw);
+  } catch (_) {}
+  if (!draft) return;
+  const subjEl = document.getElementById('mfcSubject');
+  const bodyEl = document.getElementById('mfcBody');
+  const promptEl = document.getElementById('mfcAiPrompt');
+  const tplEl = document.getElementById('mfcTemplate');
+  if (subjEl && draft.subject) subjEl.value = draft.subject;
+  if (bodyEl && draft.body) bodyEl.value = draft.body;
+  if (promptEl && draft.aiPrompt) promptEl.value = draft.aiPrompt;
+  if (tplEl && draft.tplId) tplEl.value = String(draft.tplId);
+  // Library-Anhänge wieder laden
+  if (Array.isArray(draft.libIds) && draft.libIds.length) {
+    try {
+      await loadAttachmentsForAccount(ctx.accountId);
+      const list = ATTACHMENTS_STATE.byAccount.get(ctx.accountId) || [];
+      const existingIds = new Set((ctx.attachments || []).filter(a => a._libRecordId).map(a => a._libRecordId));
+      for (const id of draft.libIds) {
+        if (existingIds.has(id)) continue;
+        const r = list.find(x => x.recordId === id);
+        if (!r) continue;
+        try {
+          const blob = await fetchLibraryAttachmentBlob(r);
+          ctx.attachments.push(Object.assign({}, blob, { _libRecordId: r.recordId }));
+        } catch (_) {}
+      }
+      const host = document.getElementById('mfcAttachList');
+      if (host) host.innerHTML = _mfcAttachListHtml();
+    } catch (_) {}
+  }
+  // Banner mit Restore-Hinweis
+  const dateLabel = draft.savedAt ? new Date(draft.savedAt).toLocaleString('de-DE') : '?';
+  const banner = document.createElement('div');
+  banner.id = 'mfcDraftBanner';
+  banner.className = 'mb-2 bg-blue-50 border border-blue-200 rounded-lg p-2 text-[11px] text-blue-800 flex items-center justify-between gap-2';
+  banner.innerHTML = '<span><i data-lucide="save" class="w-3 h-3 inline -mt-0.5"></i> Entwurf vom ' + escapeHtml(dateLabel) + ' wiederhergestellt.</span>' +
+    '<button onclick="_mfcDiscardDraft()" class="text-blue-700 hover:text-blue-900 font-semibold underline">Verwerfen</button>';
+  const modalBody = document.querySelector('#subModalHost .flex-1.overflow-y-auto');
+  if (modalBody) modalBody.insertBefore(banner, modalBody.firstChild);
+  if (window.lucide) lucide.createIcons();
+}
+function _mfcDiscardDraft() {
+  const ctx = window._MFC_CTX;
+  if (!ctx) return;
+  try { localStorage.removeItem(_mfcDraftKey(ctx.accountId, ctx.recipientEmail)); } catch (_) {}
+  const subjEl = document.getElementById('mfcSubject');
+  const bodyEl = document.getElementById('mfcBody');
+  const promptEl = document.getElementById('mfcAiPrompt');
+  const tplEl = document.getElementById('mfcTemplate');
+  if (subjEl) subjEl.value = '';
+  if (bodyEl) bodyEl.value = '';
+  if (promptEl) promptEl.value = '';
+  if (tplEl) tplEl.value = '';
+  ctx.attachments = [];
+  const ah = document.getElementById('mfcAttachList');
+  if (ah) ah.innerHTML = _mfcAttachListHtml();
+  const banner = document.getElementById('mfcDraftBanner');
+  if (banner) banner.remove();
+}
+function _mfcClearDraft() {
+  const ctx = window._MFC_CTX;
+  if (!ctx) return;
+  try { localStorage.removeItem(_mfcDraftKey(ctx.accountId, ctx.recipientEmail)); } catch (_) {}
 }
 
 async function _mfcAiGenerate(btn) {
@@ -9906,6 +10007,7 @@ async function _mfcAiGenerate(btn) {
     document.getElementById('mfcBody').value = obj.body || '';
     const tplEl = document.getElementById('mfcTemplate');
     if (tplEl) tplEl.value = '';
+    _mfcSaveDraft();
     toast('Betreff + Body von KI erzeugt.', 'success', 3000);
   } catch (e) {
     toast('KI-Generierung fehlgeschlagen: ' + (e.message || e), 'error', 7000);
@@ -9945,6 +10047,7 @@ function _mfcTemplateChange() {
   const bodyHtml = _renderPlaceholders(tpl.content_html || tpl.content || '', placeholderCtx);
   $('mfcSubject').value = subj;
   $('mfcBody').value = htmlToText(bodyHtml);
+  _mfcSaveDraft();
   // Doublette-Check
   const dup = (ctx.history || []).find(h => String(h.template_id_fd) === String(tplId));
   if (dup && dupBox) {
@@ -10028,15 +10131,22 @@ async function processMarketingFromContact(btn) {
         body: JSON.stringify({ body: noteBody, private: true }),
       }).catch(() => {});
     }
+    _mfcClearDraft();
     closeMarketingFromContactModal();
     toast('Marketing-Email gesendet — Ticket #' + created.id, 'success', 5000);
   } catch (e) {
     setBusy(btn, false);
     setErr(e.message || String(e));
+    // Bei Fehler: Modal bleibt offen, Daten sind sicher im Draft persistiert
+    _mfcSaveDraft();
   }
 }
 
 function closeMarketingFromContactModal() {
+  // v2.46.111: final draft-save vor dem Schließen — damit auch ein versehentliches
+  // Klick auf X die Daten nicht killt. Beim nächsten Öffnen des Modals werden sie
+  // automatisch wiederhergestellt.
+  try { _mfcSaveDraft(); } catch (_) {}
   delete window._MFC_CTX;
   const host = document.getElementById('subModalHost');
   if (host) host.innerHTML = '';
