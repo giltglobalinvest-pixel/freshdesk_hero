@@ -758,7 +758,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.112';
+const APP_VERSION = 'v2.46.113';
 
 /* ============================================================
    GLOBAL THEME — v2.46.12
@@ -9775,6 +9775,13 @@ function _renderMarketingFromContactModal(accountId, recipientEmail, recipientNa
           // v2.46.108: KI-Generator
           '<div class="bg-gradient-to-br from-purple-50 to-brand-50 border border-purple-200 rounded-xl p-2.5 space-y-2">' +
             '<p class="text-[11px] font-bold text-purple-800 inline-flex items-center gap-1"><i data-lucide="sparkles" class="w-3.5 h-3.5"></i> ODER mit KI individuell schreiben</p>' +
+            '<div class="flex gap-1.5 items-center">' +
+              '<select id="mfcPromptTpl" onchange="_mfcLoadPromptTpl(this.value)" class="flex-1 px-2 py-1.5 border border-purple-300 rounded-lg text-[11px] bg-white">' +
+                '<option value="">— Prompt-Vorlage laden —</option>' +
+              '</select>' +
+              '<button onclick="_mfcSavePromptTpl(this)" title="Aktuellen Prompt als Vorlage speichern" class="px-2 py-1.5 bg-white border border-purple-300 hover:bg-purple-100 text-purple-700 rounded-lg text-[11px] inline-flex items-center"><i data-lucide="save" class="w-3.5 h-3.5"></i></button>' +
+              '<button onclick="_mfcDeletePromptTpl(this)" title="Aktuell gewählte Vorlage löschen" class="px-2 py-1.5 bg-white border border-red-300 hover:bg-red-50 text-red-600 rounded-lg text-[11px] inline-flex items-center"><i data-lucide="trash-2" class="w-3.5 h-3.5"></i></button>' +
+            '</div>' +
             '<textarea id="mfcAiPrompt" oninput="_mfcSaveDraft()" rows="2" placeholder="z.B. „Hinweis dass wir ein neues Produkt haben"" class="w-full px-3 py-2 border border-purple-300 rounded-lg text-[12px] resize-none"></textarea>' +
             '<button onclick="_mfcAiGenerate(this)" class="w-full px-3 py-2 bg-gradient-to-br from-purple-600 to-brand-600 hover:opacity-90 text-white rounded-lg text-xs font-bold inline-flex items-center justify-center gap-1"><i data-lucide="wand-2" class="w-3.5 h-3.5"></i> Betreff + Body generieren</button>' +
           '</div>' +
@@ -9807,6 +9814,74 @@ function _renderMarketingFromContactModal(accountId, recipientEmail, recipientNa
   if (window.lucide) lucide.createIcons();
   // Entwurf wiederherstellen (falls vorhanden) — async damit Anhänge nachgeladen werden
   _mfcApplyDraft().catch(e => console.warn('Draft-Restore fehlgeschlagen:', e));
+  // KI-Prompt-Vorlagen ins Dropdown laden
+  _mfcRefreshPromptTpls().catch(() => {});
+}
+
+async function _mfcRefreshPromptTpls() {
+  const ctx = window._MFC_CTX;
+  if (!ctx) return;
+  const sel = document.getElementById('mfcPromptTpl');
+  if (!sel) return;
+  const list = await loadAiPromptsForAccount(ctx.accountId);
+  sel.innerHTML = _aiPromptOptions(list, sel.value);
+}
+
+async function _mfcLoadPromptTpl(recordId) {
+  const ctx = window._MFC_CTX;
+  if (!ctx || !recordId) return;
+  const list = await loadAiPromptsForAccount(ctx.accountId);
+  const rec = list.find(r => String(r.recordId) === String(recordId));
+  if (!rec) return;
+  const promptEl = document.getElementById('mfcAiPrompt');
+  if (promptEl) promptEl.value = rec.prompt || '';
+  _mfcSaveDraft();
+  bumpAiPromptUsage(recordId, ctx.accountId).catch(() => {});
+  toast('Vorlage „' + (rec.title || '?') + '" geladen.', 'success', 2500);
+}
+
+async function _mfcSavePromptTpl(btn) {
+  const ctx = window._MFC_CTX;
+  if (!ctx) return;
+  const promptEl = document.getElementById('mfcAiPrompt');
+  const prompt = (promptEl?.value || '').trim();
+  if (!prompt) { toast('Erst einen Prompt eingeben.', 'warn', 4000); return; }
+  const title = window.prompt('Vorlagen-Titel (z.B. „Produkt-Ankündigung"):', '');
+  if (title === null) return;
+  if (!title.trim()) { toast('Titel fehlt — Vorlage nicht gespeichert.', 'warn', 3000); return; }
+  const makeGlobal = window.confirm('Vorlage global verfügbar machen (in allen Mandanten sichtbar)?\n\nOK = global\nAbbrechen = nur für „' + (((APP_STATE.accounts || []).find(a => a.id === ctx.accountId) || {}).name || 'aktueller Mandant') + '"');
+  setBusy(btn, true);
+  try {
+    await saveAiPromptTemplate(ctx.accountId, title.trim(), prompt, makeGlobal);
+    await _mfcRefreshPromptTpls();
+    toast('Vorlage „' + title.trim() + '" gespeichert.', 'success', 3500);
+  } catch (e) {
+    toast('Speichern fehlgeschlagen: ' + (e.message || e), 'error', 6000);
+  } finally {
+    setBusy(btn, false);
+  }
+}
+
+async function _mfcDeletePromptTpl(btn) {
+  const ctx = window._MFC_CTX;
+  if (!ctx) return;
+  const sel = document.getElementById('mfcPromptTpl');
+  const recordId = sel?.value;
+  if (!recordId) { toast('Erst eine Vorlage im Dropdown wählen.', 'warn', 3000); return; }
+  const list = await loadAiPromptsForAccount(ctx.accountId);
+  const rec = list.find(r => String(r.recordId) === String(recordId));
+  if (!rec) return;
+  if (!confirm('Vorlage „' + (rec.title || '?') + '" löschen?')) return;
+  setBusy(btn, true);
+  try {
+    await deleteAiPromptTemplate(recordId, ctx.accountId);
+    await _mfcRefreshPromptTpls();
+    toast('Gelöscht.', 'success', 2000);
+  } catch (e) {
+    toast('Löschen fehlgeschlagen: ' + (e.message || e), 'error', 6000);
+  } finally {
+    setBusy(btn, false);
+  }
 }
 
 /* v2.46.108: Anhang-Helpers für Single-Marketing-Modal */
@@ -25753,6 +25828,88 @@ async function deleteLibraryAttachment(recordId, accountId) {
   ATTACHMENTS_STATE.byAccount.delete(accountId);
 }
 
+/* === v2.46.113: KI-Prompt-Vorlagen pro Mandant + Global ====================
+   Speichern + wiederverwendbar machen von Marketing-Prompts ("Hinweis dass wir
+   ein neues Produkt haben…" usw.). Tabelle wird beim ersten Save automatisch
+   via airtableWriteWithAutoField angelegt.
+   Scope-Filter: aktueller Mandant ODER global (account_id = ''). */
+const AI_PROMPTS_TABLE = 'AiPromptTemplates';
+const AI_PROMPTS_STATE = {
+  byAccount: new Map(),  // accountId → Array<record>
+};
+
+async function loadAiPromptsForAccount(accountId, force) {
+  if (!accountId) return [];
+  if (!force && AI_PROMPTS_STATE.byAccount.has(accountId)) return AI_PROMPTS_STATE.byAccount.get(accountId);
+  let list = [];
+  try {
+    const filter = "OR({account_id}='" + escapeFormula(accountId) + "',{account_id}='')";
+    const recs = await airtableRead(AI_PROMPTS_TABLE, {
+      filter,
+      sort: [{ field: 'last_used_at', direction: 'desc' }],
+      maxRecords: 200,
+    });
+    list = recs.map(r => Object.assign({ recordId: r.id }, r.fields));
+  } catch (_) { /* Tabelle noch nicht da */ }
+  AI_PROMPTS_STATE.byAccount.set(accountId, list);
+  return list;
+}
+
+async function saveAiPromptTemplate(accountId, title, prompt, makeGlobal) {
+  const t = String(title || '').trim();
+  const p = String(prompt || '').trim();
+  if (!t) throw new Error('Bitte einen Titel angeben.');
+  if (!p) throw new Error('Prompt ist leer.');
+  const me = APP_KEYS.user || {};
+  const fields = {
+    title:        t,
+    prompt:       p,
+    account_id:   makeGlobal ? '' : (accountId || ''),
+    tags:         '',
+    created_by:   me.email || '',
+    created_at:   nowIso(),
+    last_used_at: nowIso(),
+    usage_count:  1,
+  };
+  await airtableWriteWithAutoField(AI_PROMPTS_TABLE, fields, {
+    title:        'singleLineText',
+    prompt:       'multilineText',
+    account_id:   'singleLineText',
+    tags:         'singleLineText',
+    created_by:   'singleLineText',
+    created_at:   'singleLineText',
+    last_used_at: 'singleLineText',
+    usage_count:  'number',
+  });
+  AI_PROMPTS_STATE.byAccount.delete(accountId);
+}
+
+async function deleteAiPromptTemplate(recordId, accountId) {
+  await airtableDelete(AI_PROMPTS_TABLE, recordId);
+  AI_PROMPTS_STATE.byAccount.delete(accountId);
+}
+
+async function bumpAiPromptUsage(recordId, accountId) {
+  const list = AI_PROMPTS_STATE.byAccount.get(accountId) || [];
+  const rec = list.find(r => r.recordId === recordId);
+  const newCount = (Number(rec?.usage_count || 0)) + 1;
+  try {
+    await airtableUpdate(AI_PROMPTS_TABLE, recordId, { last_used_at: nowIso(), usage_count: newCount });
+  } catch (_) {}
+  AI_PROMPTS_STATE.byAccount.delete(accountId);
+}
+
+/* Liefert die Optionen für ein <select>-Element. Mit Mandanten-Tag bei globalen. */
+function _aiPromptOptions(list, selectedId) {
+  const opts = list.map(r => {
+    const isGlobal = !r.account_id;
+    const label = (isGlobal ? '🌐 ' : '') + (r.title || '(ohne Titel)');
+    const sel = String(r.recordId) === String(selectedId || '') ? ' selected' : '';
+    return '<option value="' + escapeAttr(r.recordId) + '"' + sel + '>' + escapeHtml(label) + '</option>';
+  }).join('');
+  return '<option value="">— Vorlage laden —</option>' + opts;
+}
+
 /* Holt eine Bibliothek-Datei als Blob (für den Versand). Der Name wird auf den
    editierten „name"-Wert gesetzt, damit der Empfänger den angepassten Dateinamen
    sieht, nicht den Original-Filename. */
@@ -26685,6 +26842,13 @@ function _renderBulkMarketingModal() {
           // KI-Generator
           '<div class="bg-gradient-to-br from-purple-50 to-brand-50 border border-purple-200 rounded-xl p-2.5 space-y-2">' +
             '<p class="text-[11px] font-bold text-purple-800 inline-flex items-center gap-1"><i data-lucide="sparkles" class="w-3.5 h-3.5"></i> ODER per KI individuell schreiben</p>' +
+            '<div class="flex gap-1.5 items-center">' +
+              '<select id="bulkPromptTpl" onchange="_bulkLoadPromptTpl(this.value)" class="flex-1 px-2 py-1.5 border border-purple-300 rounded-lg text-[11px] bg-white">' +
+                '<option value="">— Prompt-Vorlage laden —</option>' +
+              '</select>' +
+              '<button onclick="_bulkSavePromptTpl(this)" title="Aktuellen Prompt als Vorlage speichern" class="px-2 py-1.5 bg-white border border-purple-300 hover:bg-purple-100 text-purple-700 rounded-lg text-[11px] inline-flex items-center"><i data-lucide="save" class="w-3.5 h-3.5"></i></button>' +
+              '<button onclick="_bulkDeletePromptTpl(this)" title="Aktuell gewählte Vorlage löschen" class="px-2 py-1.5 bg-white border border-red-300 hover:bg-red-50 text-red-600 rounded-lg text-[11px] inline-flex items-center"><i data-lucide="trash-2" class="w-3.5 h-3.5"></i></button>' +
+            '</div>' +
             '<textarea id="bulkAiPrompt" rows="2" placeholder="z.B. „Hinweis dass wir ein neues Produkt im Sortiment haben und einladen wollen es kennenzulernen"" class="w-full px-3 py-2 border border-purple-300 rounded-lg text-[12px] resize-none">' + escapeHtml(window._BULK_CTX?.aiPrompt || '') + '</textarea>' +
             '<button onclick="_bulkAiGenerate(this)" class="w-full px-3 py-2 bg-gradient-to-br from-purple-600 to-brand-600 hover:opacity-90 text-white rounded-lg text-xs font-bold inline-flex items-center justify-center gap-1"><i data-lucide="wand-2" class="w-3.5 h-3.5"></i> Betreff + Body generieren</button>' +
           '</div>' +
@@ -26728,6 +26892,73 @@ function _renderBulkMarketingModal() {
       '</div>' +
     '</div>';
   if (window.lucide) lucide.createIcons();
+  _bulkRefreshPromptTpls().catch(() => {});
+}
+
+async function _bulkRefreshPromptTpls() {
+  const ctx = window._BULK_CTX;
+  if (!ctx) return;
+  const sel = document.getElementById('bulkPromptTpl');
+  if (!sel) return;
+  const list = await loadAiPromptsForAccount(ctx.accountId);
+  sel.innerHTML = _aiPromptOptions(list, sel.value);
+}
+
+async function _bulkLoadPromptTpl(recordId) {
+  const ctx = window._BULK_CTX;
+  if (!ctx || !recordId) return;
+  const list = await loadAiPromptsForAccount(ctx.accountId);
+  const rec = list.find(r => String(r.recordId) === String(recordId));
+  if (!rec) return;
+  const promptEl = document.getElementById('bulkAiPrompt');
+  if (promptEl) promptEl.value = rec.prompt || '';
+  ctx.aiPrompt = rec.prompt || '';
+  bumpAiPromptUsage(recordId, ctx.accountId).catch(() => {});
+  toast('Vorlage „' + (rec.title || '?') + '" geladen.', 'success', 2500);
+}
+
+async function _bulkSavePromptTpl(btn) {
+  const ctx = window._BULK_CTX;
+  if (!ctx) return;
+  const promptEl = document.getElementById('bulkAiPrompt');
+  const prompt = (promptEl?.value || '').trim();
+  if (!prompt) { toast('Erst einen Prompt eingeben.', 'warn', 4000); return; }
+  const title = window.prompt('Vorlagen-Titel (z.B. „Produkt-Ankündigung"):', '');
+  if (title === null) return;
+  if (!title.trim()) { toast('Titel fehlt — Vorlage nicht gespeichert.', 'warn', 3000); return; }
+  const makeGlobal = window.confirm('Vorlage global verfügbar machen (in allen Mandanten sichtbar)?\n\nOK = global\nAbbrechen = nur für „' + (((APP_STATE.accounts || []).find(a => a.id === ctx.accountId) || {}).name || 'aktueller Mandant') + '"');
+  setBusy(btn, true);
+  try {
+    await saveAiPromptTemplate(ctx.accountId, title.trim(), prompt, makeGlobal);
+    await _bulkRefreshPromptTpls();
+    toast('Vorlage „' + title.trim() + '" gespeichert.', 'success', 3500);
+  } catch (e) {
+    toast('Speichern fehlgeschlagen: ' + (e.message || e), 'error', 6000);
+  } finally {
+    setBusy(btn, false);
+  }
+}
+
+async function _bulkDeletePromptTpl(btn) {
+  const ctx = window._BULK_CTX;
+  if (!ctx) return;
+  const sel = document.getElementById('bulkPromptTpl');
+  const recordId = sel?.value;
+  if (!recordId) { toast('Erst eine Vorlage im Dropdown wählen.', 'warn', 3000); return; }
+  const list = await loadAiPromptsForAccount(ctx.accountId);
+  const rec = list.find(r => String(r.recordId) === String(recordId));
+  if (!rec) return;
+  if (!confirm('Vorlage „' + (rec.title || '?') + '" löschen?')) return;
+  setBusy(btn, true);
+  try {
+    await deleteAiPromptTemplate(recordId, ctx.accountId);
+    await _bulkRefreshPromptTpls();
+    toast('Gelöscht.', 'success', 2000);
+  } catch (e) {
+    toast('Löschen fehlgeschlagen: ' + (e.message || e), 'error', 6000);
+  } finally {
+    setBusy(btn, false);
+  }
 }
 
 function _bulkFormatBytes(n) {
