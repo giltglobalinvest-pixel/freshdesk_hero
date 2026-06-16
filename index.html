@@ -758,7 +758,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.108';
+const APP_VERSION = 'v2.46.109';
 
 /* ============================================================
    GLOBAL THEME — v2.46.12
@@ -25444,8 +25444,8 @@ async function loadAttachmentsForAccount(accountId, force) {
 
 async function uploadAttachmentToLibrary(accountId, file, displayName, description) {
   if (!accountId) throw new Error('Bitte Mandant wählen');
-  const MAX = 5 * 1024 * 1024;
-  if (file.size > MAX) throw new Error('Datei zu groß (' + Math.round(file.size / 1024 / 1024) + ' MB) — Bibliothek erlaubt max 5 MB pro Datei.');
+  const MAX = 7 * 1024 * 1024;
+  if (file.size > MAX) throw new Error('Datei zu groß (' + Math.round(file.size / 1024 / 1024) + ' MB) — Bibliothek erlaubt max 7 MB pro Datei.');
   const { tableId, fileFieldId } = await _ensureAttachmentsTable();
   const me = APP_KEYS.user || {};
   // Step 1: Record mit Metadaten anlegen (ohne file)
@@ -25544,7 +25544,7 @@ async function renderAttachmentsPage() {
     '<div class="bg-gradient-to-br from-orange-50 to-amber-50 border border-orange-200 rounded-xl p-3 text-[12px] text-orange-900">' +
       '<p class="font-bold inline-flex items-center gap-1 mb-1"><i data-lucide="paperclip" class="w-4 h-4"></i> Anhang-Bibliothek</p>' +
       '<p>Lade Dateien zentral hoch und benutze sie in jeder Marketing-Mail. Bibliothek wird <b>pro Mandant</b> geführt — z.B. Aufzugshandwerk-PDFs sind nicht in FLP-Liste sichtbar.</p>' +
-      '<p class="text-[10px] text-orange-700 mt-1">Größenlimit: 5 MB pro Datei (Airtable-Storage).</p>' +
+      '<p class="text-[10px] text-orange-700 mt-1">Größenlimit: 7 MB pro Datei (Airtable-Storage).</p>' +
     '</div>' +
     '<div class="bg-white rounded-xl border border-ink-200 p-3 space-y-2">' +
       '<label class="text-[11px] inline-flex items-center gap-1.5 w-full">' +
