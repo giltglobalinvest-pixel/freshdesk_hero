@@ -758,7 +758,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.115';
+const APP_VERSION = 'v2.46.116';
 
 /* ============================================================
    GLOBAL THEME — v2.46.12
@@ -5742,12 +5742,30 @@ function renderContactEditBody() {
 
   $('contactEditBody').innerHTML = `
     <div class="space-y-3 max-w-2xl mx-auto">
+      <div id="contactEditMarketingHistory"></div>
       ${aiTopBlock}
       ${stammdatenBlock}
       ${saveAllButton}
       ${systemStatusBlock}
     </div>`;
   if (window.lucide) lucide.createIcons();
+  // v2.46.116: Marketing-History lazy laden — direkt sichtbar beim Öffnen des Kontakts
+  const histEmail = ctx.fd?.email || ctx.master?.contact?.email || '';
+  if (histEmail) {
+    _contactEditLoadMarketingHistory(histEmail).catch(e => console.warn('Marketing-History laden:', e));
+  }
+}
+
+async function _contactEditLoadMarketingHistory(email) {
+  const host = document.getElementById('contactEditMarketingHistory');
+  if (!host || !email) return;
+  try {
+    const list = await loadMarketingEmailsForEmail(email);
+    host.innerHTML = _mfcRenderHistoryBlock(list);
+    if (window.lucide) lucide.createIcons();
+  } catch (e) {
+    console.warn('Marketing-History-Render:', e);
+  }
 }
 
 /* === Freshdesk-Firma-Kachel im Contact-Edit-Modal ==========================
@@ -9806,8 +9824,9 @@ function _renderMarketingFromContactModal(accountId, recipientEmail, recipientNa
           '<input type="hidden" id="mfcSourceTicketId" value="' + escapeAttr(String(sourceTicketId || '')) + '">' +
           '<div class="bg-orange-50 border border-orange-200 rounded-xl p-2.5 text-[11px] text-orange-900">' +
             '<b>An:</b> ' + escapeHtml(recipientName || recipientEmail) + (recipientName ? ' &lt;' + escapeHtml(recipientEmail) + '&gt;' : '') +
-            (history.length ? '<br><b>Bisherige Marketing-Mails:</b> ' + history.length : '') +
           '</div>' +
+          // v2.46.116: Volle Marketing-Historie direkt sichtbar — verhindert Doppelversand
+          _mfcRenderHistoryBlock(history) +
           '<label class="text-xs font-bold text-ink-700 uppercase tracking-wider block">Vorlage (optional)</label>' +
           '<select id="mfcTemplate" onchange="_mfcTemplateChange()" class="w-full px-3 py-2.5 border border-ink-300 rounded-xl text-sm bg-white">' + tplOpts + '</select>' +
           '<div id="mfcDupWarning" class="hidden bg-amber-50 border border-amber-200 rounded-xl p-2.5 text-[11px] text-amber-900"></div>' +
@@ -10009,6 +10028,64 @@ async function _mfcPickFromLibrary() {
    Bei erfolgreichem Versand: Draft löschen.
    Ad-hoc-File-Anhänge bleiben in-memory (zu groß für localStorage) — Bibliothek-
    Anhänge werden via Record-ID persistiert und beim Reopen neu geladen. */
+/* v2.46.116: Marketing-History-Block für den Single-Send-Modal.
+   Wird DIREKT unter dem „An:"-Block angezeigt — der User sieht VOR der Auswahl
+   einer Vorlage, was an diesen Kontakt schon ging. */
+function _mfcRenderHistoryBlock(history) {
+  if (!history || !history.length) {
+    return '<div class="bg-emerald-50 border border-emerald-200 rounded-xl p-2.5 text-[11px] text-emerald-800 inline-flex items-center gap-1.5">' +
+      '<i data-lucide="leaf" class="w-3.5 h-3.5"></i> Noch keine Marketing-Mail an diesen Kontakt versandt — alles offen.' +
+    '</div>';
+  }
+  const items = history.slice().sort((a, b) =>
+    new Date(b.sent_at || 0).getTime() - new Date(a.sent_at || 0).getTime()
+  );
+  const last = items[0];
+  const daysSinceLast = last?.sent_at
+    ? Math.floor((Date.now() - new Date(last.sent_at).getTime()) / 86400e3)
+    : null;
+  const lastLabel = daysSinceLast == null ? '?' :
+    daysSinceLast === 0 ? 'heute' :
+    daysSinceLast === 1 ? 'gestern' :
+    'vor ' + daysSinceLast + ' Tagen';
+  const uniqueTpls = new Set(items.map(m => String(m.template_title || '(freier Text)')));
+  const VISIBLE = 8;
+  const visible = items.slice(0, VISIBLE);
+  const hidden = items.length - VISIBLE;
+  return '<div class="bg-amber-50 border border-amber-300 rounded-xl overflow-hidden">' +
+    '<div class="px-2.5 py-1.5 bg-amber-100 border-b border-amber-200 flex items-center gap-1.5">' +
+      '<i data-lucide="alert-triangle" class="w-3.5 h-3.5 text-amber-700"></i>' +
+      '<span class="text-[11px] font-bold text-amber-900 flex-1">Bisheriger Marketing-Versand — bitte vor Auswahl der Vorlage prüfen</span>' +
+      '<span class="text-[10px] text-amber-800 bg-white px-1.5 py-0.5 rounded font-bold">' + items.length + ' Mail' + (items.length === 1 ? '' : 's') + ' · ' + uniqueTpls.size + ' Vorlage' + (uniqueTpls.size === 1 ? '' : 'n') + '</span>' +
+    '</div>' +
+    '<p class="text-[10px] text-amber-700 px-2.5 py-1 italic border-b border-amber-100">Letzte Mail ' + escapeHtml(lastLabel) + ' · jüngste zuerst.</p>' +
+    '<div class="divide-y divide-amber-100 max-h-56 overflow-y-auto">' +
+      visible.map(m => {
+        const d = m.sent_at ? new Date(m.sent_at) : null;
+        const dateLabel = d ? d.toLocaleDateString('de-DE', { day:'2-digit', month:'2-digit', year:'2-digit' }) : '?';
+        const time = d ? d.toLocaleTimeString('de-DE', { hour:'2-digit', minute:'2-digit' }) : '';
+        const tplLabel = m.template_title || '(freier Text)';
+        return '<div class="px-2.5 py-1.5 bg-white">' +
+          '<div class="flex items-start justify-between gap-2">' +
+            '<div class="flex-1 min-w-0">' +
+              '<p class="font-semibold text-ink-900 text-[11px] truncate">' + escapeHtml(m.betreff || '(ohne Betreff)') + '</p>' +
+              '<p class="text-[10px] text-ink-500 truncate inline-flex items-center gap-1 mt-0.5">' +
+                '<span class="bg-orange-100 text-orange-700 px-1 py-0.5 rounded text-[9px]"><i data-lucide="megaphone" class="w-2.5 h-2.5 inline -mt-0.5"></i> ' + escapeHtml(tplLabel) + '</span>' +
+                (m.outbound_ticket_id ? '<span class="text-ink-400">· Ticket #' + escapeHtml(String(m.outbound_ticket_id)) + '</span>' : '') +
+              '</p>' +
+            '</div>' +
+            '<div class="text-right shrink-0">' +
+              '<p class="text-[10px] font-semibold text-ink-700">' + escapeHtml(dateLabel) + '</p>' +
+              (time ? '<p class="text-[9px] text-ink-400">' + escapeHtml(time) + '</p>' : '') +
+            '</div>' +
+          '</div>' +
+        '</div>';
+      }).join('') +
+    '</div>' +
+    (hidden > 0 ? '<p class="text-[10px] text-amber-700 italic px-2.5 py-1 bg-amber-50/50">+ ' + hidden + ' ältere Mail' + (hidden === 1 ? '' : 's') + ' (gesamt ' + items.length + ')</p>' : '') +
+  '</div>';
+}
+
 function _mfcDraftKey(accountId, email) {
   return 'fdh_mfc_draft_' + String(accountId || '') + '_' + String(email || '').toLowerCase();
 }
