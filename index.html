@@ -758,7 +758,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.117';
+const APP_VERSION = 'v2.46.118';
 
 /* ============================================================
    GLOBAL THEME — v2.46.12
@@ -26440,10 +26440,20 @@ async function parseContactSearchPrompt(promptText) {
   }
   const sys = 'Du extrahierst Suchparameter für eine Kontakt-Suche in Freshdesk CRM.\n' +
     'Antworte AUSSCHLIESSLICH mit einem JSON-Objekt mit Feldern:\n' +
-    '{ "company": string|null, "name": string|null, "email": string|null, "email_domain": string|null, "job_title": string|null, "limit": number }\n' +
+    '{ "company": string|null, "aliases": string[], "name": string|null, "email": string|null, "email_domain": string|null, "job_title": string|null, "limit": number }\n' +
     'limit: standardmäßig 30, höher wenn der User explizit eine größere Anzahl nennt.\n' +
-    'company: Firmenname (z.B. "KONE", "Otis"). name: Personenname. email_domain: nur Domain (z.B. "kone.com").\n' +
-    'Lass Felder null wenn der User sie nicht erwähnt. KEIN Markdown, KEIN Text drumherum.';
+    'company: Firmenname (z.B. "KONE", "Otis").\n' +
+    'aliases: GÄNGIGE ALTERNATIVNAMEN derselben Firma — Branchenwissen für Aufzugsbranche/Industriegüter:\n' +
+    '  Beispiele:\n' +
+    '  - "TKE" → ["TK Elevator", "ThyssenKrupp Elevator", "thyssenkrupp", "TK Aufzüge"]\n' +
+    '  - "TK Elevator" → ["TKE", "ThyssenKrupp Elevator", "thyssenkrupp"]\n' +
+    '  - "KONE" → ["KONE Aufzüge", "KONE GmbH"]\n' +
+    '  - "Otis" → ["OTIS GmbH", "Otis Service", "Otis Aufzüge"]\n' +
+    '  - "Schindler" → ["Schindler Aufzüge", "Schindler Deutschland"]\n' +
+    '  Gib NUR Aliase wenn du sicher bist, dass es dieselbe Firma/Gruppe ist. Sonst leeres Array [].\n' +
+    'email_domain: beste-Guess-Domain der Firma wenn typisch bekannt (z.B. "kone.com" für KONE, "tkelevator.com" oder "tk-elevator.com" für TKE).\n' +
+    'name: Personenname. job_title: Position.\n' +
+    'Lass Felder null bzw. [] wenn der User sie nicht erwähnt. KEIN Markdown, KEIN Text drumherum.';
   try {
     const data = await proxyJson('/anthropic/v1/messages', {
       method: 'POST',
@@ -26535,8 +26545,9 @@ async function _searchFdContactsByParams(accountId, params, maxPerAccount, pageO
 
   // 3. Firma → companies suchen → pro company_id contacts laden
   //    Trick: FDs /search/companies kennt KEIN name-Feld (nur domain + custom_fields).
-  //    Strategie A: wenn email_domain bekannt → domain:'X' in search-DSL (erlaubt)
-  //    Strategie B: /companies?per_page=100 paginated + clientside name-Filter
+  //    Strategie A: domain:'X' in search-DSL (erlaubt) — alle bekannten Domain-Varianten
+  //    Strategie B: /companies?per_page=100 paginated + clientside name-Filter über
+  //                 alle Such-Begriffe (company + KI-Aliase)
   if (aborted()) return found;
   if (params.company && found.length < limit) {
     const companies = [];
@@ -26544,17 +26555,29 @@ async function _searchFdContactsByParams(accountId, params, maxPerAccount, pageO
     const addCo = (arr) => arr.forEach(co => {
       if (co?.id && !seenCo.has(co.id)) { seenCo.add(co.id); companies.push(co); }
     });
-    // A) Domain-Suche via search-DSL (das einzige was /search/companies erlaubt)
-    if (params.email_domain) {
+    // v2.46.118: Multi-Term-Matching — Hauptname + KI-Aliase
+    const nameTerms = Array.from(new Set([
+      params.company,
+      ...(Array.isArray(params.aliases) ? params.aliases : []),
+    ].filter(Boolean).map(s => String(s).trim().toLowerCase()).filter(Boolean)));
+    const domainTerms = Array.from(new Set([
+      params.email_domain,
+      ...(Array.isArray(params.aliases) ? params.aliases : []),
+    ].filter(Boolean).map(s => String(s).trim().toLowerCase()).filter(Boolean)));
+    // A) Domain-Suche für ALLE bekannten Domain-Varianten (KI-gehintet + email_domain)
+    for (const term of domainTerms) {
+      if (aborted()) break;
+      const stripped = term.replace(/^@/, '');
+      // Nur "echte" Domain-Heuristik: enthält Punkt oder ist 1-Wort
+      if (!stripped.includes('.') && stripped.split(/\s+/).length > 1) continue;
       try {
-        const q = '"domain:\'' + safe(String(params.email_domain).replace(/^@/, '')) + '\'"';
+        const q = '"domain:\'' + safe(stripped) + '\'"';
         const res = await proxyJson(base + '/search/companies?query=' + encodeURIComponent(q));
         addCo(res?.results || []);
       } catch (_) {}
     }
-    // B) Paginierte Liste + clientside-Filter — funktioniert auch ohne Domain
+    // B) Paginierte Liste + clientside-Filter — matcht WENN IRGENDEIN Such-Begriff im Namen/Domain steckt
     if (companies.length < 10) {
-      const needle = String(params.company).toLowerCase();
       let pages = 0;
       for (let page = 1; page <= 5; page++) {
         if (aborted()) break;
@@ -26566,14 +26589,15 @@ async function _searchFdContactsByParams(accountId, params, maxPerAccount, pageO
           arr.forEach(co => {
             const n = String(co.name || '').toLowerCase();
             const d = String(co.domains?.[0] || '').toLowerCase();
-            if (n.includes(needle) || (d && d.includes(needle))) addCo([co]);
+            const match = nameTerms.some(t => n.includes(t) || (d && d.includes(t)));
+            if (match) addCo([co]);
           });
           if (arr.length < 100) break;
         } catch (e) { errs.push('companies-list: ' + e.message); break; }
       }
       if (!pages && !companies.length) errs.push('company: /companies-Endpunkt nicht erreichbar (evtl. fehlende Admin-Permission)');
     }
-    if (!companies.length) errs.push('company: keine Firma „' + params.company + '" gefunden');
+    if (!companies.length) errs.push('company: keine Firma „' + params.company + '" gefunden (auch nicht via Aliase: ' + (params.aliases || []).join(', ') + ')');
     // Pro Treffer Contacts laden — bei Pagination tiefere Pages je Company holen
     for (const co of companies.slice(0, 10)) {
       if (aborted()) break;
@@ -27590,6 +27614,7 @@ function _paramsToLabel(p) {
   if (!p) return '';
   const parts = [];
   if (p.company)      parts.push('Firma: ' + p.company);
+  if (Array.isArray(p.aliases) && p.aliases.length) parts.push('Aliase: ' + p.aliases.join(', '));
   if (p.name)         parts.push('Name: ' + p.name);
   if (p.email)        parts.push('Email: ' + p.email);
   if (p.email_domain) parts.push('Domain: ' + p.email_domain);
