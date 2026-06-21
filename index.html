@@ -684,6 +684,9 @@
     <button onclick="navTo('attachments'); closeMenu();" class="w-full text-left px-3 py-2 text-sm hover:bg-ink-50 flex items-center gap-2">
       <i data-lucide="paperclip" class="w-4 h-4 text-orange-500"></i> Email-Anhänge
     </button>
+    <button onclick="navTo('lists'); closeMenu();" class="w-full text-left px-3 py-2 text-sm hover:bg-ink-50 flex items-center gap-2">
+      <i data-lucide="list-checks" class="w-4 h-4 text-orange-500"></i> Marketing-Listen
+    </button>
     <button onclick="navTo('stats'); closeMenu();" class="w-full text-left px-3 py-2 text-sm hover:bg-ink-50 flex items-center gap-2">
       <i data-lucide="bar-chart-3" class="w-4 h-4 text-indigo-500"></i> Statistiken
     </button>
@@ -758,7 +761,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.118';
+const APP_VERSION = 'v2.46.119';
 
 /* ============================================================
    GLOBAL THEME — v2.46.12
@@ -6957,6 +6960,7 @@ function navTo(page) {
   else if (page === 'deals')     renderFn = renderDealsPage;
   else if (page === 'marketing') renderFn = renderMarketingPage;
   else if (page === 'attachments') renderFn = renderAttachmentsPage;
+  else if (page === 'lists')      renderFn = renderListsPage;
   else if (page === 'contacts')  renderFn = renderContactsPage;
   else if (page === 'stats')     renderFn = renderStatsPage;
   try {
@@ -10406,6 +10410,23 @@ async function processMarketingFromContact(btn) {
       }).catch(() => {});
     }
     _mfcClearDraft();
+    // v2.46.119: wenn aus einer Marketing-Liste abgearbeitet → Status auf 'sent' setzen
+    const pendingItem = window._LIST_PENDING_ITEM;
+    if (pendingItem) {
+      delete window._LIST_PENDING_ITEM;
+      try {
+        await updateListItemStatus(pendingItem.itemRecordId, pendingItem.listId, pendingItem.accountId, {
+          status: 'sent',
+          sent_at: nowIso(),
+          outbound_ticket_id: String(created.id),
+        });
+        await loadContactListItems(pendingItem.listId, true);
+        // Wenn wir gerade in der Listen-Detail-View sind, neu rendern
+        if (LISTS_STATE.currentListId === pendingItem.listId && APP_STATE.page === 'lists') {
+          _renderListDetailItems();
+        }
+      } catch (_) {}
+    }
     closeMarketingFromContactModal();
     toast('Marketing-Email gesendet — Ticket #' + created.id, 'success', 5000);
   } catch (e) {
@@ -26111,6 +26132,165 @@ async function bumpAiPromptUsage(recordId, accountId) {
   AI_PROMPTS_STATE.byAccount.delete(accountId);
 }
 
+/* === v2.46.119: Kontakt-Listen pro Mandant ================================
+   Persistente Listen von Kontakten für sequenzielles Marketing-Abarbeiten.
+   Tabellen werden beim ersten Save automatisch angelegt.
+   ContactLists: ein Record pro Liste (title, account_id, status, …).
+   ContactListItems: ein Record pro Empfänger einer Liste mit Bearbeitungs-Status. */
+const CONTACT_LISTS_TABLE = 'ContactLists';
+const CONTACT_LIST_ITEMS_TABLE = 'ContactListItems';
+const LISTS_STATE = {
+  byAccount: new Map(),    // accountId → Array<list>
+  itemsByList: new Map(),  // listRecordId → Array<item>
+  currentListId: '',       // aktuell geöffnete Liste in Detail-View
+  currentAccountId: '',
+};
+
+async function loadContactListsForAccount(accountId, force) {
+  if (!accountId) return [];
+  if (!force && LISTS_STATE.byAccount.has(accountId)) return LISTS_STATE.byAccount.get(accountId);
+  let list = [];
+  try {
+    const recs = await airtableRead(CONTACT_LISTS_TABLE, {
+      filter: "{account_id}='" + escapeFormula(accountId) + "'",
+      sort: [{ field: 'last_used_at', direction: 'desc' }],
+      maxRecords: 500,
+    });
+    list = recs.map(r => Object.assign({ recordId: r.id }, r.fields));
+  } catch (_) {}
+  LISTS_STATE.byAccount.set(accountId, list);
+  return list;
+}
+
+async function loadContactListItems(listId, force) {
+  if (!listId) return [];
+  if (!force && LISTS_STATE.itemsByList.has(listId)) return LISTS_STATE.itemsByList.get(listId);
+  let items = [];
+  try {
+    const recs = await airtableRead(CONTACT_LIST_ITEMS_TABLE, {
+      filter: "{list_id}='" + escapeFormula(listId) + "'",
+      sort: [{ field: 'order_pos', direction: 'asc' }],
+      maxRecords: 5000,
+    });
+    items = recs.map(r => Object.assign({ recordId: r.id }, r.fields));
+  } catch (_) {}
+  LISTS_STATE.itemsByList.set(listId, items);
+  return items;
+}
+
+async function createContactList(accountId, title, description) {
+  const me = APP_KEYS.user || {};
+  const fields = {
+    title:        String(title || '').trim() || 'Unbenannte Liste',
+    description:  String(description || '').trim(),
+    account_id:   accountId || '',
+    status:       'active',
+    item_count:   0,
+    sent_count:   0,
+    created_by:   me.email || '',
+    created_at:   nowIso(),
+    last_used_at: nowIso(),
+  };
+  const rec = await airtableWriteWithAutoField(CONTACT_LISTS_TABLE, fields, {
+    title:        'singleLineText',
+    description:  'multilineText',
+    account_id:   'singleLineText',
+    status:       'singleLineText',
+    item_count:   'number',
+    sent_count:   'number',
+    created_by:   'singleLineText',
+    created_at:   'singleLineText',
+    last_used_at: 'singleLineText',
+  });
+  LISTS_STATE.byAccount.delete(accountId);
+  return rec;
+}
+
+async function addContactsToList(listId, accountId, contacts) {
+  if (!listId || !Array.isArray(contacts) || !contacts.length) return { added: 0, skipped: 0 };
+  // Bestehende Emails der Liste laden, um Duplikate zu vermeiden
+  const existing = await loadContactListItems(listId, true);
+  const existingEmails = new Set(existing.map(it => String(it.email || '').toLowerCase()));
+  const maxPos = existing.reduce((m, it) => Math.max(m, Number(it.order_pos || 0)), 0);
+  let added = 0, skipped = 0;
+  let pos = maxPos + 1;
+  for (const c of contacts) {
+    const email = String(c.email || '').trim().toLowerCase();
+    if (!email) { skipped++; continue; }
+    if (existingEmails.has(email)) { skipped++; continue; }
+    existingEmails.add(email);
+    try {
+      await airtableWriteWithAutoField(CONTACT_LIST_ITEMS_TABLE, {
+        list_id:            listId,
+        email:              email,
+        name:               c.name || '',
+        contact_id_fd:      String(c.id || ''),
+        company_name:       c.company_name || '',
+        job_title:          c.job_title || '',
+        status:             'open',
+        sent_at:            '',
+        outbound_ticket_id: '',
+        notes:              '',
+        order_pos:          pos++,
+      }, {
+        list_id:            'singleLineText',
+        email:              'singleLineText',
+        name:               'singleLineText',
+        contact_id_fd:      'singleLineText',
+        company_name:       'singleLineText',
+        job_title:          'singleLineText',
+        status:             'singleLineText',
+        sent_at:            'singleLineText',
+        outbound_ticket_id: 'singleLineText',
+        notes:              'multilineText',
+        order_pos:          'number',
+      });
+      added++;
+    } catch (_) { skipped++; }
+  }
+  // Counter im Listen-Record updaten
+  try {
+    const totalCount = existing.length + added;
+    await airtableUpdate(CONTACT_LISTS_TABLE, listId, {
+      item_count:   totalCount,
+      last_used_at: nowIso(),
+    });
+  } catch (_) {}
+  LISTS_STATE.itemsByList.delete(listId);
+  LISTS_STATE.byAccount.delete(accountId);
+  return { added, skipped };
+}
+
+async function updateListItemStatus(itemRecordId, listId, accountId, patch) {
+  await airtableUpdate(CONTACT_LIST_ITEMS_TABLE, itemRecordId, patch);
+  LISTS_STATE.itemsByList.delete(listId);
+  // sent_count im Listen-Record nachziehen wenn Status auf 'sent' geht
+  if (patch.status === 'sent') {
+    try {
+      const items = await loadContactListItems(listId, true);
+      const sentCount = items.filter(it => it.status === 'sent').length;
+      await airtableUpdate(CONTACT_LISTS_TABLE, listId, {
+        sent_count:   sentCount,
+        last_used_at: nowIso(),
+      });
+      LISTS_STATE.byAccount.delete(accountId);
+    } catch (_) {}
+  }
+}
+
+async function deleteContactList(listId, accountId) {
+  // Erst alle Items löschen, dann die Liste
+  try {
+    const items = await loadContactListItems(listId, true);
+    for (const it of items) {
+      try { await airtableDelete(CONTACT_LIST_ITEMS_TABLE, it.recordId); } catch (_) {}
+    }
+  } catch (_) {}
+  await airtableDelete(CONTACT_LISTS_TABLE, listId);
+  LISTS_STATE.itemsByList.delete(listId);
+  LISTS_STATE.byAccount.delete(accountId);
+}
+
 /* Liefert die Optionen für ein <select>-Element. Mit Mandanten-Tag bei globalen. */
 function _aiPromptOptions(list, selectedId) {
   const opts = list.map(r => {
@@ -26809,6 +26989,7 @@ async function renderContactsPage() {
       '<div class="flex-1"></div>' +
       '<button onclick="_selectAllVisible()" class="text-[11px] bg-white/15 hover:bg-white/25 px-2 py-1 rounded inline-flex items-center gap-1"><i data-lucide="list-checks" class="w-3.5 h-3.5"></i> Alle sichtbaren</button>' +
       '<button onclick="_clearSelection()" class="text-[11px] bg-white/15 hover:bg-white/25 px-2 py-1 rounded inline-flex items-center gap-1"><i data-lucide="x" class="w-3.5 h-3.5"></i> Leeren</button>' +
+      '<button onclick="_openSaveToListModal()" class="text-[11px] bg-white/20 hover:bg-white/30 px-3 py-1 rounded font-bold inline-flex items-center gap-1"><i data-lucide="bookmark-plus" class="w-3.5 h-3.5"></i> Als Liste speichern</button>' +
       '<button onclick="_openBulkMarketing()" class="text-[11px] bg-white text-orange-700 hover:bg-orange-50 px-3 py-1 rounded font-bold inline-flex items-center gap-1"><i data-lucide="megaphone" class="w-3.5 h-3.5"></i> Marketing-Mail senden</button>' +
     '</div>' +
     '<div id="contactsResults">' +
@@ -26988,6 +27169,360 @@ function _selectAllVisible() {
 function _clearSelection() {
   CONTACTS_STATE.selected.clear();
   _renderContactsResults();
+}
+
+/* === v2.46.119: „Als Liste speichern" Modal ============================= */
+async function _openSaveToListModal() {
+  const emails = Array.from(CONTACTS_STATE.selected);
+  if (!emails.length) { toast('Keine Kontakte ausgewählt.', 'warn'); return; }
+  // Resolve zu vollen Contact-Objekten
+  const byEmail = new Map();
+  CONTACTS_STATE.results.forEach(c => byEmail.set(String(c.email || '').toLowerCase(), c));
+  const contacts = emails.map(e => byEmail.get(e)).filter(Boolean);
+  if (!contacts.length) { toast('Auswahl wurde inzwischen ausgeblendet.', 'warn'); return; }
+  // Account-Konsistenz
+  const accIds = Array.from(new Set(contacts.map(c => String(c._accountId))));
+  if (accIds.length > 1) {
+    toast('Bitte nur Kontakte aus EINEM Mandanten in eine Liste speichern. Mandant zuerst filtern.', 'error', 7000);
+    return;
+  }
+  const accountId = accIds[0];
+  let host = document.getElementById('subModalHost');
+  if (!host) { host = document.createElement('div'); host.id = 'subModalHost'; document.body.appendChild(host); }
+  host.innerHTML =
+    '<div class="fixed inset-0 z-[70] flex items-end justify-center bg-black/60" onclick="if(event.target===this)_closeSaveToListModal()">' +
+      '<div class="bg-white w-full max-w-md rounded-t-3xl shadow-2xl flex flex-col safe-bottom" style="max-height:90vh">' +
+        '<div class="safe-top px-4 py-3 border-b border-ink-200 flex items-center justify-between gap-2 shrink-0">' +
+          '<h3 class="font-bold text-ink-900 inline-flex items-center gap-2"><i data-lucide="bookmark-plus" class="w-5 h-5 text-orange-600"></i> Als Liste speichern</h3>' +
+          '<button onclick="_closeSaveToListModal()" class="w-9 h-9 rounded-lg hover:bg-ink-100 flex items-center justify-center"><i data-lucide="x" class="w-5 h-5 text-ink-700"></i></button>' +
+        '</div>' +
+        '<div class="flex-1 overflow-y-auto p-4 space-y-3">' +
+          '<div class="bg-orange-50 border border-orange-200 rounded-xl p-2.5 text-[11px] text-orange-900">' + contacts.length + ' Kontakt' + (contacts.length === 1 ? '' : 'e') + ' werden gespeichert.</div>' +
+          '<div id="saveListChoice" class="space-y-3">' +
+            '<div class="text-center text-sm text-ink-500"><span class="spinner inline-block w-4 h-4 border-[2px]"></span> Lade bestehende Listen…</div>' +
+          '</div>' +
+        '</div>' +
+        '<div class="border-t border-ink-200 p-3 flex gap-2 shrink-0">' +
+          '<button onclick="_closeSaveToListModal()" class="flex-1 bg-ink-100 hover:bg-ink-200 text-ink-700 rounded-xl px-3 py-3 text-sm font-bold">Abbrechen</button>' +
+          '<button id="saveListConfirmBtn" onclick="_confirmSaveToList(this)" class="flex-[2] bg-orange-600 hover:bg-orange-700 text-white rounded-xl px-3 py-3 text-sm font-bold inline-flex items-center justify-center gap-1.5"><i data-lucide="save" class="w-4 h-4"></i> Speichern</button>' +
+        '</div>' +
+      '</div>' +
+    '</div>';
+  window._SAVE_LIST_CTX = { accountId, contacts, mode: 'new', existingListId: '' };
+  if (window.lucide) lucide.createIcons();
+  await _renderSaveListChoice();
+}
+
+function _closeSaveToListModal() {
+  delete window._SAVE_LIST_CTX;
+  const host = document.getElementById('subModalHost');
+  if (host) host.innerHTML = '';
+}
+
+async function _renderSaveListChoice() {
+  const ctx = window._SAVE_LIST_CTX;
+  if (!ctx) return;
+  const host = document.getElementById('saveListChoice');
+  if (!host) return;
+  const lists = await loadContactListsForAccount(ctx.accountId);
+  const newRadio =
+    '<label class="flex items-start gap-2 p-2 border-2 ' + (ctx.mode === 'new' ? 'border-orange-400 bg-orange-50' : 'border-ink-200') + ' rounded-lg cursor-pointer">' +
+      '<input type="radio" name="saveListMode" value="new" ' + (ctx.mode === 'new' ? 'checked' : '') + ' onchange="_setSaveListMode(\'new\')" class="mt-1 accent-orange-600">' +
+      '<div class="flex-1">' +
+        '<p class="font-bold text-ink-900 text-sm">Neue Liste anlegen</p>' +
+        '<input id="newListTitle" type="text" placeholder="z.B. „TKE Frühjahrs-Kampagne 2026"" class="w-full px-2 py-1.5 border border-ink-300 rounded-lg text-sm mt-1">' +
+        '<textarea id="newListDescription" placeholder="Beschreibung (optional)" rows="2" class="w-full px-2 py-1.5 border border-ink-300 rounded-lg text-[11px] mt-1 resize-none"></textarea>' +
+      '</div>' +
+    '</label>';
+  const existRadio = lists.length
+    ? '<label class="flex items-start gap-2 p-2 border-2 ' + (ctx.mode === 'existing' ? 'border-orange-400 bg-orange-50' : 'border-ink-200') + ' rounded-lg cursor-pointer">' +
+        '<input type="radio" name="saveListMode" value="existing" ' + (ctx.mode === 'existing' ? 'checked' : '') + ' onchange="_setSaveListMode(\'existing\')" class="mt-1 accent-orange-600">' +
+        '<div class="flex-1">' +
+          '<p class="font-bold text-ink-900 text-sm">Zu bestehender Liste hinzufügen</p>' +
+          '<select id="existingListSelect" class="w-full px-2 py-1.5 border border-ink-300 rounded-lg text-sm mt-1 bg-white">' +
+            lists.map(l => '<option value="' + escapeAttr(l.recordId) + '"' + (l.recordId === ctx.existingListId ? ' selected' : '') + '>' + escapeHtml(l.title || '?') + ' (' + (l.item_count || 0) + ')</option>').join('') +
+          '</select>' +
+          '<p class="text-[10px] text-ink-500 mt-1">Doppelte Emails werden übersprungen.</p>' +
+        '</div>' +
+      '</label>'
+    : '<p class="text-[11px] text-ink-500 italic">Noch keine Listen vorhanden für diesen Mandanten.</p>';
+  host.innerHTML = newRadio + existRadio;
+}
+
+function _setSaveListMode(mode) {
+  const ctx = window._SAVE_LIST_CTX;
+  if (!ctx) return;
+  ctx.mode = mode;
+  _renderSaveListChoice();
+}
+
+async function _confirmSaveToList(btn) {
+  const ctx = window._SAVE_LIST_CTX;
+  if (!ctx) return;
+  setBusy(btn, true, 'Speichere…');
+  try {
+    let listId;
+    let listTitle;
+    if (ctx.mode === 'new') {
+      const title = (document.getElementById('newListTitle')?.value || '').trim();
+      const description = (document.getElementById('newListDescription')?.value || '').trim();
+      if (!title) { setBusy(btn, false); toast('Bitte Titel angeben.', 'warn', 3000); return; }
+      const rec = await createContactList(ctx.accountId, title, description);
+      listId = rec.id;
+      listTitle = title;
+    } else {
+      const sel = document.getElementById('existingListSelect');
+      listId = sel?.value || '';
+      if (!listId) { setBusy(btn, false); toast('Bitte Liste wählen.', 'warn', 3000); return; }
+      const lists = await loadContactListsForAccount(ctx.accountId);
+      const rec = lists.find(l => l.recordId === listId);
+      listTitle = rec?.title || '(?)';
+    }
+    const { added, skipped } = await addContactsToList(listId, ctx.accountId, ctx.contacts);
+    _closeSaveToListModal();
+    CONTACTS_STATE.selected.clear();
+    _renderContactsResults();
+    toast(added + ' zu „' + listTitle + '" hinzugefügt' + (skipped ? ' (' + skipped + ' bereits enthalten/übersprungen)' : '') + '.', 'success', 5000);
+  } catch (e) {
+    setBusy(btn, false);
+    toast('Speichern fehlgeschlagen: ' + (e.message || e), 'error', 6000);
+  }
+}
+
+/* === v2.46.119: Marketing-Listen Verwaltungs-Seite ====================== */
+async function renderListsPage() {
+  setPageTitle('Marketing-Listen', 'Kontaktlisten der Reihe nach abarbeiten');
+  const accounts = APP_STATE.accounts || [];
+  if (!LISTS_STATE.currentAccountId || !accounts.find(a => a.id === LISTS_STATE.currentAccountId)) {
+    LISTS_STATE.currentAccountId = APP_STATE.currentAccount && APP_STATE.currentAccount !== 'all'
+      ? APP_STATE.currentAccount
+      : (accounts[0]?.id || '');
+  }
+  const accountOpts = accounts.map(a =>
+    '<option value="' + escapeAttr(a.id) + '"' + (a.id === LISTS_STATE.currentAccountId ? ' selected' : '') + '>' + escapeHtml(a.name || a.id) + '</option>'
+  ).join('');
+  if (LISTS_STATE.currentListId) {
+    return _renderListDetailView();
+  }
+  $('pageContent').innerHTML = '<div class="space-y-3 max-w-3xl mx-auto">' +
+    '<div class="bg-gradient-to-br from-orange-50 to-amber-50 border border-orange-200 rounded-xl p-3 text-[12px] text-orange-900">' +
+      '<p class="font-bold inline-flex items-center gap-1 mb-1"><i data-lucide="list-checks" class="w-4 h-4"></i> Marketing-Listen</p>' +
+      '<p>Gespeicherte Kontaktlisten für sequenzielles Abarbeiten. Aus den Kontakte-Suchen heraus mit „Als Liste speichern" anlegen.</p>' +
+    '</div>' +
+    '<div class="bg-white rounded-xl border border-ink-200 p-3">' +
+      '<label class="text-[11px] inline-flex items-center gap-1.5 w-full">' +
+        '<i data-lucide="building-2" class="w-3.5 h-3.5 text-ink-500"></i>' +
+        '<span class="font-semibold text-ink-600 uppercase tracking-wider">Mandant:</span>' +
+        '<select id="listsAccount" onchange="_onListsAccount(this.value)" class="flex-1 px-2 py-1.5 border border-ink-300 rounded-lg text-sm bg-white">' +
+          accountOpts +
+        '</select>' +
+      '</label>' +
+    '</div>' +
+    '<div id="listsContainer">' +
+      '<div class="bg-white rounded-xl border border-ink-200 p-6 text-center"><span class="spinner inline-block w-5 h-5 border-[2px] text-orange-500"></span><p class="text-sm text-ink-500 mt-2">Lade Listen…</p></div>' +
+    '</div>' +
+  '</div>';
+  if (window.lucide) lucide.createIcons();
+  await loadContactListsForAccount(LISTS_STATE.currentAccountId);
+  _renderListsOverview();
+}
+
+function _onListsAccount(v) {
+  LISTS_STATE.currentAccountId = v;
+  loadContactListsForAccount(v).then(_renderListsOverview);
+}
+
+function _renderListsOverview() {
+  const host = document.getElementById('listsContainer');
+  if (!host) return;
+  const lists = LISTS_STATE.byAccount.get(LISTS_STATE.currentAccountId) || [];
+  if (!lists.length) {
+    host.innerHTML = '<div class="bg-white rounded-xl border border-dashed border-ink-300 p-6 text-center text-sm text-ink-500">' +
+      '<i data-lucide="bookmark" class="w-8 h-8 inline text-ink-400"></i>' +
+      '<p class="mt-2">Noch keine Liste für diesen Mandanten.</p>' +
+      '<p class="text-[11px] text-ink-400 mt-1">Im <b>Kontakte</b>-Tab Empfänger auswählen → „Als Liste speichern".</p>' +
+    '</div>';
+    if (window.lucide) lucide.createIcons();
+    return;
+  }
+  host.innerHTML = '<p class="text-[10px] text-ink-500 uppercase tracking-wider mb-2 px-1">' + lists.length + ' Liste' + (lists.length === 1 ? '' : 'n') + '</p>' +
+    lists.map(l => {
+      const total = Number(l.item_count || 0);
+      const sent = Number(l.sent_count || 0);
+      const open = total - sent;
+      const pct = total ? Math.round((sent / total) * 100) : 0;
+      const lastUsed = l.last_used_at ? new Date(l.last_used_at).toLocaleDateString('de-DE') : '?';
+      return '<div class="bg-white rounded-xl border border-ink-200 mb-2 p-3 hover:border-orange-300 cursor-pointer" onclick="_openListDetail(' + escapeAttr(JSON.stringify(l.recordId)) + ')">' +
+        '<div class="flex items-start justify-between gap-2 mb-2">' +
+          '<div class="flex-1 min-w-0">' +
+            '<p class="font-bold text-ink-900 text-sm truncate">' + escapeHtml(l.title || '?') + '</p>' +
+            (l.description ? '<p class="text-[11px] text-ink-500 truncate">' + escapeHtml(l.description) + '</p>' : '') +
+            '<p class="text-[10px] text-ink-400">zuletzt: ' + escapeHtml(lastUsed) + ' · von ' + escapeHtml(l.created_by || '?') + '</p>' +
+          '</div>' +
+          '<div class="text-right shrink-0">' +
+            '<p class="text-[11px] font-bold text-ink-900">' + sent + '/' + total + '</p>' +
+            '<p class="text-[10px] text-ink-500">' + pct + '%</p>' +
+          '</div>' +
+        '</div>' +
+        '<div class="w-full bg-ink-100 rounded-full h-1.5 overflow-hidden"><div class="bg-emerald-500 h-full" style="width:' + pct + '%"></div></div>' +
+        '<div class="flex gap-1.5 mt-2 text-[10px]">' +
+          (open > 0 ? '<span class="bg-orange-100 text-orange-700 px-1.5 py-0.5 rounded font-semibold">' + open + ' offen</span>' : '<span class="bg-emerald-100 text-emerald-700 px-1.5 py-0.5 rounded font-semibold">✓ abgeschlossen</span>') +
+          (sent ? '<span class="bg-emerald-50 text-emerald-700 px-1.5 py-0.5 rounded">' + sent + ' gesendet</span>' : '') +
+        '</div>' +
+      '</div>';
+    }).join('');
+  if (window.lucide) lucide.createIcons();
+}
+
+function _openListDetail(listId) {
+  LISTS_STATE.currentListId = listId;
+  _renderListDetailView();
+}
+
+function _backToListsOverview() {
+  LISTS_STATE.currentListId = '';
+  renderListsPage();
+}
+
+async function _renderListDetailView() {
+  const lists = LISTS_STATE.byAccount.get(LISTS_STATE.currentAccountId) || [];
+  const list = lists.find(l => l.recordId === LISTS_STATE.currentListId);
+  if (!list) { _backToListsOverview(); return; }
+  setPageTitle('Liste: ' + (list.title || '?'), (list.description || '').slice(0, 80));
+  $('pageContent').innerHTML = '<div class="space-y-3 max-w-3xl mx-auto">' +
+    '<div class="flex items-center gap-2">' +
+      '<button onclick="_backToListsOverview()" class="px-3 py-2 bg-ink-100 hover:bg-ink-200 text-ink-700 rounded-lg text-sm font-bold inline-flex items-center gap-1"><i data-lucide="arrow-left" class="w-4 h-4"></i> Listen</button>' +
+      '<div class="flex-1"></div>' +
+      '<button onclick="_deleteCurrentList(this)" class="px-3 py-2 bg-red-50 hover:bg-red-100 text-red-700 rounded-lg text-sm font-bold inline-flex items-center gap-1" title="Liste komplett löschen"><i data-lucide="trash-2" class="w-4 h-4"></i></button>' +
+    '</div>' +
+    '<div id="listDetailContainer">' +
+      '<div class="bg-white rounded-xl border border-ink-200 p-6 text-center"><span class="spinner inline-block w-5 h-5 border-[2px] text-orange-500"></span><p class="text-sm text-ink-500 mt-2">Lade Einträge…</p></div>' +
+    '</div>' +
+  '</div>';
+  if (window.lucide) lucide.createIcons();
+  await loadContactListItems(LISTS_STATE.currentListId, true);
+  _renderListDetailItems();
+}
+
+function _renderListDetailItems() {
+  const host = document.getElementById('listDetailContainer');
+  if (!host) return;
+  const items = LISTS_STATE.itemsByList.get(LISTS_STATE.currentListId) || [];
+  const total = items.length;
+  const sent = items.filter(it => it.status === 'sent').length;
+  const skipped = items.filter(it => it.status === 'skipped').length;
+  const errored = items.filter(it => it.status === 'error').length;
+  const open = total - sent - skipped - errored;
+  const pct = total ? Math.round((sent / total) * 100) : 0;
+  const nextOpen = items.find(it => it.status === 'open');
+  host.innerHTML =
+    '<div class="bg-white rounded-xl border border-ink-200 p-3 mb-3">' +
+      '<div class="flex items-center justify-between mb-2">' +
+        '<p class="text-[12px] font-bold text-ink-900">' + sent + '/' + total + ' abgearbeitet (' + pct + '%)</p>' +
+        (nextOpen ? '<button onclick="_processNextListItem(this)" class="px-3 py-1.5 bg-orange-600 hover:bg-orange-700 text-white rounded-lg text-[11px] font-bold inline-flex items-center gap-1"><i data-lucide="send" class="w-3.5 h-3.5"></i> Nächsten abarbeiten</button>' : '<span class="text-[11px] text-emerald-700 bg-emerald-100 px-2 py-1 rounded font-bold">✓ Liste abgeschlossen</span>') +
+      '</div>' +
+      '<div class="w-full bg-ink-100 rounded-full h-2 overflow-hidden"><div class="bg-emerald-500 h-full" style="width:' + pct + '%"></div></div>' +
+      '<div class="flex flex-wrap gap-1.5 mt-2 text-[10px]">' +
+        (open ? '<span class="bg-orange-100 text-orange-700 px-1.5 py-0.5 rounded">' + open + ' offen</span>' : '') +
+        (sent ? '<span class="bg-emerald-100 text-emerald-700 px-1.5 py-0.5 rounded">' + sent + ' gesendet</span>' : '') +
+        (skipped ? '<span class="bg-ink-100 text-ink-700 px-1.5 py-0.5 rounded">' + skipped + ' übersprungen</span>' : '') +
+        (errored ? '<span class="bg-red-100 text-red-700 px-1.5 py-0.5 rounded">' + errored + ' Fehler</span>' : '') +
+      '</div>' +
+    '</div>' +
+    items.map(it => _renderListItem(it)).join('');
+  if (window.lucide) lucide.createIcons();
+}
+
+function _renderListItem(it) {
+  const status = it.status || 'open';
+  const id = JSON.stringify(it.recordId);
+  const statusBadge =
+    status === 'sent'    ? '<span class="bg-emerald-100 text-emerald-700 px-1.5 py-0.5 rounded text-[10px] font-bold inline-flex items-center gap-1"><i data-lucide="check" class="w-2.5 h-2.5"></i> gesendet</span>' :
+    status === 'skipped' ? '<span class="bg-ink-100 text-ink-700 px-1.5 py-0.5 rounded text-[10px] font-bold inline-flex items-center gap-1"><i data-lucide="skip-forward" class="w-2.5 h-2.5"></i> übersprungen</span>' :
+    status === 'error'   ? '<span class="bg-red-100 text-red-700 px-1.5 py-0.5 rounded text-[10px] font-bold inline-flex items-center gap-1"><i data-lucide="alert-triangle" class="w-2.5 h-2.5"></i> Fehler</span>' :
+                            '<span class="bg-orange-100 text-orange-700 px-1.5 py-0.5 rounded text-[10px] font-bold">offen</span>';
+  const sentInfo = it.sent_at ? new Date(it.sent_at).toLocaleString('de-DE', { day:'2-digit', month:'2-digit', year:'2-digit', hour:'2-digit', minute:'2-digit' }) : '';
+  return '<div class="bg-white rounded-xl border border-ink-200 mb-1.5 p-2.5">' +
+    '<div class="flex items-start justify-between gap-2">' +
+      '<div class="flex-1 min-w-0">' +
+        '<p class="font-bold text-ink-900 text-sm truncate">' + escapeHtml(it.name || it.email) + '</p>' +
+        '<p class="text-[11px] text-ink-600 truncate">' + escapeHtml(it.email) + (it.company_name ? ' · ' + escapeHtml(it.company_name) : '') + '</p>' +
+        (it.job_title ? '<p class="text-[10px] text-brand-700 truncate inline-flex items-center gap-1"><i data-lucide="briefcase" class="w-2.5 h-2.5"></i> ' + escapeHtml(it.job_title) + '</p>' : '') +
+        (sentInfo ? '<p class="text-[10px] text-emerald-700 mt-0.5">↗ versandt ' + escapeHtml(sentInfo) + (it.outbound_ticket_id ? ' · Ticket #' + escapeHtml(String(it.outbound_ticket_id)) : '') + '</p>' : '') +
+      '</div>' +
+      '<div class="flex flex-col items-end gap-1 shrink-0">' +
+        statusBadge +
+        '<div class="flex gap-0.5">' +
+          (status === 'open' ? '<button onclick="_listItemAction(' + escapeAttr(id) + ', \'send\')" class="text-[10px] bg-orange-50 hover:bg-orange-100 border border-orange-300 text-orange-700 px-1.5 py-0.5 rounded" title="Marketing-Email senden"><i data-lucide="send" class="w-3 h-3"></i></button>' : '') +
+          (status === 'open' ? '<button onclick="_listItemAction(' + escapeAttr(id) + ', \'skip\')" class="text-[10px] bg-ink-50 hover:bg-ink-100 border border-ink-300 text-ink-700 px-1.5 py-0.5 rounded" title="Überspringen"><i data-lucide="skip-forward" class="w-3 h-3"></i></button>' : '') +
+          (status !== 'open' ? '<button onclick="_listItemAction(' + escapeAttr(id) + ', \'reset\')" class="text-[10px] bg-white hover:bg-ink-100 border border-ink-300 text-ink-600 px-1.5 py-0.5 rounded" title="Wieder offen setzen"><i data-lucide="rotate-ccw" class="w-3 h-3"></i></button>' : '') +
+          '<button onclick="_listItemAction(' + escapeAttr(id) + ', \'delete\')" class="text-[10px] bg-white hover:bg-red-50 border border-red-300 text-red-600 px-1.5 py-0.5 rounded" title="Aus Liste entfernen"><i data-lucide="trash-2" class="w-3 h-3"></i></button>' +
+        '</div>' +
+      '</div>' +
+    '</div>' +
+  '</div>';
+}
+
+async function _processNextListItem(btn) {
+  const items = LISTS_STATE.itemsByList.get(LISTS_STATE.currentListId) || [];
+  const next = items.find(it => it.status === 'open');
+  if (!next) { toast('Liste komplett abgearbeitet.', 'success'); return; }
+  await _listItemAction(next.recordId, 'send');
+}
+
+async function _listItemAction(itemRecordId, action) {
+  const items = LISTS_STATE.itemsByList.get(LISTS_STATE.currentListId) || [];
+  const item = items.find(it => it.recordId === itemRecordId);
+  if (!item) return;
+  if (action === 'send') {
+    // Single-Send-Modal öffnen, beim Erfolg Status auf 'sent' setzen
+    window._LIST_PENDING_ITEM = { itemRecordId, listId: LISTS_STATE.currentListId, accountId: LISTS_STATE.currentAccountId };
+    await openMarketingFromContactModal(LISTS_STATE.currentAccountId, item.email, item.name || '', item.contact_id_fd ? Number(item.contact_id_fd) : 0, null);
+    return;
+  }
+  if (action === 'skip') {
+    try {
+      await updateListItemStatus(item.recordId, LISTS_STATE.currentListId, LISTS_STATE.currentAccountId, { status: 'skipped' });
+      await loadContactListItems(LISTS_STATE.currentListId, true);
+      _renderListDetailItems();
+    } catch (e) { toast('Speichern fehlgeschlagen: ' + (e.message || e), 'error'); }
+    return;
+  }
+  if (action === 'reset') {
+    try {
+      await updateListItemStatus(item.recordId, LISTS_STATE.currentListId, LISTS_STATE.currentAccountId, { status: 'open', sent_at: '', outbound_ticket_id: '' });
+      await loadContactListItems(LISTS_STATE.currentListId, true);
+      _renderListDetailItems();
+    } catch (e) { toast('Speichern fehlgeschlagen: ' + (e.message || e), 'error'); }
+    return;
+  }
+  if (action === 'delete') {
+    if (!confirm('Eintrag aus Liste entfernen?')) return;
+    try {
+      await airtableDelete(CONTACT_LIST_ITEMS_TABLE, item.recordId);
+      LISTS_STATE.itemsByList.delete(LISTS_STATE.currentListId);
+      await loadContactListItems(LISTS_STATE.currentListId, true);
+      _renderListDetailItems();
+    } catch (e) { toast('Löschen fehlgeschlagen: ' + (e.message || e), 'error'); }
+    return;
+  }
+}
+
+async function _deleteCurrentList(btn) {
+  const lists = LISTS_STATE.byAccount.get(LISTS_STATE.currentAccountId) || [];
+  const list = lists.find(l => l.recordId === LISTS_STATE.currentListId);
+  if (!list) return;
+  if (!confirm('Liste „' + (list.title || '?') + '" mit ' + (list.item_count || 0) + ' Einträgen wirklich löschen?')) return;
+  setBusy(btn, true);
+  try {
+    await deleteContactList(LISTS_STATE.currentListId, LISTS_STATE.currentAccountId);
+    LISTS_STATE.currentListId = '';
+    toast('Liste gelöscht.', 'success', 3000);
+    renderListsPage();
+  } catch (e) {
+    setBusy(btn, false);
+    toast('Löschen fehlgeschlagen: ' + (e.message || e), 'error', 6000);
+  }
 }
 
 /* === v2.46.102: Bulk-Marketing-Send ========================================
