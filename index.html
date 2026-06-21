@@ -758,7 +758,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.116';
+const APP_VERSION = 'v2.46.117';
 
 /* ============================================================
    GLOBAL THEME — v2.46.12
@@ -9827,8 +9827,10 @@ function _renderMarketingFromContactModal(accountId, recipientEmail, recipientNa
           '</div>' +
           // v2.46.116: Volle Marketing-Historie direkt sichtbar — verhindert Doppelversand
           _mfcRenderHistoryBlock(history) +
-          '<label class="text-xs font-bold text-ink-700 uppercase tracking-wider block">Vorlage (optional)</label>' +
-          '<select id="mfcTemplate" onchange="_mfcTemplateChange()" class="w-full px-3 py-2.5 border border-ink-300 rounded-xl text-sm bg-white">' + tplOpts + '</select>' +
+          // v2.46.117: FD-Vorlagen-Dropdown ausgeblendet — User benutzt KI + eigene Prompt-Vorlagen.
+          // Select bleibt im DOM (versteckt) damit alle Referenzen auf $('mfcTemplate') in
+          // _mfcTemplateChange / processMarketingFromContact / Draft-Save weiter funktionieren.
+          '<select id="mfcTemplate" onchange="_mfcTemplateChange()" class="hidden">' + tplOpts + '</select>' +
           '<div id="mfcDupWarning" class="hidden bg-amber-50 border border-amber-200 rounded-xl p-2.5 text-[11px] text-amber-900"></div>' +
           // v2.46.108: KI-Generator
           '<div class="bg-gradient-to-br from-purple-50 to-brand-50 border border-purple-200 rounded-xl p-2.5 space-y-2">' +
@@ -10105,6 +10107,22 @@ function _mfcSaveDraft() {
   const payload = { subject, body, aiPrompt, tplId, libIds, savedAt: Date.now() };
   try { localStorage.setItem(key, JSON.stringify(payload)); } catch (_) {}
 }
+/* v2.46.117: prüft ob Draft inhaltlich einer bereits versandten Mail entspricht.
+   Vergleicht Betreff und (bei langem Body) Body-Snapshot — case-insensitive. */
+function _mfcDraftMatchesHistory(draft, history) {
+  if (!draft || !history?.length) return null;
+  const subj = String(draft.subject || '').trim().toLowerCase();
+  const body = String(draft.body || '').trim().toLowerCase();
+  if (!subj && !body) return null;
+  for (const m of history) {
+    const mSubj = String(m.betreff || '').trim().toLowerCase();
+    const mBody = String(m.body_snapshot || '').trim().toLowerCase();
+    if (subj && mSubj && mSubj === subj) return m;
+    if (body && body.length > 60 && mBody && mBody === body) return m;
+  }
+  return null;
+}
+
 async function _mfcApplyDraft() {
   const ctx = window._MFC_CTX;
   if (!ctx) return;
@@ -10114,6 +10132,36 @@ async function _mfcApplyDraft() {
     if (raw) draft = JSON.parse(raw);
   } catch (_) {}
   if (!draft) return;
+  // History-Match-Check VOR dem Apply — wenn der Draft inhaltlich einer bereits
+  // versandten Mail entspricht, NICHT automatisch laden sondern rote Warnung zeigen
+  const dupMatch = _mfcDraftMatchesHistory(draft, ctx.history);
+  const dateLabel = draft.savedAt ? new Date(draft.savedAt).toLocaleString('de-DE') : '?';
+  if (dupMatch) {
+    const dupDate = dupMatch.sent_at ? new Date(dupMatch.sent_at).toLocaleDateString('de-DE') : '?';
+    // Felder LEER lassen — User soll bewusst entscheiden
+    window._MFC_PENDING_DRAFT = draft;
+    const banner = document.createElement('div');
+    banner.id = 'mfcDraftBanner';
+    banner.className = 'mb-2 bg-red-50 border-2 border-red-300 rounded-lg p-2.5 text-[11px] text-red-900 space-y-1.5';
+    banner.innerHTML =
+      '<p class="font-bold inline-flex items-center gap-1"><i data-lucide="alert-triangle" class="w-3.5 h-3.5"></i> Letzter Entwurf wurde bereits versandt</p>' +
+      '<p>Der Entwurf vom <b>' + escapeHtml(dateLabel) + '</b> entspricht der Mail „' + escapeHtml(dupMatch.betreff || '?') + '" die am <b>' + escapeHtml(dupDate) + '</b> bereits an diesen Kontakt gesendet wurde. Felder bleiben leer — neu schreiben oder Entwurf trotzdem laden?</p>' +
+      '<div class="flex gap-1.5 pt-1">' +
+        '<button onclick="_mfcForceApplyPendingDraft()" class="text-[11px] bg-white border border-red-300 hover:bg-red-100 text-red-700 px-2 py-1 rounded font-semibold">Trotzdem laden</button>' +
+        '<button onclick="_mfcDiscardDraft()" class="text-[11px] bg-red-600 hover:bg-red-700 text-white px-2 py-1 rounded font-semibold">Entwurf verwerfen</button>' +
+      '</div>';
+    const modalBody = document.querySelector('#subModalHost .flex-1.overflow-y-auto');
+    if (modalBody) modalBody.insertBefore(banner, modalBody.firstChild);
+    if (window.lucide) lucide.createIcons();
+    return;
+  }
+  // Standard-Apply (kein History-Match)
+  await _mfcDoApplyDraft(draft, dateLabel, /*duplicateApply*/ false);
+}
+
+async function _mfcDoApplyDraft(draft, dateLabel, isForce) {
+  const ctx = window._MFC_CTX;
+  if (!ctx || !draft) return;
   const subjEl = document.getElementById('mfcSubject');
   const bodyEl = document.getElementById('mfcBody');
   const promptEl = document.getElementById('mfcAiPrompt');
@@ -10122,7 +10170,6 @@ async function _mfcApplyDraft() {
   if (bodyEl && draft.body) bodyEl.value = draft.body;
   if (promptEl && draft.aiPrompt) promptEl.value = draft.aiPrompt;
   if (tplEl && draft.tplId) tplEl.value = String(draft.tplId);
-  // Library-Anhänge wieder laden
   if (Array.isArray(draft.libIds) && draft.libIds.length) {
     try {
       await loadAttachmentsForAccount(ctx.accountId);
@@ -10141,16 +10188,25 @@ async function _mfcApplyDraft() {
       if (host) host.innerHTML = _mfcAttachListHtml();
     } catch (_) {}
   }
-  // Banner mit Restore-Hinweis
-  const dateLabel = draft.savedAt ? new Date(draft.savedAt).toLocaleString('de-DE') : '?';
+  // Bestehender Banner ggf. raus
+  const existing = document.getElementById('mfcDraftBanner');
+  if (existing) existing.remove();
   const banner = document.createElement('div');
   banner.id = 'mfcDraftBanner';
   banner.className = 'mb-2 bg-blue-50 border border-blue-200 rounded-lg p-2 text-[11px] text-blue-800 flex items-center justify-between gap-2';
-  banner.innerHTML = '<span><i data-lucide="save" class="w-3 h-3 inline -mt-0.5"></i> Entwurf vom ' + escapeHtml(dateLabel) + ' wiederhergestellt.</span>' +
+  banner.innerHTML = '<span><i data-lucide="save" class="w-3 h-3 inline -mt-0.5"></i> Entwurf vom ' + escapeHtml(dateLabel) + ' wiederhergestellt' + (isForce ? ' (trotz History-Match)' : '') + '.</span>' +
     '<button onclick="_mfcDiscardDraft()" class="text-blue-700 hover:text-blue-900 font-semibold underline">Verwerfen</button>';
   const modalBody = document.querySelector('#subModalHost .flex-1.overflow-y-auto');
   if (modalBody) modalBody.insertBefore(banner, modalBody.firstChild);
   if (window.lucide) lucide.createIcons();
+}
+
+async function _mfcForceApplyPendingDraft() {
+  const draft = window._MFC_PENDING_DRAFT;
+  delete window._MFC_PENDING_DRAFT;
+  if (!draft) return;
+  const dateLabel = draft.savedAt ? new Date(draft.savedAt).toLocaleString('de-DE') : '?';
+  await _mfcDoApplyDraft(draft, dateLabel, true);
 }
 function _mfcDiscardDraft() {
   const ctx = window._MFC_CTX;
