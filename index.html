@@ -761,7 +761,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.129';
+const APP_VERSION = 'v2.46.130';
 
 /* ============================================================
    GLOBAL THEME — v2.46.12
@@ -28466,6 +28466,86 @@ async function _resolveJobTitleNow(email, btn) {
   _renderContactsResults();
 }
 
+/* v2.46.130: FD-only Kontakt in Freshsales pushen (Quick-Action ohne Edit-Modal).
+   Holt aktuelle FD-Stammdaten + hydrierte Felder, baut FS-Contact-Payload, legt an,
+   invalidiert den Sync-Cache, re-rendert mit ✓ sync. */
+async function _pushContactToFs(email, btn) {
+  const c = CONTACTS_STATE.results.find(x => String(x.email || '').toLowerCase() === email);
+  if (!c) return;
+  if (!c.email) { toast('Kontakt hat keine Email — kein FS-Push möglich.', 'warn'); return; }
+  const acc = (APP_STATE.accounts || []).find(a => a.id === c._accountId);
+  if (!acc || !accountHasFreshsales(acc)) { toast('Dieser Mandant hat kein Freshsales aktiviert.', 'warn', 4000); return; }
+  // Name-Split: „Grewe, Adrian" → first=Adrian, last=Grewe / „Adrian Grewe" → first=Adrian, last=Grewe
+  let firstName = '', lastName = '';
+  const rawName = String(c.name || '').trim();
+  if (rawName) {
+    if (rawName.includes(',')) {
+      const [l, f] = rawName.split(',').map(s => s.trim());
+      lastName = l || '';
+      firstName = f || '';
+    } else {
+      const parts = rawName.split(/\s+/);
+      if (parts.length > 1) {
+        lastName = parts[parts.length - 1];
+        firstName = parts.slice(0, -1).join(' ');
+      } else {
+        lastName = rawName;
+      }
+    }
+  }
+  if (!lastName) lastName = c.email.split('@')[0];
+  // Adress-Split (selbe Heuristik wie im Edit-Modal)
+  const addrLines = String(c.address || '').split('\n').map(s => s.trim()).filter(Boolean);
+  const countryLine = addrLines.find(l => /(deutschland|germany|österreich|austria|schweiz|switzerland|france|italy|italien|netherlands|niederlande)$/i.test(l)) || '';
+  const zipCityLine = addrLines.find(l => /^\d{4,5}\s/.test(l)) || '';
+  const zipMatch = zipCityLine.match(/^(\d{4,5})\s+(.+)$/);
+  const zipcode = zipMatch?.[1] || '';
+  const city    = zipMatch?.[2] || '';
+  const street  = addrLines.find(l => l !== zipCityLine && l !== countryLine) || '';
+  const fields = {
+    first_name:    firstName || null,
+    last_name:     lastName,
+    display_name:  rawName || (firstName + ' ' + lastName).trim() || null,
+    email:         c.email,
+    work_number:   c.phone  || null,
+    mobile_number: c.mobile || null,
+    job_title:     c.job_title || null,
+    address:       street || null,
+    city:          city || null,
+    zipcode:       zipcode || null,
+    country:       countryLine || null,
+  };
+  // Confirm mit Vorschau
+  const preview =
+    'In Freshsales anlegen?\n\n' +
+    'Name:   ' + (rawName || (firstName + ' ' + lastName)) + '\n' +
+    'Email:  ' + c.email + '\n' +
+    (c.phone  ? 'Tel:    ' + c.phone + '\n' : '') +
+    (c.mobile ? 'Mobil:  ' + c.mobile + '\n' : '') +
+    (c.job_title ? 'Job:    ' + c.job_title + '\n' : '') +
+    (c.company_name ? 'Firma:  ' + c.company_name + '\n' : '') +
+    (street ? 'Adresse: ' + street + (zipcode ? ', ' + zipcode + ' ' + city : '') + '\n' : '');
+  if (!confirm(preview)) return;
+  setBusy(btn, true, 'Push…');
+  try {
+    const created = await createFreshsalesContact(c._accountId, fields);
+    if (!created?.id) throw new Error('FS lieferte keine Contact-ID zurück');
+    // Caches updaten — Sync-Status wird sofort grün
+    const cacheKey = c._accountId + '|' + String(c.email).toLowerCase();
+    CONTACTS_STATE.fsCheckCache.set(cacheKey, { checked: true, hasFs: true, inFs: true, contactId: created.id });
+    const existing = _readEnrichCache(c._accountId, c.email) || {};
+    _writeEnrichCache(c._accountId, c.email, Object.assign({}, existing, {
+      hasFs: true, inFs: true, fsContactId: created.id,
+    }));
+    setBusy(btn, false);
+    toast('In Freshsales angelegt — FS #' + created.id, 'success', 5000);
+    _renderContactsResults();
+  } catch (e) {
+    setBusy(btn, false);
+    toast('FS-Anlage fehlgeschlagen: ' + (e.message || e), 'error', 7000);
+  }
+}
+
 async function _toggleHideContact(email, btn) {
   const norm = String(email || '').trim().toLowerCase();
   if (!norm) return;
@@ -28591,7 +28671,8 @@ function _renderContactSearchCard(row) {
   if (fsRes?.checked) {
     if (!fsRes.hasFs) syncBadge = '<span class="text-[9px] bg-ink-100 text-ink-500 px-1.5 py-0.5 rounded" title="Mandant ohne Freshsales">FD</span>';
     else if (fsRes.inFs) syncBadge = '<span class="text-[9px] bg-emerald-100 text-emerald-700 px-1.5 py-0.5 rounded font-bold" title="In FD + FS vorhanden">✓ sync</span>';
-    else syncBadge = '<span class="text-[9px] bg-amber-100 text-amber-700 px-1.5 py-0.5 rounded" title="Nur in Freshdesk, nicht in Freshsales">FD only</span>';
+    else syncBadge = '<span class="text-[9px] bg-amber-100 text-amber-700 px-1.5 py-0.5 rounded" title="Nur in Freshdesk, nicht in Freshsales">FD only</span>' +
+      ' <button onclick="event.stopPropagation();_pushContactToFs(' + js(row.e) + ', this)" class="text-[9px] bg-emerald-50 hover:bg-emerald-100 border border-emerald-300 text-emerald-700 px-1.5 py-0.5 rounded font-bold inline-flex items-center gap-0.5" title="In Freshsales anlegen (FD-Stammdaten + ermittelte Tel/Funktion)"><i data-lucide="upload" class="w-2.5 h-2.5"></i> push FS</button>';
   } else if (isOpen) {
     syncBadge = '<span class="text-[9px] bg-ink-100 text-ink-500 px-1.5 py-0.5 rounded inline-flex items-center gap-1"><span class="spinner inline-block w-2.5 h-2.5 border-[1.5px]"></span> Sync?</span>';
   }
