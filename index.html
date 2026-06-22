@@ -761,7 +761,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.119';
+const APP_VERSION = 'v2.46.120';
 
 /* ============================================================
    GLOBAL THEME — v2.46.12
@@ -26839,11 +26839,22 @@ async function _fetchContactJobTitle(accountId, contactId, email) {
   CONTACTS_STATE.jobTitleCache.set(norm, { jobTitle: '', source: 'checking', checked: false });
   let jobTitle = '';
   let source = 'unknown';
-  // Step 1: voller Contact-Record
+  // Step 1: voller Contact-Record — bringt nicht nur job_title sondern auch
+  // phone/mobile/updated_at, die im Search-Result-Lite oft fehlen. Werden
+  // ins Search-Ergebnis-Objekt zurückgespielt damit die Karte sie zeigen kann.
   if (contactId) {
     try {
       const full = await proxyJson('/freshdesk/' + encodeURIComponent(accountId) + '/api/v2/contacts/' + contactId);
       if (full?.job_title) { jobTitle = String(full.job_title).trim(); source = 'fd_field'; }
+      // Auch sonst Felder ins CONTACTS_STATE.results zurückspielen
+      const target = (CONTACTS_STATE.results || []).find(x => String(x.email || '').toLowerCase() === norm);
+      if (target && full) {
+        if (full.phone && !target.phone) target.phone = full.phone;
+        if (full.mobile && !target.mobile) target.mobile = full.mobile;
+        if (full.job_title && !target.job_title) target.job_title = full.job_title;
+        if (full.updated_at && !target.updated_at) target.updated_at = full.updated_at;
+        if (full.created_at && !target.created_at) target.created_at = full.created_at;
+      }
     } catch (_) {}
   }
   // Step 2: Ticket-Signatur via KI
@@ -28366,11 +28377,28 @@ function _renderContactSearchCard(row) {
           // Kein Cache, kein FD-Feld → manuell triggerbar
           return '<button onclick="event.stopPropagation();_resolveJobTitleNow(' + js(row.e) + ', this)" class="text-[10px] text-brand-600 hover:text-brand-800 inline-flex items-center gap-1 mt-0.5 underline-offset-2 hover:underline"><i data-lucide="sparkles" class="w-2.5 h-2.5"></i> Funktion ermitteln</button>';
         })() +
+        // v2.46.120: Telefon + Mobil (kompakt in Header)
+        (function () {
+          const parts = [];
+          if (c.phone)  parts.push('<span class="inline-flex items-center gap-1"><i data-lucide="phone" class="w-2.5 h-2.5"></i>' + escapeHtml(c.phone) + '</span>');
+          if (c.mobile) parts.push('<span class="inline-flex items-center gap-1"><i data-lucide="smartphone" class="w-2.5 h-2.5"></i>' + escapeHtml(c.mobile) + '</span>');
+          return parts.length ? '<p class="text-[10px] text-ink-700 font-medium mt-0.5 flex gap-2 flex-wrap">' + parts.join('') + '</p>' : '';
+        })() +
         '<p class="text-[10px] text-ink-500 truncate mt-0.5">' +
           (c.company_name ? '<i data-lucide="building-2" class="w-2.5 h-2.5 inline -mt-0.5"></i> ' + escapeHtml(c.company_name) + ' · ' : '') +
           escapeHtml(accName) +
           (last ? ' · letzte Mkt vor ' + daysSince + ' T' : '') +
         '</p>' +
+        // v2.46.120: Letzte Aktivität (Contact updated_at)
+        (function () {
+          if (!c.updated_at) return '';
+          const upd = new Date(c.updated_at);
+          if (isNaN(upd.getTime())) return '';
+          const daysAgo = Math.floor((Date.now() - upd.getTime()) / 86400e3);
+          const label = upd.toLocaleDateString('de-DE', { day:'2-digit', month:'2-digit', year:'2-digit' });
+          const ago = daysAgo === 0 ? 'heute' : (daysAgo === 1 ? 'gestern' : 'vor ' + daysAgo + ' T');
+          return '<p class="text-[10px] text-ink-400 truncate mt-0.5"><i data-lucide="clock" class="w-2.5 h-2.5 inline -mt-0.5"></i> Letzte Aktivität: ' + escapeHtml(label) + ' · ' + ago + '</p>';
+        })() +
         mktTags +
       '</button>' +
       '<div class="flex flex-col items-end gap-1 shrink-0">' +
