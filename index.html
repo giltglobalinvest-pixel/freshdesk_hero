@@ -761,7 +761,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.122';
+const APP_VERSION = 'v2.46.123';
 
 /* ============================================================
    GLOBAL THEME — v2.46.12
@@ -28401,59 +28401,65 @@ function _renderContactSearchCard(row) {
     : '<button onclick="event.stopPropagation();_toggleHideContact(' + js(row.e) + ', this)" class="text-[10px] bg-white hover:bg-ink-100 border border-ink-300 text-ink-600 px-2 py-1 rounded inline-flex items-center gap-1" title="Kein Sales-Potenzial — ausblenden"><i data-lucide="eye-off" class="w-3 h-3"></i></button>';
   // Checkbox links für Mass-Select
   const selBox = '<input type="checkbox" ' + (isSel ? 'checked' : '') + ' onclick="event.stopPropagation();_toggleSelect(' + js(row.e) + ')" class="w-4 h-4 accent-orange-600 mt-1 shrink-0" title="Für Massenversand auswählen">';
+  // v2.46.123: Komplett-Refactoring der Card-Struktur.
+  // - Wrap-Element ist jetzt ein <div> mit onclick (statt <button>) — nested
+  //   <button> in <button> ist invalides HTML, Chrome rendert das in vertikalen
+  //   Spalten-Salat.
+  // - Job-Title-Block ohne inline-flex auf <p> (war ursächlich für Layout-Bug).
+  // - Tel/Mobile in einer ganz simplen Text-Zeile mit · als Trenner.
+  const jobTitleHtml = (function () {
+    if (c.job_title) {
+      return '<div class="text-[11px] text-brand-700 font-semibold mt-0.5"><i data-lucide="briefcase" class="w-3 h-3 inline -mt-0.5"></i> ' + escapeHtml(c.job_title) + '</div>';
+    }
+    const cached = CONTACTS_STATE.jobTitleCache.get(row.e);
+    if (cached?.source === 'checking') {
+      return '<div class="text-[11px] text-ink-500 mt-0.5"><span class="spinner inline-block w-2.5 h-2.5 border-[1.5px] align-middle"></span> Funktion wird ermittelt…</div>';
+    }
+    if (cached?.jobTitle) {
+      return '<div class="text-[11px] text-brand-700 font-semibold mt-0.5"><i data-lucide="briefcase" class="w-3 h-3 inline -mt-0.5"></i> ' + escapeHtml(cached.jobTitle) + (cached.source === 'signature' ? ' <span class="text-[9px] font-normal text-ink-400">· aus Signatur</span>' : '') + '</div>';
+    }
+    if (cached?.checked && !cached.jobTitle) {
+      return '<div class="text-[10px] text-ink-400 italic mt-0.5">Funktion nicht ermittelbar</div>';
+    }
+    return '<div class="text-[10px] text-brand-600 mt-0.5"><span onclick="event.stopPropagation();_resolveJobTitleNow(' + js(row.e) + ', this)" class="hover:underline cursor-pointer"><i data-lucide="sparkles" class="w-2.5 h-2.5 inline -mt-0.5"></i> Funktion ermitteln</span></div>';
+  })();
+
+  const phoneHtml = (function () {
+    const parts = [];
+    if (c.phone)  parts.push('<i data-lucide="phone" class="w-2.5 h-2.5 inline -mt-0.5"></i> ' + escapeHtml(c.phone));
+    if (c.mobile) parts.push('<i data-lucide="smartphone" class="w-2.5 h-2.5 inline -mt-0.5"></i> ' + escapeHtml(c.mobile));
+    return parts.length ? '<div class="text-[10px] text-ink-700 font-medium mt-0.5">' + parts.join(' &nbsp; · &nbsp; ') + '</div>' : '';
+  })();
+
+  const activityHtml = (function () {
+    if (!c.updated_at) return '';
+    const upd = new Date(c.updated_at);
+    if (isNaN(upd.getTime())) return '';
+    const daysAgo = Math.floor((Date.now() - upd.getTime()) / 86400e3);
+    const label = upd.toLocaleDateString('de-DE', { day:'2-digit', month:'2-digit', year:'2-digit' });
+    const ago = daysAgo === 0 ? 'heute' : (daysAgo === 1 ? 'gestern' : 'vor ' + daysAgo + ' T');
+    return '<div class="text-[10px] text-ink-400 mt-0.5"><i data-lucide="clock" class="w-2.5 h-2.5 inline -mt-0.5"></i> Letzte Aktivität: ' + escapeHtml(label) + ' · ' + ago + '</div>';
+  })();
+
   const head =
     '<div class="w-full px-3 py-2.5 ' + (row.hidden ? 'bg-ink-50/60 opacity-70' : (fresh ? 'bg-orange-50' : 'bg-white')) + ' border-b border-ink-200 flex items-start gap-2 ' + (isSel ? 'ring-2 ring-orange-400 ring-inset' : '') + '">' +
       selBox +
-      '<button type="button" onclick="_toggleContact(' + js(row.e) + ')" class="flex-1 min-w-0 text-left hover:bg-ink-50/50 -m-1 p-1 rounded block">' +
-        // v2.46.122: Name + Badge in EINEM <p> (inline) statt flex-Container —
-        // flex-wrap + break-words hat den Text in extrem schmale Spalten zerlegt.
-        '<p class="font-bold text-ink-900 text-sm leading-tight">' + escapeHtml(c.name || row.e.split('@')[0]) + ' ' + syncBadge + '</p>' +
-        '<p class="text-[11px] text-ink-600 break-all">' + escapeHtml(row.e) + '</p>' +
-        (function () {
-          // v2.46.105: Job-Title aus FD-Feld ODER Cache (KI-Signatur-Extraktion)
-          if (c.job_title) {
-            return '<p class="text-[11px] text-brand-700 font-semibold truncate inline-flex items-center gap-1 mt-0.5"><i data-lucide="briefcase" class="w-3 h-3"></i> ' + escapeHtml(c.job_title) + '</p>';
-          }
-          const cached = CONTACTS_STATE.jobTitleCache.get(row.e);
-          if (cached?.source === 'checking') {
-            return '<p class="text-[11px] text-ink-500 inline-flex items-center gap-1 mt-0.5"><span class="spinner inline-block w-2.5 h-2.5 border-[1.5px]"></span> Funktion wird ermittelt…</p>';
-          }
-          if (cached?.jobTitle) {
-            return '<p class="text-[11px] text-brand-700 font-semibold truncate inline-flex items-center gap-1 mt-0.5"><i data-lucide="briefcase" class="w-3 h-3"></i> ' + escapeHtml(cached.jobTitle) + (cached.source === 'signature' ? ' <span class="text-[9px] font-normal text-ink-400">· aus Signatur</span>' : '') + '</p>';
-          }
-          if (cached?.checked && !cached.jobTitle) {
-            return '<p class="text-[10px] text-ink-400 italic mt-0.5">Funktion nicht ermittelbar</p>';
-          }
-          // Kein Cache, kein FD-Feld → manuell triggerbar
-          return '<button onclick="event.stopPropagation();_resolveJobTitleNow(' + js(row.e) + ', this)" class="text-[10px] text-brand-600 hover:text-brand-800 inline-flex items-center gap-1 mt-0.5 underline-offset-2 hover:underline"><i data-lucide="sparkles" class="w-2.5 h-2.5"></i> Funktion ermitteln</button>';
-        })() +
-        // v2.46.120: Telefon + Mobil (kompakt in Header)
-        (function () {
-          const parts = [];
-          if (c.phone)  parts.push('<span class="inline-flex items-center gap-1"><i data-lucide="phone" class="w-2.5 h-2.5"></i>' + escapeHtml(c.phone) + '</span>');
-          if (c.mobile) parts.push('<span class="inline-flex items-center gap-1"><i data-lucide="smartphone" class="w-2.5 h-2.5"></i>' + escapeHtml(c.mobile) + '</span>');
-          return parts.length ? '<p class="text-[10px] text-ink-700 font-medium mt-0.5 flex gap-2 flex-wrap">' + parts.join('') + '</p>' : '';
-        })() +
-        '<p class="text-[10px] text-ink-500 truncate mt-0.5">' +
+      '<div onclick="_toggleContact(' + js(row.e) + ')" class="flex-1 min-w-0 cursor-pointer hover:bg-ink-50/50 -m-1 p-1 rounded">' +
+        '<div class="font-bold text-ink-900 text-sm leading-tight">' + escapeHtml(c.name || row.e.split('@')[0]) + ' ' + syncBadge + '</div>' +
+        '<div class="text-[11px] text-ink-600 break-all">' + escapeHtml(row.e) + '</div>' +
+        jobTitleHtml +
+        phoneHtml +
+        '<div class="text-[10px] text-ink-500 mt-0.5">' +
           (c.company_name ? '<i data-lucide="building-2" class="w-2.5 h-2.5 inline -mt-0.5"></i> ' + escapeHtml(c.company_name) + ' · ' : '') +
           escapeHtml(accName) +
           (last ? ' · letzte Mkt vor ' + daysSince + ' T' : '') +
-        '</p>' +
-        // v2.46.120: Letzte Aktivität (Contact updated_at)
-        (function () {
-          if (!c.updated_at) return '';
-          const upd = new Date(c.updated_at);
-          if (isNaN(upd.getTime())) return '';
-          const daysAgo = Math.floor((Date.now() - upd.getTime()) / 86400e3);
-          const label = upd.toLocaleDateString('de-DE', { day:'2-digit', month:'2-digit', year:'2-digit' });
-          const ago = daysAgo === 0 ? 'heute' : (daysAgo === 1 ? 'gestern' : 'vor ' + daysAgo + ' T');
-          return '<p class="text-[10px] text-ink-400 truncate mt-0.5"><i data-lucide="clock" class="w-2.5 h-2.5 inline -mt-0.5"></i> Letzte Aktivität: ' + escapeHtml(label) + ' · ' + ago + '</p>';
-        })() +
+        '</div>' +
+        activityHtml +
         mktTags +
-      '</button>' +
+      '</div>' +
       '<div class="flex flex-col items-end gap-1 shrink-0">' +
         '<div class="flex items-center gap-1">' + sendBtn + hideBtn + '</div>' +
-        '<button type="button" onclick="_toggleContact(' + js(row.e) + ')" class="p-0.5"><i data-lucide="' + (isOpen ? 'chevron-up' : 'chevron-down') + '" class="w-4 h-4 text-ink-500"></i></button>' +
+        '<span onclick="_toggleContact(' + js(row.e) + ')" class="p-0.5 cursor-pointer"><i data-lucide="' + (isOpen ? 'chevron-up' : 'chevron-down') + '" class="w-4 h-4 text-ink-500"></i></span>' +
       '</div>' +
     '</div>';
   if (!isOpen) {
