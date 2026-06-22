@@ -761,7 +761,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.128';
+const APP_VERSION = 'v2.46.129';
 
 /* ============================================================
    GLOBAL THEME — v2.46.12
@@ -26996,14 +26996,37 @@ async function _hydrateVisibleCards() {
     const display = CONTACTS_STATE.displayCount || 30;
     const candidates = (CONTACTS_STATE.results || [])
       .slice(0, display)
-      .filter(c => c?.id && !c._hydratedBasics && (!c.phone || !c.mobile || !c.updated_at || !c.job_title));
+      .filter(c => c?.id);
     if (!candidates.length) return;
-    const CONCURRENCY = 5;
+    const CONCURRENCY = 4;
     let i = 0;
     while (i < candidates.length) {
       if (CONTACTS_STATE.searchCtrl?.aborted) break;
       const batch = candidates.slice(i, i + CONCURRENCY);
-      await Promise.all(batch.map(c => _hydrateContactBasics(c)));
+      // v2.46.129: pro Kontakt parallel — Basics + Job-Title-KI + FS-Sync.
+      // Cache-First in jedem Helper → bei wiederkehrenden Suchen 0 Calls.
+      await Promise.all(batch.map(async c => {
+        const norm = String(c.email || '').toLowerCase();
+        const tasks = [];
+        // Basics (phone/mobile/job_title aus FD-Record + Tickets)
+        if (!c._hydratedBasics) tasks.push(_hydrateContactBasics(c));
+        // Job-Title via KI wenn weiterhin leer nach Basics
+        const jtCached = CONTACTS_STATE.jobTitleCache.get(norm);
+        if (!c.job_title && (!jtCached || (jtCached.source === 'checking' && !jtCached.checked))) {
+          tasks.push((async () => {
+            await _hydrateContactBasics(c).catch(() => {}); // sicher: basics zuerst
+            if (!c.job_title) {
+              await _fetchContactJobTitle(c._accountId, c.id, c.email).catch(() => {});
+            }
+          })());
+        }
+        // FS-Sync-Check
+        const fsKey = c._accountId + '|' + norm;
+        if (!CONTACTS_STATE.fsCheckCache.has(fsKey)) {
+          tasks.push(_checkFsForEmail(c._accountId, norm));
+        }
+        await Promise.all(tasks);
+      }));
       i += CONCURRENCY;
       // Re-render alle 2 Batches damit der User Fortschritt sieht
       if (i % (CONCURRENCY * 2) === 0) _renderContactsResults();
@@ -27145,6 +27168,13 @@ async function _fetchContactJobTitle(accountId, contactId, email) {
 async function _checkFsForEmail(accountId, email) {
   const cacheKey = accountId + '|' + email;
   if (CONTACTS_STATE.fsCheckCache.has(cacheKey)) return CONTACTS_STATE.fsCheckCache.get(cacheKey);
+  // v2.46.129: localStorage-Cache prüfen (7-Tage-TTL) — sync-Check ist teuer und ändert sich selten
+  const persisted = _readEnrichCache(accountId, email);
+  if (persisted && typeof persisted.inFs === 'boolean') {
+    const r = { checked: true, hasFs: !!persisted.hasFs, inFs: !!persisted.inFs, contactId: persisted.fsContactId || '', _fromCache: true };
+    CONTACTS_STATE.fsCheckCache.set(cacheKey, r);
+    return r;
+  }
   const acc = (APP_STATE.accounts || []).find(a => a.id === accountId);
   if (!acc || !accountHasFreshsales(acc)) {
     const r = { checked: true, hasFs: false, inFs: false };
@@ -27157,6 +27187,11 @@ async function _checkFsForEmail(accountId, email) {
     const hit = list.find(c => String(c.email || '').toLowerCase() === email);
     const r = { checked: true, hasFs: true, inFs: !!hit, contactId: hit?.id || '' };
     CONTACTS_STATE.fsCheckCache.set(cacheKey, r);
+    // In localStorage persistieren
+    const existing = _readEnrichCache(accountId, email) || {};
+    _writeEnrichCache(accountId, email, Object.assign({}, existing, {
+      hasFs: true, inFs: !!hit, fsContactId: hit?.id || '',
+    }));
     return r;
   } catch (_) {
     const r = { checked: true, hasFs: true, inFs: false };
