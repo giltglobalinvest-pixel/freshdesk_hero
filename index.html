@@ -761,7 +761,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.124';
+const APP_VERSION = 'v2.46.125';
 
 /* ============================================================
    GLOBAL THEME — v2.46.12
@@ -26822,10 +26822,87 @@ async function _searchFdContactsByParams(accountId, params, maxPerAccount, pageO
   return final.slice(0, limit);
 }
 
+/* v2.46.125: Extrahiert deutsche Telefonnummern aus Freitext (Signaturen).
+   Pattern: muss mit +49 / 0049 / +XX / 0 anfangen, danach Ziffern/Spaces/
+   Trennzeichen, insgesamt 7-18 Ziffern. */
+function _extractPhonesFromText(text) {
+  if (!text) return [];
+  const cleaned = String(text).replace(/<[^>]+>/g, ' ').replace(/&nbsp;/g, ' ');
+  const phoneRegex = /(?:\+49|\+\d{1,3}|0049|\(0\))[\s\-/.()]*\d[\d\s\-/.()]{6,24}\d|(?:^|\s|[:;])0\d[\d\s\-/.()]{6,18}\d/g;
+  const matches = cleaned.match(phoneRegex) || [];
+  const out = [];
+  const seen = new Set();
+  for (let raw of matches) {
+    raw = raw.trim().replace(/^[:;\s]+/, '').replace(/\s{2,}/g, ' ');
+    const digits = raw.replace(/[^\d]/g, '');
+    if (digits.length < 7 || digits.length > 18) continue;
+    // Heuristik: nicht 4-stellige Jahre/IDs allein erkennen
+    if (/^(19|20)\d{2}$/.test(digits)) continue;
+    const key = digits;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(raw);
+  }
+  return out;
+}
+
+function _isMobileNumber(num) {
+  const digits = String(num).replace(/[^\d]/g, '');
+  // Deutsche Handyvorwahlen: 015, 016, 017 (mit/ohne Ländercode)
+  if (/^0?(?:0?49)?1[5-7]/.test(digits)) return true;
+  if (/^491[5-7]/.test(digits)) return true;
+  return false;
+}
+
+/* Holt letzte 1-2 Tickets des Kontakts, scant Body+Konversationen nach Telefon.
+   Bevorzugt Conversations vom Kontakt selbst (eigene Signatur). */
+async function _fetchPhonesFromTickets(accountId, contactId, email) {
+  if (!contactId || !accountId) return { phone: '', mobile: '' };
+  try {
+    const tlist = await proxyJson('/freshdesk/' + encodeURIComponent(accountId) + '/api/v2/contacts/' + contactId + '/tickets?per_page=2');
+    const arr = Array.isArray(tlist) ? tlist : (tlist?.tickets || []);
+    const allPhones = [];
+    const emailLc = String(email || '').toLowerCase();
+    for (const t of arr) {
+      try {
+        const ticket = await proxyJson('/freshdesk/' + encodeURIComponent(accountId) + '/api/v2/tickets/' + t.id + '?include=conversations');
+        const parts = [];
+        if (ticket?.description_text) parts.push(ticket.description_text);
+        else if (ticket?.description) parts.push(htmlToText(ticket.description));
+        (ticket?.conversations || []).forEach(co => {
+          const fromOk = !emailLc || String(co.from_email || '').toLowerCase() === emailLc || !co.from_email;
+          if (!fromOk) return;
+          if (co.body_text) parts.push(co.body_text);
+          else if (co.body) parts.push(htmlToText(co.body));
+        });
+        // Letzte 1500 Zeichen pro Block — Signaturen sitzen typisch am Ende
+        parts.forEach(p => {
+          const tail = p.slice(-1500);
+          const found = _extractPhonesFromText(tail);
+          found.forEach(f => { if (!allPhones.includes(f)) allPhones.push(f); });
+        });
+      } catch (_) {}
+    }
+    if (!allPhones.length) return { phone: '', mobile: '' };
+    let phone = '';
+    let mobile = '';
+    for (const num of allPhones) {
+      if (_isMobileNumber(num)) { if (!mobile) mobile = num; }
+      else { if (!phone) phone = num; }
+      if (phone && mobile) break;
+    }
+    // Wenn nur eine Sorte gefunden, vergeb sie passend
+    if (!phone && allPhones.length && !mobile) phone = allPhones[0];
+    return { phone, mobile };
+  } catch (_) { return { phone: '', mobile: '' }; }
+}
+
 /* v2.46.121: Schneller Bulk-Hydrator — holt vollen Contact-Record (phone, mobile,
    job_title, updated_at) ohne KI-Call. Wird nach Suche + Load-More parallel im
    Batch von 5 Kontakten ausgeführt, damit die Kartenliste die Felder direkt
-   anzeigt ohne dass der User klicken muss. */
+   anzeigt ohne dass der User klicken muss.
+   v2.46.125: Wenn FD-Record keine Telefonnummer hat, werden auch die letzten
+   Tickets nach Signatur-Phones gescant (regex-basiert). */
 async function _hydrateContactBasics(c) {
   if (!c?.id || !c?._accountId) return;
   if (c._hydratedBasics) return;
@@ -26856,6 +26933,15 @@ async function _hydrateContactBasics(c) {
       if (!c.mobile && others[1] && others[1] !== c.phone) c.mobile = others[1];
     }
   } catch (_) {}
+  // v2.46.125: Phone-Fallback — Tickets scannen wenn FD-Record nichts liefert.
+  // Markiert mit _phoneFromTickets / _mobileFromTickets damit die Anzeige es kenntlich macht.
+  if (!c.phone || !c.mobile) {
+    try {
+      const fromTickets = await _fetchPhonesFromTickets(c._accountId, c.id, c.email);
+      if (!c.phone  && fromTickets.phone)  { c.phone  = fromTickets.phone;  c._phoneFromTickets  = true; }
+      if (!c.mobile && fromTickets.mobile) { c.mobile = fromTickets.mobile; c._mobileFromTickets = true; }
+    } catch (_) {}
+  }
 }
 
 let _CONTACTS_HYDRATE_RUNNING = false;
@@ -28448,8 +28534,13 @@ function _renderContactSearchCard(row) {
     if (isHydrating) {
       return '<div class="text-[10px] text-ink-400 mt-0.5"><span class="spinner inline-block w-2.5 h-2.5 border-[1.5px] align-middle"></span> Telefon wird geladen…</div>';
     }
-    const phoneVal  = c.phone  ? '<a onclick="event.stopPropagation()" href="tel:' + escapeAttr(c.phone)  + '" class="hover:underline text-ink-700">' + escapeHtml(c.phone)  + '</a>' : '<span class="text-ink-300">—</span>';
-    const mobileVal = c.mobile ? '<a onclick="event.stopPropagation()" href="tel:' + escapeAttr(c.mobile) + '" class="hover:underline text-ink-700">' + escapeHtml(c.mobile) + '</a>' : '<span class="text-ink-300">—</span>';
+    const ticketMark = '<span class="text-[8px] bg-amber-100 text-amber-700 px-1 py-0 rounded ml-0.5" title="aus Ticket-Signatur extrahiert (nicht in FD-Stammdaten gepflegt)">📄</span>';
+    const phoneVal  = c.phone
+      ? '<a onclick="event.stopPropagation()" href="tel:' + escapeAttr(c.phone) + '" class="hover:underline text-ink-700">' + escapeHtml(c.phone) + '</a>' + (c._phoneFromTickets ? ticketMark : '')
+      : '<span class="text-ink-300">—</span>';
+    const mobileVal = c.mobile
+      ? '<a onclick="event.stopPropagation()" href="tel:' + escapeAttr(c.mobile) + '" class="hover:underline text-ink-700">' + escapeHtml(c.mobile) + '</a>' + (c._mobileFromTickets ? ticketMark : '')
+      : '<span class="text-ink-300">—</span>';
     return '<div class="text-[10px] text-ink-500 mt-0.5"><i data-lucide="phone" class="w-2.5 h-2.5 inline -mt-0.5"></i> ' + phoneVal + ' &nbsp;·&nbsp; <i data-lucide="smartphone" class="w-2.5 h-2.5 inline -mt-0.5"></i> ' + mobileVal + '</div>';
   })();
 
