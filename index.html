@@ -761,7 +761,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.120';
+const APP_VERSION = 'v2.46.121';
 
 /* ============================================================
    GLOBAL THEME — v2.46.12
@@ -26822,6 +26822,51 @@ async function _searchFdContactsByParams(accountId, params, maxPerAccount, pageO
   return final.slice(0, limit);
 }
 
+/* v2.46.121: Schneller Bulk-Hydrator — holt vollen Contact-Record (phone, mobile,
+   job_title, updated_at) ohne KI-Call. Wird nach Suche + Load-More parallel im
+   Batch von 5 Kontakten ausgeführt, damit die Kartenliste die Felder direkt
+   anzeigt ohne dass der User klicken muss. */
+async function _hydrateContactBasics(c) {
+  if (!c?.id || !c?._accountId) return;
+  if (c._hydratedBasics) return;
+  c._hydratedBasics = true;
+  try {
+    const full = await proxyJson('/freshdesk/' + encodeURIComponent(c._accountId) + '/api/v2/contacts/' + c.id);
+    if (full?.phone && !c.phone) c.phone = full.phone;
+    if (full?.mobile && !c.mobile) c.mobile = full.mobile;
+    if (full?.job_title && !c.job_title) c.job_title = full.job_title;
+    if (full?.updated_at && !c.updated_at) c.updated_at = full.updated_at;
+    if (full?.created_at && !c.created_at) c.created_at = full.created_at;
+    if (full?.company_name && !c.company_name) c.company_name = full.company_name;
+  } catch (_) {}
+}
+
+let _CONTACTS_HYDRATE_RUNNING = false;
+async function _hydrateVisibleCards() {
+  if (_CONTACTS_HYDRATE_RUNNING) return;
+  _CONTACTS_HYDRATE_RUNNING = true;
+  try {
+    const display = CONTACTS_STATE.displayCount || 30;
+    const candidates = (CONTACTS_STATE.results || [])
+      .slice(0, display)
+      .filter(c => c?.id && !c._hydratedBasics && (!c.phone || !c.mobile || !c.updated_at || !c.job_title));
+    if (!candidates.length) return;
+    const CONCURRENCY = 5;
+    let i = 0;
+    while (i < candidates.length) {
+      if (CONTACTS_STATE.searchCtrl?.aborted) break;
+      const batch = candidates.slice(i, i + CONCURRENCY);
+      await Promise.all(batch.map(c => _hydrateContactBasics(c)));
+      i += CONCURRENCY;
+      // Re-render alle 2 Batches damit der User Fortschritt sieht
+      if (i % (CONCURRENCY * 2) === 0) _renderContactsResults();
+    }
+    _renderContactsResults();
+  } finally {
+    _CONTACTS_HYDRATE_RUNNING = false;
+  }
+}
+
 /* Lazy: Ermittelt die Funktion/Position eines Kontakts.
    Strategie:
      1) /contacts/<id> voll laden — manchmal hat das Feld einen Wert auch wenn
@@ -27075,6 +27120,8 @@ function _stopContactSearch() {
 function _loadMoreContacts() {
   CONTACTS_STATE.displayCount = (CONTACTS_STATE.displayCount || 30) + 30;
   _renderContactsResults();
+  // v2.46.121: Auto-Hydrate für die neu sichtbar gewordenen Karten
+  _hydrateVisibleCards().catch(() => {});
 }
 
 /* Lädt eine weitere FD-Page für die aktive Suche und merged neue Treffer.
@@ -27121,6 +27168,8 @@ async function _loadMoreFromFd(btn) {
     } else {
       CONTACTS_STATE.displayCount = (CONTACTS_STATE.displayCount || 30) + Math.min(added, 30);
       toast('+' + added + ' weitere Kontakte aus Freshdesk.', 'success', 2500);
+      // v2.46.121: Auto-Hydrate für die neuen Karten
+      _hydrateVisibleCards().catch(() => {});
     }
   } catch (e) {
     toast('Nachladen fehlgeschlagen: ' + (e.message || e), 'error', 5000);
@@ -28153,6 +28202,8 @@ async function _runContactSearch(btn) {
       CONTACTS_STATE.lastError = 'Suche abgebrochen.';
     }
     _renderContactsResults();
+    // v2.46.121: Telefon/Mobile/Aktivität für sichtbare Karten im Hintergrund nachladen
+    if (!wasAborted) _hydrateVisibleCards().catch(() => {});
   }
 }
 
@@ -28354,11 +28405,12 @@ function _renderContactSearchCard(row) {
     '<div class="w-full px-3 py-2.5 ' + (row.hidden ? 'bg-ink-50/60 opacity-70' : (fresh ? 'bg-orange-50' : 'bg-white')) + ' border-b border-ink-200 flex items-start gap-2 ' + (isSel ? 'ring-2 ring-orange-400 ring-inset' : '') + '">' +
       selBox +
       '<button type="button" onclick="_toggleContact(' + js(row.e) + ')" class="flex-1 min-w-0 text-left hover:bg-ink-50/50 -m-1 p-1 rounded">' +
-        '<div class="flex items-center gap-1.5 flex-wrap">' +
-          '<p class="font-bold text-ink-900 text-sm truncate">' + escapeHtml(c.name || row.e.split('@')[0]) + '</p>' +
+        '<div class="flex items-start gap-1.5 flex-wrap">' +
+          // v2.46.121: Name darf mehrzeilig sein (lange Doppelnamen / Komma-Schreibweise)
+          '<p class="font-bold text-ink-900 text-sm leading-tight break-words flex-1 min-w-0">' + escapeHtml(c.name || row.e.split('@')[0]) + '</p>' +
           syncBadge +
         '</div>' +
-        '<p class="text-[11px] text-ink-600 truncate">' + escapeHtml(row.e) + '</p>' +
+        '<p class="text-[11px] text-ink-600 break-words">' + escapeHtml(row.e) + '</p>' +
         (function () {
           // v2.46.105: Job-Title aus FD-Feld ODER Cache (KI-Signatur-Extraktion)
           if (c.job_title) {
