@@ -761,7 +761,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.127';
+const APP_VERSION = 'v2.46.128';
 
 /* ============================================================
    GLOBAL THEME — v2.46.12
@@ -26822,6 +26822,30 @@ async function _searchFdContactsByParams(accountId, params, maxPerAccount, pageO
   return final.slice(0, limit);
 }
 
+/* v2.46.128: localStorage-Cache für angereicherte Kontakt-Daten (phone, mobile,
+   job_title). TTL 7 Tage. Bei Cache-Hit werden keine FD/Anthropic-Calls gemacht
+   → bei wiederkehrender Suche derselben Kontakte spart das massiv Calls. */
+const ENRICH_TTL_MS = 7 * 86400 * 1000;
+function _enrichCacheKey(accountId, email) {
+  return 'fdh_enrich_' + String(accountId || '') + '_' + String(email || '').trim().toLowerCase();
+}
+function _readEnrichCache(accountId, email) {
+  try {
+    const raw = localStorage.getItem(_enrichCacheKey(accountId, email));
+    if (!raw) return null;
+    const obj = JSON.parse(raw);
+    if (!obj?.savedAt) return null;
+    if (Date.now() - obj.savedAt > ENRICH_TTL_MS) return null;
+    return obj;
+  } catch (_) { return null; }
+}
+function _writeEnrichCache(accountId, email, data) {
+  try {
+    const payload = Object.assign({}, data, { savedAt: Date.now() });
+    localStorage.setItem(_enrichCacheKey(accountId, email), JSON.stringify(payload));
+  } catch (_) { /* quota etc — ignorieren */ }
+}
+
 /* v2.46.125: Extrahiert deutsche Telefonnummern aus Freitext (Signaturen).
    Pattern: muss mit +49 / 0049 / +XX / 0 anfangen, danach Ziffern/Spaces/
    Trennzeichen, insgesamt 7-18 Ziffern. */
@@ -26908,6 +26932,16 @@ async function _hydrateContactBasics(c) {
   if (!c?.id || !c?._accountId) return;
   if (c._hydratedBasics) return;
   c._hydratedBasics = true;
+  // v2.46.128: Cache-Hit → keine API-Calls nötig
+  const cached = _readEnrichCache(c._accountId, c.email);
+  if (cached) {
+    if (cached.phone     && !c.phone)     { c.phone = cached.phone;     if (cached.phoneFromTickets)  c._phoneFromTickets  = true; }
+    if (cached.mobile    && !c.mobile)    { c.mobile = cached.mobile;   if (cached.mobileFromTickets) c._mobileFromTickets = true; }
+    if (cached.job_title && !c.job_title) { c.job_title = cached.job_title; }
+    if (cached.updated_at && !c.updated_at) c.updated_at = cached.updated_at;
+    c._fromCache = true;
+    return;
+  }
   try {
     const full = await proxyJson('/freshdesk/' + encodeURIComponent(c._accountId) + '/api/v2/contacts/' + c.id);
     if (full?.phone && !c.phone) c.phone = full.phone;
@@ -26943,6 +26977,15 @@ async function _hydrateContactBasics(c) {
       if (!c.mobile && fromTickets.mobile) { c.mobile = fromTickets.mobile; c._mobileFromTickets = true; }
     } catch (_) {}
   }
+  // v2.46.128: Cache schreiben (7-Tage-TTL) — bei wiederkehrender Suche keine FD-Calls mehr
+  _writeEnrichCache(c._accountId, c.email, {
+    phone:              c.phone || '',
+    mobile:             c.mobile || '',
+    job_title:          c.job_title || '',
+    updated_at:         c.updated_at || '',
+    phoneFromTickets:   !!c._phoneFromTickets,
+    mobileFromTickets:  !!c._mobileFromTickets,
+  });
 }
 
 let _CONTACTS_HYDRATE_RUNNING = false;
@@ -26984,6 +27027,13 @@ async function _fetchContactJobTitle(accountId, contactId, email) {
   if (!norm || !accountId) return null;
   const existing = CONTACTS_STATE.jobTitleCache.get(norm);
   if (existing && existing.checked) return existing;
+  // v2.46.128: localStorage-Cache prüfen — kein API-Call wenn frische Daten da
+  const cached = _readEnrichCache(accountId, norm);
+  if (cached?.job_title) {
+    const result = { jobTitle: cached.job_title, source: 'cache', checked: true };
+    CONTACTS_STATE.jobTitleCache.set(norm, result);
+    return result;
+  }
   // Marker: läuft gerade
   CONTACTS_STATE.jobTitleCache.set(norm, { jobTitle: '', source: 'checking', checked: false });
   let jobTitle = '';
@@ -27009,22 +27059,31 @@ async function _fetchContactJobTitle(accountId, contactId, email) {
   // Step 2: Ticket-Signatur via KI
   if (!jobTitle && contactId) {
     try {
-      // v2.46.126: gleicher Endpoint-Fix wie bei phones
-      const tlist = await proxyJson('/freshdesk/' + encodeURIComponent(accountId) + '/api/v2/tickets?requester_id=' + encodeURIComponent(contactId) + '&per_page=1');
+      // v2.46.128: 2 Tickets statt 1 — mehr Chance dass eine echte Funktion in der Signatur steht
+      const tlist = await proxyJson('/freshdesk/' + encodeURIComponent(accountId) + '/api/v2/tickets?requester_id=' + encodeURIComponent(contactId) + '&per_page=2');
       const arr = Array.isArray(tlist) ? tlist : (tlist?.tickets || []);
       if (arr.length) {
-        const tid = arr[0].id;
-        const ticket = await proxyJson('/freshdesk/' + encodeURIComponent(accountId) + '/api/v2/tickets/' + tid + '?include=conversations');
-        const parts = [];
-        if (ticket?.description_text) parts.push(ticket.description_text);
-        else if (ticket?.description) parts.push(htmlToText(ticket.description));
-        (ticket?.conversations || []).forEach(co => {
-          if (co.body_text) parts.push(co.body_text);
-          else if (co.body) parts.push(htmlToText(co.body));
-        });
-        const blob = parts.join('\n---\n');
-        // Letzte ~1500 Zeichen — Signatur sitzt meist am Ende
-        const snippet = blob.slice(-1800).trim();
+        const blobs = [];
+        const emailLc = String(email || '').toLowerCase();
+        // Bevorzugt Konversationen vom Kontakt selbst (eigene Signatur)
+        for (const t of arr.slice(0, 2)) {
+          try {
+            const ticket = await proxyJson('/freshdesk/' + encodeURIComponent(accountId) + '/api/v2/tickets/' + t.id + '?include=conversations');
+            const parts = [];
+            if (ticket?.description_text) parts.push(ticket.description_text);
+            else if (ticket?.description) parts.push(htmlToText(ticket.description));
+            (ticket?.conversations || []).forEach(co => {
+              const fromOk = !emailLc || String(co.from_email || '').toLowerCase() === emailLc || !co.from_email;
+              if (!fromOk) return;
+              if (co.body_text) parts.push(co.body_text);
+              else if (co.body) parts.push(htmlToText(co.body));
+            });
+            // Pro Ticket nur die letzten 1500 Zeichen (Signatur am Ende)
+            const tailPerTicket = parts.map(p => p.slice(-1500)).join('\n---\n');
+            if (tailPerTicket.trim()) blobs.push(tailPerTicket);
+          } catch (_) {}
+        }
+        const snippet = blobs.join('\n=== Anderes Ticket ===\n').slice(-3000).trim();
         if (snippet.length > 30) {
           const sys = 'Du extrahierst die berufliche FUNKTION/ROLLE einer Person aus einer Email-Signatur.\n' +
             'Eine FUNKTION beschreibt was die Person im Unternehmen MACHT — Rolle, Position, Verantwortungsbereich.\n' +
@@ -27072,6 +27131,12 @@ async function _fetchContactJobTitle(accountId, contactId, email) {
     } catch (_) {}
   }
   const result = { jobTitle, source: jobTitle ? source : 'unknown', checked: true };
+  // v2.46.128: gefundene Funktion in den localStorage-Cache übernehmen damit
+  // nachfolgende Searches sie ohne API-Call laden können
+  if (jobTitle) {
+    const existing = _readEnrichCache(accountId, norm) || {};
+    _writeEnrichCache(accountId, norm, Object.assign({}, existing, { job_title: jobTitle }));
+  }
   CONTACTS_STATE.jobTitleCache.set(norm, result);
   return result;
 }
