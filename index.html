@@ -761,7 +761,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.121';
+const APP_VERSION = 'v2.46.122';
 
 /* ============================================================
    GLOBAL THEME — v2.46.12
@@ -28404,13 +28404,11 @@ function _renderContactSearchCard(row) {
   const head =
     '<div class="w-full px-3 py-2.5 ' + (row.hidden ? 'bg-ink-50/60 opacity-70' : (fresh ? 'bg-orange-50' : 'bg-white')) + ' border-b border-ink-200 flex items-start gap-2 ' + (isSel ? 'ring-2 ring-orange-400 ring-inset' : '') + '">' +
       selBox +
-      '<button type="button" onclick="_toggleContact(' + js(row.e) + ')" class="flex-1 min-w-0 text-left hover:bg-ink-50/50 -m-1 p-1 rounded">' +
-        '<div class="flex items-start gap-1.5 flex-wrap">' +
-          // v2.46.121: Name darf mehrzeilig sein (lange Doppelnamen / Komma-Schreibweise)
-          '<p class="font-bold text-ink-900 text-sm leading-tight break-words flex-1 min-w-0">' + escapeHtml(c.name || row.e.split('@')[0]) + '</p>' +
-          syncBadge +
-        '</div>' +
-        '<p class="text-[11px] text-ink-600 break-words">' + escapeHtml(row.e) + '</p>' +
+      '<button type="button" onclick="_toggleContact(' + js(row.e) + ')" class="flex-1 min-w-0 text-left hover:bg-ink-50/50 -m-1 p-1 rounded block">' +
+        // v2.46.122: Name + Badge in EINEM <p> (inline) statt flex-Container —
+        // flex-wrap + break-words hat den Text in extrem schmale Spalten zerlegt.
+        '<p class="font-bold text-ink-900 text-sm leading-tight">' + escapeHtml(c.name || row.e.split('@')[0]) + ' ' + syncBadge + '</p>' +
+        '<p class="text-[11px] text-ink-600 break-all">' + escapeHtml(row.e) + '</p>' +
         (function () {
           // v2.46.105: Job-Title aus FD-Feld ODER Cache (KI-Signatur-Extraktion)
           if (c.job_title) {
