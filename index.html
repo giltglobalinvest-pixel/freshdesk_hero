@@ -761,7 +761,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.126';
+const APP_VERSION = 'v2.46.127';
 
 /* ============================================================
    GLOBAL THEME — v2.46.12
@@ -27026,10 +27026,23 @@ async function _fetchContactJobTitle(accountId, contactId, email) {
         // Letzte ~1500 Zeichen — Signatur sitzt meist am Ende
         const snippet = blob.slice(-1800).trim();
         if (snippet.length > 30) {
-          const sys = 'Du extrahierst die Berufsbezeichnung/Funktion einer Person aus dem Email-Text. ' +
-            'Antworte AUSSCHLIESSLICH mit der Funktion in 1-4 Worten auf Deutsch (z.B. "Geschäftsführer", "Vertriebsleiter", "Mitarbeiter Service", "Leitung Wartung") ' +
-            'oder mit dem Wort "unknown" wenn keine Position erkennbar ist. KEIN Markdown, KEINE Anführungszeichen, KEIN zusätzlicher Text.';
-          const userMsg = 'Funktion des Absenders dieser Email „' + norm + '" extrahieren — typischerweise unter dem Namen in der Signatur:\n\n' + snippet;
+          const sys = 'Du extrahierst die berufliche FUNKTION/ROLLE einer Person aus einer Email-Signatur.\n' +
+            'Eine FUNKTION beschreibt was die Person im Unternehmen MACHT — Rolle, Position, Verantwortungsbereich.\n' +
+            'KEIN akademischer Titel oder Bildungsabschluss (Dipl.-Ing., Dr., Prof., M.Sc., B.Sc., MBA, Ing., M.Eng., LL.M. usw.) — diese ZÄHLEN NICHT als Funktion.\n' +
+            'Gute Beispiele für FUNKTION:\n' +
+            '  - "Geschäftsführer", "CEO", "Prokurist"\n' +
+            '  - "Vertriebsleiter", "Sales Manager", "Key Account Manager"\n' +
+            '  - "Service-Techniker", "Mitarbeiter Service", "Leitung Wartung"\n' +
+            '  - "Niederlassungsleiter", "Standortleiter Süd"\n' +
+            '  - "Projektmanager", "Bauleiter Aufzüge"\n' +
+            '  - "Einkauf", "Buchhaltung", "Personalabteilung"\n' +
+            'SCHLECHTE Beispiele (NICHT als Funktion ausgeben):\n' +
+            '  - "Dipl.-Ing." → kein Funktion, das ist Akademiker\n' +
+            '  - "Dr." → kein Funktion\n' +
+            '  - "Herr/Frau" → Anrede, kein Funktion\n' +
+            '  - "M.Sc.", "B.Sc.", "MBA" → Bildungsabschluss\n' +
+            'Antworte AUSSCHLIESSLICH mit der FUNKTION in 1-5 Worten auf Deutsch ODER mit dem Wort "unknown" wenn keine echte Funktion erkennbar ist (nur akademische Titel zählen nicht). KEIN Markdown, KEINE Anführungszeichen, KEIN zusätzlicher Text.';
+          const userMsg = 'Berufliche Funktion/Rolle des Absenders dieser Email „' + norm + '" extrahieren — sitzt meist in der Signatur am Ende, in einer eigenen Zeile UNTER dem Namen (z.B. „Max Mustermann\\nVertriebsleiter Norddeutschland"). Akademische Titel überspringen!\n\n' + snippet;
           const data = await proxyJson('/anthropic/v1/messages', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -27048,7 +27061,9 @@ async function _fetchContactJobTitle(accountId, contactId, email) {
             accountId,
           });
           const raw = (data?.content?.[0]?.text || '').trim().replace(/^["'„]|["'"]$/g, '');
-          if (raw && raw.length <= 60 && raw.toLowerCase() !== 'unknown' && !/unbekannt|nicht erkennbar/i.test(raw)) {
+          // v2.46.127: Clientside-Filter — selbst wenn KI noch was Falsches liefert, akademische Titel rauswerfen
+          const academicOnly = /^(dipl\.?[\s\-]?ing\.?|dr\.?|prof\.?|m\.?\s?sc\.?|b\.?\s?sc\.?|mba|ing\.?|m\.?\s?eng\.?|ll\.?\s?m\.?|ph\.?\s?d\.?|mag\.?|dipl\.?[\s\-]?kfm\.?|dipl\.?[\s\-]?wirt\.?|dipl\.?[\s\-]?oec\.?|bachelor|master)\.?$/i;
+          if (raw && raw.length <= 60 && raw.toLowerCase() !== 'unknown' && !/unbekannt|nicht erkennbar/i.test(raw) && !academicOnly.test(raw.trim())) {
             jobTitle = raw;
             source = 'signature';
           }
