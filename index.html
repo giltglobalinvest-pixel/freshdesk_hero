@@ -761,7 +761,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.123';
+const APP_VERSION = 'v2.46.124';
 
 /* ============================================================
    GLOBAL THEME — v2.46.12
@@ -26838,6 +26838,23 @@ async function _hydrateContactBasics(c) {
     if (full?.updated_at && !c.updated_at) c.updated_at = full.updated_at;
     if (full?.created_at && !c.created_at) c.created_at = full.created_at;
     if (full?.company_name && !c.company_name) c.company_name = full.company_name;
+    // v2.46.124: FD-Custom-Fields + other_phone_numbers durchsuchen falls phone/mobile leer
+    if (!c.phone || !c.mobile) {
+      const others = [];
+      if (Array.isArray(full?.other_phone_numbers)) full.other_phone_numbers.forEach(p => { if (p?.value) others.push(p.value); });
+      // Custom-Fields können telefon enthalten
+      if (full?.custom_fields && typeof full.custom_fields === 'object') {
+        Object.entries(full.custom_fields).forEach(([k, v]) => {
+          if (!v) return;
+          const lk = String(k).toLowerCase();
+          if (lk.includes('phone') || lk.includes('telefon') || lk.includes('handy') || lk.includes('mobile') || lk.includes('mobil')) {
+            others.push(String(v));
+          }
+        });
+      }
+      if (!c.phone && others[0]) c.phone = others[0];
+      if (!c.mobile && others[1] && others[1] !== c.phone) c.mobile = others[1];
+    }
   } catch (_) {}
 }
 
@@ -28424,11 +28441,16 @@ function _renderContactSearchCard(row) {
     return '<div class="text-[10px] text-brand-600 mt-0.5"><span onclick="event.stopPropagation();_resolveJobTitleNow(' + js(row.e) + ', this)" class="hover:underline cursor-pointer"><i data-lucide="sparkles" class="w-2.5 h-2.5 inline -mt-0.5"></i> Funktion ermitteln</span></div>';
   })();
 
+  // v2.46.124: Telefon/Mobile-Zeile IMMER sichtbar — auch wenn leer (zeigt dass es geprüft wurde).
+  // Spinner während der Hydrate-Loader noch läuft, sonst Wert oder „—".
   const phoneHtml = (function () {
-    const parts = [];
-    if (c.phone)  parts.push('<i data-lucide="phone" class="w-2.5 h-2.5 inline -mt-0.5"></i> ' + escapeHtml(c.phone));
-    if (c.mobile) parts.push('<i data-lucide="smartphone" class="w-2.5 h-2.5 inline -mt-0.5"></i> ' + escapeHtml(c.mobile));
-    return parts.length ? '<div class="text-[10px] text-ink-700 font-medium mt-0.5">' + parts.join(' &nbsp; · &nbsp; ') + '</div>' : '';
+    const isHydrating = !c._hydratedBasics && !c.phone && !c.mobile;
+    if (isHydrating) {
+      return '<div class="text-[10px] text-ink-400 mt-0.5"><span class="spinner inline-block w-2.5 h-2.5 border-[1.5px] align-middle"></span> Telefon wird geladen…</div>';
+    }
+    const phoneVal  = c.phone  ? '<a onclick="event.stopPropagation()" href="tel:' + escapeAttr(c.phone)  + '" class="hover:underline text-ink-700">' + escapeHtml(c.phone)  + '</a>' : '<span class="text-ink-300">—</span>';
+    const mobileVal = c.mobile ? '<a onclick="event.stopPropagation()" href="tel:' + escapeAttr(c.mobile) + '" class="hover:underline text-ink-700">' + escapeHtml(c.mobile) + '</a>' : '<span class="text-ink-300">—</span>';
+    return '<div class="text-[10px] text-ink-500 mt-0.5"><i data-lucide="phone" class="w-2.5 h-2.5 inline -mt-0.5"></i> ' + phoneVal + ' &nbsp;·&nbsp; <i data-lucide="smartphone" class="w-2.5 h-2.5 inline -mt-0.5"></i> ' + mobileVal + '</div>';
   })();
 
   const activityHtml = (function () {
