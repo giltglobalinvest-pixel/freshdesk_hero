@@ -761,7 +761,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.134';
+const APP_VERSION = 'v2.46.135';
 
 /* ============================================================
    GLOBAL THEME — v2.46.12
@@ -15349,14 +15349,13 @@ async function aiInterpretCommand(ticket, command, accountId) {
     'VERFÜGBARE GRUPPEN:\n' + (groupsList || '(keine)') + '\n\n' +
     'BEFEHL DES USERS:\n"' + command + '"';
 
-  const data = await proxyJson('/anthropic/v1/messages', {
-    method: 'POST',
-    body: JSON.stringify({
-      model: 'claude-sonnet-4-5-20250929',
-      max_tokens: 4000,
-      system: sysPrompt,
-      messages: [{ role: 'user', content: userPrompt }]
-    })
+  // v2.46.135: Retry-Wrapper auch hier — transient 5xx vom val.town-Proxy
+  // sind dadurch unsichtbar fuer den User statt das ganze Verarbeiten-Button-Klick zu killen.
+  const data = await _callAnthropicWithRetry({
+    model: 'claude-sonnet-4-5-20250929',
+    max_tokens: 4000,
+    system: sysPrompt,
+    messages: [{ role: 'user', content: userPrompt }]
   });
   const text = (data.content && data.content[0] && data.content[0].text) || '';
   const parsed = parseAIJson(text);
@@ -26904,19 +26903,22 @@ async function writeEnrichmentToAirtable(accountId, email, data) {
       filter: "AND({account_id}='" + escapeFormula(accountId) + "',{email}='" + escapeFormula(normEmail) + "')",
       maxRecords: 1,
     });
+    // v2.46.135: Bei UPDATE auch Auto-Field-Mechanik nutzen — sonst 422 wenn neue
+    // Felder hinzukommen (z.B. activity_summary in v2.46.133 nach existierender Tabelle).
+    const defaultTypes = {
+      email:               'singleLineText',  account_id:          'singleLineText',
+      phone:               'singleLineText',  mobile:              'singleLineText',
+      job_title:           'singleLineText',  updated_at:          'singleLineText',
+      phone_source:        'singleLineText',  mobile_source:       'singleLineText',
+      has_fs:              'singleLineText',  in_fs:               'singleLineText',
+      fs_contact_id:       'singleLineText',  enriched_at:         'singleLineText',
+      enriched_by:         'singleLineText',
+      activity_summary:    'multilineText',   activity_summary_at: 'singleLineText',
+    };
     if (existing[0]?.id) {
-      await airtableUpdate(ENRICH_CACHE_TABLE, existing[0].id, fields);
+      await airtableUpdateWithAutoField(ENRICH_CACHE_TABLE, existing[0].id, fields, defaultTypes);
     } else {
-      await airtableWriteWithAutoField(ENRICH_CACHE_TABLE, fields, {
-        email:               'singleLineText',  account_id:          'singleLineText',
-        phone:               'singleLineText',  mobile:              'singleLineText',
-        job_title:           'singleLineText',  updated_at:          'singleLineText',
-        phone_source:        'singleLineText',  mobile_source:       'singleLineText',
-        has_fs:              'singleLineText',  in_fs:               'singleLineText',
-        fs_contact_id:       'singleLineText',  enriched_at:         'singleLineText',
-        enriched_by:         'singleLineText',
-        activity_summary:    'multilineText',   activity_summary_at: 'singleLineText',
-      });
+      await airtableWriteWithAutoField(ENRICH_CACHE_TABLE, fields, defaultTypes);
     }
   } catch (_) { /* Tabelle existiert ggf. noch nicht — wird beim ersten Write angelegt */ }
 }
