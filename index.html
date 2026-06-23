@@ -687,6 +687,9 @@
     <button onclick="navTo('lists'); closeMenu();" class="w-full text-left px-3 py-2 text-sm hover:bg-ink-50 flex items-center gap-2">
       <i data-lucide="list-checks" class="w-4 h-4 text-orange-500"></i> Marketing-Listen
     </button>
+    <button onclick="navTo('saved-searches'); closeMenu();" class="w-full text-left px-3 py-2 text-sm hover:bg-ink-50 flex items-center gap-2">
+      <i data-lucide="bookmark" class="w-4 h-4 text-amber-500"></i> Gespeicherte Suchen
+    </button>
     <button onclick="navTo('phone-scripts'); closeMenu();" class="w-full text-left px-3 py-2 text-sm hover:bg-ink-50 flex items-center gap-2">
       <i data-lucide="phone-outgoing" class="w-4 h-4 text-purple-500"></i> Telefon-Leitfaden-Vorlagen
     </button>
@@ -764,7 +767,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.139';
+const APP_VERSION = 'v2.46.140';
 
 /* ============================================================
    GLOBAL THEME — v2.46.12
@@ -6979,6 +6982,7 @@ function navTo(page) {
   else if (page === 'marketing') renderFn = renderMarketingPage;
   else if (page === 'attachments') renderFn = renderAttachmentsPage;
   else if (page === 'lists')      renderFn = renderListsPage;
+  else if (page === 'saved-searches') renderFn = renderSavedSearchesPage;
   else if (page === 'phone-scripts') renderFn = renderPhoneScriptTemplatesPage;
   else if (page === 'contacts')  renderFn = renderContactsPage;
   else if (page === 'stats')     renderFn = renderStatsPage;
@@ -26450,6 +26454,276 @@ async function deleteContactList(listId, accountId) {
   LISTS_STATE.byAccount.delete(accountId);
 }
 
+/* === v2.46.140: Gespeicherte Suchen pro Mandant ===========================
+   Tabelle SavedSearches (auto-angelegt beim ersten Save). Speichert das KI-
+   Prompt + Snapshot der Treffer (email/id/name/company/account) als JSON in
+   einem multilineText-Feld. Beim Öffnen werden die Treffer direkt in
+   CONTACTS_STATE.results geladen — keine FD-Search-Calls — und der vorhandene
+   shared Airtable-Enrichment-Cache liefert phone/mobile/job_title/summary. */
+const SAVED_SEARCHES_TABLE = 'SavedSearches';
+const SAVED_SEARCHES_STATE = {
+  byAccount: new Map(),  // accountId → savedSearches[]
+  currentAccountId: '',
+};
+const SAVED_SEARCHES_DEFAULT_TYPES = {
+  title:           'singleLineText',
+  prompt:          'multilineText',
+  account_id:      'singleLineText',
+  contact_count:   'number',
+  contacts_json:   'multilineText',
+  created_by:      'singleLineText',
+  created_at:      'singleLineText',
+  last_opened_at:  'singleLineText',
+  open_count:      'number',
+};
+
+async function loadSavedSearches(accountId, force) {
+  if (!accountId) return [];
+  if (!force && SAVED_SEARCHES_STATE.byAccount.has(accountId)) return SAVED_SEARCHES_STATE.byAccount.get(accountId);
+  let list = [];
+  try {
+    const filter = "{account_id}='" + escapeFormula(accountId) + "'";
+    const recs = await airtableRead(SAVED_SEARCHES_TABLE, {
+      filter,
+      sort: [{ field: 'last_opened_at', direction: 'desc' }],
+      maxRecords: 500,
+    });
+    list = recs.map(r => Object.assign({ recordId: r.id }, r.fields));
+  } catch (_) {}
+  SAVED_SEARCHES_STATE.byAccount.set(accountId, list);
+  return list;
+}
+
+async function saveSearchSnapshot(accountId, title, prompt, contacts) {
+  const me = APP_KEYS.user || {};
+  // Pro Kontakt nur die Identity-Felder snapshotten — alles andere kommt
+  // beim Re-Open aus dem shared Enrichment-Cache.
+  const snapshot = (contacts || []).map(c => ({
+    e: String(c.email || '').toLowerCase(),
+    i: c.id || 0,
+    n: c.name || '',
+    co: c.company_name || '',
+    a: c._accountId || accountId,
+  })).filter(x => x.e);
+  const fields = {
+    title:          String(title || '').trim() || 'Unbenannte Suche',
+    prompt:         String(prompt || '').trim(),
+    account_id:     accountId,
+    contact_count:  snapshot.length,
+    contacts_json:  JSON.stringify(snapshot),
+    created_by:     me.email || '',
+    created_at:     nowIso(),
+    last_opened_at: nowIso(),
+    open_count:     0,
+  };
+  const rec = await airtableWriteWithAutoField(SAVED_SEARCHES_TABLE, fields, SAVED_SEARCHES_DEFAULT_TYPES);
+  SAVED_SEARCHES_STATE.byAccount.delete(accountId);
+  return rec;
+}
+
+async function deleteSavedSearch(recordId, accountId) {
+  await airtableDelete(SAVED_SEARCHES_TABLE, recordId);
+  SAVED_SEARCHES_STATE.byAccount.delete(accountId);
+}
+
+async function bumpSavedSearchUsage(recordId, accountId) {
+  const list = SAVED_SEARCHES_STATE.byAccount.get(accountId) || [];
+  const rec = list.find(r => r.recordId === recordId);
+  const newCount = (Number(rec?.open_count || 0)) + 1;
+  try {
+    await airtableUpdate(SAVED_SEARCHES_TABLE, recordId, { last_opened_at: nowIso(), open_count: newCount });
+  } catch (_) {}
+  SAVED_SEARCHES_STATE.byAccount.delete(accountId);
+}
+
+/* Lädt einen gespeicherten Search-Snapshot, populated CONTACTS_STATE.results
+   und triggert das Hydrate (das nimmt alles aus dem Cache wenn vorhanden). */
+async function openSavedSearch(recordId) {
+  // Welche Suche?
+  const accId = SAVED_SEARCHES_STATE.currentAccountId;
+  const list = await loadSavedSearches(accId);
+  const rec = list.find(r => r.recordId === recordId);
+  if (!rec) { toast('Gespeicherte Suche nicht gefunden.', 'warn'); return; }
+  let snapshot = [];
+  try { snapshot = JSON.parse(rec.contacts_json || '[]'); } catch (_) { snapshot = []; }
+  if (!Array.isArray(snapshot) || !snapshot.length) {
+    toast('Diese Suche enthält keine Kontakte.', 'warn');
+    return;
+  }
+  // CONTACTS_STATE auf den Snapshot setzen + zur Kontakte-Seite navigieren
+  CONTACTS_STATE.results = snapshot.map(s => ({
+    email:        s.e,
+    id:           s.i,
+    name:         s.n,
+    company_name: s.co,
+    _accountId:   s.a,
+    _source:      'saved_search',
+  }));
+  CONTACTS_STATE.prompt = rec.prompt || '';
+  CONTACTS_STATE.params = null;
+  CONTACTS_STATE.displayCount = 30;
+  CONTACTS_STATE.open.clear();
+  CONTACTS_STATE.selected.clear();
+  CONTACTS_STATE.lastError = '';
+  CONTACTS_STATE.searchAccountId = rec.account_id;
+  CONTACTS_STATE.noMoreFromFd = true; // gespeicherte Suchen können nicht paginiert werden
+  bumpSavedSearchUsage(recordId, accId).catch(() => {});
+  navTo('contacts');
+  // Hydrate startet nach Render automatisch (siehe renderContactsPage)
+  setTimeout(() => {
+    if (CONTACTS_STATE.results.length) {
+      const promptEl = document.getElementById('contactsPrompt');
+      if (promptEl) promptEl.value = rec.prompt || '';
+      _renderContactsResults();
+      _hydrateVisibleCards().catch(() => {});
+      toast('„' + (rec.title || '?') + '" geöffnet — ' + snapshot.length + ' Kontakte (aus Cache).', 'success', 4000);
+    }
+  }, 250);
+}
+
+/* === v2.46.140: Gespeicherte Suchen — Verwaltungs-Seite =================== */
+async function renderSavedSearchesPage() {
+  setPageTitle('Gespeicherte Suchen', 'Schnell wieder öffnen ohne neuen FD-Call');
+  const accounts = APP_STATE.accounts || [];
+  if (!SAVED_SEARCHES_STATE.currentAccountId || !accounts.find(a => a.id === SAVED_SEARCHES_STATE.currentAccountId)) {
+    SAVED_SEARCHES_STATE.currentAccountId = APP_STATE.currentAccount && APP_STATE.currentAccount !== 'all'
+      ? APP_STATE.currentAccount
+      : (accounts[0]?.id || '');
+  }
+  const accountOpts = accounts.map(a =>
+    '<option value="' + escapeAttr(a.id) + '"' + (a.id === SAVED_SEARCHES_STATE.currentAccountId ? ' selected' : '') + '>' + escapeHtml(a.name || a.id) + '</option>'
+  ).join('');
+  $('pageContent').innerHTML = '<div class="space-y-3 max-w-3xl mx-auto">' +
+    '<div class="bg-gradient-to-br from-amber-50 to-orange-50 border border-amber-200 rounded-xl p-3 text-[12px] text-amber-900">' +
+      '<p class="font-bold inline-flex items-center gap-1 mb-1"><i data-lucide="bookmark" class="w-4 h-4"></i> Gespeicherte Suchen</p>' +
+      '<p>Such-Snapshots pro Mandant. Wieder-Öffnen lädt die Kontakte direkt aus dem shared Cache — kein neuer FD-Such-Call. Zum Anlegen: im <b>Kontakte</b>-Tab eine Suche laufen lassen + <b>„💾 Suche speichern"</b> klicken.</p>' +
+    '</div>' +
+    '<div class="bg-white rounded-xl border border-ink-200 p-3">' +
+      '<label class="text-[11px] inline-flex items-center gap-1.5 w-full">' +
+        '<i data-lucide="building-2" class="w-3.5 h-3.5 text-ink-500"></i>' +
+        '<span class="font-semibold text-ink-600 uppercase tracking-wider">Mandant:</span>' +
+        '<select id="ssAccount" onchange="_onSsAccount(this.value)" class="flex-1 px-2 py-1.5 border border-ink-300 rounded-lg text-sm bg-white">' +
+          accountOpts +
+        '</select>' +
+      '</label>' +
+    '</div>' +
+    '<div id="ssList"><div class="bg-white rounded-xl border border-ink-200 p-6 text-center"><span class="spinner inline-block w-5 h-5 border-[2px] text-amber-500"></span><p class="text-sm text-ink-500 mt-2">Lade Suchen…</p></div></div>' +
+  '</div>';
+  if (window.lucide) lucide.createIcons();
+  await loadSavedSearches(SAVED_SEARCHES_STATE.currentAccountId);
+  _renderSavedSearchesList();
+}
+
+function _onSsAccount(v) {
+  SAVED_SEARCHES_STATE.currentAccountId = v;
+  loadSavedSearches(v).then(_renderSavedSearchesList);
+}
+
+function _renderSavedSearchesList() {
+  const host = document.getElementById('ssList');
+  if (!host) return;
+  const list = SAVED_SEARCHES_STATE.byAccount.get(SAVED_SEARCHES_STATE.currentAccountId) || [];
+  if (!list.length) {
+    host.innerHTML = '<div class="bg-white rounded-xl border border-dashed border-ink-300 p-6 text-center text-sm text-ink-500">' +
+      '<i data-lucide="bookmark" class="w-8 h-8 inline text-ink-400"></i>' +
+      '<p class="mt-2">Noch keine gespeicherte Suche für diesen Mandanten.</p>' +
+      '<p class="text-[11px] text-ink-400 mt-1">Im <b>Kontakte</b>-Tab eine Suche laufen lassen → <b>💾 Suche speichern</b>.</p>' +
+    '</div>';
+    if (window.lucide) lucide.createIcons();
+    return;
+  }
+  host.innerHTML = '<p class="text-[10px] text-ink-500 uppercase tracking-wider mb-2 px-1">' + list.length + ' gespeichert</p>' +
+    list.map(s => {
+      const created = s.created_at ? new Date(s.created_at).toLocaleDateString('de-DE') : '?';
+      const opened = s.last_opened_at ? new Date(s.last_opened_at).toLocaleDateString('de-DE') : '?';
+      return '<div class="bg-white rounded-xl border border-ink-200 mb-2 p-3 hover:border-amber-300 cursor-pointer" onclick="openSavedSearch(' + escapeAttr(JSON.stringify(s.recordId)) + ')">' +
+        '<div class="flex items-start justify-between gap-2">' +
+          '<div class="flex-1 min-w-0">' +
+            '<p class="font-bold text-ink-900 text-sm truncate">' + escapeHtml(s.title || '?') + '</p>' +
+            '<p class="text-[11px] text-ink-600 truncate italic">„' + escapeHtml(s.prompt || '') + '"</p>' +
+            '<p class="text-[10px] text-ink-400 mt-1">' + (s.contact_count || 0) + ' Kontakte · ' + (s.open_count || 0) + '× geöffnet · zuletzt ' + escapeHtml(opened) + ' · von ' + escapeHtml(s.created_by || '?') + '</p>' +
+          '</div>' +
+          '<div class="flex gap-1 shrink-0">' +
+            '<button onclick="event.stopPropagation();_deleteSavedSearchAction(' + escapeAttr(JSON.stringify(s.recordId)) + ')" class="text-[10px] bg-red-50 hover:bg-red-100 text-red-700 px-2 py-1 rounded inline-flex items-center gap-1" title="Löschen"><i data-lucide="trash-2" class="w-3 h-3"></i></button>' +
+          '</div>' +
+        '</div>' +
+      '</div>';
+    }).join('');
+  if (window.lucide) lucide.createIcons();
+}
+
+async function _deleteSavedSearchAction(recordId) {
+  if (!confirm('Gespeicherte Suche löschen? Die Such-Snapshot wird verworfen — die Kontakte selbst bleiben in FD.')) return;
+  try {
+    await deleteSavedSearch(recordId, SAVED_SEARCHES_STATE.currentAccountId);
+    await loadSavedSearches(SAVED_SEARCHES_STATE.currentAccountId, true);
+    _renderSavedSearchesList();
+    toast('Gelöscht.', 'success', 2500);
+  } catch (e) {
+    toast('Löschen fehlgeschlagen: ' + (e.message || e), 'error', 5000);
+  }
+}
+
+/* === Save-Modal (aufgerufen vom Kontakte-Tab nach erfolgreicher Suche) === */
+async function _openSaveSearchModal() {
+  if (!CONTACTS_STATE.results.length) { toast('Keine Suchergebnisse zum Speichern.', 'warn'); return; }
+  const accIds = Array.from(new Set(CONTACTS_STATE.results.map(c => String(c._accountId))));
+  if (accIds.length > 1) {
+    toast('Suchen mit Kontakten aus mehreren Mandanten kann ich nicht speichern. Bitte Mandant filtern.', 'warn', 6000);
+    return;
+  }
+  const accountId = accIds[0];
+  let host = document.getElementById('subModalHost');
+  if (!host) { host = document.createElement('div'); host.id = 'subModalHost'; document.body.appendChild(host); }
+  const defaultTitle = (CONTACTS_STATE.prompt || '').slice(0, 80) + ' · ' + new Date().toLocaleDateString('de-DE');
+  host.innerHTML =
+    '<div class="fixed inset-0 z-[70] flex items-end justify-center bg-black/60" onclick="if(event.target===this)_closeSaveSearchModal()">' +
+      '<div class="bg-white w-full max-w-md rounded-t-3xl shadow-2xl flex flex-col safe-bottom" style="max-height:90vh">' +
+        '<div class="safe-top px-4 py-3 border-b border-ink-200 flex items-center justify-between gap-2 shrink-0">' +
+          '<h3 class="font-bold text-ink-900 inline-flex items-center gap-2"><i data-lucide="bookmark-plus" class="w-5 h-5 text-amber-600"></i> Suche speichern</h3>' +
+          '<button onclick="_closeSaveSearchModal()" class="w-9 h-9 rounded-lg hover:bg-ink-100 flex items-center justify-center"><i data-lucide="x" class="w-5 h-5"></i></button>' +
+        '</div>' +
+        '<div class="flex-1 overflow-y-auto p-4 space-y-3">' +
+          '<div class="bg-amber-50 border border-amber-200 rounded-xl p-2.5 text-[11px] text-amber-900">' +
+            '<b>' + CONTACTS_STATE.results.length + ' Kontakte</b> aus dem aktuellen Such-Ergebnis werden als Snapshot persistiert.<br>' +
+            'Such-Prompt: „' + escapeHtml(CONTACTS_STATE.prompt || '?') + '"' +
+          '</div>' +
+          '<label class="text-xs font-bold text-ink-700 uppercase tracking-wider block">Titel</label>' +
+          '<input id="ssTitle" type="text" value="' + escapeAttr(defaultTitle) + '" class="w-full px-3 py-2 border border-ink-300 rounded-lg text-sm">' +
+        '</div>' +
+        '<div class="border-t border-ink-200 p-3 flex gap-2 shrink-0">' +
+          '<button onclick="_closeSaveSearchModal()" class="flex-1 bg-ink-100 hover:bg-ink-200 text-ink-700 rounded-xl px-3 py-3 text-sm font-bold">Abbrechen</button>' +
+          '<button onclick="_confirmSaveSearch(this)" class="flex-[2] bg-amber-600 hover:bg-amber-700 text-white rounded-xl px-3 py-3 text-sm font-bold inline-flex items-center justify-center gap-1.5"><i data-lucide="save" class="w-4 h-4"></i> Speichern</button>' +
+        '</div>' +
+      '</div>' +
+    '</div>';
+  window._SAVE_SEARCH_CTX = { accountId };
+  if (window.lucide) lucide.createIcons();
+  setTimeout(() => { document.getElementById('ssTitle')?.select(); }, 100);
+}
+
+function _closeSaveSearchModal() {
+  delete window._SAVE_SEARCH_CTX;
+  const host = document.getElementById('subModalHost');
+  if (host) host.innerHTML = '';
+}
+
+async function _confirmSaveSearch(btn) {
+  const ctx = window._SAVE_SEARCH_CTX;
+  if (!ctx) return;
+  const title = (document.getElementById('ssTitle')?.value || '').trim();
+  if (!title) { toast('Bitte Titel angeben.', 'warn'); return; }
+  setBusy(btn, true, 'Speichere…');
+  try {
+    await saveSearchSnapshot(ctx.accountId, title, CONTACTS_STATE.prompt || '', CONTACTS_STATE.results);
+    _closeSaveSearchModal();
+    toast('„' + title + '" gespeichert.', 'success', 3500);
+  } catch (e) {
+    setBusy(btn, false);
+    toast('Speichern fehlgeschlagen: ' + (e.message || e), 'error', 6000);
+  }
+}
+
 /* === v2.46.137: Telefon-Leitfaden-Vorlagen — Verwaltungs-Seite ============ */
 async function renderPhoneScriptTemplatesPage() {
   setPageTitle('Telefon-Leitfaden-Vorlagen', 'KI-Prompt-Vorlagen pro Mandant + global');
@@ -29326,12 +29600,18 @@ function _renderContactsResults() {
       (fromLive ? ' <span class="text-amber-700">· ⚡ ' + fromLive + ' live</span>' : '')
     : '';
   host.innerHTML =
-    '<p class="text-[10px] text-ink-500 uppercase tracking-wider mb-2 px-1">' +
-      visible.length + ' angezeigt · ' + filteredCount + ' im Filter · ' + totalHits + ' Treffer gesamt' +
-      (hiddenCount ? ' · ' + hiddenCount + ' ohne Sales-Potenzial' + (CONTACTS_STATE.showHidden ? '' : ' (ausgeblendet)') : '') +
-      (CONTACTS_STATE.templateFilter ? ' · Filter: ' + escapeHtml(CONTACTS_STATE.templateFilterMode === 'missing' ? 'OHNE ' : 'MIT ') + '„' + escapeHtml(CONTACTS_STATE.templateFilter) + '"' : '') +
-      cacheStats +
-    '</p>' +
+    // v2.46.140: „Suche speichern"-Button + Stats-Zeile
+    '<div class="flex items-center justify-between gap-2 mb-2 px-1">' +
+      '<p class="text-[10px] text-ink-500 uppercase tracking-wider flex-1">' +
+        visible.length + ' angezeigt · ' + filteredCount + ' im Filter · ' + totalHits + ' Treffer gesamt' +
+        (hiddenCount ? ' · ' + hiddenCount + ' ohne Sales-Potenzial' + (CONTACTS_STATE.showHidden ? '' : ' (ausgeblendet)') : '') +
+        (CONTACTS_STATE.templateFilter ? ' · Filter: ' + escapeHtml(CONTACTS_STATE.templateFilterMode === 'missing' ? 'OHNE ' : 'MIT ') + '„' + escapeHtml(CONTACTS_STATE.templateFilter) + '"' : '') +
+        cacheStats +
+      '</p>' +
+      (CONTACTS_STATE.results.length
+        ? '<button onclick="_openSaveSearchModal()" class="text-[10px] bg-amber-50 hover:bg-amber-100 border border-amber-300 text-amber-800 px-2 py-1 rounded font-bold inline-flex items-center gap-1 shrink-0" title="Diese Suche als Snapshot persistieren (wieder-öffnen ohne FD-Call)"><i data-lucide="bookmark-plus" class="w-3 h-3"></i> Suche speichern</button>'
+        : '') +
+    '</div>' +
     visible.map(row => _renderContactSearchCard(row)).join('') +
     (hasMore
       ? '<button onclick="_loadMoreContacts()" class="w-full mt-2 px-3 py-3 bg-white hover:bg-ink-50 border-2 border-dashed border-ink-300 text-ink-700 rounded-xl text-sm font-bold inline-flex items-center justify-center gap-2"><i data-lucide="chevron-down" class="w-4 h-4"></i> Nächste 30 anzeigen (' + (filteredCount - display) + ' verbleibend)</button>'
