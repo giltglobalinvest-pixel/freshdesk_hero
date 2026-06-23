@@ -767,7 +767,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.140';
+const APP_VERSION = 'v2.46.141';
 
 /* ============================================================
    GLOBAL THEME — v2.46.12
@@ -26466,15 +26466,16 @@ const SAVED_SEARCHES_STATE = {
   currentAccountId: '',
 };
 const SAVED_SEARCHES_DEFAULT_TYPES = {
-  title:           'singleLineText',
-  prompt:          'multilineText',
-  account_id:      'singleLineText',
-  contact_count:   'number',
-  contacts_json:   'multilineText',
-  created_by:      'singleLineText',
-  created_at:      'singleLineText',
-  last_opened_at:  'singleLineText',
-  open_count:      'number',
+  title:                    'singleLineText',
+  prompt:                   'multilineText',
+  account_id:               'singleLineText',
+  contact_count:            'number',
+  contacts_json:            'multilineText',
+  phone_script_template_id: 'singleLineText',  // v2.46.141: zugewiesene Vorlage
+  created_by:               'singleLineText',
+  created_at:               'singleLineText',
+  last_opened_at:           'singleLineText',
+  open_count:               'number',
 };
 
 async function loadSavedSearches(accountId, force) {
@@ -26494,7 +26495,7 @@ async function loadSavedSearches(accountId, force) {
   return list;
 }
 
-async function saveSearchSnapshot(accountId, title, prompt, contacts) {
+async function saveSearchSnapshot(accountId, title, prompt, contacts, phoneScriptTemplateId) {
   const me = APP_KEYS.user || {};
   // Pro Kontakt nur die Identity-Felder snapshotten — alles andere kommt
   // beim Re-Open aus dem shared Enrichment-Cache.
@@ -26506,15 +26507,16 @@ async function saveSearchSnapshot(accountId, title, prompt, contacts) {
     a: c._accountId || accountId,
   })).filter(x => x.e);
   const fields = {
-    title:          String(title || '').trim() || 'Unbenannte Suche',
-    prompt:         String(prompt || '').trim(),
-    account_id:     accountId,
-    contact_count:  snapshot.length,
-    contacts_json:  JSON.stringify(snapshot),
-    created_by:     me.email || '',
-    created_at:     nowIso(),
-    last_opened_at: nowIso(),
-    open_count:     0,
+    title:                    String(title || '').trim() || 'Unbenannte Suche',
+    prompt:                   String(prompt || '').trim(),
+    account_id:               accountId,
+    contact_count:            snapshot.length,
+    contacts_json:            JSON.stringify(snapshot),
+    phone_script_template_id: String(phoneScriptTemplateId || ''),
+    created_by:               me.email || '',
+    created_at:               nowIso(),
+    last_opened_at:           nowIso(),
+    open_count:               0,
   };
   const rec = await airtableWriteWithAutoField(SAVED_SEARCHES_TABLE, fields, SAVED_SEARCHES_DEFAULT_TYPES);
   SAVED_SEARCHES_STATE.byAccount.delete(accountId);
@@ -26567,6 +26569,9 @@ async function openSavedSearch(recordId) {
   CONTACTS_STATE.lastError = '';
   CONTACTS_STATE.searchAccountId = rec.account_id;
   CONTACTS_STATE.noMoreFromFd = true; // gespeicherte Suchen können nicht paginiert werden
+  // v2.46.141: zugewiesene Telefon-Leitfaden-Vorlage merken — Phone-Call-Modal nutzt sie
+  CONTACTS_STATE.activePhoneScriptTemplateId = rec.phone_script_template_id || '';
+  CONTACTS_STATE.activeSavedSearchId = recordId;
   bumpSavedSearchUsage(recordId, accId).catch(() => {});
   navTo('contacts');
   // Hydrate startet nach Render automatisch (siehe renderContactsPage)
@@ -26579,6 +26584,313 @@ async function openSavedSearch(recordId) {
       toast('„' + (rec.title || '?') + '" geöffnet — ' + snapshot.length + ' Kontakte (aus Cache).', 'success', 4000);
     }
   }, 250);
+}
+
+/* === v2.46.141: Phone-Call-Modal ==========================================
+   Wird vom 📞-Button auf der Kontaktkarte aufgerufen (erscheint nur wenn die
+   aktive Saved-Search eine PhoneScriptTemplate zugewiesen hat). Modal-Sektionen:
+   1) Stammdaten (read-only, kompakt)
+   2) Gesprächsleitfaden — beim ersten Klick generiert + im Enrichment-Cache
+      gespeichert (phone_scripts_json: Map<templateId, {text, at, by}>)
+   3) Sprachnotiz — Textarea + Speichern (voice_notes_json: Array<{at, by, text}>)
+   4) Mini KI-Email-Composer — Prompt + KI-Generieren + Anhang-Bibliothek + Senden */
+async function _openPhoneCallModal(email) {
+  const c = CONTACTS_STATE.results.find(x => String(x.email || '').toLowerCase() === email);
+  if (!c) return;
+  const templateId = CONTACTS_STATE.activePhoneScriptTemplateId;
+  if (!templateId) { toast('Keine Vorlage in der aktiven Suche zugewiesen.', 'warn'); return; }
+  const templates = await loadPhoneScriptTemplates(c._accountId);
+  const template = templates.find(t => t.recordId === templateId);
+  if (!template) { toast('Zugewiesene Vorlage nicht gefunden.', 'error'); return; }
+  // Voice-Notes laden
+  const cached = _readEnrichCache(c._accountId, c.email) || {};
+  let voiceNotes = [];
+  try { voiceNotes = JSON.parse(cached.voice_notes_json || '[]'); } catch (_) {}
+  if (!Array.isArray(voiceNotes)) voiceNotes = [];
+  // Phone-Scripts laden
+  let phoneScripts = {};
+  try { phoneScripts = JSON.parse(cached.phone_scripts_json || '{}'); } catch (_) {}
+  const existingScript = phoneScripts[templateId];
+  window._PHONE_CALL_CTX = {
+    contact: c, template, voiceNotes,
+    phoneScripts, script: existingScript || null,
+    emailAttachments: [],
+  };
+  _renderPhoneCallModal();
+  // Wenn noch kein Skript da → automatisch generieren
+  if (!existingScript) {
+    _phoneCallGenerateScript().catch(e => console.warn(e));
+  }
+}
+
+function _closePhoneCallModal() {
+  delete window._PHONE_CALL_CTX;
+  const host = document.getElementById('subModalHost');
+  if (host) host.innerHTML = '';
+}
+
+function _renderPhoneCallModal() {
+  const ctx = window._PHONE_CALL_CTX;
+  if (!ctx) return;
+  const c = ctx.contact;
+  const t = ctx.template;
+  const scriptText = ctx.script?.text || '';
+  const scriptDate = ctx.script?.at ? new Date(ctx.script.at).toLocaleString('de-DE') : '';
+  let host = document.getElementById('subModalHost');
+  if (!host) { host = document.createElement('div'); host.id = 'subModalHost'; document.body.appendChild(host); }
+  host.innerHTML =
+    '<div class="fixed inset-0 z-[70] flex items-end justify-center bg-black/60" onclick="if(event.target===this)_closePhoneCallModal()">' +
+      '<div class="bg-white w-full max-w-2xl rounded-t-3xl shadow-2xl flex flex-col safe-bottom" style="max-height:96vh">' +
+        '<div class="safe-top px-4 py-3 border-b border-ink-200 flex items-center justify-between gap-2 shrink-0">' +
+          '<div class="min-w-0">' +
+            '<h3 class="font-bold text-ink-900 inline-flex items-center gap-2"><i data-lucide="phone-call" class="w-5 h-5 text-purple-600"></i> Anruf vorbereiten</h3>' +
+            '<p class="text-[11px] text-ink-600 truncate">' + escapeHtml(c.name || c.email) + (c.company_name ? ' · ' + escapeHtml(c.company_name) : '') + '</p>' +
+          '</div>' +
+          '<button onclick="_closePhoneCallModal()" class="w-9 h-9 rounded-lg hover:bg-ink-100 flex items-center justify-center"><i data-lucide="x" class="w-5 h-5"></i></button>' +
+        '</div>' +
+        '<div class="flex-1 overflow-y-auto p-4 space-y-3">' +
+          // Sektion 1: Stammdaten
+          '<div class="bg-ink-50 border border-ink-200 rounded-xl p-3 grid grid-cols-2 gap-x-3 gap-y-1 text-[11px]">' +
+            (c.phone ? '<p><b>Tel:</b> <a href="tel:' + escapeAttr(c.phone) + '" class="text-brand-700 hover:underline">' + escapeHtml(c.phone) + '</a></p>' : '<p class="text-ink-400">Tel: —</p>') +
+            (c.mobile ? '<p><b>Mobil:</b> <a href="tel:' + escapeAttr(c.mobile) + '" class="text-brand-700 hover:underline">' + escapeHtml(c.mobile) + '</a></p>' : '<p class="text-ink-400">Mobil: —</p>') +
+            '<p class="col-span-2"><b>Email:</b> ' + escapeHtml(c.email) + '</p>' +
+            (c.job_title ? '<p class="col-span-2"><b>Funktion:</b> ' + escapeHtml(c.job_title) + '</p>' : '') +
+            (c.company_name ? '<p class="col-span-2"><b>Firma:</b> ' + escapeHtml(c.company_name) + '</p>' : '') +
+          '</div>' +
+          // Sektion 2: Gesprächsleitfaden
+          '<div class="bg-purple-50 border border-purple-200 rounded-xl p-3">' +
+            '<div class="flex items-center justify-between gap-2 mb-1.5">' +
+              '<p class="text-[11px] font-bold text-purple-800 inline-flex items-center gap-1"><i data-lucide="sparkles" class="w-3.5 h-3.5"></i> Gesprächsleitfaden · ' + escapeHtml(t.title || '?') + '</p>' +
+              '<button onclick="_phoneCallGenerateScript(true)" class="text-[10px] bg-white hover:bg-purple-100 border border-purple-300 text-purple-700 px-2 py-1 rounded inline-flex items-center gap-1" title="Neu generieren"><i data-lucide="refresh-cw" class="w-2.5 h-2.5"></i> neu</button>' +
+            '</div>' +
+            (ctx._scriptLoading
+              ? '<p class="text-[11px] text-ink-500 inline-flex items-center gap-1.5"><span class="spinner inline-block w-3 h-3 border-[2px]"></span> KI erzeugt Leitfaden…</p>'
+              : (scriptText
+                  ? '<p class="text-[11px] text-purple-900 leading-relaxed whitespace-pre-line bg-white rounded p-2 border border-purple-200">' + escapeHtml(scriptText) + '</p>' +
+                    (scriptDate ? '<p class="text-[10px] text-purple-600 mt-1 italic">erstellt ' + escapeHtml(scriptDate) + '</p>' : '')
+                  : '<p class="text-[11px] text-ink-400 italic">Noch kein Leitfaden generiert — wird gleich erzeugt…</p>')) +
+          '</div>' +
+          // Sektion 3: Sprachnotiz
+          '<div class="bg-emerald-50 border border-emerald-200 rounded-xl p-3">' +
+            '<div class="flex items-center justify-between gap-2 mb-1.5">' +
+              '<p class="text-[11px] font-bold text-emerald-800 inline-flex items-center gap-1"><i data-lucide="mic" class="w-3.5 h-3.5"></i> Gesprächs-Notiz</p>' +
+            '</div>' +
+            '<textarea id="pcNote" rows="3" placeholder="z.B. „Wartungsvertrag-Interesse, Angebot bis Freitag senden, Folge-Call Mittwoch 14h"" class="w-full px-3 py-2 border border-emerald-300 rounded-lg text-[12px] bg-white resize-y"></textarea>' +
+            '<button onclick="_phoneCallSaveNote(this)" class="mt-1.5 w-full px-3 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-xs font-bold inline-flex items-center justify-center gap-1"><i data-lucide="check" class="w-3 h-3"></i> Notiz speichern</button>' +
+            (ctx.voiceNotes?.length
+              ? '<div class="mt-2 space-y-1 max-h-32 overflow-y-auto">' +
+                  ctx.voiceNotes.slice().reverse().map(n => {
+                    const d = n.at ? new Date(n.at).toLocaleString('de-DE') : '?';
+                    return '<div class="bg-white border border-emerald-100 rounded p-1.5 text-[10px]"><p class="text-emerald-700 font-semibold">' + escapeHtml(d) + ' · ' + escapeHtml(n.by || '?') + '</p><p class="text-ink-700 whitespace-pre-line">' + escapeHtml(n.text || '') + '</p></div>';
+                  }).join('') +
+                '</div>'
+              : '') +
+          '</div>' +
+          // Sektion 4: Mini KI-Email-Composer
+          '<div class="bg-orange-50 border border-orange-200 rounded-xl p-3">' +
+            '<div class="flex items-center justify-between gap-2 mb-1.5">' +
+              '<p class="text-[11px] font-bold text-orange-800 inline-flex items-center gap-1"><i data-lucide="mail" class="w-3.5 h-3.5"></i> Follow-up Email per KI</p>' +
+            '</div>' +
+            '<textarea id="pcMailPrompt" rows="2" placeholder="z.B. „Bedanken für das Gespräch + Angebot für Wartungspaket beilegen"" class="w-full px-3 py-2 border border-orange-300 rounded-lg text-[12px] bg-white resize-none mb-1.5"></textarea>' +
+            '<div class="flex gap-1.5 flex-wrap mb-1.5">' +
+              '<button onclick="_pcGenerateMail(this)" class="flex-1 min-w-[120px] px-3 py-2 bg-gradient-to-br from-purple-600 to-brand-600 hover:opacity-90 text-white rounded-lg text-xs font-bold inline-flex items-center justify-center gap-1"><i data-lucide="wand-2" class="w-3.5 h-3.5"></i> Betreff + Body generieren</button>' +
+              '<button onclick="_pcPickAttachments()" class="px-3 py-2 bg-white hover:bg-orange-100 border border-orange-300 text-orange-700 rounded-lg text-xs font-bold inline-flex items-center gap-1"><i data-lucide="paperclip" class="w-3.5 h-3.5"></i> Anhang</button>' +
+            '</div>' +
+            '<input id="pcMailSubject" type="text" placeholder="Betreff" class="w-full px-3 py-2 border border-orange-300 rounded-lg text-sm bg-white mb-1.5">' +
+            '<textarea id="pcMailBody" rows="6" placeholder="Nachricht (KI generiert hier oder selbst tippen)" class="w-full px-3 py-2 border border-orange-300 rounded-lg text-[12px] bg-white font-mono leading-snug resize-y mb-1.5"></textarea>' +
+            '<div id="pcAttachList" class="mb-1.5"></div>' +
+            '<button onclick="_pcSendMail(this)" class="w-full px-3 py-2 bg-orange-600 hover:bg-orange-700 text-white rounded-lg text-xs font-bold inline-flex items-center justify-center gap-1"><i data-lucide="send" class="w-3.5 h-3.5"></i> Senden</button>' +
+          '</div>' +
+        '</div>' +
+      '</div>' +
+    '</div>';
+  if (window.lucide) lucide.createIcons();
+  _pcRenderAttachList();
+}
+
+async function _phoneCallGenerateScript(force) {
+  const ctx = window._PHONE_CALL_CTX;
+  if (!ctx) return;
+  ctx._scriptLoading = true;
+  _renderPhoneCallModal();
+  try {
+    const scriptText = await _generatePhoneScript(ctx.contact, ctx.template);
+    const me = APP_KEYS.user || {};
+    const tid = ctx.template.recordId;
+    ctx.script = { text: scriptText, at: nowIso(), by: me.email || '' };
+    ctx.phoneScripts[tid] = ctx.script;
+    // Persistieren im Enrichment-Cache
+    const existing = _readEnrichCache(ctx.contact._accountId, ctx.contact.email) || {};
+    _writeEnrichCache(ctx.contact._accountId, ctx.contact.email, Object.assign({}, existing, {
+      phone_scripts_json: JSON.stringify(ctx.phoneScripts),
+    }));
+  } catch (e) {
+    toast('Leitfaden-Generierung fehlgeschlagen: ' + (e.message || e), 'error', 6000);
+  } finally {
+    ctx._scriptLoading = false;
+    _renderPhoneCallModal();
+  }
+}
+
+async function _phoneCallSaveNote(btn) {
+  const ctx = window._PHONE_CALL_CTX;
+  if (!ctx) return;
+  const text = (document.getElementById('pcNote')?.value || '').trim();
+  if (!text) { toast('Notiz ist leer.', 'warn', 2500); return; }
+  const me = APP_KEYS.user || {};
+  ctx.voiceNotes = ctx.voiceNotes || [];
+  ctx.voiceNotes.push({ at: nowIso(), by: me.email || '', text });
+  setBusy(btn, true);
+  try {
+    const existing = _readEnrichCache(ctx.contact._accountId, ctx.contact.email) || {};
+    _writeEnrichCache(ctx.contact._accountId, ctx.contact.email, Object.assign({}, existing, {
+      voice_notes_json: JSON.stringify(ctx.voiceNotes),
+    }));
+    toast('Notiz gespeichert.', 'success', 2500);
+    setBusy(btn, false);
+    _renderPhoneCallModal();
+  } catch (e) {
+    setBusy(btn, false);
+    toast('Speichern fehlgeschlagen: ' + (e.message || e), 'error', 5000);
+  }
+}
+
+async function _pcGenerateMail(btn) {
+  const ctx = window._PHONE_CALL_CTX;
+  if (!ctx) return;
+  const prompt = (document.getElementById('pcMailPrompt')?.value || '').trim();
+  if (!prompt) { toast('Bitte Email-Beschreibung eingeben.', 'warn', 3000); return; }
+  const c = ctx.contact;
+  const me = APP_KEYS.user || {};
+  const acc = (APP_STATE.accounts || []).find(a => a.id === c._accountId);
+  setBusy(btn, true, 'KI schreibt…');
+  try {
+    const lastNote = ctx.voiceNotes?.[ctx.voiceNotes.length - 1]?.text || '';
+    const sys = 'Du schreibst Follow-up-Emails nach einem Sales-Call auf Deutsch.\n' +
+      'Antworte AUSSCHLIESSLICH mit JSON: {"subject":"…","body":"…"}\n' +
+      'body: Plain-Text mit Zeilenumbruechen, KEIN HTML, KEIN Markdown.\n' +
+      'Maximal 150 Worte, sachlich, kurz, Bezug auf das Gespraech wenn moeglich.\n' +
+      'Absender: ' + (me.name || me.email || '') + ' (' + (acc?.name || '') + ')\n' +
+      'Empfaenger: ' + (c.name || c.email) + (c.job_title ? ' (' + c.job_title + ')' : '');
+    const userMsg = 'Beschreibung was die Mail leisten soll: ' + prompt +
+      (lastNote ? '\n\nLetzte Gespraechs-Notiz als Kontext: ' + lastNote : '');
+    const data = await _callAnthropicWithRetry({
+      model: 'claude-haiku-4-5-20251001',
+      max_tokens: 700,
+      system: sys,
+      messages: [{ role: 'user', content: userMsg }],
+    });
+    recordAiUsage({
+      model: 'claude-haiku-4-5-20251001',
+      input_tokens:  data?.usage?.input_tokens || 0,
+      output_tokens: data?.usage?.output_tokens || 0,
+      feature: 'phone_followup_mail',
+      accountId: c._accountId,
+    });
+    const raw = (data?.content?.[0]?.text || '').trim().replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/i, '');
+    let obj;
+    try { obj = JSON.parse(raw); }
+    catch (_) {
+      const m = raw.match(/\{[\s\S]*\}/);
+      if (m) obj = JSON.parse(m[0]);
+    }
+    document.getElementById('pcMailSubject').value = obj?.subject || '';
+    document.getElementById('pcMailBody').value = obj?.body || '';
+    toast('Betreff + Body generiert.', 'success', 3000);
+  } catch (e) {
+    toast('KI-Generierung fehlgeschlagen: ' + (e.message || e), 'error', 6000);
+  } finally {
+    setBusy(btn, false);
+  }
+}
+
+async function _pcPickAttachments() {
+  const ctx = window._PHONE_CALL_CTX;
+  if (!ctx) return;
+  const alreadyIds = (ctx.emailAttachments || []).filter(a => a._libRecordId).map(a => a._libRecordId);
+  await _openAttachmentPicker(ctx.contact._accountId, alreadyIds, async (recs) => {
+    const keepIds = new Set(recs.map(r => r.recordId));
+    ctx.emailAttachments = (ctx.emailAttachments || []).filter(a => !a._libRecordId || keepIds.has(a._libRecordId));
+    const existingIds = new Set(ctx.emailAttachments.filter(a => a._libRecordId).map(a => a._libRecordId));
+    for (const r of recs) {
+      if (existingIds.has(r.recordId)) continue;
+      try {
+        const blob = await fetchLibraryAttachmentBlob(r);
+        ctx.emailAttachments.push(Object.assign({}, blob, { _libRecordId: r.recordId }));
+      } catch (_) {}
+    }
+    _renderPhoneCallModal();
+  });
+}
+
+function _pcRenderAttachList() {
+  const host = document.getElementById('pcAttachList');
+  const ctx = window._PHONE_CALL_CTX;
+  if (!host || !ctx) return;
+  if (!ctx.emailAttachments?.length) { host.innerHTML = ''; return; }
+  host.innerHTML = '<p class="text-[10px] text-ink-500 mb-1">Anhänge:</p>' + ctx.emailAttachments.map((f, i) => {
+    const sz = f.size < 1024 ? f.size + ' B' : (f.size < 1024 * 1024 ? (f.size / 1024).toFixed(1) + ' KB' : (f.size / 1024 / 1024).toFixed(1) + ' MB');
+    return '<div class="flex items-center justify-between gap-2 text-[11px] bg-white border border-ink-200 rounded px-2 py-1 mb-1">' +
+      '<span class="truncate flex-1"><i data-lucide="file" class="w-3 h-3 inline -mt-0.5"></i> ' + escapeHtml(f.name) + ' <span class="text-ink-400">(' + sz + ')</span></span>' +
+      '<button onclick="_pcRemoveAttachment(' + i + ')" class="text-red-500 hover:text-red-700"><i data-lucide="x" class="w-3 h-3"></i></button>' +
+    '</div>';
+  }).join('');
+  if (window.lucide) lucide.createIcons();
+}
+
+function _pcRemoveAttachment(idx) {
+  const ctx = window._PHONE_CALL_CTX;
+  if (!ctx?.emailAttachments) return;
+  ctx.emailAttachments.splice(idx, 1);
+  _pcRenderAttachList();
+}
+
+async function _pcSendMail(btn) {
+  const ctx = window._PHONE_CALL_CTX;
+  if (!ctx) return;
+  const c = ctx.contact;
+  const subject = (document.getElementById('pcMailSubject')?.value || '').trim();
+  const body    = (document.getElementById('pcMailBody')?.value || '').trim();
+  if (!subject || !body) { toast('Betreff und Nachricht sind Pflicht.', 'warn'); return; }
+  setBusy(btn, true, 'Sende…');
+  try {
+    const configs = await ensureEmailConfigsLoaded(c._accountId);
+    const primaryCfg = configs.find(cf => cf.primary_role || cf.default) || configs[0];
+    if (!primaryCfg) throw new Error('Keine Absender-Konfiguration im Mandanten');
+    const me = await fetchAgentMe(c._accountId).catch(() => null);
+    const sig = me?.signature || '';
+    const bodyHtml = appendSignatureHtml(textToHtmlForFreshdesk(body), sig);
+    let created;
+    if (ctx.emailAttachments?.length) {
+      created = await _fdPostMultipart(c._accountId, 'tickets/outbound_email', {
+        subject, description: bodyHtml,
+        email: c.email,
+        email_config_id: String(primaryCfg.id),
+        priority: '1', status: '5',
+      }, ctx.emailAttachments);
+    } else {
+      created = await proxyJson('/freshdesk/' + encodeURIComponent(c._accountId) + '/api/v2/tickets/outbound_email', {
+        method: 'POST',
+        body: JSON.stringify({
+          subject, description: bodyHtml,
+          email: c.email,
+          email_config_id: primaryCfg.id,
+          priority: 1, status: 5,
+        }),
+      });
+    }
+    if (!created?.id) throw new Error('Versand fehlgeschlagen');
+    toast('Follow-up versendet — Ticket #' + created.id, 'success', 5000);
+    document.getElementById('pcMailPrompt').value = '';
+    document.getElementById('pcMailSubject').value = '';
+    document.getElementById('pcMailBody').value = '';
+    ctx.emailAttachments = [];
+    _pcRenderAttachList();
+    setBusy(btn, false);
+  } catch (e) {
+    setBusy(btn, false);
+    toast('Senden fehlgeschlagen: ' + (e.message || e), 'error', 7000);
+  }
 }
 
 /* === v2.46.140: Gespeicherte Suchen — Verwaltungs-Seite =================== */
@@ -26676,6 +26988,13 @@ async function _openSaveSearchModal() {
   let host = document.getElementById('subModalHost');
   if (!host) { host = document.createElement('div'); host.id = 'subModalHost'; document.body.appendChild(host); }
   const defaultTitle = (CONTACTS_STATE.prompt || '').slice(0, 80) + ' · ' + new Date().toLocaleDateString('de-DE');
+  // Telefon-Leitfaden-Vorlagen für den Mandanten laden (für Dropdown)
+  const phsTemplates = await loadPhoneScriptTemplates(accountId);
+  const tplOpts = '<option value="">— ohne Vorlage —</option>' + phsTemplates.map(t => {
+    const isGlobal = !t.account_id;
+    const label = (isGlobal ? '🌐 ' : '') + (t.title || '?') + (t.category_hint ? ' (' + t.category_hint + ')' : '');
+    return '<option value="' + escapeAttr(t.recordId) + '">' + escapeHtml(label) + '</option>';
+  }).join('');
   host.innerHTML =
     '<div class="fixed inset-0 z-[70] flex items-end justify-center bg-black/60" onclick="if(event.target===this)_closeSaveSearchModal()">' +
       '<div class="bg-white w-full max-w-md rounded-t-3xl shadow-2xl flex flex-col safe-bottom" style="max-height:90vh">' +
@@ -26690,6 +27009,9 @@ async function _openSaveSearchModal() {
           '</div>' +
           '<label class="text-xs font-bold text-ink-700 uppercase tracking-wider block">Titel</label>' +
           '<input id="ssTitle" type="text" value="' + escapeAttr(defaultTitle) + '" class="w-full px-3 py-2 border border-ink-300 rounded-lg text-sm">' +
+          '<label class="text-xs font-bold text-ink-700 uppercase tracking-wider block">Telefon-Leitfaden-Vorlage zuweisen <span class="font-normal text-ink-500 normal-case">(optional)</span></label>' +
+          '<select id="ssPhsTpl" class="w-full px-3 py-2 border border-ink-300 rounded-lg text-sm bg-white">' + tplOpts + '</select>' +
+          '<p class="text-[10px] text-ink-500">Wenn zugewiesen erscheint pro Kontakt ein 📞-Icon das den Anruf-Modal mit vorgeneriertem Leitfaden öffnet.</p>' +
         '</div>' +
         '<div class="border-t border-ink-200 p-3 flex gap-2 shrink-0">' +
           '<button onclick="_closeSaveSearchModal()" class="flex-1 bg-ink-100 hover:bg-ink-200 text-ink-700 rounded-xl px-3 py-3 text-sm font-bold">Abbrechen</button>' +
@@ -26713,11 +27035,12 @@ async function _confirmSaveSearch(btn) {
   if (!ctx) return;
   const title = (document.getElementById('ssTitle')?.value || '').trim();
   if (!title) { toast('Bitte Titel angeben.', 'warn'); return; }
+  const tplId = (document.getElementById('ssPhsTpl')?.value || '').trim();
   setBusy(btn, true, 'Speichere…');
   try {
-    await saveSearchSnapshot(ctx.accountId, title, CONTACTS_STATE.prompt || '', CONTACTS_STATE.results);
+    await saveSearchSnapshot(ctx.accountId, title, CONTACTS_STATE.prompt || '', CONTACTS_STATE.results, tplId);
     _closeSaveSearchModal();
-    toast('„' + title + '" gespeichert.', 'success', 3500);
+    toast('„' + title + '" gespeichert' + (tplId ? ' mit zugewiesener Vorlage' : '') + '.', 'success', 4000);
   } catch (e) {
     setBusy(btn, false);
     toast('Speichern fehlgeschlagen: ' + (e.message || e), 'error', 6000);
@@ -27563,6 +27886,8 @@ async function writeEnrichmentToAirtable(accountId, email, data) {
     activity_summary_at:            data.activity_summary_at || '',
     activity_summary_extended:      data.activity_summary_extended || '',
     activity_summary_extended_at:   data.activity_summary_extended_at || '',
+    phone_scripts_json:             data.phone_scripts_json || '',
+    voice_notes_json:               data.voice_notes_json || '',
     enriched_at:                    nowIso(),
     enriched_by:                    me.email || '',
   };
@@ -27584,6 +27909,7 @@ async function writeEnrichmentToAirtable(accountId, email, data) {
       enriched_by:                   'singleLineText',
       activity_summary:              'multilineText',   activity_summary_at:           'singleLineText',
       activity_summary_extended:     'multilineText',   activity_summary_extended_at:  'singleLineText',
+      phone_scripts_json:            'multilineText',   voice_notes_json:              'multilineText',
     };
     if (existing[0]?.id) {
       await airtableUpdateWithAutoField(ENRICH_CACHE_TABLE, existing[0].id, fields, defaultTypes);
@@ -27784,6 +28110,8 @@ async function _hydrateVisibleCards() {
             activity_summary_at:           rec.activity_summary_at || '',
             activity_summary_extended:     rec.activity_summary_extended || '',
             activity_summary_extended_at:  rec.activity_summary_extended_at || '',
+            phone_scripts_json:            rec.phone_scripts_json || '',
+            voice_notes_json:              rec.voice_notes_json || '',
           }, { skipAirtable: true });
         });
       }
@@ -29685,6 +30013,10 @@ function _renderContactSearchCard(row) {
     : '<span class="text-[9px] bg-emerald-50 text-emerald-700 px-1.5 py-0.5 rounded mt-1 inline-block" title="Noch keine Marketing-Mail">neu — noch keine Marketing-Mail</span>';
   // Action-Buttons rechts
   const sendBtn = '<button onclick="event.stopPropagation();openMarketingFromContactModal(' + js(c._accountId) + ',' + js(row.e) + ',' + js(c.name || '') + ',' + Number(c.id || 0) + ', null)" class="text-[10px] bg-orange-50 hover:bg-orange-100 border border-orange-300 text-orange-700 px-2 py-1 rounded inline-flex items-center gap-1" title="Marketing-Email an diesen Kontakt"><i data-lucide="megaphone" class="w-3 h-3"></i></button>';
+  // v2.46.141: 📞-Button erscheint NUR wenn aktive Saved-Search eine Vorlage zugewiesen hat
+  const phoneBtn = CONTACTS_STATE.activePhoneScriptTemplateId
+    ? '<button onclick="event.stopPropagation();_openPhoneCallModal(' + js(row.e) + ')" class="text-[10px] bg-purple-50 hover:bg-purple-100 border border-purple-300 text-purple-700 px-2 py-1 rounded inline-flex items-center gap-1" title="Anruf vorbereiten — Leitfaden + Notiz + Follow-up-Email"><i data-lucide="phone-call" class="w-3 h-3"></i></button>'
+    : '';
   const hideBtn = row.hidden
     ? '<button onclick="event.stopPropagation();_toggleHideContact(' + js(row.e) + ', this)" class="text-[10px] bg-ink-200 hover:bg-ink-300 text-ink-700 px-2 py-1 rounded inline-flex items-center gap-1" title="Wieder einblenden"><i data-lucide="eye" class="w-3 h-3"></i></button>'
     : '<button onclick="event.stopPropagation();_toggleHideContact(' + js(row.e) + ', this)" class="text-[10px] bg-white hover:bg-ink-100 border border-ink-300 text-ink-600 px-2 py-1 rounded inline-flex items-center gap-1" title="Kein Sales-Potenzial — ausblenden"><i data-lucide="eye-off" class="w-3 h-3"></i></button>';
@@ -29757,7 +30089,7 @@ function _renderContactSearchCard(row) {
         mktTags +
       '</div>' +
       '<div class="flex flex-col items-end gap-1 shrink-0">' +
-        '<div class="flex items-center gap-1">' + sendBtn + hideBtn + '</div>' +
+        '<div class="flex items-center gap-1">' + phoneBtn + sendBtn + hideBtn + '</div>' +
         '<span onclick="_toggleContact(' + js(row.e) + ')" class="p-0.5 cursor-pointer"><i data-lucide="' + (isOpen ? 'chevron-up' : 'chevron-down') + '" class="w-4 h-4 text-ink-500"></i></span>' +
       '</div>' +
     '</div>';
