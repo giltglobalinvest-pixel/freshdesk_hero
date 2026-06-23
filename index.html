@@ -767,7 +767,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.143';
+const APP_VERSION = 'v2.46.144';
 
 /* ============================================================
    GLOBAL THEME — v2.46.12
@@ -26565,8 +26565,11 @@ async function openSavedSearch(recordId) {
     toast('Diese Suche enthält keine Kontakte.', 'warn');
     return;
   }
-  // v2.46.143: hydrierte Daten direkt aus Snapshot restoren — kein Re-Hydrate-Loop nötig.
+  // v2.46.143/144: hydrierte Daten direkt aus Snapshot restoren — kein Re-Hydrate-Loop nötig.
+  // v2.46.144: _hydratedBasics nur wenn Snapshot TATSÄCHLICH Daten hat. Sonst läuft
+  // der normale Hydrate (mit Airtable-Cache-First) — wichtig für OLD-Snapshots aus v2.46.140-142.
   CONTACTS_STATE.results = snapshot.map(s => {
+    const hasHydratedData = !!(s.p || s.m || s.j || s.u || s.pf || s.mf);
     const c = {
       email:              s.e,
       id:                 s.i,
@@ -26580,7 +26583,9 @@ async function openSavedSearch(recordId) {
       updated_at:         s.u || '',
       _phoneFromTickets:  !!s.pf,
       _mobileFromTickets: !!s.mf,
-      _hydratedBasics:    true,  // markiert: Basics sind schon da, kein Live-Call nötig
+      _hydratedBasics:    hasHydratedData,
+      _fromCache:         hasHydratedData,
+      _cacheSource:       hasHydratedData ? 'airtable' : '',
     };
     // FS-Sync-Status auch in den In-Memory-Cache schreiben damit die Sync-Badge korrekt rendert
     if (typeof s.hfs !== 'undefined' || typeof s.ifs !== 'undefined') {
