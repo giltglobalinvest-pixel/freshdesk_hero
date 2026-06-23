@@ -761,7 +761,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.131';
+const APP_VERSION = 'v2.46.132';
 
 /* ============================================================
    GLOBAL THEME — v2.46.12
@@ -27012,6 +27012,11 @@ async function _hydrateContactBasics(c) {
     if (cached.job_title && !c.job_title) { c.job_title = cached.job_title; }
     if (cached.updated_at && !c.updated_at) c.updated_at = cached.updated_at;
     c._fromCache = true;
+    // v2.46.132: Origin unterscheiden — Airtable batch-preload vs reiner localStorage
+    const originKey = c._accountId + '|' + String(c.email).toLowerCase();
+    c._cacheSource = (CONTACTS_STATE._airtableOrigins && CONTACTS_STATE._airtableOrigins.has(originKey))
+      ? 'airtable'
+      : 'local';
     return;
   }
   try {
@@ -27081,9 +27086,15 @@ async function _hydrateVisibleCards() {
         if (!byAccount.has(a)) byAccount.set(a, []);
         byAccount.get(a).push(c.email);
       });
+      // v2.46.132: Origin-Tracking — Set für „kam aus Airtable batch-preload"
+      if (!CONTACTS_STATE._airtableOrigins) CONTACTS_STATE._airtableOrigins = new Set();
       for (const [accId, emails] of byAccount) {
         const cache = await loadEnrichmentBatchFromAirtable(accId, emails);
         cache.forEach((rec, email) => {
+          CONTACTS_STATE._airtableOrigins.add(accId + '|' + email);
+          // Auch ins Result-Objekt schreiben damit die Karte das Origin direkt sieht
+          const target = (CONTACTS_STATE.results || []).find(x => String(x.email || '').toLowerCase() === email && x._accountId === accId);
+          if (target) target._enrichedAt = rec.enriched_at || '';
           _writeEnrichCache(accId, email, {
             phone:             rec.phone || '',
             mobile:            rec.mobile || '',
@@ -28727,11 +28738,21 @@ function _renderContactsResults() {
     tplSel.innerHTML = '<option value="">— keine Filterung —</option>' + _contactTplFilterOptions();
     tplSel.value = v;
   }
+  // v2.46.132: Cache-Statistik — wie viele Karten kommen aus Cache (= 0 API-Calls)
+  const fromAirtable = visible.filter(r => r.c._fromCache && r.c._cacheSource === 'airtable').length;
+  const fromLocal    = visible.filter(r => r.c._fromCache && r.c._cacheSource === 'local').length;
+  const fromLive     = visible.length - fromAirtable - fromLocal;
+  const cacheStats = (fromAirtable + fromLocal) > 0
+    ? ' <span class="text-blue-700">· ☁ ' + fromAirtable + ' shared</span>' +
+      ' <span class="text-ink-600">· 💾 ' + fromLocal + ' local</span>' +
+      (fromLive ? ' <span class="text-amber-700">· ⚡ ' + fromLive + ' live</span>' : '')
+    : '';
   host.innerHTML =
     '<p class="text-[10px] text-ink-500 uppercase tracking-wider mb-2 px-1">' +
       visible.length + ' angezeigt · ' + filteredCount + ' im Filter · ' + totalHits + ' Treffer gesamt' +
       (hiddenCount ? ' · ' + hiddenCount + ' ohne Sales-Potenzial' + (CONTACTS_STATE.showHidden ? '' : ' (ausgeblendet)') : '') +
       (CONTACTS_STATE.templateFilter ? ' · Filter: ' + escapeHtml(CONTACTS_STATE.templateFilterMode === 'missing' ? 'OHNE ' : 'MIT ') + '„' + escapeHtml(CONTACTS_STATE.templateFilter) + '"' : '') +
+      cacheStats +
     '</p>' +
     visible.map(row => _renderContactSearchCard(row)).join('') +
     (hasMore
@@ -28775,6 +28796,15 @@ function _renderContactSearchCard(row) {
       ' <button onclick="event.stopPropagation();_pushContactToFs(' + js(row.e) + ', this)" class="text-[9px] bg-emerald-50 hover:bg-emerald-100 border border-emerald-300 text-emerald-700 px-1.5 py-0.5 rounded font-bold inline-flex items-center gap-0.5" title="In Freshsales anlegen (FD-Stammdaten + ermittelte Tel/Funktion)"><i data-lucide="upload" class="w-2.5 h-2.5"></i> push FS</button>';
   } else if (isOpen) {
     syncBadge = '<span class="text-[9px] bg-ink-100 text-ink-500 px-1.5 py-0.5 rounded inline-flex items-center gap-1"><span class="spinner inline-block w-2.5 h-2.5 border-[1.5px]"></span> Sync?</span>';
+  }
+  // v2.46.132: Cache-Indicator — zeigt wenn Daten aus Cache statt aus Live-API kommen.
+  // ☁ = aus shared Airtable-Cache (team-shared)  ·  💾 = nur lokal (eigener Browser)
+  if (c._fromCache) {
+    if (c._cacheSource === 'airtable') {
+      syncBadge += ' <span class="text-[9px] bg-blue-50 text-blue-700 border border-blue-200 px-1.5 py-0.5 rounded font-bold inline-flex items-center gap-0.5" title="Aus Team-Cache (Airtable ContactEnrichmentCache' + (c._enrichedAt ? ' · enriched ' + new Date(c._enrichedAt).toLocaleDateString('de-DE') : '') + ') — keine FD/KI-Calls"><i data-lucide="cloud" class="w-2.5 h-2.5"></i> cached</span>';
+    } else {
+      syncBadge += ' <span class="text-[9px] bg-ink-50 text-ink-600 border border-ink-200 px-1.5 py-0.5 rounded inline-flex items-center gap-0.5" title="Aus lokalem Browser-Cache — keine FD/KI-Calls"><i data-lucide="hard-drive" class="w-2.5 h-2.5"></i> local</span>';
+    }
   }
   // Marketing-Tags: pro eindeutiger Vorlage ein Chip mit Datum
   const uniqueTpl = new Map();
