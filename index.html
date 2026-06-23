@@ -767,7 +767,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.142';
+const APP_VERSION = 'v2.46.143';
 
 /* ============================================================
    GLOBAL THEME — v2.46.12
@@ -26497,15 +26497,28 @@ async function loadSavedSearches(accountId, force) {
 
 async function saveSearchSnapshot(accountId, title, prompt, contacts, phoneScriptTemplateId) {
   const me = APP_KEYS.user || {};
-  // Pro Kontakt nur die Identity-Felder snapshotten — alles andere kommt
-  // beim Re-Open aus dem shared Enrichment-Cache.
-  const snapshot = (contacts || []).map(c => ({
-    e: String(c.email || '').toLowerCase(),
-    i: c.id || 0,
-    n: c.name || '',
-    co: c.company_name || '',
-    a: c._accountId || accountId,
-  })).filter(x => x.e);
+  // v2.46.143: Hydrierte Daten direkt im Snapshot speichern — kein Re-Hydrate beim Re-Open.
+  // Compact-Keys um Storage zu schonen (Airtable multilineText hat ~100k Limit).
+  const snapshot = (contacts || []).map(c => {
+    // FS-Sync-Status aus dem In-Memory-Cache holen falls vorhanden
+    const fsRes = CONTACTS_STATE.fsCheckCache.get(c._accountId + '|' + String(c.email || '').toLowerCase());
+    return {
+      e:  String(c.email || '').toLowerCase(),
+      i:  c.id || 0,
+      n:  c.name || '',
+      co: c.company_name || '',
+      a:  c._accountId || accountId,
+      p:  c.phone || '',
+      m:  c.mobile || '',
+      j:  c.job_title || '',
+      u:  c.updated_at || '',
+      pf: c._phoneFromTickets ? 1 : 0,
+      mf: c._mobileFromTickets ? 1 : 0,
+      hfs: fsRes?.hasFs ? 1 : 0,
+      ifs: fsRes?.inFs ? 1 : 0,
+      fsi: fsRes?.contactId || '',
+    };
+  }).filter(x => x.e);
   const fields = {
     title:                    String(title || '').trim() || 'Unbenannte Suche',
     prompt:                   String(prompt || '').trim(),
@@ -26552,15 +26565,35 @@ async function openSavedSearch(recordId) {
     toast('Diese Suche enthält keine Kontakte.', 'warn');
     return;
   }
-  // CONTACTS_STATE auf den Snapshot setzen + zur Kontakte-Seite navigieren
-  CONTACTS_STATE.results = snapshot.map(s => ({
-    email:        s.e,
-    id:           s.i,
-    name:         s.n,
-    company_name: s.co,
-    _accountId:   s.a,
-    _source:      'saved_search',
-  }));
+  // v2.46.143: hydrierte Daten direkt aus Snapshot restoren — kein Re-Hydrate-Loop nötig.
+  CONTACTS_STATE.results = snapshot.map(s => {
+    const c = {
+      email:              s.e,
+      id:                 s.i,
+      name:               s.n,
+      company_name:       s.co,
+      _accountId:         s.a,
+      _source:            'saved_search',
+      phone:              s.p || '',
+      mobile:             s.m || '',
+      job_title:          s.j || '',
+      updated_at:         s.u || '',
+      _phoneFromTickets:  !!s.pf,
+      _mobileFromTickets: !!s.mf,
+      _hydratedBasics:    true,  // markiert: Basics sind schon da, kein Live-Call nötig
+    };
+    // FS-Sync-Status auch in den In-Memory-Cache schreiben damit die Sync-Badge korrekt rendert
+    if (typeof s.hfs !== 'undefined' || typeof s.ifs !== 'undefined') {
+      CONTACTS_STATE.fsCheckCache.set(s.a + '|' + s.e, {
+        checked: true,
+        hasFs:   !!s.hfs,
+        inFs:    !!s.ifs,
+        contactId: s.fsi || '',
+        _fromCache: true,
+      });
+    }
+    return c;
+  });
   CONTACTS_STATE.prompt = rec.prompt || '';
   CONTACTS_STATE.params = null;
   CONTACTS_STATE.displayCount = 30;
