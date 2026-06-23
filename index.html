@@ -761,7 +761,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.133';
+const APP_VERSION = 'v2.46.134';
 
 /* ============================================================
    GLOBAL THEME — v2.46.12
@@ -27222,7 +27222,8 @@ async function _fetchContactJobTitle(accountId, contactId, email) {
             if (tailPerTicket.trim()) blobs.push(tailPerTicket);
           } catch (_) {}
         }
-        const snippet = blobs.join('\n=== Anderes Ticket ===\n').slice(-3000).trim();
+        // v2.46.134: Snippet auf 2000 reduziert (vorher 3000) — sicherer Abstand zum Token-Limit
+        const snippet = blobs.join('\n=== Anderes Ticket ===\n').slice(-2000).trim();
         if (snippet.length > 30) {
           const sys = 'Du extrahierst die berufliche FUNKTION/ROLLE einer Person aus einer Email-Signatur.\n' +
             'Eine FUNKTION beschreibt was die Person im Unternehmen MACHT — Rolle, Position, Verantwortungsbereich.\n' +
@@ -27241,15 +27242,12 @@ async function _fetchContactJobTitle(accountId, contactId, email) {
             '  - "M.Sc.", "B.Sc.", "MBA" → Bildungsabschluss\n' +
             'Antworte AUSSCHLIESSLICH mit der FUNKTION in 1-5 Worten auf Deutsch ODER mit dem Wort "unknown" wenn keine echte Funktion erkennbar ist (nur akademische Titel zählen nicht). KEIN Markdown, KEINE Anführungszeichen, KEIN zusätzlicher Text.';
           const userMsg = 'Berufliche Funktion/Rolle des Absenders dieser Email „' + norm + '" extrahieren — sitzt meist in der Signatur am Ende, in einer eigenen Zeile UNTER dem Namen (z.B. „Max Mustermann\\nVertriebsleiter Norddeutschland"). Akademische Titel überspringen!\n\n' + snippet;
-          const data = await proxyJson('/anthropic/v1/messages', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              model: 'claude-haiku-4-5-20251001',
-              max_tokens: 40,
-              system: sys,
-              messages: [{ role: 'user', content: userMsg }],
-            })
+          // v2.46.134: Retry-Wrapper
+          const data = await _callAnthropicWithRetry({
+            model: 'claude-haiku-4-5-20251001',
+            max_tokens: 40,
+            system: sys,
+            messages: [{ role: 'user', content: userMsg }],
           });
           recordAiUsage({
             model: 'claude-haiku-4-5-20251001',
@@ -27278,6 +27276,35 @@ async function _fetchContactJobTitle(accountId, contactId, email) {
   }
   CONTACTS_STATE.jobTitleCache.set(norm, result);
   return result;
+}
+
+/* v2.46.134: Retry-Wrapper für Anthropic-Calls. Bei 5xx (transient: val.town-
+   Proxy-Crash, Anthropic-Hiccup) wird automatisch 2× nachgefasst mit exponential
+   backoff. 4xx wird sofort durchgereicht (das ist ein Request-Fehler, kein
+   Retry sinnvoll). */
+async function _callAnthropicWithRetry(body, maxRetries) {
+  const tries = Math.max(0, maxRetries == null ? 2 : maxRetries);
+  let lastErr = null;
+  for (let attempt = 0; attempt <= tries; attempt++) {
+    try {
+      return await proxyJson('/anthropic/v1/messages', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+    } catch (e) {
+      lastErr = e;
+      const status = e?.status || 0;
+      // Nur transient 5xx (500/502/503/504) retry, 4xx ist Request-Fehler
+      if (status < 500 || status >= 600) break;
+      if (attempt < tries) {
+        const wait = 800 * Math.pow(2, attempt); // 800ms, 1600ms, 3200ms…
+        console.warn('Anthropic ' + status + ' — retry ' + (attempt + 1) + '/' + tries + ' in ' + wait + 'ms');
+        await new Promise(r => setTimeout(r, wait));
+      }
+    }
+  }
+  throw lastErr;
 }
 
 /* v2.46.133: Aktivitäts-Zusammenfassung — Haiku 4.5 fasst die letzten 3 Tickets
@@ -27333,7 +27360,8 @@ async function _fetchContactActivitySummary(accountId, contactId, email, force) 
       } catch (_) {}
     }
     if (!blocks.length) return { summary: 'Tickets konnten nicht geladen werden.', from_cache: false };
-    const blob = blocks.join('\n\n').slice(-8000);
+    // v2.46.134: Blob auf 5000 reduziert (vorher 8000) — sicherer Abstand zum Token-Limit
+    const blob = blocks.join('\n\n').slice(-5000);
     const sys = 'Du fasst die letzten Tickets eines Kontakts in einer Freshdesk-App fuer einen Sales-Mitarbeiter zusammen.\n' +
       'Ziel: der Sales-Mitarbeiter soll auf einen Blick verstehen WAS ZULETZT mit diesem Kontakt passiert ist, ob es offene Punkte gibt und ob Sales-Potenzial sichtbar ist.\n' +
       'Antworte mit einer KOMPAKTEN Zusammenfassung auf Deutsch:\n' +
@@ -27342,15 +27370,11 @@ async function _fetchContactActivitySummary(accountId, contactId, email, force) 
       '- Wenn ueber alle Tickets ein Muster erkennbar ist (z.B. wiederkehrendes Problem, Wartungsthema, Beschwerden): das EXPLIZIT erwaehnen.\n' +
       '- Bei erkennbarem Sales-Potenzial (z.B. Frage nach Angebot/Erweiterung/Service): "Sales-Hinweis: …" einfuegen.\n' +
       'KEIN Markdown-# Headers, KEIN HTML, KEINE Anfuehrungszeichen drumherum. Direkter Lesefluss.';
-    const data = await proxyJson('/anthropic/v1/messages', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        model: 'claude-haiku-4-5-20251001',
-        max_tokens: 700,
-        system: sys,
-        messages: [{ role: 'user', content: blob }]
-      })
+    const data = await _callAnthropicWithRetry({
+      model: 'claude-haiku-4-5-20251001',
+      max_tokens: 700,
+      system: sys,
+      messages: [{ role: 'user', content: blob }]
     });
     recordAiUsage({
       model: 'claude-haiku-4-5-20251001',
