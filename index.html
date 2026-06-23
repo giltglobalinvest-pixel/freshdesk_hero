@@ -687,6 +687,9 @@
     <button onclick="navTo('lists'); closeMenu();" class="w-full text-left px-3 py-2 text-sm hover:bg-ink-50 flex items-center gap-2">
       <i data-lucide="list-checks" class="w-4 h-4 text-orange-500"></i> Marketing-Listen
     </button>
+    <button onclick="navTo('phone-scripts'); closeMenu();" class="w-full text-left px-3 py-2 text-sm hover:bg-ink-50 flex items-center gap-2">
+      <i data-lucide="phone-outgoing" class="w-4 h-4 text-purple-500"></i> Telefon-Leitfaden-Vorlagen
+    </button>
     <button onclick="navTo('stats'); closeMenu();" class="w-full text-left px-3 py-2 text-sm hover:bg-ink-50 flex items-center gap-2">
       <i data-lucide="bar-chart-3" class="w-4 h-4 text-indigo-500"></i> Statistiken
     </button>
@@ -761,7 +764,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.136';
+const APP_VERSION = 'v2.46.137';
 
 /* ============================================================
    GLOBAL THEME — v2.46.12
@@ -6961,6 +6964,7 @@ function navTo(page) {
   else if (page === 'marketing') renderFn = renderMarketingPage;
   else if (page === 'attachments') renderFn = renderAttachmentsPage;
   else if (page === 'lists')      renderFn = renderListsPage;
+  else if (page === 'phone-scripts') renderFn = renderPhoneScriptTemplatesPage;
   else if (page === 'contacts')  renderFn = renderContactsPage;
   else if (page === 'stats')     renderFn = renderStatsPage;
   try {
@@ -26131,6 +26135,147 @@ async function bumpAiPromptUsage(recordId, accountId) {
   AI_PROMPTS_STATE.byAccount.delete(accountId);
 }
 
+/* === v2.46.137: Telefon-Leitfaden-Vorlagen ================================
+   Tabelle PhoneScriptTemplates (auto-angelegt beim ersten Save). Pro Vorlage:
+   - title, description, account_id ('' = global), category_hint (z.B. „Geschäftsführer")
+   - system_prompt (KI-Rolle/Stil)
+   - user_template (mit Platzhaltern {{contact_name}}/{{firma}}/{{job_title}}/{{recent_summary}})
+   - is_default ('1' = bevorzugt wählen wenn nichts anderes matcht)
+   - usage_count, created/last_used Audit
+   Auto-Match-Logik bei Per-Kontakt-Anwendung: category_hint-Substring im job_title
+   wins; sonst is_default=1; sonst erste verfügbare. */
+const PHONE_SCRIPT_TEMPLATES_TABLE = 'PhoneScriptTemplates';
+const PHONE_SCRIPTS_STATE = {
+  byAccount: new Map(),  // accountId → templates[]
+  currentAccountId: '',
+  editingRecordId: '',   // aktuell offene Vorlage im Editor
+};
+
+async function loadPhoneScriptTemplates(accountId, force) {
+  if (!accountId) return [];
+  if (!force && PHONE_SCRIPTS_STATE.byAccount.has(accountId)) return PHONE_SCRIPTS_STATE.byAccount.get(accountId);
+  let list = [];
+  try {
+    const filter = "OR({account_id}='" + escapeFormula(accountId) + "',{account_id}='')";
+    const recs = await airtableRead(PHONE_SCRIPT_TEMPLATES_TABLE, {
+      filter,
+      sort: [{ field: 'last_used_at', direction: 'desc' }],
+      maxRecords: 200,
+    });
+    list = recs.map(r => Object.assign({ recordId: r.id }, r.fields));
+  } catch (_) {}
+  PHONE_SCRIPTS_STATE.byAccount.set(accountId, list);
+  return list;
+}
+
+const PHONE_SCRIPT_DEFAULT_TYPES = {
+  title:           'singleLineText',
+  description:     'multilineText',
+  account_id:      'singleLineText',
+  category_hint:   'singleLineText',
+  system_prompt:   'multilineText',
+  user_template:   'multilineText',
+  is_default:      'singleLineText',
+  usage_count:     'number',
+  created_by:      'singleLineText',
+  created_at:      'singleLineText',
+  last_used_at:    'singleLineText',
+};
+
+async function savePhoneScriptTemplate(accountId, fields) {
+  const me = APP_KEYS.user || {};
+  const payload = Object.assign({
+    title:         '',
+    description:   '',
+    account_id:    '',
+    category_hint: '',
+    system_prompt: '',
+    user_template: '',
+    is_default:    '0',
+    usage_count:   0,
+    created_by:    me.email || '',
+    created_at:    nowIso(),
+    last_used_at:  nowIso(),
+  }, fields);
+  if (!payload.title?.trim()) throw new Error('Titel fehlt');
+  if (!payload.system_prompt?.trim()) throw new Error('System-Prompt fehlt');
+  if (!payload.user_template?.trim()) throw new Error('User-Template fehlt');
+  const rec = await airtableWriteWithAutoField(PHONE_SCRIPT_TEMPLATES_TABLE, payload, PHONE_SCRIPT_DEFAULT_TYPES);
+  PHONE_SCRIPTS_STATE.byAccount.delete(accountId);
+  return rec;
+}
+
+async function updatePhoneScriptTemplate(recordId, accountId, patch) {
+  await airtableUpdateWithAutoField(PHONE_SCRIPT_TEMPLATES_TABLE, recordId, patch, PHONE_SCRIPT_DEFAULT_TYPES);
+  PHONE_SCRIPTS_STATE.byAccount.delete(accountId);
+}
+
+async function deletePhoneScriptTemplate(recordId, accountId) {
+  await airtableDelete(PHONE_SCRIPT_TEMPLATES_TABLE, recordId);
+  PHONE_SCRIPTS_STATE.byAccount.delete(accountId);
+}
+
+async function bumpPhoneScriptUsage(recordId, accountId) {
+  const list = PHONE_SCRIPTS_STATE.byAccount.get(accountId) || [];
+  const rec = list.find(r => r.recordId === recordId);
+  const newCount = (Number(rec?.usage_count || 0)) + 1;
+  try {
+    await airtableUpdate(PHONE_SCRIPT_TEMPLATES_TABLE, recordId, { last_used_at: nowIso(), usage_count: newCount });
+  } catch (_) {}
+  PHONE_SCRIPTS_STATE.byAccount.delete(accountId);
+}
+
+/* Wählt die best-passende Vorlage für einen Kontakt aus der Liste:
+   1) category_hint substring-match im job_title (case-insensitive)
+   2) is_default=1
+   3) erste Vorlage */
+function _pickBestPhoneScriptForContact(c, templates) {
+  if (!Array.isArray(templates) || !templates.length) return null;
+  const job = String(c?.job_title || '').toLowerCase();
+  if (job) {
+    const byCategory = templates.find(t => {
+      const h = String(t.category_hint || '').toLowerCase().trim();
+      return h && job.includes(h);
+    });
+    if (byCategory) return byCategory;
+  }
+  const def = templates.find(t => String(t.is_default) === '1' || String(t.is_default) === 'true');
+  return def || templates[0];
+}
+
+/* KI-Generator: nimmt Vorlage + Kontaktdaten + ggf. Activity-Summary, fragt Haiku */
+async function _generatePhoneScript(c, template) {
+  if (!c || !template) throw new Error('Kontakt oder Vorlage fehlt');
+  const recentSummary = c?._summary?.summary || '(noch keine Aktivitäts-Zusammenfassung geladen)';
+  const placeholders = {
+    contact_name:   c.name || c.email || '',
+    firma:          c.company_name || '',
+    job_title:      c.job_title || '',
+    email:          c.email || '',
+    phone:          c.phone || '',
+    mobile:         c.mobile || '',
+    recent_summary: recentSummary,
+    user_name:      APP_KEYS.user?.name || '',
+  };
+  const userText = String(template.user_template || '').replace(/\{\{(\w+)\}\}/g, (m, k) => placeholders[k] != null ? placeholders[k] : m);
+  const data = await _callAnthropicWithRetry({
+    model: 'claude-haiku-4-5-20251001',
+    max_tokens: 1200,
+    system: String(template.system_prompt || ''),
+    messages: [{ role: 'user', content: userText }],
+  });
+  recordAiUsage({
+    model: 'claude-haiku-4-5-20251001',
+    input_tokens:  data?.usage?.input_tokens || 0,
+    output_tokens: data?.usage?.output_tokens || 0,
+    feature: 'phone_script',
+    accountId: c._accountId,
+  });
+  const script = (data?.content?.[0]?.text || '').trim();
+  bumpPhoneScriptUsage(template.recordId, c._accountId).catch(() => {});
+  return script;
+}
+
 /* === v2.46.119: Kontakt-Listen pro Mandant ================================
    Persistente Listen von Kontakten für sequenzielles Marketing-Abarbeiten.
    Tabellen werden beim ersten Save automatisch angelegt.
@@ -26288,6 +26433,218 @@ async function deleteContactList(listId, accountId) {
   await airtableDelete(CONTACT_LISTS_TABLE, listId);
   LISTS_STATE.itemsByList.delete(listId);
   LISTS_STATE.byAccount.delete(accountId);
+}
+
+/* === v2.46.137: Telefon-Leitfaden-Vorlagen — Verwaltungs-Seite ============ */
+async function renderPhoneScriptTemplatesPage() {
+  setPageTitle('Telefon-Leitfaden-Vorlagen', 'KI-Prompt-Vorlagen pro Mandant + global');
+  const accounts = APP_STATE.accounts || [];
+  if (!PHONE_SCRIPTS_STATE.currentAccountId || !accounts.find(a => a.id === PHONE_SCRIPTS_STATE.currentAccountId)) {
+    PHONE_SCRIPTS_STATE.currentAccountId = APP_STATE.currentAccount && APP_STATE.currentAccount !== 'all'
+      ? APP_STATE.currentAccount
+      : (accounts[0]?.id || '');
+  }
+  const accountOpts = accounts.map(a =>
+    '<option value="' + escapeAttr(a.id) + '"' + (a.id === PHONE_SCRIPTS_STATE.currentAccountId ? ' selected' : '') + '>' + escapeHtml(a.name || a.id) + '</option>'
+  ).join('');
+  $('pageContent').innerHTML = '<div class="space-y-3 max-w-3xl mx-auto">' +
+    '<div class="bg-gradient-to-br from-purple-50 to-brand-50 border border-purple-200 rounded-xl p-3 text-[12px] text-purple-900">' +
+      '<p class="font-bold inline-flex items-center gap-1 mb-1"><i data-lucide="phone-outgoing" class="w-4 h-4"></i> Telefon-Leitfaden-Vorlagen</p>' +
+      '<p>Pro Mandant (oder global) speicherst du KI-Vorlagen für Telefonleitfäden. Die App nimmt automatisch die passende anhand des <code>category_hint</code> (matcht im Job-Title des Kontakts) — du kannst aber auch manuell wählen.</p>' +
+      '<p class="mt-1"><b>Platzhalter im user_template:</b> <code>{{contact_name}}</code>, <code>{{firma}}</code>, <code>{{job_title}}</code>, <code>{{email}}</code>, <code>{{phone}}</code>, <code>{{mobile}}</code>, <code>{{recent_summary}}</code>, <code>{{user_name}}</code></p>' +
+    '</div>' +
+    '<div class="bg-white rounded-xl border border-ink-200 p-3 flex items-center gap-2">' +
+      '<label class="text-[11px] inline-flex items-center gap-1.5 flex-1">' +
+        '<i data-lucide="building-2" class="w-3.5 h-3.5 text-ink-500"></i>' +
+        '<span class="font-semibold text-ink-600 uppercase tracking-wider">Mandant:</span>' +
+        '<select id="phsAccount" onchange="_onPhsAccount(this.value)" class="flex-1 px-2 py-1.5 border border-ink-300 rounded-lg text-sm bg-white">' +
+          accountOpts +
+        '</select>' +
+      '</label>' +
+      '<button onclick="_openPhoneScriptEditor(\'\')" class="px-3 py-2 bg-purple-600 hover:bg-purple-700 text-white rounded-lg text-sm font-bold inline-flex items-center gap-1"><i data-lucide="plus" class="w-4 h-4"></i> Neue Vorlage</button>' +
+    '</div>' +
+    '<div id="phsList"><div class="bg-white rounded-xl border border-ink-200 p-6 text-center"><span class="spinner inline-block w-5 h-5 border-[2px] text-purple-500"></span><p class="text-sm text-ink-500 mt-2">Lade Vorlagen…</p></div></div>' +
+  '</div>';
+  if (window.lucide) lucide.createIcons();
+  await loadPhoneScriptTemplates(PHONE_SCRIPTS_STATE.currentAccountId);
+  _renderPhoneScriptTemplatesList();
+}
+
+function _onPhsAccount(v) {
+  PHONE_SCRIPTS_STATE.currentAccountId = v;
+  loadPhoneScriptTemplates(v).then(_renderPhoneScriptTemplatesList);
+}
+
+function _renderPhoneScriptTemplatesList() {
+  const host = document.getElementById('phsList');
+  if (!host) return;
+  const list = PHONE_SCRIPTS_STATE.byAccount.get(PHONE_SCRIPTS_STATE.currentAccountId) || [];
+  if (!list.length) {
+    host.innerHTML = '<div class="bg-white rounded-xl border border-dashed border-ink-300 p-6 text-center text-sm text-ink-500">' +
+      '<i data-lucide="phone-outgoing" class="w-8 h-8 inline text-ink-400"></i>' +
+      '<p class="mt-2">Noch keine Telefon-Leitfaden-Vorlage für diesen Mandanten.</p>' +
+      '<p class="text-[11px] text-ink-400 mt-1">Klick auf <b>+ Neue Vorlage</b> oben.</p>' +
+    '</div>';
+    if (window.lucide) lucide.createIcons();
+    return;
+  }
+  host.innerHTML = '<p class="text-[10px] text-ink-500 uppercase tracking-wider mb-2 px-1">' + list.length + ' Vorlage' + (list.length === 1 ? '' : 'n') + '</p>' +
+    list.map(t => {
+      const isGlobal = !t.account_id;
+      const isDefault = String(t.is_default) === '1' || String(t.is_default) === 'true';
+      return '<div class="bg-white rounded-xl border border-ink-200 mb-2 p-3">' +
+        '<div class="flex items-start justify-between gap-2">' +
+          '<div class="flex-1 min-w-0">' +
+            '<p class="font-bold text-ink-900 text-sm">' + (isGlobal ? '🌐 ' : '') + escapeHtml(t.title || '(ohne Titel)') + (isDefault ? ' <span class="text-[9px] bg-emerald-100 text-emerald-700 px-1.5 py-0.5 rounded font-bold">default</span>' : '') + '</p>' +
+            (t.description ? '<p class="text-[11px] text-ink-600 mt-0.5">' + escapeHtml(t.description) + '</p>' : '') +
+            (t.category_hint ? '<p class="text-[10px] text-purple-700 mt-1">Match: Job-Title enthält <b>„' + escapeHtml(t.category_hint) + '"</b></p>' : '') +
+            '<p class="text-[10px] text-ink-400 mt-1">Nutzungen: ' + (Number(t.usage_count) || 0) + ' · zuletzt: ' + escapeHtml(t.last_used_at ? new Date(t.last_used_at).toLocaleDateString('de-DE') : '?') + '</p>' +
+          '</div>' +
+          '<div class="flex gap-1 shrink-0">' +
+            '<button onclick="_openPhoneScriptEditor(' + escapeAttr(JSON.stringify(t.recordId)) + ')" class="text-[10px] bg-brand-50 hover:bg-brand-100 text-brand-700 px-2 py-1 rounded inline-flex items-center gap-1"><i data-lucide="pen-line" class="w-3 h-3"></i> Bearbeiten</button>' +
+            '<button onclick="_deletePhsTemplate(' + escapeAttr(JSON.stringify(t.recordId)) + ')" class="text-[10px] bg-red-50 hover:bg-red-100 text-red-700 px-2 py-1 rounded inline-flex items-center gap-1"><i data-lucide="trash-2" class="w-3 h-3"></i></button>' +
+          '</div>' +
+        '</div>' +
+      '</div>';
+    }).join('');
+  if (window.lucide) lucide.createIcons();
+}
+
+async function _openPhoneScriptEditor(recordId) {
+  PHONE_SCRIPTS_STATE.editingRecordId = recordId || '';
+  let rec = {};
+  if (recordId) {
+    const list = await loadPhoneScriptTemplates(PHONE_SCRIPTS_STATE.currentAccountId);
+    rec = list.find(t => t.recordId === recordId) || {};
+  }
+  let host = document.getElementById('subModalHost');
+  if (!host) { host = document.createElement('div'); host.id = 'subModalHost'; document.body.appendChild(host); }
+  host.innerHTML =
+    '<div class="fixed inset-0 z-[70] flex items-end justify-center bg-black/60" onclick="if(event.target===this)_closePhsEditor()">' +
+      '<div class="bg-white w-full max-w-2xl rounded-t-3xl shadow-2xl flex flex-col safe-bottom" style="max-height:94vh">' +
+        '<div class="safe-top px-4 py-3 border-b border-ink-200 flex items-center justify-between gap-2 shrink-0">' +
+          '<h3 class="font-bold text-ink-900 inline-flex items-center gap-2"><i data-lucide="phone-outgoing" class="w-5 h-5 text-purple-600"></i> ' + (recordId ? 'Vorlage bearbeiten' : 'Neue Vorlage anlegen') + '</h3>' +
+          '<button onclick="_closePhsEditor()" class="w-9 h-9 rounded-lg hover:bg-ink-100 flex items-center justify-center"><i data-lucide="x" class="w-5 h-5"></i></button>' +
+        '</div>' +
+        '<div class="flex-1 overflow-y-auto p-4 space-y-3">' +
+          '<label class="text-xs font-bold text-ink-700 uppercase tracking-wider block">Titel *</label>' +
+          '<input id="phsTitle" type="text" value="' + escapeAttr(rec.title || '') + '" placeholder="z.B. „Geschäftsführer Aufzugsfirmen — Erstkontakt"" class="w-full px-3 py-2 border border-ink-300 rounded-lg text-sm">' +
+          '<label class="text-xs font-bold text-ink-700 uppercase tracking-wider block">Beschreibung (optional)</label>' +
+          '<input id="phsDescription" type="text" value="' + escapeAttr(rec.description || '') + '" placeholder="kurz wozu diese Vorlage gut ist" class="w-full px-3 py-2 border border-ink-300 rounded-lg text-sm">' +
+          '<label class="text-xs font-bold text-ink-700 uppercase tracking-wider block">Category-Hint <span class="font-normal text-ink-500 normal-case">— Substring im Job-Title für Auto-Auswahl</span></label>' +
+          '<input id="phsCategoryHint" type="text" value="' + escapeAttr(rec.category_hint || '') + '" placeholder="z.B. „Geschäftsführer" oder „Service" oder „Technik"" class="w-full px-3 py-2 border border-ink-300 rounded-lg text-sm">' +
+          '<label class="text-xs font-bold text-ink-700 uppercase tracking-wider block">System-Prompt (KI-Rolle) *</label>' +
+          '<textarea id="phsSystemPrompt" rows="4" placeholder="z.B. „Du bist Vertriebsmitarbeiter bei FLP Lift Parts. Du baust Telefonleitfäden für Erstkontakte mit Aufzugsbau-Entscheidern. Stil: professionell, knapp, ergebnisorientiert."" class="w-full px-3 py-2 border border-ink-300 rounded-lg text-[12px] font-mono leading-snug resize-y">' + escapeHtml(rec.system_prompt || '') + '</textarea>' +
+          '<label class="text-xs font-bold text-ink-700 uppercase tracking-wider block">User-Template *</label>' +
+          '<textarea id="phsUserTemplate" rows="9" placeholder="Erstelle einen Telefonleitfaden für folgenden Kontakt:\nName: {{contact_name}}\nFirma: {{firma}}\nFunktion: {{job_title}}\n\nLetzte Kontakte/Tickets:\n{{recent_summary}}\n\nGib einen kompakten Leitfaden mit:\n1. Eisbrecher (max 2 Sätze)\n2. Wertversprechen (was bringt es dem Kontakt?)\n3. 3-5 Smart-Fragen zur Bedarfsklärung\n4. Empfohlener Call-to-Action" class="w-full px-3 py-2 border border-ink-300 rounded-lg text-[12px] font-mono leading-snug resize-y">' + escapeHtml(rec.user_template || '') + '</textarea>' +
+          '<p class="text-[10px] text-ink-500">Platzhalter: <code>{{contact_name}}</code>, <code>{{firma}}</code>, <code>{{job_title}}</code>, <code>{{email}}</code>, <code>{{phone}}</code>, <code>{{mobile}}</code>, <code>{{recent_summary}}</code>, <code>{{user_name}}</code></p>' +
+          '<div class="flex flex-wrap gap-2 items-center pt-2 border-t border-ink-100">' +
+            '<label class="text-[11px] inline-flex items-center gap-1 cursor-pointer"><input id="phsIsGlobal" type="checkbox" ' + (rec.account_id === '' || rec.account_id == null ? 'checked' : '') + ' class="w-3.5 h-3.5 accent-purple-600"> Global (alle Mandanten)</label>' +
+            '<label class="text-[11px] inline-flex items-center gap-1 cursor-pointer"><input id="phsIsDefault" type="checkbox" ' + (String(rec.is_default) === '1' || String(rec.is_default) === 'true' ? 'checked' : '') + ' class="w-3.5 h-3.5 accent-emerald-600"> Default (Fallback wenn nichts matcht)</label>' +
+          '</div>' +
+        '</div>' +
+        '<div class="border-t border-ink-200 p-3 flex gap-2 shrink-0">' +
+          '<button onclick="_closePhsEditor()" class="flex-1 bg-ink-100 hover:bg-ink-200 text-ink-700 rounded-xl px-3 py-3 text-sm font-bold">Abbrechen</button>' +
+          '<button onclick="_savePhsFromEditor(this)" class="flex-[2] bg-purple-600 hover:bg-purple-700 text-white rounded-xl px-3 py-3 text-sm font-bold inline-flex items-center justify-center gap-1.5"><i data-lucide="save" class="w-4 h-4"></i> Speichern</button>' +
+        '</div>' +
+      '</div>' +
+    '</div>';
+  if (window.lucide) lucide.createIcons();
+}
+
+function _closePhsEditor() {
+  PHONE_SCRIPTS_STATE.editingRecordId = '';
+  const host = document.getElementById('subModalHost');
+  if (host) host.innerHTML = '';
+}
+
+async function _savePhsFromEditor(btn) {
+  const recordId = PHONE_SCRIPTS_STATE.editingRecordId;
+  const accountId = PHONE_SCRIPTS_STATE.currentAccountId;
+  const fields = {
+    title:         (document.getElementById('phsTitle')?.value || '').trim(),
+    description:   (document.getElementById('phsDescription')?.value || '').trim(),
+    category_hint: (document.getElementById('phsCategoryHint')?.value || '').trim(),
+    system_prompt: (document.getElementById('phsSystemPrompt')?.value || '').trim(),
+    user_template: (document.getElementById('phsUserTemplate')?.value || '').trim(),
+    account_id:    document.getElementById('phsIsGlobal')?.checked ? '' : accountId,
+    is_default:    document.getElementById('phsIsDefault')?.checked ? '1' : '0',
+  };
+  if (!fields.title || !fields.system_prompt || !fields.user_template) {
+    toast('Titel, System-Prompt und User-Template sind Pflicht.', 'warn', 4000);
+    return;
+  }
+  setBusy(btn, true);
+  try {
+    if (recordId) {
+      await updatePhoneScriptTemplate(recordId, accountId, fields);
+      toast('Vorlage aktualisiert.', 'success', 3000);
+    } else {
+      await savePhoneScriptTemplate(accountId, fields);
+      toast('Vorlage angelegt.', 'success', 3000);
+    }
+    _closePhsEditor();
+    await loadPhoneScriptTemplates(accountId, true);
+    _renderPhoneScriptTemplatesList();
+  } catch (e) {
+    setBusy(btn, false);
+    toast('Speichern fehlgeschlagen: ' + (e.message || e), 'error', 6000);
+  }
+}
+
+async function _deletePhsTemplate(recordId) {
+  if (!confirm('Vorlage löschen?')) return;
+  try {
+    await deletePhoneScriptTemplate(recordId, PHONE_SCRIPTS_STATE.currentAccountId);
+    await loadPhoneScriptTemplates(PHONE_SCRIPTS_STATE.currentAccountId, true);
+    _renderPhoneScriptTemplatesList();
+    toast('Gelöscht.', 'success', 2500);
+  } catch (e) {
+    toast('Löschen fehlgeschlagen: ' + (e.message || e), 'error', 5000);
+  }
+}
+
+/* === Per-Kontakt Telefon-Leitfaden-Generator (in der Karte) === */
+async function _runPhoneScriptForContact(email, btn) {
+  const c = CONTACTS_STATE.results.find(x => String(x.email || '').toLowerCase() === email);
+  if (!c) return;
+  const templates = await loadPhoneScriptTemplates(c._accountId);
+  if (!templates.length) {
+    toast('Noch keine Vorlage angelegt. Menü → Telefon-Leitfaden-Vorlagen → + Neue Vorlage.', 'warn', 8000);
+    return;
+  }
+  const sel = document.getElementById('phsTplSel_' + _emailKey(email));
+  let templateId = sel?.value || '';
+  if (!templateId) {
+    const best = _pickBestPhoneScriptForContact(c, templates);
+    templateId = best?.recordId || templates[0].recordId;
+  }
+  const tpl = templates.find(t => t.recordId === templateId);
+  if (!tpl) return;
+  setBusy(btn, true, 'KI generiert…');
+  c._phoneScriptLoading = true;
+  _renderContactsResults();
+  try {
+    const script = await _generatePhoneScript(c, tpl);
+    c._phoneScript = { text: script, template_title: tpl.title, template_id: tpl.recordId, at: Date.now() };
+  } catch (e) {
+    toast('Leitfaden-Generierung fehlgeschlagen: ' + (e.message || e), 'error', 6000);
+  } finally {
+    c._phoneScriptLoading = false;
+    setBusy(btn, false);
+    _renderContactsResults();
+  }
+}
+
+function _emailKey(email) { return String(email || '').toLowerCase().replace(/[^a-z0-9]/g, '_'); }
+
+async function _copyPhoneScript(email) {
+  const c = CONTACTS_STATE.results.find(x => String(x.email || '').toLowerCase() === email);
+  if (!c?._phoneScript?.text) return;
+  try {
+    await navigator.clipboard.writeText(c._phoneScript.text);
+    toast('Leitfaden kopiert.', 'success', 2500);
+  } catch (_) { toast('Konnte nicht kopieren — Browser blockiert Clipboard.', 'warn', 4000); }
 }
 
 /* Liefert die Optionen für ein <select>-Element. Mit Mandanten-Tag bei globalen. */
@@ -28710,6 +29067,10 @@ function _toggleContact(email) {
           .catch(() => {})
           .finally(() => { c._summaryLoading = false; _renderContactsResults(); });
       }
+      // v2.46.137: Telefon-Leitfaden-Vorlagen für diesen Mandanten pre-laden (nur Read, kein KI-Call)
+      if (!PHONE_SCRIPTS_STATE.byAccount.has(c._accountId)) {
+        loadPhoneScriptTemplates(c._accountId).then(() => _renderContactsResults()).catch(() => {});
+      }
     }
   }
   _renderContactsResults();
@@ -29154,7 +29515,46 @@ function _renderContactSearchCard(row) {
         }).join('') +
       '</div>'
     : '<div class="px-3 py-3 text-[11px] text-ink-500 italic text-center">Noch keine Marketing-Mail an diesen Kontakt versandt.</div>';
-  return '<div class="bg-white rounded-xl border border-ink-200 mb-2 overflow-hidden">' + head + summaryBlock + stamm + actions + history + '</div>';
+  // v2.46.137: Telefon-Leitfaden-Block (lazy, on-demand)
+  const phoneScriptBlock = (function () {
+    const templates = PHONE_SCRIPTS_STATE.byAccount.get(c._accountId) || [];
+    if (!templates.length) {
+      return '<div class="px-3 py-2 bg-purple-50/50 border-b border-purple-200 text-[11px] text-purple-800 flex items-center gap-2">' +
+        '<i data-lucide="phone-outgoing" class="w-3.5 h-3.5"></i>' +
+        '<span>Keine Telefon-Leitfaden-Vorlage angelegt — <a class="underline cursor-pointer font-bold" onclick="navTo(' + js('phone-scripts') + ')">Menü → Telefon-Leitfaden-Vorlagen</a></span>' +
+      '</div>';
+    }
+    const best = _pickBestPhoneScriptForContact(c, templates);
+    const tplOpts = templates.map(t => {
+      const isGlobal = !t.account_id;
+      const label = (isGlobal ? '🌐 ' : '') + (t.title || '?') + (t.category_hint ? ' (' + t.category_hint + ')' : '');
+      return '<option value="' + escapeAttr(t.recordId) + '"' + (t.recordId === best?.recordId ? ' selected' : '') + '>' + escapeHtml(label) + '</option>';
+    }).join('');
+    let inner;
+    if (c._phoneScriptLoading) {
+      inner = '<p class="text-[11px] text-purple-700 inline-flex items-center gap-1.5"><span class="spinner inline-block w-3 h-3 border-[2px]"></span> KI erzeugt Leitfaden…</p>';
+    } else if (c._phoneScript?.text) {
+      const ageSec = Math.round((Date.now() - c._phoneScript.at) / 1000);
+      const ageLabel = ageSec < 60 ? 'gerade erstellt' : (ageSec < 3600 ? 'vor ' + Math.round(ageSec / 60) + ' min' : 'älter');
+      inner = '<p class="text-[10px] text-purple-600 italic mb-1">' + escapeHtml(c._phoneScript.template_title || '?') + ' · ' + ageLabel + '</p>' +
+        '<p class="text-[11px] text-purple-900 leading-relaxed whitespace-pre-line bg-white rounded p-2 border border-purple-200">' + escapeHtml(c._phoneScript.text) + '</p>' +
+        '<div class="flex gap-1.5 mt-1.5">' +
+          '<button onclick="event.stopPropagation();_copyPhoneScript(' + js(row.e) + ')" class="text-[10px] bg-white hover:bg-purple-100 border border-purple-300 text-purple-700 px-2 py-1 rounded inline-flex items-center gap-1"><i data-lucide="clipboard" class="w-2.5 h-2.5"></i> Kopieren</button>' +
+          '<button onclick="event.stopPropagation();_runPhoneScriptForContact(' + js(row.e) + ', this)" class="text-[10px] bg-white hover:bg-purple-100 border border-purple-300 text-purple-700 px-2 py-1 rounded inline-flex items-center gap-1"><i data-lucide="refresh-cw" class="w-2.5 h-2.5"></i> Neu</button>' +
+        '</div>';
+    } else {
+      inner = '';
+    }
+    return '<div class="px-3 py-2 bg-purple-50 border-b border-purple-200">' +
+      '<p class="text-[11px] font-bold text-purple-800 inline-flex items-center gap-1 mb-1.5"><i data-lucide="phone-outgoing" class="w-3.5 h-3.5"></i> Gesprächsleitfaden</p>' +
+      '<div class="flex gap-1.5 items-center mb-1.5">' +
+        '<select id="phsTplSel_' + _emailKey(row.e) + '" class="flex-1 px-2 py-1.5 border border-purple-300 rounded-lg text-[11px] bg-white">' + tplOpts + '</select>' +
+        '<button onclick="event.stopPropagation();_runPhoneScriptForContact(' + js(row.e) + ', this)" class="px-3 py-1.5 bg-purple-600 hover:bg-purple-700 text-white rounded-lg text-xs font-bold inline-flex items-center gap-1"><i data-lucide="wand-2" class="w-3 h-3"></i> Generieren</button>' +
+      '</div>' +
+      inner +
+    '</div>';
+  })();
+  return '<div class="bg-white rounded-xl border border-ink-200 mb-2 overflow-hidden">' + head + summaryBlock + phoneScriptBlock + stamm + actions + history + '</div>';
 }
 
 async function renderRulesPage() {
