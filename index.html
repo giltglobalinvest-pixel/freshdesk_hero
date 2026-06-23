@@ -764,7 +764,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.137';
+const APP_VERSION = 'v2.46.138';
 
 /* ============================================================
    GLOBAL THEME — v2.46.12
@@ -1198,6 +1198,21 @@ async function airtableDelete(table, id) {
   return res.json();
 }
 
+/* v2.46.138: baut die korrekte Airtable-Field-Spec inkl. options-Block für
+   Field-Typen die das verlangen (number → precision, currency → symbol, etc.).
+   Vorher: `{ name, type: 'number' }` → 422 INVALID_FIELD_TYPE_OPTIONS_FOR_CREATE. */
+function _airtableFieldSpec(name, type) {
+  const t = type || 'singleLineText';
+  const spec = { name, type: t };
+  if (t === 'number')       spec.options = { precision: 0 };
+  else if (t === 'currency') spec.options = { precision: 2, symbol: '€' };
+  else if (t === 'percent')  spec.options = { precision: 0 };
+  else if (t === 'rating')   spec.options = { max: 5, color: 'yellowBright', icon: 'star' };
+  else if (t === 'date')     spec.options = { dateFormat: { name: 'iso' } };
+  else if (t === 'dateTime') spec.options = { dateFormat: { name: 'iso' }, timeFormat: { name: '24hour' }, timeZone: 'utc' };
+  return spec;
+}
+
 async function ensureTable(tableName, fields) {
   if (!APP_KEYS.airtableWriteKey) throw new Error('Bitte einloggen');
   const metaRes = await fetch(
@@ -1239,7 +1254,7 @@ async function ensureAirtableField(tableName, fieldName, fieldType) {
     {
       method: 'POST',
       headers: { 'Authorization': 'Bearer ' + APP_KEYS.airtableWriteKey, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name: fieldName, type: fieldType || 'singleLineText' }),
+      body: JSON.stringify(_airtableFieldSpec(fieldName, fieldType || 'singleLineText')),
     }
   );
   if (!addRes.ok) { const t = await addRes.text(); throw new Error('ensureAirtableField: ' + t.slice(0, 200)); }
@@ -1294,7 +1309,7 @@ async function _runWithAutoField(opLabel, runFn, fields, defaultTypes) {
         tableTried = true;
         console.log('Auto-Tabelle anlegen: ' + opLabel);
         try {
-          const tableFields = Object.entries(defaultTypes).map(([name, type]) => ({ name, type: type || 'singleLineText' }));
+          const tableFields = Object.entries(defaultTypes).map(([name, type]) => _airtableFieldSpec(name, type));
           if (!tableFields.length) throw new Error('Kein Schema in defaultTypes — kann Tabelle nicht anlegen');
           await ensureTable(opLabel, tableFields);
           // Längere Pause, damit Airtable die neue Tabelle propagiert
