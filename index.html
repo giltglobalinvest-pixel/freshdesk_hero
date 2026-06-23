@@ -764,7 +764,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.138';
+const APP_VERSION = 'v2.46.139';
 
 /* ============================================================
    GLOBAL THEME — v2.46.12
@@ -26585,8 +26585,29 @@ async function _savePhsFromEditor(btn) {
     account_id:    document.getElementById('phsIsGlobal')?.checked ? '' : accountId,
     is_default:    document.getElementById('phsIsDefault')?.checked ? '1' : '0',
   };
-  if (!fields.title || !fields.system_prompt || !fields.user_template) {
-    toast('Titel, System-Prompt und User-Template sind Pflicht.', 'warn', 4000);
+  // v2.46.139: Sichtbare Validation — fehlende Pflichtfelder rot umranden + scrollen
+  const required = [
+    { id: 'phsTitle',          value: fields.title,         label: 'Titel' },
+    { id: 'phsSystemPrompt',   value: fields.system_prompt, label: 'System-Prompt' },
+    { id: 'phsUserTemplate',   value: fields.user_template, label: 'User-Template' },
+  ];
+  const missing = required.filter(r => !r.value);
+  // Reset Borders bei allen Pflichtfeldern
+  required.forEach(r => {
+    const el = document.getElementById(r.id);
+    if (el) el.classList.remove('ring-2', 'ring-red-500', 'border-red-400');
+  });
+  if (missing.length) {
+    missing.forEach(r => {
+      const el = document.getElementById(r.id);
+      if (el) el.classList.add('ring-2', 'ring-red-500', 'border-red-400');
+    });
+    const firstMissing = document.getElementById(missing[0].id);
+    if (firstMissing) {
+      firstMissing.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      setTimeout(() => firstMissing.focus(), 350);
+    }
+    toast('Pflichtfeld leer: ' + missing.map(m => m.label).join(', '), 'warn', 5000);
     return;
   }
   setBusy(btn, true);
