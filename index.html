@@ -761,7 +761,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.132';
+const APP_VERSION = 'v2.46.133';
 
 /* ============================================================
    GLOBAL THEME — v2.46.12
@@ -26893,6 +26893,8 @@ async function writeEnrichmentToAirtable(accountId, email, data) {
     has_fs:               data.hasFs ? 'true' : 'false',
     in_fs:                data.inFs ? 'true' : 'false',
     fs_contact_id:        data.fsContactId || '',
+    activity_summary:     data.activity_summary || '',
+    activity_summary_at:  data.activity_summary_at || '',
     enriched_at:          nowIso(),
     enriched_by:          me.email || '',
   };
@@ -26906,13 +26908,14 @@ async function writeEnrichmentToAirtable(accountId, email, data) {
       await airtableUpdate(ENRICH_CACHE_TABLE, existing[0].id, fields);
     } else {
       await airtableWriteWithAutoField(ENRICH_CACHE_TABLE, fields, {
-        email:            'singleLineText',  account_id:       'singleLineText',
-        phone:            'singleLineText',  mobile:           'singleLineText',
-        job_title:        'singleLineText',  updated_at:       'singleLineText',
-        phone_source:     'singleLineText',  mobile_source:    'singleLineText',
-        has_fs:           'singleLineText',  in_fs:            'singleLineText',
-        fs_contact_id:    'singleLineText',  enriched_at:      'singleLineText',
-        enriched_by:      'singleLineText',
+        email:               'singleLineText',  account_id:          'singleLineText',
+        phone:               'singleLineText',  mobile:              'singleLineText',
+        job_title:           'singleLineText',  updated_at:          'singleLineText',
+        phone_source:        'singleLineText',  mobile_source:       'singleLineText',
+        has_fs:              'singleLineText',  in_fs:               'singleLineText',
+        fs_contact_id:       'singleLineText',  enriched_at:         'singleLineText',
+        enriched_by:         'singleLineText',
+        activity_summary:    'multilineText',   activity_summary_at: 'singleLineText',
       });
     }
   } catch (_) { /* Tabelle existiert ggf. noch nicht — wird beim ersten Write angelegt */ }
@@ -27096,15 +27099,17 @@ async function _hydrateVisibleCards() {
           const target = (CONTACTS_STATE.results || []).find(x => String(x.email || '').toLowerCase() === email && x._accountId === accId);
           if (target) target._enrichedAt = rec.enriched_at || '';
           _writeEnrichCache(accId, email, {
-            phone:             rec.phone || '',
-            mobile:            rec.mobile || '',
-            job_title:         rec.job_title || '',
-            updated_at:        rec.updated_at || '',
-            phoneFromTickets:  rec.phone_source  === 'ticket',
-            mobileFromTickets: rec.mobile_source === 'ticket',
-            hasFs:             rec.has_fs === 'true',
-            inFs:              rec.in_fs === 'true',
-            fsContactId:       rec.fs_contact_id || '',
+            phone:                rec.phone || '',
+            mobile:               rec.mobile || '',
+            job_title:            rec.job_title || '',
+            updated_at:           rec.updated_at || '',
+            phoneFromTickets:     rec.phone_source  === 'ticket',
+            mobileFromTickets:    rec.mobile_source === 'ticket',
+            hasFs:                rec.has_fs === 'true',
+            inFs:                 rec.in_fs === 'true',
+            fsContactId:          rec.fs_contact_id || '',
+            activity_summary:     rec.activity_summary || '',
+            activity_summary_at:  rec.activity_summary_at || '',
           }, { skipAirtable: true });
         });
       }
@@ -27273,6 +27278,103 @@ async function _fetchContactJobTitle(accountId, contactId, email) {
   }
   CONTACTS_STATE.jobTitleCache.set(norm, result);
   return result;
+}
+
+/* v2.46.133: Aktivitäts-Zusammenfassung — Haiku 4.5 fasst die letzten 3 Tickets
+   eines Kontakts zusammen. Cached in Airtable (mit 24h TTL — kürzer als andere
+   Felder, weil neue Tickets dazukommen können). Wird lazy beim Aufklappen
+   einer Karte angestoßen. */
+const ACTIVITY_SUMMARY_TTL_MS = 24 * 3600 * 1000;
+async function _fetchContactActivitySummary(accountId, contactId, email, force) {
+  const norm = String(email || '').trim().toLowerCase();
+  if (!norm || !contactId || !accountId) return null;
+  // Cache prüfen (24h TTL)
+  if (!force) {
+    const cached = _readEnrichCache(accountId, norm);
+    if (cached?.activity_summary && cached?.activity_summary_at) {
+      const ageMs = Date.now() - new Date(cached.activity_summary_at).getTime();
+      if (!isNaN(ageMs) && ageMs < ACTIVITY_SUMMARY_TTL_MS) {
+        return { summary: cached.activity_summary, from_cache: true, age_ms: ageMs };
+      }
+    }
+  }
+  try {
+    // 3 letzte Tickets — order by updated_at desc
+    const tlist = await proxyJson('/freshdesk/' + encodeURIComponent(accountId) + '/api/v2/tickets?requester_id=' + encodeURIComponent(contactId) + '&per_page=3&order_by=updated_at&order_type=desc');
+    const arr = Array.isArray(tlist) ? tlist : (tlist?.tickets || []);
+    if (!arr.length) {
+      const result = { summary: 'Keine Tickets für diesen Kontakt vorhanden.', from_cache: false };
+      const existing = _readEnrichCache(accountId, norm) || {};
+      _writeEnrichCache(accountId, norm, Object.assign({}, existing, {
+        activity_summary: result.summary,
+        activity_summary_at: nowIso(),
+      }));
+      return result;
+    }
+    const blocks = [];
+    for (const t of arr.slice(0, 3)) {
+      try {
+        const ticket = await proxyJson('/freshdesk/' + encodeURIComponent(accountId) + '/api/v2/tickets/' + t.id + '?include=conversations');
+        const subject  = ticket?.subject || '(ohne Betreff)';
+        const status   = ticket?.status_text || _statusLabel(ticket?.status) || '?';
+        const created  = ticket?.created_at ? new Date(ticket.created_at).toLocaleDateString('de-DE') : '?';
+        const updated  = ticket?.updated_at ? new Date(ticket.updated_at).toLocaleDateString('de-DE') : '?';
+        const desc     = ticket?.description_text || (ticket?.description ? htmlToText(ticket.description) : '');
+        const convs    = (ticket?.conversations || []).map(co => {
+          const from = co.from_email || (co.private ? 'INTERNE NOTIZ' : 'Agent');
+          const body = co.body_text || htmlToText(co.body || '');
+          return '[' + from + ']: ' + body.slice(0, 1200);
+        }).join('\n---\n').slice(0, 3500);
+        blocks.push('=== TICKET #' + t.id + ' ===\n' +
+          'Betreff: ' + subject + '\n' +
+          'Status: ' + status + ' · erstellt ' + created + ' · zuletzt aktualisiert ' + updated + '\n' +
+          'Initiale Beschreibung:\n' + desc.slice(0, 1500) + '\n' +
+          'Verlauf:\n' + convs);
+      } catch (_) {}
+    }
+    if (!blocks.length) return { summary: 'Tickets konnten nicht geladen werden.', from_cache: false };
+    const blob = blocks.join('\n\n').slice(-8000);
+    const sys = 'Du fasst die letzten Tickets eines Kontakts in einer Freshdesk-App fuer einen Sales-Mitarbeiter zusammen.\n' +
+      'Ziel: der Sales-Mitarbeiter soll auf einen Blick verstehen WAS ZULETZT mit diesem Kontakt passiert ist, ob es offene Punkte gibt und ob Sales-Potenzial sichtbar ist.\n' +
+      'Antworte mit einer KOMPAKTEN Zusammenfassung auf Deutsch:\n' +
+      '- Maximal 130 Worte, 2-4 Absaetze ODER bullet-aehnliche Zeilen mit „•"\n' +
+      '- Pro Ticket eine Zeile mit: Datum + Thema + Status (offen/geschlossen) + ggf. offener Punkt\n' +
+      '- Wenn ueber alle Tickets ein Muster erkennbar ist (z.B. wiederkehrendes Problem, Wartungsthema, Beschwerden): das EXPLIZIT erwaehnen.\n' +
+      '- Bei erkennbarem Sales-Potenzial (z.B. Frage nach Angebot/Erweiterung/Service): "Sales-Hinweis: …" einfuegen.\n' +
+      'KEIN Markdown-# Headers, KEIN HTML, KEINE Anfuehrungszeichen drumherum. Direkter Lesefluss.';
+    const data = await proxyJson('/anthropic/v1/messages', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: 'claude-haiku-4-5-20251001',
+        max_tokens: 700,
+        system: sys,
+        messages: [{ role: 'user', content: blob }]
+      })
+    });
+    recordAiUsage({
+      model: 'claude-haiku-4-5-20251001',
+      input_tokens:  data?.usage?.input_tokens || 0,
+      output_tokens: data?.usage?.output_tokens || 0,
+      feature: 'contact_activity_summary',
+      accountId,
+    });
+    const summary = (data?.content?.[0]?.text || '').trim();
+    if (!summary) return null;
+    const existing = _readEnrichCache(accountId, norm) || {};
+    _writeEnrichCache(accountId, norm, Object.assign({}, existing, {
+      activity_summary: summary,
+      activity_summary_at: nowIso(),
+    }));
+    return { summary, from_cache: false };
+  } catch (e) {
+    console.warn('Activity-summary failed:', e);
+    return null;
+  }
+}
+
+function _statusLabel(n) {
+  return ({2:'offen',3:'wartend',4:'geschlossen',5:'geschlossen',6:'on hold'})[String(n)] || '';
 }
 
 /* Lazy: Prüft ob die Email in Freshsales existiert (für Sync-Status-Badge). */
@@ -28561,8 +28663,30 @@ function _toggleContact(email) {
       if (!c.job_title && !CONTACTS_STATE.jobTitleCache.get(email)?.checked) {
         _fetchContactJobTitle(c._accountId, c.id, email).then(() => _renderContactsResults());
       }
+      // v2.46.133: Activity-Summary auto-laden (cached, 24h TTL)
+      if (c.id && !c._summaryLoading) {
+        c._summaryLoading = true;
+        _fetchContactActivitySummary(c._accountId, c.id, email)
+          .then(res => { c._summary = res; })
+          .catch(() => {})
+          .finally(() => { c._summaryLoading = false; _renderContactsResults(); });
+      }
     }
   }
+  _renderContactsResults();
+}
+
+async function _refreshContactSummary(email, btn) {
+  const c = CONTACTS_STATE.results.find(x => String(x.email || '').toLowerCase() === email);
+  if (!c) return;
+  setBusy(btn, true, 'KI fasst zusammen…');
+  c._summaryLoading = true;
+  try {
+    const res = await _fetchContactActivitySummary(c._accountId, c.id, email, /*force*/ true);
+    c._summary = res;
+  } catch (_) {}
+  c._summaryLoading = false;
+  setBusy(btn, false);
   _renderContactsResults();
 }
 
@@ -28906,6 +29030,31 @@ function _renderContactSearchCard(row) {
   if (!isOpen) {
     return '<div class="bg-white rounded-xl border border-ink-200 mb-2 overflow-hidden">' + head + '</div>';
   }
+  // v2.46.133: KI-Activity-Summary-Block (letzte 3 Tickets zusammengefasst)
+  const summaryBlock = (function () {
+    const s = c._summary;
+    let inner;
+    if (c._summaryLoading && !s) {
+      inner = '<p class="text-[11px] text-ink-500 inline-flex items-center gap-1.5"><span class="spinner inline-block w-3 h-3 border-[2px]"></span> KI fasst letzte 3 Tickets zusammen…</p>';
+    } else if (s?.summary) {
+      const ageMin = s.age_ms ? Math.round(s.age_ms / 60000) : 0;
+      const ageLabel = !s.from_cache ? 'gerade erstellt' :
+                       (ageMin < 60 ? 'vor ' + ageMin + ' min' :
+                       (ageMin < 24*60 ? 'vor ' + Math.round(ageMin / 60) + ' h' :
+                       'vor ' + Math.round(ageMin / (60*24)) + ' T'));
+      inner = '<p class="text-[11px] text-purple-900 leading-relaxed whitespace-pre-line">' + escapeHtml(s.summary) + '</p>' +
+        '<p class="text-[10px] text-purple-600 mt-1.5 italic">' + escapeHtml(ageLabel) + (s.from_cache ? ' · aus Cache' : '') + '</p>';
+    } else {
+      inner = '<p class="text-[11px] text-ink-400 italic">Keine Zusammenfassung verfügbar.</p>';
+    }
+    return '<div class="px-3 py-2 bg-purple-50 border-b border-purple-200">' +
+      '<div class="flex items-center justify-between gap-2 mb-1">' +
+        '<p class="text-[11px] font-bold text-purple-800 inline-flex items-center gap-1"><i data-lucide="sparkles" class="w-3.5 h-3.5"></i> KI-Verlauf · letzte 3 Tickets</p>' +
+        '<button onclick="event.stopPropagation();_refreshContactSummary(' + js(row.e) + ', this)" class="text-[10px] bg-white hover:bg-purple-100 border border-purple-300 text-purple-700 px-1.5 py-0.5 rounded inline-flex items-center gap-1" title="Neu generieren (Cache umgehen)"><i data-lucide="refresh-cw" class="w-2.5 h-2.5"></i> neu</button>' +
+      '</div>' +
+      inner +
+    '</div>';
+  })();
   // Body: Stammdaten + Marketing-History + Aktionen
   const stamm =
     '<div class="px-3 py-2 bg-ink-50/50 border-b border-ink-100 text-[11px] text-ink-700 grid grid-cols-2 gap-x-3 gap-y-1">' +
@@ -28940,7 +29089,7 @@ function _renderContactSearchCard(row) {
         }).join('') +
       '</div>'
     : '<div class="px-3 py-3 text-[11px] text-ink-500 italic text-center">Noch keine Marketing-Mail an diesen Kontakt versandt.</div>';
-  return '<div class="bg-white rounded-xl border border-ink-200 mb-2 overflow-hidden">' + head + stamm + actions + history + '</div>';
+  return '<div class="bg-white rounded-xl border border-ink-200 mb-2 overflow-hidden">' + head + summaryBlock + stamm + actions + history + '</div>';
 }
 
 async function renderRulesPage() {
