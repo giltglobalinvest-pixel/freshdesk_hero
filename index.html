@@ -761,7 +761,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.130';
+const APP_VERSION = 'v2.46.131';
 
 /* ============================================================
    GLOBAL THEME — v2.46.12
@@ -26839,11 +26839,83 @@ function _readEnrichCache(accountId, email) {
     return obj;
   } catch (_) { return null; }
 }
-function _writeEnrichCache(accountId, email, data) {
+function _writeEnrichCache(accountId, email, data, opts) {
   try {
     const payload = Object.assign({}, data, { savedAt: Date.now() });
     localStorage.setItem(_enrichCacheKey(accountId, email), JSON.stringify(payload));
   } catch (_) { /* quota etc — ignorieren */ }
+  // v2.46.131: Async fire-and-forget Airtable-Write damit shared zwischen Browsern/Usern
+  if (!opts?.skipAirtable && accountId && email) {
+    writeEnrichmentToAirtable(accountId, email, data).catch(() => {});
+  }
+}
+
+/* === v2.46.131: Shared Airtable-Cache zwischen Browsern/Usern ===============
+   Tabelle ContactEnrichmentCache wird auto-angelegt beim ersten Write. Pro
+   Mandant+Email ein Record. Beim Hydrate batch-preload (1 Query für alle
+   sichtbaren Kontakte) → spart Calls auch ohne lokalen Cache. */
+const ENRICH_CACHE_TABLE = 'ContactEnrichmentCache';
+
+async function loadEnrichmentBatchFromAirtable(accountId, emails) {
+  const out = new Map();
+  if (!accountId || !Array.isArray(emails) || !emails.length) return out;
+  const norm = Array.from(new Set(emails.map(e => String(e || '').trim().toLowerCase()).filter(Boolean)));
+  // Chunks von 20 (Airtable URL-Länge mit OR-Formula begrenzt)
+  const CHUNK = 20;
+  for (let i = 0; i < norm.length; i += CHUNK) {
+    const slice = norm.slice(i, i + CHUNK);
+    const formula = "AND({account_id}='" + escapeFormula(accountId) + "',OR(" +
+      slice.map(e => "{email}='" + escapeFormula(e) + "'").join(',') + "))";
+    try {
+      const recs = await airtableRead(ENRICH_CACHE_TABLE, { filter: formula, maxRecords: CHUNK });
+      recs.forEach(r => {
+        const email = String(r.fields.email || '').trim().toLowerCase();
+        if (email) out.set(email, Object.assign({ recordId: r.id }, r.fields));
+      });
+    } catch (_) { /* Tabelle existiert ggf. noch nicht */ }
+  }
+  return out;
+}
+
+async function writeEnrichmentToAirtable(accountId, email, data) {
+  if (!accountId || !email) return;
+  const normEmail = String(email).trim().toLowerCase();
+  const me = APP_KEYS.user || {};
+  const fields = {
+    email:                normEmail,
+    account_id:           String(accountId),
+    phone:                data.phone || '',
+    mobile:               data.mobile || '',
+    job_title:            data.job_title || '',
+    updated_at:           data.updated_at || '',
+    phone_source:         data.phoneFromTickets  ? 'ticket' : (data.phone  ? 'fd_stamm' : ''),
+    mobile_source:        data.mobileFromTickets ? 'ticket' : (data.mobile ? 'fd_stamm' : ''),
+    has_fs:               data.hasFs ? 'true' : 'false',
+    in_fs:                data.inFs ? 'true' : 'false',
+    fs_contact_id:        data.fsContactId || '',
+    enriched_at:          nowIso(),
+    enriched_by:          me.email || '',
+  };
+  try {
+    // Upsert-Manuell: existiert Record? PATCH, sonst POST
+    const existing = await airtableRead(ENRICH_CACHE_TABLE, {
+      filter: "AND({account_id}='" + escapeFormula(accountId) + "',{email}='" + escapeFormula(normEmail) + "')",
+      maxRecords: 1,
+    });
+    if (existing[0]?.id) {
+      await airtableUpdate(ENRICH_CACHE_TABLE, existing[0].id, fields);
+    } else {
+      await airtableWriteWithAutoField(ENRICH_CACHE_TABLE, fields, {
+        email:            'singleLineText',  account_id:       'singleLineText',
+        phone:            'singleLineText',  mobile:           'singleLineText',
+        job_title:        'singleLineText',  updated_at:       'singleLineText',
+        phone_source:     'singleLineText',  mobile_source:    'singleLineText',
+        has_fs:           'singleLineText',  in_fs:            'singleLineText',
+        fs_contact_id:    'singleLineText',  enriched_at:      'singleLineText',
+        enriched_by:      'singleLineText',
+      });
+    }
+  } catch (_) { /* Tabelle existiert ggf. noch nicht — wird beim ersten Write angelegt */ }
 }
 
 /* v2.46.125: Extrahiert deutsche Telefonnummern aus Freitext (Signaturen).
@@ -26998,6 +27070,34 @@ async function _hydrateVisibleCards() {
       .slice(0, display)
       .filter(c => c?.id);
     if (!candidates.length) return;
+    // v2.46.131: Airtable-Cache batch-preload (1 Query für alle sichtbaren Emails).
+    // Treffer werden in localStorage gespiegelt damit die nachfolgenden Per-Contact-
+    // Hydrates Cache-Hits haben (= keine FD/Anthropic-Calls).
+    try {
+      const byAccount = new Map(); // accountId → emails[]
+      candidates.forEach(c => {
+        if (!c.email) return;
+        const a = c._accountId;
+        if (!byAccount.has(a)) byAccount.set(a, []);
+        byAccount.get(a).push(c.email);
+      });
+      for (const [accId, emails] of byAccount) {
+        const cache = await loadEnrichmentBatchFromAirtable(accId, emails);
+        cache.forEach((rec, email) => {
+          _writeEnrichCache(accId, email, {
+            phone:             rec.phone || '',
+            mobile:            rec.mobile || '',
+            job_title:         rec.job_title || '',
+            updated_at:        rec.updated_at || '',
+            phoneFromTickets:  rec.phone_source  === 'ticket',
+            mobileFromTickets: rec.mobile_source === 'ticket',
+            hasFs:             rec.has_fs === 'true',
+            inFs:              rec.in_fs === 'true',
+            fsContactId:       rec.fs_contact_id || '',
+          }, { skipAirtable: true });
+        });
+      }
+    } catch (_) {}
     const CONCURRENCY = 4;
     let i = 0;
     while (i < candidates.length) {
