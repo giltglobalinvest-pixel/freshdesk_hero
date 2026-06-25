@@ -767,7 +767,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.144';
+const APP_VERSION = 'v2.46.145';
 
 /* ============================================================
    GLOBAL THEME — v2.46.12
@@ -11977,6 +11977,24 @@ function _ticketActionBarIcons(accountId, ticketId) {
   ].join('');
 }
 
+/* v2.46.145: Verlauf neu von Freshdesk laden (z.B. wenn zwischenzeitlich Antworten kamen).
+   Re-fetched das Ticket inkl. conversations und re-rendert die Detail-View. */
+async function _reloadTicketDetail(accountId, ticketId, btn) {
+  if (btn) setBusy(btn, true);
+  try {
+    const ticket = await fetchTicketDetail(accountId, ticketId);
+    if (!ticket) throw new Error('Ticket nicht gefunden');
+    ticket._accountId = accountId;
+    CURRENT_TICKET = ticket;
+    renderTicketDetailBody(ticket);
+    const count = (ticket.conversations || []).length;
+    toast(count ? count + ' Nachricht' + (count === 1 ? '' : 'en') + ' geladen.' : 'Keine neuen Antworten.', count ? 'success' : 'info', 3000);
+  } catch (e) {
+    if (btn) setBusy(btn, false);
+    toast('Verlauf-Reload fehlgeschlagen: ' + (e.message || e), 'error', 5000);
+  }
+}
+
 async function openTicketDetail(accountId, ticketId) {
   CURRENT_TICKET = null;
   const acc = APP_STATE.accounts.find(a => a.id === accountId);
@@ -12310,12 +12328,16 @@ function renderTicketDetailBody(ticket) {
       })()}
 
       <!-- Verlauf -->
-      ${conversations.length ? `
       <div class="bg-white rounded-2xl border border-ink-200 p-4">
-        <div class="flex items-center justify-between mb-3">
+        <div class="flex items-center justify-between mb-3 gap-2">
           <p class="text-[10px] font-semibold text-ink-500 uppercase tracking-wider">Verlauf</p>
-          <span class="text-[10px] text-ink-400">${conversations.length} Nachricht${conversations.length === 1 ? '' : 'en'}</span>
+          <div class="flex items-center gap-2">
+            <span class="text-[10px] text-ink-400">${conversations.length ? conversations.length + ' Nachricht' + (conversations.length === 1 ? '' : 'en') : 'noch keine Antworten'}</span>
+            <button onclick="_reloadTicketDetail('${escapeAttr(ticket._accountId)}', ${ticket.id}, this)" class="text-[10px] bg-ink-50 hover:bg-brand-50 border border-ink-200 hover:border-brand-300 text-ink-700 hover:text-brand-700 px-2 py-1 rounded inline-flex items-center gap-1 font-bold" title="Verlauf neu von Freshdesk laden"><i data-lucide="refresh-cw" class="w-2.5 h-2.5"></i> Neu laden</button>
+          </div>
         </div>
+        ${!conversations.length ? `<p class="text-[11px] text-ink-400 italic px-1 py-2">Bisher keine Antworten zu diesem Ticket. Falls neu eingegangen ist — Klick „Neu laden" um zu prüfen.</p>` : ''}
+        ${conversations.length ? `
         <div class="space-y-3">
           ${conversations.map((c, idx) => {
             const isIncoming = c.incoming === true;
@@ -12367,7 +12389,8 @@ function renderTicketDetailBody(ticket) {
               </div>`;
           }).join('')}
         </div>
-      </div>` : ''}
+        ` : ''}
+      </div>
 
       <!-- Direkter Antwort-Compose -->
       ${_detailReplyComposer(ticket)}
