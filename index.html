@@ -767,7 +767,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.145';
+const APP_VERSION = 'v2.46.146';
 
 /* ============================================================
    GLOBAL THEME — v2.46.12
@@ -12316,10 +12316,11 @@ function renderTicketDetailBody(ticket) {
         const imageCount = atts.filter(_isImageAttachment).length;
         return `
           <div class="bg-white rounded-2xl border border-ink-200 p-4">
-            <div class="flex items-center gap-2 mb-3">
+            <div class="flex items-center gap-2 mb-3 flex-wrap">
               <i data-lucide="paperclip" class="w-4 h-4 text-ink-700"></i>
               <p class="text-[10px] font-semibold text-ink-500 uppercase tracking-wider">Anhänge (${atts.length})</p>
-              <span class="ml-auto text-[10px] text-ink-400">${imageCount ? imageCount + ' Bild' + (imageCount === 1 ? '' : 'er') + ' · tippen für Vorschau' : 'tippen zum Öffnen'}</span>
+              <span class="text-[10px] text-ink-400 flex-1 min-w-0">${imageCount ? imageCount + ' Bild' + (imageCount === 1 ? '' : 'er') + ' · tippen für Vorschau' : 'tippen zum Öffnen'}</span>
+              ${atts.length > 1 ? `<button onclick="_downloadAllAttachmentsAsZip(this)" class="text-[11px] bg-brand-50 hover:bg-brand-100 border border-brand-300 text-brand-700 px-2.5 py-1 rounded inline-flex items-center gap-1 font-bold shrink-0" title="Alle ${atts.length} Anhänge als ZIP herunterladen"><i data-lucide="download" class="w-3 h-3"></i> Alle als ZIP</button>` : ''}
             </div>
             <div class="space-y-1.5">
               ${atts.map(a => _renderAttachmentItem(a)).join('')}
@@ -14483,6 +14484,83 @@ function collectTicketAttachments(ticket) {
     });
   });
   return list;
+}
+
+/* v2.46.146: Alle Anhänge eines Tickets als ZIP herunterladen.
+   - JSZip wird lazy via CDN nachgeladen
+   - Pro Anhang: erst CORS-Fetch (FD-CDN), sonst via /attachment-fetch-Proxy
+   - Doppelte Dateinamen werden mit Suffix (2)/(3) abgesetzt
+   - ZIP wird gestreamt (kein Memory-Peak bei vielen Bildern) */
+async function _ensureJSZip() {
+  if (window.JSZip) return window.JSZip;
+  await _loadScriptOnce('https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js');
+  if (!window.JSZip) throw new Error('JSZip konnte nicht geladen werden');
+  return window.JSZip;
+}
+
+async function _downloadAllAttachmentsAsZip(btn) {
+  const ticket = CURRENT_TICKET;
+  if (!ticket) { toast('Kein Ticket geöffnet.', 'warn'); return; }
+  const atts = collectTicketAttachments(ticket);
+  if (!atts.length) { toast('Keine Anhänge zum Herunterladen.', 'warn'); return; }
+  setBusy(btn, true, 'JSZip…');
+  const corsProblemHosts = /s3\.amazonaws\.com|attachments6?\.freshdesk\.com|attachment\.freshdesk\.com/i;
+  try {
+    const JSZip = await _ensureJSZip();
+    const zip = new JSZip();
+    const usedNames = new Map(); // basename → count, für Dedupe
+    let ok = 0, failed = 0;
+    for (let i = 0; i < atts.length; i++) {
+      const a = atts[i];
+      if (btn) setBusy(btn, true, 'Lade ' + (i + 1) + '/' + atts.length + '…');
+      if (!a.attachment_url) { failed++; continue; }
+      let blob = null;
+      // 1. Direkter CORS-Fetch wenn host wahrscheinlich erlaubt
+      if (!corsProblemHosts.test(a.attachment_url)) {
+        try {
+          const resp = await fetch(a.attachment_url, { mode: 'cors' });
+          if (resp.ok) blob = await resp.blob();
+        } catch (_) {}
+      }
+      // 2. Fallback über val.town-Proxy
+      if (!blob) {
+        try {
+          const resp = await proxyFetch('/attachment-fetch?url=' + encodeURIComponent(a.attachment_url));
+          if (resp.ok) blob = await resp.blob();
+        } catch (e) {
+          console.warn('Proxy-Fetch fehlgeschlagen für', a.name, e.message);
+        }
+      }
+      if (!blob) { failed++; continue; }
+      // Dedupe Dateiname
+      let name = a.name || ('attachment_' + (i + 1));
+      const count = usedNames.get(name) || 0;
+      if (count > 0) {
+        const dotIdx = name.lastIndexOf('.');
+        if (dotIdx > 0) name = name.slice(0, dotIdx) + ' (' + (count + 1) + ')' + name.slice(dotIdx);
+        else name = name + ' (' + (count + 1) + ')';
+      }
+      usedNames.set(a.name || name, count + 1);
+      zip.file(name, blob);
+      ok++;
+    }
+    if (!ok) throw new Error('Kein Anhang konnte geladen werden');
+    setBusy(btn, true, 'Packe ZIP…');
+    const zipBlob = await zip.generateAsync({ type: 'blob', compression: 'DEFLATE', compressionOptions: { level: 5 } });
+    const dlUrl = URL.createObjectURL(zipBlob);
+    const link = document.createElement('a');
+    link.href = dlUrl;
+    link.download = 'Ticket-' + ticket.id + '-Anhaenge.zip';
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(dlUrl);
+    setBusy(btn, false);
+    toast(ok + ' Anhänge in ZIP gepackt' + (failed ? ' · ' + failed + ' fehlgeschlagen' : '') + ' (' + (zipBlob.size / 1024 / 1024).toFixed(1) + ' MB)', failed ? 'warn' : 'success', 5000);
+  } catch (e) {
+    setBusy(btn, false);
+    toast('ZIP-Download fehlgeschlagen: ' + (e.message || e), 'error', 6000);
+  }
 }
 
 function attachmentIcon(contentType) {
