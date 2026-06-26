@@ -767,7 +767,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.146';
+const APP_VERSION = 'v2.46.147';
 
 /* ============================================================
    GLOBAL THEME — v2.46.12
@@ -11968,6 +11968,8 @@ function _ticketActionBarIcons(accountId, ticketId) {
     btn('text-cursor-input', 'sky',  'Titel als „ANFRAGE Nr | Standort | Fabriknr" strukturieren', `openRestructureTitleModal('${accIdAttr}', ${ticketId})`),
     // v2.46.70: Angebots-Button nur für Aufzug-Service-Accounts (Aufzugshandwerk/Aszendio)
     (accountHasAngebotsModul(acc) ? btn('file-text', 'indigo', 'Angebot erstellen (KI-gestützt)', `openAngebotsModal('${accIdAttr}', ${ticketId})`) : ''),
+    // v2.46.147: Stellungnahme — KI-gestützter Brief auf Briefpapier (für alle Accounts)
+    btn('file-check-2',   'emerald', 'Stellungnahme erstellen (KI · Briefpapier)',             `openStellungnahmeModal('${accIdAttr}', ${ticketId})`),
     btn('mail',           'orange',  'Email-Vorlage senden (Outbound)',                        `openTicketEmailModal('${accIdAttr}', ${ticketId})`),
     btn('message-circle', 'emerald', 'Per WhatsApp an Kollegen schicken',                     `openWhatsAppTicketShare('${accIdAttr}', ${ticketId})`),
     btn('check-square',   'brand',   'Mehrfach-Auswahl starten',                               `closeModal(); msEnter('${accIdAttr}', ${ticketId})`),
@@ -23927,6 +23929,323 @@ function closeAngebotsChatModal() {
   document.body.style.overflow = '';
   // v2.46.79: Body-Klasse für Side-Panel entfernen → Ticket-Detail nimmt wieder volle Breite
   document.body.classList.remove('ang-side-panel-open');
+}
+
+/* === v2.46.147: Stellungnahme-Modul =======================================
+   KI-gestützter formeller Brief auf Briefpapier — nutzt dieselbe Letterhead-
+   Infrastruktur wie das Angebote-Modul. User beschreibt Anlass + Tonfall,
+   KI (Sonnet) generiert Anrede/Body/Schluss/Betreff aus Ticket-Kontext. Rechts
+   Live-Preview als HTML-Brief auf Briefpapier, Download per Browser-Print. */
+async function openStellungnahmeModal(accountId, ticketId) {
+  let host = document.getElementById('subModalHost');
+  if (!host) { host = document.createElement('div'); host.id = 'subModalHost'; document.body.appendChild(host); }
+  document.body.classList.add('ang-side-panel-open');
+  if (window.matchMedia('(max-width: 639px)').matches) document.body.style.overflow = 'hidden';
+  const account = (APP_STATE.accounts || []).find(a => a.id === accountId);
+  if (!account) { toast('Account nicht gefunden', 'error'); return; }
+  const profile = getAngebotsProfile(account);
+  host.innerHTML =
+    '<div class="fixed inset-0 sm:inset-y-0 sm:right-0 sm:left-auto z-[60] flex items-end sm:items-stretch justify-center sm:justify-end bg-black/50 sm:bg-transparent sm:pointer-events-none">' +
+      '<div class="bg-white w-full max-w-md sm:w-[460px] sm:max-w-none rounded-t-3xl sm:rounded-none shadow-2xl flex flex-col safe-bottom max-h-[96vh] sm:h-screen sm:max-h-screen sm:border-l sm:border-ink-200 sm:pointer-events-auto p-8 text-center">' +
+        '<div class="spinner inline-block w-7 h-7 border-[3px] text-emerald-500 mx-auto"></div>' +
+        '<p class="text-sm text-ink-500 mt-2">Lade Ticket…</p>' +
+      '</div>' +
+    '</div>';
+  try {
+    let ticket = APP_STATE.ticketCache?.get?.(accountId + '|' + ticketId);
+    if (!ticket || !ticket.conversations) {
+      try { ticket = await fetchTicketDetail(accountId, ticketId); } catch (_) {}
+    }
+    if (!ticket) throw new Error('Ticket konnte nicht geladen werden');
+    const me = APP_KEYS.user || {};
+    window._STN_CTX = {
+      accountId, ticketId, ticket, profile, account,
+      tonfall: 'sachlich',
+      anlass: '',
+      result: null,  // { betreff, anrede, body, schluss }
+      sender_name:  me.name || '',
+      sender_email: me.email || '',
+    };
+    _renderStellungnahmeShell();
+  } catch (e) {
+    closeStellungnahmeModal();
+    toast('Fehler: ' + (e.message || e), 'error', 8000);
+  }
+}
+
+function closeStellungnahmeModal() {
+  delete window._STN_CTX;
+  const host = document.getElementById('subModalHost');
+  if (host) host.innerHTML = '';
+  document.body.style.overflow = '';
+  document.body.classList.remove('ang-side-panel-open');
+}
+
+function _renderStellungnahmeShell() {
+  const s = window._STN_CTX;
+  if (!s) return;
+  const host = document.getElementById('subModalHost');
+  if (!host) return;
+  const t = s.ticket;
+  const reqName  = t.requester?.name || '';
+  const reqEmail = t.requester?.email || '';
+  const reqFirma = t.requester?.company?.name || '';
+  host.innerHTML =
+    '<div class="fixed inset-0 sm:inset-y-0 sm:right-0 sm:left-auto z-[60] flex items-end sm:items-stretch justify-center sm:justify-end bg-black/50 sm:bg-transparent sm:pointer-events-none">' +
+      '<div class="bg-white w-full max-w-md sm:w-[460px] xl:w-[940px] sm:max-w-none rounded-t-3xl sm:rounded-none shadow-2xl flex flex-col safe-bottom max-h-[96vh] sm:h-screen sm:max-h-screen sm:border-l sm:border-ink-200 sm:pointer-events-auto">' +
+        '<div class="safe-top px-4 py-3 border-b border-ink-200 flex items-center justify-between gap-2 shrink-0">' +
+          '<div class="flex-1 min-w-0">' +
+            '<h3 class="font-bold text-ink-900 inline-flex items-center gap-2"><i data-lucide="file-text" class="w-5 h-5 text-emerald-600"></i> Stellungnahme erstellen</h3>' +
+            '<p class="text-[10px] text-ink-500 truncate">Briefpapier · ' + escapeHtml(s.profile.firma || '') + '</p>' +
+          '</div>' +
+          '<button onclick="closeStellungnahmeModal()" class="w-9 h-9 rounded-lg hover:bg-ink-100 flex items-center justify-center"><i data-lucide="x" class="w-5 h-5"></i></button>' +
+        '</div>' +
+        // Body: zwei Spalten auf XL
+        '<div class="flex-1 overflow-hidden flex flex-col xl:flex-row min-h-0">' +
+          // Linke Spalte: Formular
+          '<div class="flex-1 xl:w-[460px] xl:shrink-0 overflow-y-auto p-4 space-y-3 border-b xl:border-b-0 xl:border-r border-ink-200">' +
+            '<div class="bg-emerald-50 border border-emerald-200 rounded-xl p-2.5 text-[11px] text-emerald-900">' +
+              '<b>Empfänger:</b> ' + escapeHtml(reqName || reqEmail || '?') + (reqFirma ? ' · ' + escapeHtml(reqFirma) : '') + '<br>' +
+              '<b>Ticket:</b> #' + t.id + ' · ' + escapeHtml((t.subject || '').slice(0, 80)) +
+            '</div>' +
+            '<label class="text-xs font-bold text-ink-700 uppercase tracking-wider block">Worum geht es? <span class="font-normal text-ink-500 normal-case">— in eigenen Worten</span></label>' +
+            '<textarea id="stnAnlass" rows="5" placeholder="z.B. „Wir können der Forderung des Mieters nicht zustimmen. Unsere Wartung wurde wie vereinbart durchgeführt. Wir lehnen die Kostenübernahme ab und begründen das wie folgt: …"" class="w-full px-3 py-2 border border-ink-300 rounded-lg text-sm resize-y">' + escapeHtml(s.anlass || '') + '</textarea>' +
+            '<label class="text-xs font-bold text-ink-700 uppercase tracking-wider block">Tonfall</label>' +
+            '<select id="stnTonfall" class="w-full px-3 py-2 border border-ink-300 rounded-lg text-sm bg-white">' +
+              '<option value="sachlich"' + (s.tonfall === 'sachlich' ? ' selected' : '') + '>Sachlich (Standard)</option>' +
+              '<option value="bestimmt"' + (s.tonfall === 'bestimmt' ? ' selected' : '') + '>Bestimmt / Standhaft</option>' +
+              '<option value="freundlich"' + (s.tonfall === 'freundlich' ? ' selected' : '') + '>Freundlich / Versöhnlich</option>' +
+              '<option value="entschuldigend"' + (s.tonfall === 'entschuldigend' ? ' selected' : '') + '>Entschuldigend / Kulant</option>' +
+              '<option value="formal"' + (s.tonfall === 'formal' ? ' selected' : '') + '>Formal / Rechtssicher</option>' +
+            '</select>' +
+            '<button onclick="_stnGenerate(this)" class="w-full px-3 py-2.5 bg-gradient-to-br from-emerald-600 to-brand-600 hover:opacity-90 text-white rounded-lg text-sm font-bold inline-flex items-center justify-center gap-1.5"><i data-lucide="wand-2" class="w-4 h-4"></i> KI-Stellungnahme erzeugen</button>' +
+            (s.result ? (
+              '<div class="border-t border-ink-200 pt-3 space-y-2">' +
+                '<label class="text-xs font-bold text-ink-700 uppercase tracking-wider block">Betreff</label>' +
+                '<input id="stnBetreff" type="text" value="' + escapeAttr(s.result.betreff || '') + '" oninput="_stnUpdateField(\'betreff\', this.value)" class="w-full px-3 py-2 border border-ink-300 rounded-lg text-sm">' +
+                '<label class="text-xs font-bold text-ink-700 uppercase tracking-wider block">Anrede</label>' +
+                '<input id="stnAnrede" type="text" value="' + escapeAttr(s.result.anrede || '') + '" oninput="_stnUpdateField(\'anrede\', this.value)" class="w-full px-3 py-2 border border-ink-300 rounded-lg text-sm">' +
+                '<label class="text-xs font-bold text-ink-700 uppercase tracking-wider block">Body</label>' +
+                '<textarea id="stnBody" rows="10" oninput="_stnUpdateField(\'body\', this.value)" class="w-full px-3 py-2 border border-ink-300 rounded-lg text-[12px] leading-relaxed resize-y">' + escapeHtml(s.result.body || '') + '</textarea>' +
+                '<label class="text-xs font-bold text-ink-700 uppercase tracking-wider block">Schluss</label>' +
+                '<textarea id="stnSchluss" rows="3" oninput="_stnUpdateField(\'schluss\', this.value)" class="w-full px-3 py-2 border border-ink-300 rounded-lg text-[12px] resize-y">' + escapeHtml(s.result.schluss || '') + '</textarea>' +
+              '</div>'
+            ) : '<p class="text-[11px] text-ink-400 italic text-center">Klick auf „KI-Stellungnahme erzeugen" → Brief erscheint rechts in der Vorschau.</p>') +
+          '</div>' +
+          // Rechte Spalte: PDF-Preview (iframe für sauberes Print)
+          '<div class="flex-1 hidden xl:flex flex-col bg-ink-100 min-w-0">' +
+            '<div class="px-3 py-2 bg-white border-b border-ink-200 flex items-center justify-between gap-2 shrink-0">' +
+              '<p class="text-[11px] font-semibold text-ink-700">Vorschau auf Briefpapier</p>' +
+              (s.result ? '<button onclick="_stnPrintPdf()" class="text-[11px] bg-emerald-600 hover:bg-emerald-700 text-white px-3 py-1 rounded font-bold inline-flex items-center gap-1"><i data-lucide="printer" class="w-3 h-3"></i> Drucken / PDF</button>' : '') +
+            '</div>' +
+            '<iframe id="stnPreviewFrame" class="flex-1 w-full bg-white" sandbox="allow-same-origin allow-modals allow-popups allow-popups-to-escape-sandbox"></iframe>' +
+          '</div>' +
+        '</div>' +
+        // Footer mit Mobile-Print-Button
+        '<div class="border-t border-ink-200 p-3 flex gap-2 shrink-0 xl:hidden">' +
+          '<button onclick="closeStellungnahmeModal()" class="flex-1 bg-ink-100 hover:bg-ink-200 text-ink-700 rounded-xl px-3 py-3 text-sm font-bold">Schließen</button>' +
+          (s.result ? '<button onclick="_stnPrintPdf()" class="flex-[2] bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl px-3 py-3 text-sm font-bold inline-flex items-center justify-center gap-1.5"><i data-lucide="printer" class="w-4 h-4"></i> Drucken / PDF</button>' : '') +
+        '</div>' +
+      '</div>' +
+    '</div>';
+  if (window.lucide) lucide.createIcons();
+  if (s.result) _stnRefreshPreview();
+}
+
+function _stnUpdateField(field, value) {
+  const s = window._STN_CTX;
+  if (!s?.result) return;
+  s.result[field] = value;
+  _stnRefreshPreview();
+}
+
+function _stnRefreshPreview() {
+  const s = window._STN_CTX;
+  if (!s?.result) return;
+  const frame = document.getElementById('stnPreviewFrame');
+  if (!frame) return;
+  const html = _buildStellungnahmeHtml(s);
+  try {
+    const doc = frame.contentDocument || frame.contentWindow?.document;
+    if (doc) {
+      doc.open();
+      doc.write(html);
+      doc.close();
+    }
+  } catch (_) {}
+}
+
+function _stnPrintPdf() {
+  const s = window._STN_CTX;
+  if (!s?.result) return;
+  // Print iframe content
+  const frame = document.getElementById('stnPreviewFrame');
+  if (frame && window.matchMedia('(min-width: 1280px)').matches) {
+    try { frame.contentWindow.focus(); frame.contentWindow.print(); return; } catch (_) {}
+  }
+  // Mobile/fallback: open print window with the HTML
+  const html = _buildStellungnahmeHtml(s);
+  const win = window.open('', '_blank');
+  if (!win) { toast('Popup blockiert — bitte Popup-Blocker für diese Seite deaktivieren.', 'warn', 6000); return; }
+  win.document.open();
+  win.document.write(html);
+  win.document.close();
+  setTimeout(() => { try { win.focus(); win.print(); } catch (_) {} }, 400);
+}
+
+async function _stnGenerate(btn) {
+  const s = window._STN_CTX;
+  if (!s) return;
+  const anlassEl = document.getElementById('stnAnlass');
+  const tonEl = document.getElementById('stnTonfall');
+  s.anlass = (anlassEl?.value || '').trim();
+  s.tonfall = tonEl?.value || 'sachlich';
+  if (!s.anlass) { toast('Bitte beschreib worum es geht.', 'warn', 4000); return; }
+  setBusy(btn, true, 'KI schreibt…');
+  try {
+    const t = s.ticket;
+    const conv = (t.conversations || [])
+      .slice().sort((a, b) => new Date(a.created_at || 0) - new Date(b.created_at || 0))
+      .slice(-5)
+      .map(c => (c.private ? '[Notiz] ' : '') + (c.incoming ? 'Kunde' : 'Agent') + ': ' + htmlToText(c.body_text || c.body || '').slice(0, 600))
+      .join('\n\n');
+    const description = htmlToText(t.description_text || t.description || '').slice(0, 1500);
+    const tonfallHinweis = {
+      sachlich:       'Sachlich, neutral, professionell.',
+      bestimmt:       'Bestimmt und standhaft, ohne aggressiv zu werden. Die eigene Position klar vertreten.',
+      freundlich:     'Freundlich und versöhnlich. Dem Empfänger entgegenkommen ohne nachzugeben in der Sache.',
+      entschuldigend: 'Höflich entschuldigend, einsichtig, kulant — falls Fehler eingestanden werden soll.',
+      formal:         'Formal-rechtssicher. Juristische Formulierungen, klare Bezugnahmen auf Vertrag/Gesetz wo passend.',
+    }[s.tonfall] || 'Sachlich.';
+    const sysPrompt =
+      'Du schreibst eine formelle deutsche Geschäfts-Stellungnahme auf Briefpapier. Antworte AUSSCHLIESSLICH mit JSON:\n' +
+      '{ "betreff": "...", "anrede": "...", "body": "...", "schluss": "..." }\n' +
+      'Regeln:\n' +
+      '- betreff: 1 Zeile, kurz und prägnant\n' +
+      '- anrede: z.B. "Sehr geehrte Damen und Herren," oder "Sehr geehrter Herr Müller,"\n' +
+      '- body: 2-6 Absätze, durch \\n\\n getrennt. Strukturiert: Bezugnahme → Sachstand → Begründung → Konsequenz/Forderung\n' +
+      '- schluss: kurzer Abschluss-Absatz vor "Mit freundlichen Grüßen" (welches automatisch angehängt wird, nicht selbst schreiben)\n' +
+      'Tonfall: ' + tonfallHinweis + '\n' +
+      'Absender ist ' + (s.profile.firma || '') + '. KEIN Markdown, KEIN HTML, KEINE Auszeichnungen.';
+    const userPrompt =
+      'Anlass / Vorgang vom Sachbearbeiter (in eigenen Worten):\n' + s.anlass + '\n\n' +
+      'Empfänger:\n' + (t.requester?.company?.name ? 'Firma: ' + t.requester.company.name + '\n' : '') +
+      (t.requester?.name ? 'Name: ' + t.requester.name + '\n' : '') +
+      '\nTicket-Betreff: ' + (t.subject || '') + '\n' +
+      'Erste Anfrage:\n' + description + '\n\n' +
+      (conv ? 'Verlauf:\n' + conv + '\n\n' : '') +
+      'Generiere die Stellungnahme als JSON.';
+    const data = await _callAnthropicWithRetry({
+      model: 'claude-sonnet-4-5-20250929',
+      max_tokens: 2500,
+      system: sysPrompt,
+      messages: [{ role: 'user', content: userPrompt }]
+    });
+    recordAiUsage({
+      model: 'claude-sonnet-4-5-20250929',
+      input_tokens:  data?.usage?.input_tokens || 0,
+      output_tokens: data?.usage?.output_tokens || 0,
+      feature: 'stellungnahme',
+      accountId: s.accountId,
+    });
+    const raw = (data?.content?.[0]?.text || '').trim().replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/i, '');
+    let obj;
+    try { obj = JSON.parse(raw); }
+    catch (_) {
+      const m = raw.match(/\{[\s\S]*\}/);
+      if (m) obj = JSON.parse(m[0]); else throw new Error('KI-Antwort ist kein gültiges JSON');
+    }
+    s.result = {
+      betreff: obj.betreff || '',
+      anrede:  obj.anrede  || 'Sehr geehrte Damen und Herren,',
+      body:    obj.body    || '',
+      schluss: obj.schluss || '',
+    };
+    _renderStellungnahmeShell();
+    toast('Stellungnahme erzeugt — rechts in der Vorschau prüfen + anpassen.', 'success', 4500);
+  } catch (e) {
+    setBusy(btn, false);
+    toast('KI-Fehler: ' + (e.message || e), 'error', 8000);
+  }
+}
+
+/* Baut das komplette HTML-Dokument für die Stellungnahme auf Briefpapier.
+   Reuse: profile-Daten + ähnliches Styling wie das Angebote-PDF. */
+function _buildStellungnahmeHtml(s) {
+  const t = s.ticket;
+  const profile = s.profile;
+  const r = s.result;
+  const empfaengerFirma = t.requester?.company?.name || '';
+  const empfaengerName  = t.requester?.name || '';
+  const empfaengerEmail = t.requester?.email || '';
+  const datum = new Date().toLocaleDateString('de-DE', { day: '2-digit', month: '2-digit', year: 'numeric' });
+  const senderName = s.sender_name || '';
+  const senderEmail = s.sender_email || '';
+  const bodyHtml = (r.body || '').split(/\n\n+/).map(p => '<p style="margin:0 0 10px;white-space:pre-line">' + escapeHtml(p) + '</p>').join('');
+  return '<!doctype html><html><head><meta charset="utf-8"><title>Stellungnahme ' + escapeHtml(profile.firma || '') + '</title>' +
+    '<style>' +
+    '@page { size:A4; margin:0; }' +
+    'body { font-family:"Helvetica Neue",Arial,sans-serif; font-size:11pt; color:#1f2937; margin:0; background:#e5e7eb; }' +
+    '.page { width:210mm; min-height:297mm; padding:25mm 22mm; background:#fff; margin:0 auto; box-shadow:0 2px 12px rgba(0,0,0,.08); position:relative; }' +
+    '.header-row { display:flex; justify-content:space-between; align-items:flex-start; margin-bottom:25mm; gap:15mm; }' +
+    '.logo-block { font-weight:bold; font-size:16pt; color:#111; }' +
+    '.meta-block { font-size:9pt; color:#4b5563; text-align:right; }' +
+    '.meta-row { display:flex; justify-content:space-between; gap:8mm; margin-bottom:1mm; }' +
+    '.meta-row .label { color:#6b7280; }' +
+    '.addr-row { display:flex; justify-content:space-between; gap:15mm; margin-bottom:10mm; }' +
+    '.empfaenger { font-size:10pt; min-width:80mm; }' +
+    '.empfaenger .small { font-size:8pt; color:#6b7280; border-bottom:1px solid #d1d5db; padding-bottom:2mm; margin-bottom:3mm; }' +
+    '.ansprechpartner { font-size:9pt; color:#4b5563; text-align:right; min-width:50mm; }' +
+    'h1.betreff { font-size:13pt; font-weight:bold; margin:12mm 0 6mm; line-height:1.3; }' +
+    'p { line-height:1.5; }' +
+    '.signature { margin-top:10mm; }' +
+    '.signature .gruss { margin-bottom:14mm; }' +
+    '.signature .name { font-weight:bold; }' +
+    '.footer { position:absolute; bottom:10mm; left:22mm; right:22mm; border-top:1px solid #d1d5db; padding-top:3mm; display:flex; justify-content:space-between; gap:10mm; font-size:7.5pt; color:#6b7280; }' +
+    '@media print { body { background:#fff; } .page { box-shadow:none; margin:0; } }' +
+    '</style></head><body><div class="page">' +
+    // Header
+    '<div class="header-row">' +
+      '<div class="logo-block">' + escapeHtml(profile.briefkopf_logo_text || profile.firma || '') + '</div>' +
+      '<div class="meta-block">' +
+        '<div class="meta-row"><span class="label">Datum</span><span>' + escapeHtml(datum) + '</span></div>' +
+        '<div class="meta-row"><span class="label">Ticket</span><span>#' + t.id + '</span></div>' +
+      '</div>' +
+    '</div>' +
+    // Adress-Block
+    '<div class="addr-row">' +
+      '<div class="empfaenger">' +
+        '<div class="small">' + escapeHtml(profile.firma || '') + ', ' + escapeHtml(profile.anschrift || '') + '</div>' +
+        (empfaengerFirma ? escapeHtml(empfaengerFirma) + '<br>' : '') +
+        (empfaengerName && empfaengerName !== empfaengerFirma ? escapeHtml(empfaengerName) + '<br>' : '') +
+        (empfaengerEmail ? escapeHtml(empfaengerEmail) : '') +
+      '</div>' +
+      '<div class="ansprechpartner">' +
+        (senderName ? '<b>' + escapeHtml(senderName) + '</b><br>' : '') +
+        (senderEmail ? escapeHtml(senderEmail) + '<br>' : '') +
+        (profile.tel ? 'Tel.: ' + escapeHtml(profile.tel) : '') +
+      '</div>' +
+    '</div>' +
+    // Betreff
+    '<h1 class="betreff">' + escapeHtml(r.betreff || 'Stellungnahme') + '</h1>' +
+    // Anrede
+    '<p style="margin:0 0 8mm">' + escapeHtml(r.anrede || '') + '</p>' +
+    // Body
+    bodyHtml +
+    // Schluss
+    (r.schluss ? '<p style="margin:8mm 0 0;white-space:pre-line">' + escapeHtml(r.schluss) + '</p>' : '') +
+    // Signatur
+    '<div class="signature">' +
+      '<p class="gruss">Mit freundlichen Grüßen</p>' +
+      '<p class="name">' + escapeHtml(senderName || '') + (senderName ? '<br>' : '') + escapeHtml(profile.firma || '') + '</p>' +
+    '</div>' +
+    // Footer
+    '<div class="footer">' +
+      '<div><b>' + escapeHtml(profile.firma || '') + '</b><br>' + escapeHtml(profile.anschrift || '') + '<br>' + escapeHtml(profile.hrb || '') + '</div>' +
+      '<div>Tel.: ' + escapeHtml(profile.tel || '') + '<br>Mail: ' + escapeHtml(profile.email || '') + '<br>Web: ' + escapeHtml(profile.web || '') + '</div>' +
+      '<div>' + escapeHtml(profile.bank || '') + '<br>BIC: ' + escapeHtml(profile.bic || '') + '<br>IBAN: ' + escapeHtml(profile.iban || '') + '</div>' +
+    '</div>' +
+    '</div></body></html>';
 }
 
 /* ===== Step 3: Vorschau-Modal mit editierbaren Feldern + Aktions-Buttons ===== */
