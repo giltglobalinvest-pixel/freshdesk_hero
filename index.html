@@ -693,6 +693,9 @@
     <button onclick="navTo('phone-scripts'); closeMenu();" class="w-full text-left px-3 py-2 text-sm hover:bg-ink-50 flex items-center gap-2">
       <i data-lucide="phone-outgoing" class="w-4 h-4 text-purple-500"></i> Telefon-Leitfaden-Vorlagen
     </button>
+    <button onclick="navTo('letterhead'); closeMenu();" class="w-full text-left px-3 py-2 text-sm hover:bg-ink-50 flex items-center gap-2">
+      <i data-lucide="file-text" class="w-4 h-4 text-emerald-500"></i> Briefpapier-Einstellungen
+    </button>
     <button onclick="navTo('stats'); closeMenu();" class="w-full text-left px-3 py-2 text-sm hover:bg-ink-50 flex items-center gap-2">
       <i data-lucide="bar-chart-3" class="w-4 h-4 text-indigo-500"></i> Statistiken
     </button>
@@ -767,7 +770,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.147';
+const APP_VERSION = 'v2.46.148';
 
 /* ============================================================
    GLOBAL THEME — v2.46.12
@@ -6984,6 +6987,7 @@ function navTo(page) {
   else if (page === 'lists')      renderFn = renderListsPage;
   else if (page === 'saved-searches') renderFn = renderSavedSearchesPage;
   else if (page === 'phone-scripts') renderFn = renderPhoneScriptTemplatesPage;
+  else if (page === 'letterhead') renderFn = renderLetterheadSettingsPage;
   else if (page === 'contacts')  renderFn = renderContactsPage;
   else if (page === 'stats')     renderFn = renderStatsPage;
   try {
@@ -23958,13 +23962,18 @@ async function openStellungnahmeModal(accountId, ticketId) {
     }
     if (!ticket) throw new Error('Ticket konnte nicht geladen werden');
     const me = APP_KEYS.user || {};
+    // v2.46.148: LetterheadSettings für Mandant laden (Logo + Default-Signatur)
+    const lh = await loadLetterheadSettings(accountId).catch(() => null);
     window._STN_CTX = {
       accountId, ticketId, ticket, profile, account,
       tonfall: 'sachlich',
       anlass: '',
       result: null,  // { betreff, anrede, body, schluss }
-      sender_name:  me.name || '',
-      sender_email: me.email || '',
+      sender_name:     me.name || '',
+      sender_email:    me.email || '',
+      sender_titel:    lh?.default_sender_titel || '',
+      sender_funktion: lh?.default_sender_funktion || '',
+      logo_url:        _letterheadLogoUrl(lh),
     };
     _renderStellungnahmeShell();
   } catch (e) {
@@ -24019,6 +24028,18 @@ function _renderStellungnahmeShell() {
               '<option value="formal"' + (s.tonfall === 'formal' ? ' selected' : '') + '>Formal / Rechtssicher</option>' +
             '</select>' +
             '<button onclick="_stnGenerate(this)" class="w-full px-3 py-2.5 bg-gradient-to-br from-emerald-600 to-brand-600 hover:opacity-90 text-white rounded-lg text-sm font-bold inline-flex items-center justify-center gap-1.5"><i data-lucide="wand-2" class="w-4 h-4"></i> KI-Stellungnahme erzeugen</button>' +
+            // v2.46.148: Signatur-Block (Titel vor Namen + Funktion nach Namen)
+            '<div class="border-t border-ink-200 pt-3 space-y-1.5">' +
+              '<p class="text-xs font-bold text-ink-700 uppercase tracking-wider inline-flex items-center gap-1"><i data-lucide="pen-line" class="w-3.5 h-3.5"></i> Signatur</p>' +
+              '<label class="text-[10px] font-semibold text-ink-500 uppercase tracking-wider block">Titel vor Namen</label>' +
+              '<input id="stnSenderTitel" type="text" value="' + escapeAttr(s.sender_titel || '') + '" placeholder="z.B. Dipl.-Ing." oninput="_stnUpdateCtx(\'sender_titel\', this.value)" class="w-full px-2 py-1.5 border border-ink-300 rounded-lg text-sm">' +
+              '<label class="text-[10px] font-semibold text-ink-500 uppercase tracking-wider block">Funktion (nach Namen)</label>' +
+              '<input id="stnSenderFunktion" type="text" value="' + escapeAttr(s.sender_funktion || '') + '" placeholder="z.B. Geschäftsführer" oninput="_stnUpdateCtx(\'sender_funktion\', this.value)" class="w-full px-2 py-1.5 border border-ink-300 rounded-lg text-sm">' +
+              '<button onclick="_stnSaveSignatureAsDefault(this)" class="mt-1 w-full px-2 py-1.5 bg-ink-100 hover:bg-ink-200 text-ink-700 rounded-lg text-[11px] font-bold inline-flex items-center justify-center gap-1"><i data-lucide="save" class="w-3 h-3"></i> Als Standard speichern</button>' +
+              (s.logo_url
+                ? '<p class="text-[10px] text-emerald-700 inline-flex items-center gap-1 mt-1"><i data-lucide="check-circle-2" class="w-3 h-3"></i> Logo aktiv</p>'
+                : '<p class="text-[10px] text-amber-700 inline-flex items-center gap-1 mt-1"><i data-lucide="image-off" class="w-3 h-3"></i> Kein Logo. <button onclick="closeStellungnahmeModal();navTo(\'letterhead\')" class="underline">Jetzt hochladen</button></p>') +
+            '</div>' +
             (s.result ? (
               '<div class="border-t border-ink-200 pt-3 space-y-2">' +
                 '<label class="text-xs font-bold text-ink-700 uppercase tracking-wider block">Betreff</label>' +
@@ -24057,6 +24078,30 @@ function _stnUpdateField(field, value) {
   if (!s?.result) return;
   s.result[field] = value;
   _stnRefreshPreview();
+}
+
+function _stnUpdateCtx(field, value) {
+  const s = window._STN_CTX;
+  if (!s) return;
+  s[field] = value;
+  if (s.result) _stnRefreshPreview();
+}
+
+async function _stnSaveSignatureAsDefault(btn) {
+  const s = window._STN_CTX;
+  if (!s) return;
+  setBusy(btn, true, 'Speichere…');
+  try {
+    await saveLetterheadSignature(s.accountId, {
+      default_sender_titel: s.sender_titel || '',
+      default_sender_funktion: s.sender_funktion || '',
+    });
+    setBusy(btn, false);
+    toast('Als Standard gespeichert.', 'success', 2500);
+  } catch (e) {
+    setBusy(btn, false);
+    toast('Speichern fehlgeschlagen: ' + (e.message || e), 'error', 6000);
+  }
 }
 
 function _stnRefreshPreview() {
@@ -24204,9 +24249,11 @@ function _buildStellungnahmeHtml(s) {
     '.footer { position:absolute; bottom:10mm; left:22mm; right:22mm; border-top:1px solid #d1d5db; padding-top:3mm; display:flex; justify-content:space-between; gap:10mm; font-size:7.5pt; color:#6b7280; }' +
     '@media print { body { background:#fff; } .page { box-shadow:none; margin:0; } }' +
     '</style></head><body><div class="page">' +
-    // Header
+    // Header — v2.46.148: Logo als <img> wenn vorhanden, sonst Textfallback
     '<div class="header-row">' +
-      '<div class="logo-block">' + escapeHtml(profile.briefkopf_logo_text || profile.firma || '') + '</div>' +
+      '<div class="logo-block">' + (s.logo_url
+        ? '<img src="' + escapeAttr(s.logo_url) + '" alt="Logo" style="max-height:60px;max-width:280px;object-fit:contain">'
+        : escapeHtml(profile.briefkopf_logo_text || profile.firma || '')) + '</div>' +
       '<div class="meta-block">' +
         '<div class="meta-row"><span class="label">Datum</span><span>' + escapeHtml(datum) + '</span></div>' +
         '<div class="meta-row"><span class="label">Ticket</span><span>#' + t.id + '</span></div>' +
@@ -24234,10 +24281,14 @@ function _buildStellungnahmeHtml(s) {
     bodyHtml +
     // Schluss
     (r.schluss ? '<p style="margin:8mm 0 0;white-space:pre-line">' + escapeHtml(r.schluss) + '</p>' : '') +
-    // Signatur
+    // Signatur — v2.46.148: Titel vor Namen + Funktion nach Namen
     '<div class="signature">' +
       '<p class="gruss">Mit freundlichen Grüßen</p>' +
-      '<p class="name">' + escapeHtml(senderName || '') + (senderName ? '<br>' : '') + escapeHtml(profile.firma || '') + '</p>' +
+      '<p class="name">' +
+        escapeHtml(((s.sender_titel || '') + ' ' + (senderName || '')).trim()) +
+        (s.sender_funktion ? '<br><span style="font-weight:normal;color:#4b5563">' + escapeHtml(s.sender_funktion) + '</span>' : '') +
+        '<br><span style="font-weight:normal">' + escapeHtml(profile.firma || '') + '</span>' +
+      '</p>' +
     '</div>' +
     // Footer
     '<div class="footer">' +
@@ -26662,6 +26713,232 @@ async function bumpPhoneScriptUsage(recordId, accountId) {
     await airtableUpdate(PHONE_SCRIPT_TEMPLATES_TABLE, recordId, { last_used_at: nowIso(), usage_count: newCount });
   } catch (_) {}
   PHONE_SCRIPTS_STATE.byAccount.delete(accountId);
+}
+
+/* === v2.46.148: Briefpapier-Einstellungen pro Mandant ====================
+   Tabelle LetterheadSettings (auto-angelegt beim ersten Save). Pro Mandant
+   ein Record mit Logo (multipleAttachments) + Default-Signatur-Felder. */
+const LETTERHEAD_TABLE = 'LetterheadSettings';
+const LETTERHEAD_STATE = {
+  byAccount: new Map(),  // accountId → record
+};
+
+async function loadLetterheadSettings(accountId, force) {
+  if (!accountId) return null;
+  if (!force && LETTERHEAD_STATE.byAccount.has(accountId)) return LETTERHEAD_STATE.byAccount.get(accountId);
+  let rec = null;
+  try {
+    const recs = await airtableRead(LETTERHEAD_TABLE, {
+      filter: "{account_id}='" + escapeFormula(accountId) + "'",
+      maxRecords: 1,
+    });
+    if (recs[0]) rec = Object.assign({ recordId: recs[0].id }, recs[0].fields);
+  } catch (_) {}
+  LETTERHEAD_STATE.byAccount.set(accountId, rec);
+  return rec;
+}
+
+const LETTERHEAD_DEFAULT_TYPES = {
+  account_id:              'singleLineText',
+  default_sender_titel:    'singleLineText',
+  default_sender_funktion: 'singleLineText',
+  logo:                    'multipleAttachments',
+  updated_by:              'singleLineText',
+  updated_at:              'singleLineText',
+};
+
+async function _ensureLetterheadTable() {
+  if (!APP_KEYS.airtableWriteKey) throw new Error('Schreib-Key fehlt');
+  const metaRes = await fetch(
+    'https://api.airtable.com/v0/meta/bases/' + APP_CONFIG.APP_BASE_ID + '/tables',
+    { headers: { 'Authorization': 'Bearer ' + APP_KEYS.airtableWriteKey } }
+  );
+  if (!metaRes.ok) throw new Error('Meta-API: ' + metaRes.status);
+  const meta = await metaRes.json();
+  let table = (meta.tables || []).find(t => t.name === LETTERHEAD_TABLE);
+  if (!table) {
+    const fields = Object.entries(LETTERHEAD_DEFAULT_TYPES).map(([n, ty]) => _airtableFieldSpec(n, ty));
+    const createRes = await fetch(
+      'https://api.airtable.com/v0/meta/bases/' + APP_CONFIG.APP_BASE_ID + '/tables',
+      {
+        method: 'POST',
+        headers: { 'Authorization': 'Bearer ' + APP_KEYS.airtableWriteKey, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: LETTERHEAD_TABLE, fields }),
+      }
+    );
+    if (!createRes.ok) { const t = await createRes.text(); throw new Error('Tabelle anlegen: ' + t.slice(0, 200)); }
+    table = await createRes.json();
+    await new Promise(r => setTimeout(r, 800));
+  }
+  const fileField = (table.fields || []).find(f => f.name === 'logo');
+  if (!fileField) throw new Error('Logo-Feld fehlt in Tabelle');
+  return { tableId: table.id, logoFieldId: fileField.id };
+}
+
+async function saveLetterheadSignature(accountId, patch) {
+  if (!accountId) throw new Error('Mandant fehlt');
+  const me = APP_KEYS.user || {};
+  const existing = await loadLetterheadSettings(accountId);
+  const fields = Object.assign({
+    account_id:              accountId,
+    default_sender_titel:    '',
+    default_sender_funktion: '',
+    updated_by:              me.email || '',
+    updated_at:              nowIso(),
+  }, patch || {});
+  if (existing?.recordId) {
+    await airtableUpdateWithAutoField(LETTERHEAD_TABLE, existing.recordId, fields, LETTERHEAD_DEFAULT_TYPES);
+  } else {
+    await airtableWriteWithAutoField(LETTERHEAD_TABLE, fields, LETTERHEAD_DEFAULT_TYPES);
+  }
+  LETTERHEAD_STATE.byAccount.delete(accountId);
+}
+
+async function uploadLetterheadLogo(accountId, file) {
+  if (!accountId) throw new Error('Mandant fehlt');
+  if (file.size > 5 * 1024 * 1024) throw new Error('Logo zu groß (max 5 MB)');
+  const { logoFieldId } = await _ensureLetterheadTable();
+  // Record sicherstellen (ohne logo befüllen, das kommt im 2. Step)
+  let existing = await loadLetterheadSettings(accountId, true);
+  if (!existing?.recordId) {
+    await saveLetterheadSignature(accountId, {});
+    existing = await loadLetterheadSettings(accountId, true);
+  }
+  if (!existing?.recordId) throw new Error('Konnte LetterheadSettings-Record nicht anlegen');
+  // Datei via content.airtable.com hochladen
+  const buf = await file.arrayBuffer();
+  const base64 = _abToBase64(buf);
+  const uploadRes = await fetch(
+    'https://content.airtable.com/v0/' + APP_CONFIG.APP_BASE_ID + '/' + existing.recordId + '/' + logoFieldId + '/uploadAttachment',
+    {
+      method: 'POST',
+      headers: {
+        'Authorization': 'Bearer ' + APP_KEYS.airtableWriteKey,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        contentType: file.type || 'image/png',
+        file: base64,
+        filename: file.name,
+      }),
+    }
+  );
+  if (!uploadRes.ok) {
+    const t = await uploadRes.text();
+    throw new Error('Logo-Upload fehlgeschlagen: ' + t.slice(0, 200));
+  }
+  LETTERHEAD_STATE.byAccount.delete(accountId);
+  return await uploadRes.json();
+}
+
+function _letterheadLogoUrl(settings) {
+  const att = (settings?.logo || [])[0];
+  return att?.url || '';
+}
+
+const LETTERHEAD_PAGE_STATE = { currentAccountId: '' };
+
+async function renderLetterheadSettingsPage() {
+  setPageTitle('Briefpapier-Einstellungen', 'Logo + Standard-Signatur pro Mandant');
+  const accounts = APP_STATE.accounts || [];
+  if (!LETTERHEAD_PAGE_STATE.currentAccountId || !accounts.find(a => a.id === LETTERHEAD_PAGE_STATE.currentAccountId)) {
+    LETTERHEAD_PAGE_STATE.currentAccountId = APP_STATE.currentAccount && APP_STATE.currentAccount !== 'all'
+      ? APP_STATE.currentAccount
+      : (accounts[0]?.id || '');
+  }
+  const accountOpts = accounts.map(a =>
+    '<option value="' + escapeAttr(a.id) + '"' + (a.id === LETTERHEAD_PAGE_STATE.currentAccountId ? ' selected' : '') + '>' + escapeHtml(a.name || a.id) + '</option>'
+  ).join('');
+  $('pageContent').innerHTML = '<div class="space-y-3 max-w-2xl mx-auto">' +
+    '<div class="bg-gradient-to-br from-emerald-50 to-brand-50 border border-emerald-200 rounded-xl p-3 text-[12px] text-emerald-900">' +
+      '<p class="font-bold inline-flex items-center gap-1 mb-1"><i data-lucide="file-text" class="w-4 h-4"></i> Briefpapier-Einstellungen</p>' +
+      '<p>Logo + Standard-Signatur werden in der KI-Stellungnahme verwendet (und perspektivisch auch in anderen Briefen wie Angeboten).</p>' +
+    '</div>' +
+    '<div class="bg-white rounded-xl border border-ink-200 p-3">' +
+      '<label class="text-[11px] inline-flex items-center gap-1.5 w-full">' +
+        '<i data-lucide="building-2" class="w-3.5 h-3.5 text-ink-500"></i>' +
+        '<span class="font-semibold text-ink-600 uppercase tracking-wider">Mandant:</span>' +
+        '<select id="lhAccount" onchange="_onLhAccount(this.value)" class="flex-1 px-2 py-1.5 border border-ink-300 rounded-lg text-sm bg-white">' +
+          accountOpts +
+        '</select>' +
+      '</label>' +
+    '</div>' +
+    '<div id="lhBody"><div class="bg-white rounded-xl border border-ink-200 p-6 text-center"><span class="spinner inline-block w-5 h-5 border-[2px] text-emerald-500"></span><p class="text-sm text-ink-500 mt-2">Lade Einstellungen…</p></div></div>' +
+  '</div>';
+  if (window.lucide) lucide.createIcons();
+  await loadLetterheadSettings(LETTERHEAD_PAGE_STATE.currentAccountId, true);
+  _renderLetterheadBody();
+}
+
+function _onLhAccount(v) {
+  LETTERHEAD_PAGE_STATE.currentAccountId = v;
+  loadLetterheadSettings(v, true).then(_renderLetterheadBody);
+}
+
+function _renderLetterheadBody() {
+  const host = document.getElementById('lhBody');
+  if (!host) return;
+  const accId = LETTERHEAD_PAGE_STATE.currentAccountId;
+  const settings = LETTERHEAD_STATE.byAccount.get(accId) || {};
+  const logoUrl = _letterheadLogoUrl(settings);
+  host.innerHTML =
+    // Logo-Block
+    '<div class="bg-white rounded-xl border border-ink-200 p-4 mb-3">' +
+      '<p class="text-[11px] font-bold text-ink-700 uppercase tracking-wider mb-2 inline-flex items-center gap-1"><i data-lucide="image" class="w-3.5 h-3.5"></i> Firmenlogo</p>' +
+      (logoUrl
+        ? '<div class="bg-ink-50 border border-ink-200 rounded-lg p-3 mb-2 flex items-center justify-center" style="min-height:80px">' +
+            '<img src="' + escapeAttr(logoUrl) + '" alt="Logo" style="max-height:80px;max-width:300px;object-fit:contain">' +
+          '</div>'
+        : '<div class="bg-ink-50 border border-dashed border-ink-300 rounded-lg p-6 mb-2 text-center text-[11px] text-ink-500"><i data-lucide="image" class="w-8 h-8 inline text-ink-400"></i><p class="mt-1">Noch kein Logo hochgeladen</p></div>') +
+      '<input type="file" id="lhLogoInput" accept="image/png,image/jpeg,image/svg+xml" onchange="_uploadLetterheadLogo(this)" class="text-[11px] block w-full text-ink-700 file:mr-2 file:py-1.5 file:px-3 file:rounded-md file:border-0 file:text-[11px] file:font-bold file:bg-emerald-600 file:text-white hover:file:bg-emerald-700 cursor-pointer">' +
+      '<p class="text-[10px] text-ink-500 mt-1">PNG / JPEG / SVG · max 5 MB · empfohlen 300×80 px transparent</p>' +
+    '</div>' +
+    // Signatur-Block
+    '<div class="bg-white rounded-xl border border-ink-200 p-4 mb-3">' +
+      '<p class="text-[11px] font-bold text-ink-700 uppercase tracking-wider mb-2 inline-flex items-center gap-1"><i data-lucide="pen-line" class="w-3.5 h-3.5"></i> Standard-Signatur</p>' +
+      '<p class="text-[10px] text-ink-500 mb-2">Wird in der Stellungnahme vor + nach deinem Namen eingefügt. Pro Stellungnahme einzeln überschreibbar.</p>' +
+      '<label class="text-xs font-semibold text-ink-600 uppercase tracking-wider block mt-1">Titel <span class="font-normal normal-case text-ink-500">(vor dem Namen, z.B. „Dipl.-Ing.")</span></label>' +
+      '<input id="lhSenderTitel" type="text" value="' + escapeAttr(settings.default_sender_titel || '') + '" placeholder="Dipl.-Ing." class="w-full px-2 py-1.5 border border-ink-300 rounded-lg text-sm">' +
+      '<label class="text-xs font-semibold text-ink-600 uppercase tracking-wider block mt-2">Funktion <span class="font-normal normal-case text-ink-500">(nach dem Namen, z.B. „Geschäftsführer")</span></label>' +
+      '<input id="lhSenderFunktion" type="text" value="' + escapeAttr(settings.default_sender_funktion || '') + '" placeholder="Geschäftsführer" class="w-full px-2 py-1.5 border border-ink-300 rounded-lg text-sm">' +
+      '<button onclick="_saveLetterheadSignature(this)" class="mt-3 w-full px-3 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-sm font-bold inline-flex items-center justify-center gap-1.5"><i data-lucide="save" class="w-4 h-4"></i> Signatur speichern</button>' +
+    '</div>';
+  if (window.lucide) lucide.createIcons();
+}
+
+async function _uploadLetterheadLogo(inputEl) {
+  const file = inputEl?.files?.[0];
+  if (!file) return;
+  const accId = LETTERHEAD_PAGE_STATE.currentAccountId;
+  inputEl.value = '';
+  toast('Lade Logo hoch…', 'info', 2000);
+  try {
+    await uploadLetterheadLogo(accId, file);
+    await loadLetterheadSettings(accId, true);
+    _renderLetterheadBody();
+    toast('Logo hochgeladen.', 'success', 3000);
+  } catch (e) {
+    toast('Upload fehlgeschlagen: ' + (e.message || e), 'error', 6000);
+  }
+}
+
+async function _saveLetterheadSignature(btn) {
+  const accId = LETTERHEAD_PAGE_STATE.currentAccountId;
+  const titel = (document.getElementById('lhSenderTitel')?.value || '').trim();
+  const funk = (document.getElementById('lhSenderFunktion')?.value || '').trim();
+  setBusy(btn, true, 'Speichere…');
+  try {
+    await saveLetterheadSignature(accId, {
+      default_sender_titel: titel,
+      default_sender_funktion: funk,
+    });
+    await loadLetterheadSettings(accId, true);
+    setBusy(btn, false);
+    toast('Signatur gespeichert.', 'success', 2500);
+  } catch (e) {
+    setBusy(btn, false);
+    toast('Speichern fehlgeschlagen: ' + (e.message || e), 'error', 6000);
+  }
 }
 
 /* Wählt die best-passende Vorlage für einen Kontakt aus der Liste:
