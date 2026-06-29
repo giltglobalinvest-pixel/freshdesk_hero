@@ -776,7 +776,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.158';
+const APP_VERSION = 'v2.46.159';
 
 /* ============================================================
    GLOBAL THEME — v2.46.12
@@ -11965,6 +11965,8 @@ function _ticketActionBarIcons(accountId, ticketId) {
       <i data-lucide="${icon}" class="w-4 h-4 text-${color}-700 group-active:text-${color}-900"></i>
     </button>`;
   return [
+    // v2.46.159: Ticket aus Freshdesk neu laden (Status, Verlauf, Anhänge)
+    btn('rotate-cw',      'brand',   'Ticket neu laden (frische Daten von Freshdesk)',         `_reloadTicketDetail('${accIdAttr}', ${ticketId}, this)`),
     btn('check-circle-2', 'emerald', 'Ticket schließen (Status: Geschlossen)',                  `ticketActionClose('${accIdAttr}', ${ticketId}, this)`),
     btn('ban',            'red',     'Als SPAM markieren / in Papierkorb',                     `ticketActionSpam('${accIdAttr}', ${ticketId}, this)`),
     `<span class="shrink-0 w-px h-5 bg-ink-200 mx-0.5"></span>`,
