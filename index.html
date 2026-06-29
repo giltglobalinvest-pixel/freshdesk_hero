@@ -776,7 +776,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.157';
+const APP_VERSION = 'v2.46.158';
 
 /* ============================================================
    GLOBAL THEME — v2.46.12
@@ -12501,6 +12501,30 @@ async function sendDetailInternalNote(btnEl, accountId, ticketId) {
   }
 }
 
+/* v2.46.158: Interne Notiz loeschen — Trash-Icon im Notiz-Header.
+   Freshdesk-Endpoint: DELETE /api/v2/conversations/<conv_id>.
+   Nur fuer private Notizen (im UI nur dort sichtbar). */
+async function deleteInternalNote(accountId, ticketId, convId, btnEl) {
+  if (!accountId || !ticketId || !convId) return;
+  if (!confirm('Diese interne Notiz endgültig löschen?\n\nKann nicht rückgängig gemacht werden.')) return;
+  setBusy(btnEl, true);
+  try {
+    await proxyJson('/freshdesk/' + encodeURIComponent(accountId) + '/api/v2/conversations/' + convId, {
+      method: 'DELETE',
+    });
+    toast('Notiz gelöscht ✓', 'success', 3000);
+    if (CURRENT_TICKET && CURRENT_TICKET.id === ticketId) {
+      try {
+        const full = await fetchTicketDetail(accountId, ticketId);
+        if (full) { CURRENT_TICKET = full; renderTicketDetailBody(full); }
+      } catch (_) {}
+    }
+  } catch (e) {
+    setBusy(btnEl, false);
+    toast('Löschen fehlgeschlagen: ' + (e.message || e), 'error', 8000);
+  }
+}
+
 /* v2.46.151: Status-Wechsel direkt aus dem Inline-KI-Block. */
 async function setDetailTicketStatus(selEl, accountId, ticketId) {
   const newStatus = parseInt(selEl.value, 10);
@@ -12737,6 +12761,7 @@ function renderTicketDetailBody(ticket) {
                   <span class="font-semibold text-ink-700 truncate">${escapeHtml(arrow + ' ' + who)}</span>
                   <span class="text-ink-400 shrink-0">${escapeHtml(fmtDate(c.created_at))}</span>
                   ${_renderTranslateButton(bodyPlain, convId)}
+                  ${isPrivate ? `<button onclick="deleteInternalNote('${escapeAttr(ticket._accountId)}', ${ticket.id}, ${c.id}, this)" class="shrink-0 text-rose-500 hover:text-rose-700 hover:bg-rose-50 -m-1 p-1 rounded inline-flex items-center" title="Interne Notiz löschen"><i data-lucide="trash-2" class="w-3.5 h-3.5"></i></button>` : ''}
                 </div>
                 ${rulePill}
                 <div data-translatable-area="${convId}">
