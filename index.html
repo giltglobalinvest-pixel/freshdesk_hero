@@ -696,6 +696,9 @@
     <button onclick="navTo('letterhead'); closeMenu();" class="w-full text-left px-3 py-2 text-sm hover:bg-ink-50 flex items-center gap-2">
       <i data-lucide="file-text" class="w-4 h-4 text-emerald-500"></i> Briefpapier-Einstellungen
     </button>
+    <button onclick="navTo('quick-analysis'); closeMenu();" class="w-full text-left px-3 py-2 text-sm hover:bg-ink-50 flex items-center gap-2">
+      <i data-lucide="scan-search" class="w-4 h-4 text-purple-500"></i> Schnellanalyse (KI) · Aufzug-Tickets
+    </button>
     <button onclick="navTo('stats'); closeMenu();" class="w-full text-left px-3 py-2 text-sm hover:bg-ink-50 flex items-center gap-2">
       <i data-lucide="bar-chart-3" class="w-4 h-4 text-indigo-500"></i> Statistiken
     </button>
@@ -6988,6 +6991,7 @@ function navTo(page) {
   else if (page === 'saved-searches') renderFn = renderSavedSearchesPage;
   else if (page === 'phone-scripts') renderFn = renderPhoneScriptTemplatesPage;
   else if (page === 'letterhead') renderFn = renderLetterheadSettingsPage;
+  else if (page === 'quick-analysis') renderFn = renderQuickAnalysisSettingsPage;
   else if (page === 'contacts')  renderFn = renderContactsPage;
   else if (page === 'stats')     renderFn = renderStatsPage;
   try {
@@ -11972,6 +11976,8 @@ function _ticketActionBarIcons(accountId, ticketId) {
     btn('text-cursor-input', 'sky',  'Titel als „ANFRAGE Nr | Standort | Fabriknr" strukturieren', `openRestructureTitleModal('${accIdAttr}', ${ticketId})`),
     // v2.46.70: Angebots-Button nur für Aufzug-Service-Accounts (Aufzugshandwerk/Aszendio)
     (accountHasAngebotsModul(acc) ? btn('file-text', 'indigo', 'Angebot erstellen (KI-gestützt)', `openAngebotsModal('${accIdAttr}', ${ticketId})`) : ''),
+    // v2.46.152: Schnellanalyse-Icon — KI analysiert Ticket + Anhänge nach Mandanten-Prompt
+    (accountHasAngebotsModul(acc) ? btn('scan-search', 'purple', 'Schnellanalyse (KI) → interne Notiz', `runQuickAnalysis('${accIdAttr}', ${ticketId}, this)`) : ''),
     // v2.46.147: Stellungnahme — KI-gestützter Brief auf Briefpapier (für alle Accounts)
     btn('file-check-2',   'emerald', 'Stellungnahme erstellen (KI · Briefpapier)',             `openStellungnahmeModal('${accIdAttr}', ${ticketId})`),
     btn('mail',           'orange',  'Email-Vorlage senden (Outbound)',                        `openTicketEmailModal('${accIdAttr}', ${ticketId})`),
@@ -11981,6 +11987,128 @@ function _ticketActionBarIcons(accountId, ticketId) {
     btn('link',           'ink',     'Freshdesk-Link kopieren',                                `copyTicketLink('${accIdAttr}', ${ticketId}, this)`),
     btn('external-link',  'ink',     'In Freshdesk öffnen (neuer Tab)',                        `openInFreshdesk('${accIdAttr}', ${ticketId})`),
   ].join('');
+}
+
+/* === v2.46.152: Schnellanalyse — KI-Analyse des Tickets per Mandanten-Prompt ===
+   Workflow:
+   1) Lade LetterheadSettings für diesen Mandanten → quick_analysis_prompt
+   2) Wenn leer → Toast mit Direktlink in die Settings
+   3) Hol das volle Ticket (CURRENT_TICKET ist meist schon da) + Conversations
+   4) Sammle Anhänge (PDFs + Bilder) via _angChatCollectAttachments
+   5) Schick alles an Claude Sonnet 4.5 mit dem User-Prompt
+   6) Poste die Antwort als interne (private) Notiz ins Ticket
+   7) Reload Ticket-Detail damit die Notiz im Verlauf erscheint */
+async function runQuickAnalysis(accountId, ticketId, btn) {
+  try {
+    // 1) Prompt laden (force-refresh damit Settings-Änderungen sofort greifen)
+    setBusy(btn, true);
+    const settings = await loadLetterheadSettings(accountId, true).catch(() => null);
+    const prompt = (settings?.quick_analysis_prompt || '').trim();
+    if (!prompt) {
+      setBusy(btn, false);
+      toast('Kein Schnellanalyse-Prompt hinterlegt. Im Burger-Menü → „Schnellanalyse (KI)" pflegen.', 'warn', 8000);
+      return;
+    }
+    if (!confirm('Schnellanalyse starten?\n\nClaude liest Ticket #' + ticketId + ' + Anhänge und fügt das Ergebnis als interne Notiz hinzu.')) {
+      setBusy(btn, false);
+      return;
+    }
+
+    // 2) Ticket holen (inkl. Conversations + Attachments)
+    setBusy(btn, true, 'Lade Ticket…');
+    let ticket = CURRENT_TICKET;
+    if (!ticket || ticket.id !== ticketId || !Array.isArray(ticket.conversations)) {
+      ticket = await fetchTicketDetail(accountId, ticketId);
+    }
+    if (!ticket) throw new Error('Ticket nicht gefunden');
+
+    // 3) Anhänge sammeln (PDFs + Bilder, max 5 Stk / 20 MB)
+    setBusy(btn, true, 'Lade Anhänge…');
+    const attachments = await _angChatCollectAttachments(accountId, ticketId, ticket, { maxCount: 5, maxBytes: 20 * 1024 * 1024 }).catch(e => {
+      console.warn('Anhang-Sammlung teilweise fehlgeschlagen:', e);
+      return [];
+    });
+
+    // 4) Ticket-Kontext aufbereiten
+    const req = ticket.requester || {};
+    const subj = ticket.subject || '(kein Betreff)';
+    const desc = (ticket.description_text || '').slice(0, 8000);
+    const convoText = (ticket.conversations || []).slice(-15).map(c => {
+      const who = c.private ? '[INTERN]' : (c.incoming ? 'Kunde' : 'Agent');
+      const when = c.created_at ? new Date(c.created_at).toLocaleString('de-DE') : '';
+      const body = (c.body_text || '').slice(0, 2500);
+      return who + ' · ' + when + '\n' + body;
+    }).join('\n\n---\n\n');
+
+    const userMessageContent = [
+      { type: 'text', text:
+        'TICKET-KONTEXT\n' +
+        '==============\n' +
+        'Account: ' + (settings?.account_id ? settings.account_id : accountId) + '\n' +
+        'Ticket #' + ticket.id + ': ' + subj + '\n' +
+        'Kunde: ' + (req.name || '?') + (req.email ? ' <' + req.email + '>' : '') + '\n' +
+        (req.company?.name ? 'Firma: ' + req.company.name + '\n' : '') +
+        '\nBESCHREIBUNG\n============\n' + (desc || '(leer)') +
+        (convoText ? '\n\nVERLAUF\n=======\n' + convoText : '') +
+        (attachments.length ? '\n\nANHÄNGE (' + attachments.length + ')\n========\n' + attachments.map(a => '- ' + a.name + ' (' + a.mediaType + ')').join('\n') + '\n\nDie Anhänge folgen als separate Content-Blocks.' : '\n\n(Keine analysierbaren Anhänge)')
+      }
+    ];
+    attachments.forEach(att => {
+      if (att.mediaType === 'application/pdf') {
+        userMessageContent.push({ type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: att.base64 }});
+      } else if (att.mediaType.startsWith('image/')) {
+        userMessageContent.push({ type: 'image', source: { type: 'base64', media_type: att.mediaType, data: att.base64 }});
+      }
+    });
+
+    // 5) Claude rufen
+    setBusy(btn, true, 'Claude analysiert…');
+    const sysPrompt =
+      'Du bist ein hochkonzentrierter Analyst für Aufzug-Service-Tickets. ' +
+      'Befolge die ANALYSE-AUFGABE des Users EXAKT. Lies ALLE Anhänge sorgfältig (auch handschriftliche Notizen auf Fotos). ' +
+      'Gib das Ergebnis als gut lesbare Markdown-Liste zurück. Keine Vor- oder Nachrede, kein „Hier ist meine Analyse:" — direkt mit dem Inhalt anfangen. ' +
+      'Wenn etwas nicht erkennbar ist, schreibe ehrlich „nicht erkennbar" — niemals raten.';
+    const fullPrompt = 'ANALYSE-AUFGABE\n===============\n' + prompt;
+    userMessageContent.unshift({ type: 'text', text: fullPrompt });
+
+    const callFn = (typeof _callAnthropicWithRetry === 'function')
+      ? _callAnthropicWithRetry
+      : (body) => proxyJson('/anthropic/v1/messages', { method: 'POST', body: JSON.stringify(body) });
+    const data = await callFn({
+      model: 'claude-sonnet-4-5-20250929',
+      max_tokens: 2000,
+      system: sysPrompt,
+      messages: [{ role: 'user', content: userMessageContent }],
+    });
+    const resultText = (data?.content?.[0]?.text || '').trim();
+    if (!resultText) throw new Error('Leere Antwort vom Modell');
+
+    // 6) Als interne Notiz speichern
+    setBusy(btn, true, 'Speichere Notiz…');
+    const noteHeader =
+      '<p><b>🔎 KI-Schnellanalyse</b> · ' + new Date().toLocaleString('de-DE') +
+      (attachments.length ? ' · ' + attachments.length + ' Anhang/Anhänge gelesen' : '') +
+      '</p><hr>';
+    const noteBodyHtml = noteHeader + (typeof markdownToHtmlBasic === 'function'
+      ? markdownToHtmlBasic(resultText)
+      : resultText.split(/\n{2,}/).map(p => '<p>' + escapeHtml(p).replace(/\n/g, '<br>') + '</p>').join(''));
+    const base = '/freshdesk/' + encodeURIComponent(accountId) + '/api/v2/tickets/' + ticketId;
+    await proxyJson(base + '/notes', { method: 'POST', body: JSON.stringify({ body: noteBodyHtml, private: true }) });
+
+    // 7) Reload
+    setBusy(btn, false);
+    toast('Schnellanalyse als interne Notiz gespeichert ✓', 'success', 4000);
+    if (CURRENT_TICKET && CURRENT_TICKET.id === ticketId) {
+      try {
+        const full = await fetchTicketDetail(accountId, ticketId);
+        if (full) { CURRENT_TICKET = full; renderTicketDetailBody(full); }
+      } catch (_) {}
+    }
+  } catch (e) {
+    setBusy(btn, false);
+    toast('Schnellanalyse fehlgeschlagen: ' + (e.message || e), 'error', 10000);
+    console.error('runQuickAnalysis:', e);
+  }
 }
 
 /* v2.46.145: Verlauf neu von Freshdesk laden (z.B. wenn zwischenzeitlich Antworten kamen).
@@ -26865,6 +26993,8 @@ const LETTERHEAD_DEFAULT_TYPES = {
   default_sender_titel:    'singleLineText',
   default_sender_funktion: 'singleLineText',
   logo:                    'multipleAttachments',
+  // v2.46.152: Schnellanalyse-Prompt pro Mandant
+  quick_analysis_prompt:   'multilineText',
   updated_by:              'singleLineText',
   updated_at:              'singleLineText',
 };
@@ -27061,6 +27191,115 @@ async function _saveLetterheadSignature(btn) {
     setBusy(btn, false);
     toast('Speichern fehlgeschlagen: ' + (e.message || e), 'error', 6000);
   }
+}
+
+/* === v2.46.152: Schnellanalyse-Einstellungen ============================
+   Pro Mandant ein freier Prompt. Wird bei einem Klick auf das Schnellanalyse-
+   Icon im Ticket-Detail an Claude geschickt — inkl. Ticket-Body, Verlauf und
+   Anhängen (PDFs/Bilder). Ergebnis wird als interne Notiz im Ticket gespeichert.
+   Reuses LetterheadSettings als Speicher (gleiche Tabelle, neues Feld
+   `quick_analysis_prompt`). */
+const QUICK_ANALYSIS_PAGE_STATE = { currentAccountId: '' };
+
+const DEFAULT_QUICK_ANALYSIS_PROMPT =
+  'Analysiere dieses Aufzug-Service-Ticket gründlich.\n\n' +
+  'Extrahiere aus Ticketinhalt, Verlauf UND allen Anhängen (PDFs/Bilder):\n\n' +
+  '1. **Standort:** Adresse / Anlage (Straße, Hausnummer, PLZ, Ort)\n' +
+  '2. **Fabriknummer:** falls erkennbar\n' +
+  '3. **Kunde / Auftraggeber:** Name + Firma\n' +
+  '4. **Erforderlicher Leistungsumfang:** was genau soll gemacht werden — Wartung, Reparatur, Inspektion, Modernisierung etc.\n' +
+  '5. **Sonstige relevante Details:** Termine, Sonderwünsche, Sicherheitsaspekte\n\n' +
+  'Gib das Ergebnis übersichtlich als Markdown-Liste zurück. Wenn etwas nicht erkennbar ist, schreibe „nicht erkennbar".';
+
+async function renderQuickAnalysisSettingsPage() {
+  setPageTitle('Schnellanalyse (KI)', 'Pro Mandant einen Analyse-Prompt für das Ticket-Icon hinterlegen');
+  const accounts = APP_STATE.accounts || [];
+  if (!QUICK_ANALYSIS_PAGE_STATE.currentAccountId || !accounts.find(a => a.id === QUICK_ANALYSIS_PAGE_STATE.currentAccountId)) {
+    QUICK_ANALYSIS_PAGE_STATE.currentAccountId = APP_STATE.currentAccount && APP_STATE.currentAccount !== 'all'
+      ? APP_STATE.currentAccount
+      : (accounts[0]?.id || '');
+  }
+  const accountOpts = accounts.map(a =>
+    '<option value="' + escapeAttr(a.id) + '"' + (a.id === QUICK_ANALYSIS_PAGE_STATE.currentAccountId ? ' selected' : '') + '>' + escapeHtml(a.name || a.id) + '</option>'
+  ).join('');
+  $('pageContent').innerHTML = '<div class="space-y-3 max-w-2xl mx-auto">' +
+    '<div class="bg-gradient-to-br from-purple-50 to-brand-50 border border-purple-200 rounded-xl p-3 text-[12px] text-purple-900">' +
+      '<p class="font-bold inline-flex items-center gap-1 mb-1"><i data-lucide="scan-search" class="w-4 h-4"></i> Schnellanalyse pro Mandant</p>' +
+      '<p>Hinterlege hier pro Mandant einen Prompt. Im Ticket-Detail erscheint ein lila „Schnellanalyse"-Icon — ein Klick darauf schickt Ticketinhalt + Verlauf + Anhänge an Claude und fügt das Ergebnis als interne Notiz hinzu.</p>' +
+      '<p class="mt-1.5 text-[11px] text-purple-700">Das Icon erscheint nur bei Mandanten, die im Schnellanalyse-Prompt etwas hinterlegt haben.</p>' +
+    '</div>' +
+    '<div class="bg-white rounded-xl border border-ink-200 p-3">' +
+      '<label class="text-[11px] inline-flex items-center gap-1.5 w-full">' +
+        '<i data-lucide="building-2" class="w-3.5 h-3.5 text-ink-500"></i>' +
+        '<span class="font-semibold text-ink-600 uppercase tracking-wider">Mandant:</span>' +
+        '<select id="qaAccount" onchange="_onQaAccount(this.value)" class="flex-1 px-2 py-1.5 border border-ink-300 rounded-lg text-sm bg-white">' +
+          accountOpts +
+        '</select>' +
+      '</label>' +
+    '</div>' +
+    '<div id="qaBody"><div class="bg-white rounded-xl border border-ink-200 p-6 text-center"><span class="spinner inline-block w-5 h-5 border-[2px] text-purple-500"></span><p class="text-sm text-ink-500 mt-2">Lade Prompt…</p></div></div>' +
+  '</div>';
+  if (window.lucide) lucide.createIcons();
+  await loadLetterheadSettings(QUICK_ANALYSIS_PAGE_STATE.currentAccountId, true);
+  _renderQuickAnalysisBody();
+}
+
+function _onQaAccount(v) {
+  QUICK_ANALYSIS_PAGE_STATE.currentAccountId = v;
+  loadLetterheadSettings(v, true).then(_renderQuickAnalysisBody);
+}
+
+function _renderQuickAnalysisBody() {
+  const host = document.getElementById('qaBody');
+  if (!host) return;
+  const accId = QUICK_ANALYSIS_PAGE_STATE.currentAccountId;
+  const settings = LETTERHEAD_STATE.byAccount.get(accId) || {};
+  const prompt = settings.quick_analysis_prompt || '';
+  host.innerHTML =
+    '<div class="bg-white rounded-xl border border-ink-200 p-4">' +
+      '<p class="text-[11px] font-bold text-ink-700 uppercase tracking-wider mb-2 inline-flex items-center gap-1"><i data-lucide="message-square-text" class="w-3.5 h-3.5"></i> Analyse-Prompt</p>' +
+      '<p class="text-[11px] text-ink-500 mb-2">Was soll Claude aus Ticket + Anhängen extrahieren? Frei formulierbar. Wird mit dem kompletten Ticket-Kontext kombiniert.</p>' +
+      '<textarea id="qaPrompt" rows="14" placeholder="' + escapeAttr(DEFAULT_QUICK_ANALYSIS_PROMPT) + '" class="w-full px-3 py-2 border border-ink-300 rounded-lg text-[12px] leading-relaxed font-mono resize-y">' + escapeHtml(prompt) + '</textarea>' +
+      '<div class="flex gap-2 mt-3">' +
+        '<button onclick="_qaLoadDefault(this)" class="flex-1 px-3 py-2 bg-ink-100 hover:bg-ink-200 text-ink-700 rounded-lg text-sm font-bold inline-flex items-center justify-center gap-1.5"><i data-lucide="file-plus" class="w-4 h-4"></i> Beispiel-Prompt laden</button>' +
+        '<button onclick="_saveQuickAnalysisPrompt(this)" class="flex-1 px-3 py-2 bg-purple-600 hover:bg-purple-700 text-white rounded-lg text-sm font-bold inline-flex items-center justify-center gap-1.5"><i data-lucide="save" class="w-4 h-4"></i> Speichern</button>' +
+      '</div>' +
+      (prompt
+        ? '<p class="text-[11px] text-emerald-700 inline-flex items-center gap-1 mt-2"><i data-lucide="check-circle-2" class="w-3.5 h-3.5"></i> Schnellanalyse-Icon erscheint in Tickets dieses Mandanten.</p>'
+        : '<p class="text-[11px] text-amber-700 inline-flex items-center gap-1 mt-2"><i data-lucide="info" class="w-3.5 h-3.5"></i> Noch kein Prompt — Icon wird ausgeblendet bis du speicherst.</p>') +
+    '</div>';
+  if (window.lucide) lucide.createIcons();
+}
+
+function _qaLoadDefault(btn) {
+  const ta = document.getElementById('qaPrompt');
+  if (!ta) return;
+  if (ta.value.trim() && !confirm('Aktuellen Prompt überschreiben?')) return;
+  ta.value = DEFAULT_QUICK_ANALYSIS_PROMPT;
+  ta.focus();
+}
+
+async function _saveQuickAnalysisPrompt(btn) {
+  const accId = QUICK_ANALYSIS_PAGE_STATE.currentAccountId;
+  const prompt = (document.getElementById('qaPrompt')?.value || '').trim();
+  setBusy(btn, true, 'Speichere…');
+  try {
+    await saveLetterheadSignature(accId, { quick_analysis_prompt: prompt });
+    await loadLetterheadSettings(accId, true);
+    setBusy(btn, false);
+    toast(prompt ? 'Schnellanalyse-Prompt gespeichert.' : 'Prompt geleert — Icon wird ausgeblendet.', 'success', 3000);
+    _renderQuickAnalysisBody();
+  } catch (e) {
+    setBusy(btn, false);
+    toast('Speichern fehlgeschlagen: ' + (e.message || e), 'error', 6000);
+  }
+}
+
+/* Wird beim Ticket-Detail-Rendern aufgerufen. Cached den geladenen Prompt
+   in LETTERHEAD_STATE.byAccount und liefert ihn synchron beim 2. Aufruf. */
+function _getCachedQuickAnalysisPrompt(accountId) {
+  const s = LETTERHEAD_STATE.byAccount.get(accountId);
+  return (s && s.quick_analysis_prompt) ? String(s.quick_analysis_prompt).trim() : '';
 }
 
 /* Wählt die best-passende Vorlage für einen Kontakt aus der Liste:
