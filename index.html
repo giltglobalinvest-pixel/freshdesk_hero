@@ -773,7 +773,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.155';
+const APP_VERSION = 'v2.46.156';
 
 /* ============================================================
    GLOBAL THEME — v2.46.12
@@ -33517,19 +33517,22 @@ export default async function (req) {
   if (path === "attachment-fetch") {
     const targetUrl = url.searchParams.get("url");
     if (!targetUrl) return jsonResponse({ error: "Parameter 'url' fehlt" }, 400);
-    // Whitelist: nur Freshdesk-typische Attachment-URLs
-    const allowedHosts = [
-      "s3.amazonaws.com",
-      "attachments6.freshdesk.com",
-      "attachment.freshdesk.com",
-      "attachments.freshdesk.com",
-      "cdn.freshdesk.com",
-    ];
     let parsed;
     try { parsed = new URL(targetUrl); }
     catch (_) { return jsonResponse({ error: "Ungültige URL" }, 400); }
-    const hostOk = allowedHosts.some(h => parsed.hostname === h || parsed.hostname.endsWith("." + h));
-    if (!hostOk) return jsonResponse({ error: "Host nicht erlaubt: " + parsed.hostname }, 403);
+    // v2.46.156: Whitelist via Regex — alle S3-Regionen + alle FD-Subdomains.
+    // Freshdesk speichert Attachments in regional buckets:
+    //   s3.amazonaws.com / s3.eu-central-1.amazonaws.com / s3.us-east-2.amazonaws.com etc.
+    //   <bucket>.s3.amazonaws.com / <bucket>.s3.<region>.amazonaws.com
+    const h = parsed.hostname;
+    const hostOk =
+      /^s3(\\.[a-z0-9-]+)?\\.amazonaws\\.com$/.test(h) ||
+      /\\.s3(\\.[a-z0-9-]+)?\\.amazonaws\\.com$/.test(h) ||
+      /\\.freshdesk\\.com$/.test(h) ||
+      h === "freshdesk.com" ||
+      /\\.freshworks\\.com$/.test(h) ||
+      /\\.cloudfront\\.net$/.test(h);
+    if (!hostOk) return jsonResponse({ error: "Host nicht erlaubt: " + h }, 403);
     try {
       const upstream = await fetch(targetUrl);
       if (!upstream.ok) return jsonResponse({ error: "Upstream " + upstream.status }, upstream.status);
