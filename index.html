@@ -773,7 +773,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.153';
+const APP_VERSION = 'v2.46.154';
 
 /* ============================================================
    GLOBAL THEME — v2.46.12
@@ -11989,6 +11989,68 @@ function _ticketActionBarIcons(accountId, ticketId) {
   ].join('');
 }
 
+/* v2.46.154: Anhang-Collector speziell für Schnellanalyse — priorisiert PDFs.
+   Reihenfolge: erst ALLE PDFs (bis maxPerFile/Stück), dann Bilder nach Größe.
+   So gehen Service-/Installationsberichte nicht verloren wenn viele kleine
+   Bilder mit drin sind. */
+async function _qaCollectAttachments(accountId, ticketId, ticket, opts) {
+  opts = opts || {};
+  const maxCount = opts.maxCount || 12;
+  const maxBytes = opts.maxBytes || 30 * 1024 * 1024;
+  const maxPerFile = opts.maxPerFile || 15 * 1024 * 1024;
+  const all = [];
+  (ticket.attachments || []).forEach(a => all.push(a));
+  (ticket.conversations || []).forEach(c => (c.attachments || []).forEach(a => all.push(a)));
+  // Dedup nach attachment_url
+  const seen = new Set();
+  const dedup = all.filter(a => {
+    const k = a.attachment_url || a.id;
+    if (!k || seen.has(k)) return false;
+    seen.add(k);
+    return true;
+  });
+  const pdfs = dedup.filter(a => String(a.content_type || '').toLowerCase() === 'application/pdf')
+    .filter(a => (a.size || 0) <= maxPerFile);
+  const images = dedup.filter(a => String(a.content_type || '').toLowerCase().startsWith('image/'))
+    .filter(a => (a.size || 0) <= maxPerFile)
+    .sort((a, b) => (a.size || 0) - (b.size || 0));
+  const queue = pdfs.concat(images);
+  const corsProblemHosts = /s3\.amazonaws\.com|attachments6?\.freshdesk\.com|attachment\.freshdesk\.com/i;
+  const result = [];
+  let totalBytes = 0;
+  for (const a of queue) {
+    if (result.length >= maxCount) break;
+    if (!a.attachment_url) continue;
+    let blob = null;
+    const useProxyFirst = corsProblemHosts.test(a.attachment_url);
+    if (!useProxyFirst) {
+      try {
+        const resp = await fetch(a.attachment_url, { mode: 'cors' });
+        if (resp.ok) blob = await resp.blob();
+      } catch (_) {}
+    }
+    if (!blob) {
+      try {
+        const resp = await proxyFetch('/attachment-fetch?url=' + encodeURIComponent(a.attachment_url));
+        if (resp.ok) blob = await resp.blob();
+      } catch (e) { console.warn('Anhang-Load:', a.name, e.message); }
+    }
+    if (!blob) continue;
+    if (blob.size + totalBytes > maxBytes) continue;
+    try {
+      const base64 = await _blobToBase64(blob);
+      result.push({
+        name: a.name || ('attachment-' + a.id),
+        mediaType: String(a.content_type || '').toLowerCase(),
+        base64: base64,
+        size: blob.size,
+      });
+      totalBytes += blob.size;
+    } catch (e) { console.warn('Base64:', a.name, e.message); }
+  }
+  return result;
+}
+
 /* === v2.46.152: Schnellanalyse — KI-Analyse des Tickets per Mandanten-Prompt ===
    Workflow:
    1) Lade LetterheadSettings für diesen Mandanten → quick_analysis_prompt
@@ -12022,9 +12084,14 @@ async function runQuickAnalysis(accountId, ticketId, btn) {
     }
     if (!ticket) throw new Error('Ticket nicht gefunden');
 
-    // 3) Anhänge sammeln (PDFs + Bilder, max 5 Stk / 20 MB)
+    // 3) Anhänge sammeln — v2.46.154: PDFs zuerst (egal welche Größe, bis 15 MB pro PDF),
+    //    dann Bilder nach Größe. Insgesamt bis 12 Stk / 30 MB.
     setBusy(btn, true, 'Lade Anhänge…');
-    const attachments = await _angChatCollectAttachments(accountId, ticketId, ticket, { maxCount: 5, maxBytes: 20 * 1024 * 1024 }).catch(e => {
+    const attachments = await _qaCollectAttachments(accountId, ticketId, ticket, {
+      maxCount: 12,
+      maxBytes: 30 * 1024 * 1024,
+      maxPerFile: 15 * 1024 * 1024,
+    }).catch(e => {
       console.warn('Anhang-Sammlung teilweise fehlgeschlagen:', e);
       return [];
     });
@@ -12065,9 +12132,12 @@ async function runQuickAnalysis(accountId, ticketId, btn) {
     setBusy(btn, true, 'Claude analysiert…');
     const sysPrompt =
       'Du bist ein hochkonzentrierter Analyst für Aufzug-Service-Tickets. ' +
-      'Befolge die ANALYSE-AUFGABE des Users EXAKT. Lies ALLE Anhänge sorgfältig (auch handschriftliche Notizen auf Fotos). ' +
+      'Befolge die ANALYSE-AUFGABE des Users EXAKT. Lies ALLE Anhänge VOLLSTÄNDIG durch — Service-/Installations-/Wartungsberichte enthalten Daten in Tabellenzellen (Zeile „Fabriknummer:", „Anlagennr:", „Fabrik-Nr.:", „Standort der Anlage:", „Auftragsnummer:" etc.). ' +
+      'Lies auch handschriftliche Notizen auf Fotos. Vergiss KEIN Anhang. ' +
+      'WICHTIG zu Fabriknummern: das ist meist eine 4-6-stellige Zahl in einer Tabellenzelle direkt rechts neben dem Label „Fabriknummer". Verwechsle sie NICHT mit Auftragsnummer oder Rechnungsnummer. ' +
+      'Wenn ein Wert in EINEM Anhang steht, ist er erkennbar — auch wenn andere Anhänge ihn nicht erwähnen. ' +
       'Gib das Ergebnis als gut lesbare Markdown-Liste zurück. Keine Vor- oder Nachrede, kein „Hier ist meine Analyse:" — direkt mit dem Inhalt anfangen. ' +
-      'Wenn etwas nicht erkennbar ist, schreibe ehrlich „nicht erkennbar" — niemals raten.';
+      'Schreibe „nicht erkennbar" NUR wenn du wirklich in KEINEM Anhang und im Ticket-Text fündig wirst.';
     const fullPrompt = 'ANALYSE-AUFGABE\n===============\n' + prompt;
     userMessageContent.unshift({ type: 'text', text: fullPrompt });
 
@@ -12085,10 +12155,17 @@ async function runQuickAnalysis(accountId, ticketId, btn) {
 
     // 6) Als interne Notiz speichern
     setBusy(btn, true, 'Speichere Notiz…');
+    // v2.46.154: Anhangsnamen + -typen explizit auflisten — Transparenz für den User,
+    // falls eine Datei nicht reingegangen ist sieht er es sofort.
+    const attListHtml = attachments.length
+      ? '<p style="font-size:11px;color:#6b7280;margin:4px 0">Analysierte Anhänge: ' +
+        attachments.map(a => escapeHtml(a.name) + ' (' + (a.mediaType === 'application/pdf' ? 'PDF' : 'Bild') + ')').join(' · ') +
+        '</p>'
+      : '<p style="font-size:11px;color:#b45309;margin:4px 0">Keine analysierbaren Anhänge gefunden (oder Fetch fehlgeschlagen — siehe Browser-Konsole).</p>';
     const noteHeader =
-      '<p><b>🔎 KI-Schnellanalyse</b> · ' + new Date().toLocaleString('de-DE') +
-      (attachments.length ? ' · ' + attachments.length + ' Anhang/Anhänge gelesen' : '') +
-      '</p><hr>';
+      '<p><b>🔎 KI-Schnellanalyse</b> · ' + new Date().toLocaleString('de-DE') + '</p>' +
+      attListHtml +
+      '<hr>';
     const noteBodyHtml = noteHeader + (typeof markdownToHtmlBasic === 'function'
       ? markdownToHtmlBasic(resultText)
       : resultText.split(/\n{2,}/).map(p => '<p>' + escapeHtml(p).replace(/\n/g, '<br>') + '</p>').join(''));
