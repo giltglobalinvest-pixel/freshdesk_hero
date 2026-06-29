@@ -705,6 +705,9 @@
     <button onclick="checkForUpdate(true); closeMenu();" class="w-full text-left px-3 py-2 text-sm hover:bg-ink-50 flex items-center gap-2">
       <i data-lucide="refresh-cw" class="w-4 h-4 text-ink-500"></i> Update prüfen
     </button>
+    <button onclick="redeployProxyOneClick(this); closeMenu();" class="w-full text-left px-3 py-2 text-sm hover:bg-ink-50 flex items-center gap-2">
+      <i data-lucide="cloud-upload" class="w-4 h-4 text-brand-500"></i> Proxy auf val.town aktualisieren
+    </button>
     <button onclick="logout()" class="w-full text-left px-3 py-2 text-sm hover:bg-red-50 text-red-700 flex items-center gap-2 border-t border-ink-100">
       <i data-lucide="log-out" class="w-4 h-4"></i> Abmelden
     </button>
@@ -773,7 +776,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.156';
+const APP_VERSION = 'v2.46.157';
 
 /* ============================================================
    GLOBAL THEME — v2.46.12
@@ -32951,6 +32954,35 @@ async function testProxyConnection() {
     </div>`;
   } catch (e) {
     out.innerHTML = `<div class="text-xs bg-red-50 border border-red-200 rounded-lg p-2 text-red-800"><strong>Fehler:</strong> ${escapeHtml(e.message)}</div>`;
+  }
+}
+
+/* v2.46.157: One-Click-Re-Deploy aus dem Burger-Menü — nutzt den gespeicherten
+   val.town-Token + Val-ID, kein Settings-Page-Umweg. */
+async function redeployProxyOneClick(btnEl) {
+  const token = APP_KEYS.valtownKey;
+  if (!token) {
+    toast('Kein val.town-Token gespeichert — Admin → Einstellungen → Val.town-Setup', 'warn', 8000);
+    if (typeof navTo === 'function') setTimeout(() => navTo('settings'), 1500);
+    return;
+  }
+  if (!confirm('Proxy-Code auf val.town aktualisieren?\n\nLädt den aktuellen Proxy-Code aus dieser App-Version (v' + APP_VERSION.replace(/^v/, '') + ') zu val.town hoch und überschreibt die laufende Version.')) return;
+  setBusy(btnEl, true);
+  toast('Lade Proxy-Code zu val.town…', 'info', 3000);
+  const lines = [];
+  const onProgress = (msg, kind) => {
+    lines.push((kind === 'ok' ? '✓ ' : kind === 'warn' ? '! ' : '… ') + msg);
+    console.log('[proxy-redeploy]', kind || 'info', msg);
+  };
+  try {
+    const result = await valtownAutoSetup({ token, onProgress });
+    setBusy(btnEl, false);
+    toast('Proxy aktualisiert ✓ — Schnellanalyse sollte jetzt klappen', 'success', 6000);
+    console.log('[proxy-redeploy] erfolgreich:', result);
+  } catch (e) {
+    setBusy(btnEl, false);
+    console.error('[proxy-redeploy]', e, lines);
+    toast('Proxy-Update fehlgeschlagen: ' + e.message, 'error', 10000);
   }
 }
 
