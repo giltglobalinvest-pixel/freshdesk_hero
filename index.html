@@ -12103,6 +12103,23 @@ function _detailReplyComposer(ticket) {
       <button type="button" onclick="sendDetailDirectReply(this, '${accId}', ${ticket.id})" class="mt-2 w-full bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg px-3 py-2.5 text-sm font-semibold inline-flex items-center justify-center gap-1.5" title="Text 1:1 als Antwort an Kunde senden — ohne KI">
         <i data-lucide="send-horizontal" class="w-4 h-4"></i> Direkt antworten (ohne KI)
       </button>
+      <!-- v2.46.151: Interne Notiz + Status-Wechsel ohne KI -->
+      <div class="flex gap-2 mt-2">
+        <button type="button" onclick="sendDetailInternalNote(this, '${accId}', ${ticket.id})" class="flex-1 bg-amber-500 hover:bg-amber-600 text-white rounded-lg px-3 py-2 text-sm font-semibold inline-flex items-center justify-center gap-1.5" title="Eingegebenen Text als interne Notiz speichern (nur intern sichtbar)">
+          <i data-lucide="sticky-note" class="w-4 h-4"></i> Interne Notiz
+        </button>
+        <div class="flex-1 relative">
+          <select id="detailStatusSelect_${ticket.id}" onchange="setDetailTicketStatus(this, '${accId}', ${ticket.id})" class="w-full appearance-none bg-slate-600 hover:bg-slate-700 text-white rounded-lg px-3 py-2 text-sm font-semibold cursor-pointer pl-9 pr-8" title="Ticket-Status sofort ändern">
+            <option value="">Status setzen…</option>
+            <option value="2"${ticket.status === 2 ? ' disabled' : ''}>Offen</option>
+            <option value="3"${ticket.status === 3 ? ' disabled' : ''}>Wartet</option>
+            <option value="4"${ticket.status === 4 ? ' disabled' : ''}>Gelöst</option>
+            <option value="5"${ticket.status === 5 ? ' disabled' : ''}>Geschlossen</option>
+          </select>
+          <i data-lucide="flag" class="w-4 h-4 absolute left-2.5 top-1/2 -translate-y-1/2 text-white pointer-events-none"></i>
+          <i data-lucide="chevron-down" class="w-4 h-4 absolute right-2 top-1/2 -translate-y-1/2 text-white pointer-events-none"></i>
+        </div>
+      </div>
       <details class="mt-3">
         <summary class="text-[11px] text-brand-700 cursor-pointer hover:underline inline-flex items-center gap-1"><i data-lucide="lightbulb" class="w-3 h-3"></i> Beispiele</summary>
         <div class="mt-2 space-y-1 text-[11px] text-ink-700 leading-relaxed pl-1">
@@ -12220,6 +12237,69 @@ async function sendDetailDirectReply(btnEl, accountId, ticketId) {
   } catch (e) {
     setBusy(btnEl, false);
     toast('Senden fehlgeschlagen: ' + (e.message || e), 'error', 8000);
+  }
+}
+
+/* v2.46.151: Interne Notiz aus dem Inline-KI-Block — kein KI-Schritt, Text 1:1
+   als private Note in Freshdesk. */
+async function sendDetailInternalNote(btnEl, accountId, ticketId) {
+  const ta = $('detailAssistInput');
+  const raw = (ta?.value || '').trim();
+  if (!raw) return toast('Bitte etwas eingeben oder sprechen', 'warn');
+  if (!confirm('Diesen Text als interne Notiz speichern? (Nicht an Kunden sichtbar)')) return;
+  if (DETAIL_ASSIST_REC) { try { DETAIL_ASSIST_REC.stop(); } catch (_) {} DETAIL_ASSIST_REC = null; }
+  setBusy(btnEl, true, 'Speichere…');
+  try {
+    const bodyHtml = (typeof textToHtmlForFreshdesk === 'function')
+      ? textToHtmlForFreshdesk(raw)
+      : raw.split(/\n{2,}/).map(p => '<p>' + escapeHtml(p).replace(/\n/g, '<br>') + '</p>').join('');
+    const base = '/freshdesk/' + encodeURIComponent(accountId) + '/api/v2/tickets/' + ticketId;
+    await proxyJson(base + '/notes', { method: 'POST', body: JSON.stringify({ body: bodyHtml, private: true }) });
+    if (ta) ta.value = '';
+    setBusy(btnEl, false);
+    toast('Notiz gespeichert ✓', 'success', 3000);
+    if (CURRENT_TICKET && CURRENT_TICKET.id === ticketId) {
+      try {
+        const full = await fetchTicketDetail(accountId, ticketId);
+        if (full) { CURRENT_TICKET = full; renderTicketDetailBody(full); }
+      } catch (_) {}
+    }
+  } catch (e) {
+    setBusy(btnEl, false);
+    toast('Notiz fehlgeschlagen: ' + (e.message || e), 'error', 8000);
+  }
+}
+
+/* v2.46.151: Status-Wechsel direkt aus dem Inline-KI-Block. */
+async function setDetailTicketStatus(selEl, accountId, ticketId) {
+  const newStatus = parseInt(selEl.value, 10);
+  if (!newStatus) return;
+  const label = (FD_STATUS[newStatus] && FD_STATUS[newStatus].label) || ('Status ' + newStatus);
+  if (!confirm('Ticket #' + ticketId + ' auf „' + label + '" setzen?')) {
+    selEl.value = '';
+    return;
+  }
+  const orig = selEl.style.opacity;
+  selEl.disabled = true;
+  selEl.style.opacity = '0.5';
+  try {
+    await proxyJson('/freshdesk/' + encodeURIComponent(accountId) + '/api/v2/tickets/' + ticketId, {
+      method: 'PUT',
+      body: JSON.stringify({ status: newStatus }),
+    });
+    toast('Status: ' + label + ' ✓', 'success', 3000);
+    if (CURRENT_TICKET && CURRENT_TICKET.id === ticketId) {
+      try {
+        const full = await fetchTicketDetail(accountId, ticketId);
+        if (full) { CURRENT_TICKET = full; renderTicketDetailBody(full); }
+      } catch (_) {}
+    }
+  } catch (e) {
+    toast('Status-Wechsel fehlgeschlagen: ' + (e.message || e), 'error', 8000);
+    selEl.value = '';
+  } finally {
+    selEl.disabled = false;
+    selEl.style.opacity = orig;
   }
 }
 
