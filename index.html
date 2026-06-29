@@ -773,7 +773,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.154';
+const APP_VERSION = 'v2.46.155';
 
 /* ============================================================
    GLOBAL THEME — v2.46.12
@@ -11998,9 +11998,11 @@ async function _qaCollectAttachments(accountId, ticketId, ticket, opts) {
   const maxCount = opts.maxCount || 12;
   const maxBytes = opts.maxBytes || 30 * 1024 * 1024;
   const maxPerFile = opts.maxPerFile || 15 * 1024 * 1024;
+  const debug = [];
   const all = [];
-  (ticket.attachments || []).forEach(a => all.push(a));
-  (ticket.conversations || []).forEach(c => (c.attachments || []).forEach(a => all.push(a)));
+  (ticket.attachments || []).forEach(a => { all.push(a); debug.push('ticket: ' + (a.name || '?') + ' (' + (a.content_type || '?') + ', ' + (a.size || '?') + ')'); });
+  (ticket.conversations || []).forEach(c => (c.attachments || []).forEach(a => { all.push(a); debug.push('conv#' + c.id + ': ' + (a.name || '?') + ' (' + (a.content_type || '?') + ', ' + (a.size || '?') + ')'); }));
+  console.log('[qa-collect] gefunden:', all.length, debug);
   // Dedup nach attachment_url
   const seen = new Set();
   const dedup = all.filter(a => {
@@ -12009,34 +12011,42 @@ async function _qaCollectAttachments(accountId, ticketId, ticket, opts) {
     seen.add(k);
     return true;
   });
-  const pdfs = dedup.filter(a => String(a.content_type || '').toLowerCase() === 'application/pdf')
-    .filter(a => (a.size || 0) <= maxPerFile);
+  // v2.46.155: Filter NICHT auf size — Freshdesk liefert manchmal size=0/null obwohl Datei ok.
+  // Wenn Datei wirklich >maxPerFile, blockt das der Fetch später automatisch (skip).
+  const pdfs = dedup.filter(a => String(a.content_type || '').toLowerCase() === 'application/pdf');
   const images = dedup.filter(a => String(a.content_type || '').toLowerCase().startsWith('image/'))
-    .filter(a => (a.size || 0) <= maxPerFile)
     .sort((a, b) => (a.size || 0) - (b.size || 0));
   const queue = pdfs.concat(images);
+  console.log('[qa-collect] queue:', queue.map(a => a.name + ' (' + a.content_type + ')'));
   const corsProblemHosts = /s3\.amazonaws\.com|attachments6?\.freshdesk\.com|attachment\.freshdesk\.com/i;
   const result = [];
+  const skipped = [];
   let totalBytes = 0;
   for (const a of queue) {
-    if (result.length >= maxCount) break;
-    if (!a.attachment_url) continue;
+    if (result.length >= maxCount) { skipped.push(a.name + ' (max-count)'); continue; }
+    if (!a.attachment_url) { skipped.push((a.name || '?') + ' (no-url)'); continue; }
     let blob = null;
+    let err = '';
     const useProxyFirst = corsProblemHosts.test(a.attachment_url);
     if (!useProxyFirst) {
       try {
         const resp = await fetch(a.attachment_url, { mode: 'cors' });
         if (resp.ok) blob = await resp.blob();
-      } catch (_) {}
+        else err = 'cors-status-' + resp.status;
+      } catch (e) { err = 'cors-err: ' + (e.message || ''); }
     }
     if (!blob) {
       try {
         const resp = await proxyFetch('/attachment-fetch?url=' + encodeURIComponent(a.attachment_url));
         if (resp.ok) blob = await resp.blob();
-      } catch (e) { console.warn('Anhang-Load:', a.name, e.message); }
+        else err = (err ? err + ' / ' : '') + 'proxy-status-' + resp.status;
+      } catch (e) {
+        err = (err ? err + ' / ' : '') + 'proxy-err: ' + (e.message || '');
+      }
     }
-    if (!blob) continue;
-    if (blob.size + totalBytes > maxBytes) continue;
+    if (!blob) { skipped.push(a.name + ' (fetch: ' + err + ')'); console.warn('[qa-collect] fetch-fail:', a.name, err); continue; }
+    if (blob.size > maxPerFile) { skipped.push(a.name + ' (>' + Math.round(maxPerFile / 1024 / 1024) + 'MB)'); continue; }
+    if (blob.size + totalBytes > maxBytes) { skipped.push(a.name + ' (total-cap)'); continue; }
     try {
       const base64 = await _blobToBase64(blob);
       result.push({
@@ -12046,8 +12056,11 @@ async function _qaCollectAttachments(accountId, ticketId, ticket, opts) {
         size: blob.size,
       });
       totalBytes += blob.size;
-    } catch (e) { console.warn('Base64:', a.name, e.message); }
+    } catch (e) { skipped.push(a.name + ' (b64-err)'); console.warn('[qa-collect] b64:', a.name, e.message); }
   }
+  console.log('[qa-collect] geladen:', result.length, 'übersprungen:', skipped);
+  result._skipped = skipped;
+  result._totalFound = all.length;
   return result;
 }
 
@@ -12155,13 +12168,23 @@ async function runQuickAnalysis(accountId, ticketId, btn) {
 
     // 6) Als interne Notiz speichern
     setBusy(btn, true, 'Speichere Notiz…');
-    // v2.46.154: Anhangsnamen + -typen explizit auflisten — Transparenz für den User,
-    // falls eine Datei nicht reingegangen ist sieht er es sofort.
-    const attListHtml = attachments.length
-      ? '<p style="font-size:11px;color:#6b7280;margin:4px 0">Analysierte Anhänge: ' +
-        attachments.map(a => escapeHtml(a.name) + ' (' + (a.mediaType === 'application/pdf' ? 'PDF' : 'Bild') + ')').join(' · ') +
-        '</p>'
-      : '<p style="font-size:11px;color:#b45309;margin:4px 0">Keine analysierbaren Anhänge gefunden (oder Fetch fehlgeschlagen — siehe Browser-Konsole).</p>';
+    // v2.46.154/.155: Anhangsnamen + Skipped-Liste explizit auflisten — Transparenz.
+    const skipped = (attachments._skipped || []);
+    const totalFound = attachments._totalFound || 0;
+    let attListHtml = '';
+    if (attachments.length) {
+      attListHtml += '<p style="font-size:11px;color:#059669;margin:4px 0"><b>Analysiert (' + attachments.length + '):</b> ' +
+        attachments.map(a => escapeHtml(a.name) + ' [' + (a.mediaType === 'application/pdf' ? 'PDF' : 'Bild') + ']').join(' · ') +
+        '</p>';
+    } else if (totalFound > 0) {
+      attListHtml += '<p style="font-size:11px;color:#b45309;margin:4px 0"><b>Anhänge erkannt aber NICHT analysiert (' + totalFound + ' im Ticket):</b> ' +
+        (skipped.length ? escapeHtml(skipped.join(' · ')) : 'siehe Browser-Konsole') + '</p>';
+    } else {
+      attListHtml += '<p style="font-size:11px;color:#b45309;margin:4px 0">Keine Anhänge an diesem Ticket gefunden (Freshdesk-API meldet 0 Attachments).</p>';
+    }
+    if (skipped.length && attachments.length) {
+      attListHtml += '<p style="font-size:10px;color:#b45309;margin:2px 0">Übersprungen (' + skipped.length + '): ' + escapeHtml(skipped.join(' · ')) + '</p>';
+    }
     const noteHeader =
       '<p><b>🔎 KI-Schnellanalyse</b> · ' + new Date().toLocaleString('de-DE') + '</p>' +
       attListHtml +
