@@ -12186,25 +12186,36 @@ function runDetailAssistant(btnEl, accountId, ticketId) {
 
 /* v2.46.149: Direkt-Antwort ohne KI — sendet den Textarea-Inhalt 1:1 als
    öffentliche Freshdesk-Reply. Kein Plan-Flow, keine Übersetzung, keine
-   Tonfall-Anpassung. Nur reiner Send. */
+   Tonfall-Anpassung. v2.46.150: Freshdesk-Agent-Signatur wird automatisch
+   angehängt (gleicher Mechanismus wie in sendDirectReply). */
 async function sendDetailDirectReply(btnEl, accountId, ticketId) {
   const ta = $('detailAssistInput');
   const raw = (ta?.value || '').trim();
   if (!raw) return toast('Bitte etwas eingeben oder sprechen', 'warn');
-  if (!confirm('Diesen Text 1:1 als Antwort an den Kunden senden? (Ohne KI-Bearbeitung)')) return;
+  if (!confirm('Diesen Text 1:1 als Antwort an den Kunden senden? (Ohne KI-Bearbeitung — Signatur wird automatisch angehängt)')) return;
   if (DETAIL_ASSIST_REC) { try { DETAIL_ASSIST_REC.stop(); } catch (_) {} DETAIL_ASSIST_REC = null; }
   setBusy(btnEl, true, 'Sende…');
-  const bodyHtml = raw.split(/\n{2,}/).map(p => '<p>' + escapeHtml(p).replace(/\n/g, '<br>') + '</p>').join('');
   try {
+    let bodyHtml = (typeof textToHtmlForFreshdesk === 'function')
+      ? textToHtmlForFreshdesk(raw)
+      : raw.split(/\n{2,}/).map(p => '<p>' + escapeHtml(p).replace(/\n/g, '<br>') + '</p>').join('');
+    try {
+      const me = await fetchAgentMe(accountId);
+      const sig = me?.signature || '';
+      if (sig && typeof appendSignatureHtml === 'function') {
+        bodyHtml = appendSignatureHtml(bodyHtml, sig);
+      }
+    } catch (_) {}
     const base = '/freshdesk/' + encodeURIComponent(accountId) + '/api/v2/tickets/' + ticketId;
     await proxyJson(base + '/reply', { method: 'POST', body: JSON.stringify({ body: bodyHtml }) });
     if (ta) ta.value = '';
     setBusy(btnEl, false);
     toast('Antwort gesendet ✓', 'success', 3000);
-    if (typeof _reloadTicketDetail === 'function') {
-      _reloadTicketDetail(accountId, ticketId);
-    } else if (typeof openTicketDetail === 'function') {
-      openTicketDetail(accountId, ticketId);
+    if (CURRENT_TICKET && CURRENT_TICKET.id === ticketId) {
+      try {
+        const full = await fetchTicketDetail(accountId, ticketId);
+        if (full) { CURRENT_TICKET = full; renderTicketDetailBody(full); }
+      } catch (_) {}
     }
   } catch (e) {
     setBusy(btnEl, false);
