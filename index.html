@@ -699,6 +699,9 @@
     <button onclick="navTo('quick-analysis'); closeMenu();" class="w-full text-left px-3 py-2 text-sm hover:bg-ink-50 flex items-center gap-2">
       <i data-lucide="scan-search" class="w-4 h-4 text-purple-500"></i> Schnellanalyse (KI) · Aufzug-Tickets
     </button>
+    <button onclick="navTo('reply-templates'); closeMenu();" class="w-full text-left px-3 py-2 text-sm hover:bg-ink-50 flex items-center gap-2">
+      <i data-lucide="clipboard-list" class="w-4 h-4 text-rose-500"></i> Antwort-Vorlagen (mit Ansprechpartner)
+    </button>
     <button onclick="navTo('stats'); closeMenu();" class="w-full text-left px-3 py-2 text-sm hover:bg-ink-50 flex items-center gap-2">
       <i data-lucide="bar-chart-3" class="w-4 h-4 text-indigo-500"></i> Statistiken
     </button>
@@ -776,7 +779,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.159';
+const APP_VERSION = 'v2.46.160';
 
 /* ============================================================
    GLOBAL THEME — v2.46.12
@@ -6995,6 +6998,7 @@ function navTo(page) {
   else if (page === 'phone-scripts') renderFn = renderPhoneScriptTemplatesPage;
   else if (page === 'letterhead') renderFn = renderLetterheadSettingsPage;
   else if (page === 'quick-analysis') renderFn = renderQuickAnalysisSettingsPage;
+  else if (page === 'reply-templates') renderFn = renderReplyTemplatesPage;
   else if (page === 'contacts')  renderFn = renderContactsPage;
   else if (page === 'stats')     renderFn = renderStatsPage;
   try {
@@ -16037,7 +16041,11 @@ function renderAssistantPreview() {
     if (a.type === 'reply' || a.type === 'note') {
       const showSig = a.type === 'reply';  // Notiz braucht keine Signatur
       if (isActive && isPending) {
-        body = `<label class="text-[10px] uppercase font-semibold text-${meta.color}-800 block">Text — kannst du anpassen</label>
+        // v2.46.160: Vorlage-einsetzen-Button NUR bei reply (nicht bei note)
+        const tplBtn = (a.type === 'reply')
+          ? `<button type="button" onclick="openReplyTemplatePicker(${i}, '${escapeAttr(ctx.accountId)}')" class="text-[11px] inline-flex items-center gap-1 px-2 py-1 bg-rose-600 hover:bg-rose-700 text-white rounded-md font-semibold ml-auto" title="Vorgefertigte Antwort-Vorlage einsetzen (KI füllt Platzhalter)"><i data-lucide="clipboard-list" class="w-3 h-3"></i> Vorlage einsetzen</button>`
+          : '';
+        body = `<div class="flex items-end gap-2"><label class="text-[10px] uppercase font-semibold text-${meta.color}-800 block flex-1">Text — kannst du anpassen</label>${tplBtn}</div>
                 <textarea id="stepBody_${i}" class="w-full text-sm px-3 py-2 border border-${meta.color}-300 bg-white rounded-lg whitespace-pre-line mt-1" rows="${a.type==='reply'?8:6}">${escapeHtml(a.body || '')}</textarea>
                 ${_translateBlock(['reply'])}
                 ${_attachmentBlock()}
@@ -27095,6 +27103,97 @@ async function bumpPhoneScriptUsage(recordId, accountId) {
   PHONE_SCRIPTS_STATE.byAccount.delete(accountId);
 }
 
+/* === v2.46.160: Antwort-Vorlagen pro Mandant ============================
+   Tabelle ReplyTemplates (auto-angelegt beim ersten Save). Pro Vorlage:
+   - title, category (z.B. "Auftragsbestätigung", "Wartungsbestätigung")
+   - body_template (Text mit Platzhaltern wie {ANSPRECHPARTNER_NAME}, {STANDORT}, ...)
+   - ki_instruction (extra Anweisungen für KI beim Befüllen)
+   - contact_name, contact_phone, contact_email (Projektleiter/Ansprechpartner)
+   - is_default ('1' = bei Plan-Reply automatisch vorschlagen)
+   - account_id, audit-Felder */
+const REPLY_TEMPLATES_TABLE = 'ReplyTemplates';
+const REPLY_TEMPLATES_STATE = {
+  byAccount: new Map(),
+  currentAccountId: '',
+  editingRecordId: '',
+};
+
+async function loadReplyTemplates(accountId, force) {
+  if (!accountId) return [];
+  if (!force && REPLY_TEMPLATES_STATE.byAccount.has(accountId)) return REPLY_TEMPLATES_STATE.byAccount.get(accountId);
+  let list = [];
+  try {
+    const filter = "{account_id}='" + escapeFormula(accountId) + "'";
+    const recs = await airtableRead(REPLY_TEMPLATES_TABLE, {
+      filter,
+      sort: [{ field: 'last_used_at', direction: 'desc' }],
+      maxRecords: 200,
+    });
+    list = recs.map(r => Object.assign({ recordId: r.id }, r.fields));
+  } catch (_) {}
+  REPLY_TEMPLATES_STATE.byAccount.set(accountId, list);
+  return list;
+}
+
+const REPLY_TEMPLATE_DEFAULT_TYPES = {
+  title:          'singleLineText',
+  category:       'singleLineText',
+  account_id:     'singleLineText',
+  body_template:  'multilineText',
+  ki_instruction: 'multilineText',
+  contact_name:   'singleLineText',
+  contact_phone:  'singleLineText',
+  contact_email:  'singleLineText',
+  is_default:     'singleLineText',
+  usage_count:    'number',
+  created_by:     'singleLineText',
+  created_at:     'singleLineText',
+  last_used_at:   'singleLineText',
+};
+
+async function saveReplyTemplate(accountId, fields) {
+  const me = APP_KEYS.user || {};
+  const payload = Object.assign({
+    title:          '',
+    category:       '',
+    account_id:     accountId || '',
+    body_template:  '',
+    ki_instruction: '',
+    contact_name:   '',
+    contact_phone:  '',
+    contact_email:  '',
+    is_default:     '0',
+    usage_count:    0,
+    created_by:     me.email || '',
+    created_at:     nowIso(),
+    last_used_at:   nowIso(),
+  }, fields);
+  if (!payload.title?.trim()) throw new Error('Titel fehlt');
+  if (!payload.body_template?.trim()) throw new Error('Body-Template fehlt');
+  const rec = await airtableWriteWithAutoField(REPLY_TEMPLATES_TABLE, payload, REPLY_TEMPLATE_DEFAULT_TYPES);
+  REPLY_TEMPLATES_STATE.byAccount.delete(accountId);
+  return rec;
+}
+
+async function updateReplyTemplate(recordId, accountId, patch) {
+  await airtableUpdateWithAutoField(REPLY_TEMPLATES_TABLE, recordId, patch, REPLY_TEMPLATE_DEFAULT_TYPES);
+  REPLY_TEMPLATES_STATE.byAccount.delete(accountId);
+}
+
+async function deleteReplyTemplate(recordId, accountId) {
+  await airtableDelete(REPLY_TEMPLATES_TABLE, recordId);
+  REPLY_TEMPLATES_STATE.byAccount.delete(accountId);
+}
+
+async function bumpReplyTemplateUsage(recordId, accountId) {
+  try {
+    const list = await loadReplyTemplates(accountId);
+    const t = list.find(x => x.recordId === recordId);
+    const next = (parseInt(t?.usage_count, 10) || 0) + 1;
+    await updateReplyTemplate(recordId, accountId, { usage_count: next, last_used_at: nowIso() });
+  } catch (_) {}
+}
+
 /* === v2.46.148: Briefpapier-Einstellungen pro Mandant ====================
    Tabelle LetterheadSettings (auto-angelegt beim ersten Save). Pro Mandant
    ein Record mit Logo (multipleAttachments) + Default-Signatur-Felder. */
@@ -27430,6 +27529,316 @@ async function _saveQuickAnalysisPrompt(btn) {
 function _getCachedQuickAnalysisPrompt(accountId) {
   const s = LETTERHEAD_STATE.byAccount.get(accountId);
   return (s && s.quick_analysis_prompt) ? String(s.quick_analysis_prompt).trim() : '';
+}
+
+/* === v2.46.160: Antwort-Vorlagen-Page ==================================== */
+const DEFAULT_REPLY_TEMPLATE_BODY =
+  'Sehr geehrte Damen und Herren,\n\n' +
+  'vielen Dank für Ihren Auftrag zur {LEISTUNG} am Aufzug {STANDORT} (Fabrik-Nr. {FABRIKNUMMER}).\n\n' +
+  'Wir bestätigen die Annahme Ihres Auftrags auf Basis unseres Angebots {ANGEBOTSNUMMER} vom {ANGEBOTSDATUM} ' +
+  'mit einer Auftragssumme von brutto EUR {SUMME} (max.).\n\n' +
+  'Die Arbeiten werden eingeplant. Ihr Ansprechpartner für die Projektkoordination ist ' +
+  '{ANSPRECHPARTNER_NAME}, den Sie unter folgender Rufnummer erreichen: {ANSPRECHPARTNER_TEL}\n\n' +
+  'Sollten sich Mehrkosten ergeben, werden wir diese vorab mit Ihnen abstimmen.\n\n' +
+  'Mit freundlichen Grüßen';
+
+async function renderReplyTemplatesPage() {
+  setPageTitle('Antwort-Vorlagen', 'Wiederverwendbare Vorlagen mit Ansprechpartner — KI füllt sie aus dem Ticket');
+  const accounts = APP_STATE.accounts || [];
+  if (!REPLY_TEMPLATES_STATE.currentAccountId || !accounts.find(a => a.id === REPLY_TEMPLATES_STATE.currentAccountId)) {
+    REPLY_TEMPLATES_STATE.currentAccountId = APP_STATE.currentAccount && APP_STATE.currentAccount !== 'all'
+      ? APP_STATE.currentAccount
+      : (accounts[0]?.id || '');
+  }
+  const accountOpts = accounts.map(a =>
+    '<option value="' + escapeAttr(a.id) + '"' + (a.id === REPLY_TEMPLATES_STATE.currentAccountId ? ' selected' : '') + '>' + escapeHtml(a.name || a.id) + '</option>'
+  ).join('');
+  $('pageContent').innerHTML = '<div class="space-y-3 max-w-3xl mx-auto">' +
+    '<div class="bg-gradient-to-br from-rose-50 to-brand-50 border border-rose-200 rounded-xl p-3 text-[12px] text-rose-900">' +
+      '<p class="font-bold inline-flex items-center gap-1 mb-1"><i data-lucide="clipboard-list" class="w-4 h-4"></i> Antwort-Vorlagen</p>' +
+      '<p>Hinterlege wiederverwendbare Texte (z.B. „Standard-Auftragsbestätigung") mit dem Projektleiter-Kontakt. Im KI-Assistent steht dann bei „Antwort an Kunde" ein Button „📋 Vorlage einsetzen" — Claude füllt die Platzhalter aus dem Ticket aus.</p>' +
+      '<p class="mt-1.5 text-[11px] text-rose-700">Platzhalter: <code>{ANSPRECHPARTNER_NAME}</code>, <code>{ANSPRECHPARTNER_TEL}</code>, <code>{ANSPRECHPARTNER_EMAIL}</code> (aus Vorlage) · <code>{STANDORT}</code>, <code>{FABRIKNUMMER}</code>, <code>{AUFTRAGSNUMMER}</code>, <code>{ANGEBOTSNUMMER}</code>, <code>{SUMME}</code>, <code>{LEISTUNG}</code> (aus Ticket per KI).</p>' +
+    '</div>' +
+    '<div class="bg-white rounded-xl border border-ink-200 p-3 flex items-center gap-2">' +
+      '<i data-lucide="building-2" class="w-3.5 h-3.5 text-ink-500 shrink-0"></i>' +
+      '<span class="text-[11px] font-semibold text-ink-600 uppercase tracking-wider shrink-0">Mandant:</span>' +
+      '<select id="rtAccount" onchange="_onRtAccount(this.value)" class="flex-1 px-2 py-1.5 border border-ink-300 rounded-lg text-sm bg-white">' +
+        accountOpts +
+      '</select>' +
+      '<button onclick="_rtOpenEditor(\'\')" class="shrink-0 px-3 py-1.5 bg-rose-600 hover:bg-rose-700 text-white rounded-lg text-sm font-bold inline-flex items-center gap-1"><i data-lucide="plus" class="w-3.5 h-3.5"></i> Neu</button>' +
+    '</div>' +
+    '<div id="rtList"><div class="bg-white rounded-xl border border-ink-200 p-6 text-center"><span class="spinner inline-block w-5 h-5 border-[2px] text-rose-500"></span><p class="text-sm text-ink-500 mt-2">Lade Vorlagen…</p></div></div>' +
+  '</div>';
+  if (window.lucide) lucide.createIcons();
+  await loadReplyTemplates(REPLY_TEMPLATES_STATE.currentAccountId, true);
+  _renderReplyTemplatesList();
+}
+
+function _onRtAccount(v) {
+  REPLY_TEMPLATES_STATE.currentAccountId = v;
+  loadReplyTemplates(v, true).then(_renderReplyTemplatesList);
+}
+
+function _renderReplyTemplatesList() {
+  const host = document.getElementById('rtList');
+  if (!host) return;
+  const accId = REPLY_TEMPLATES_STATE.currentAccountId;
+  const list = REPLY_TEMPLATES_STATE.byAccount.get(accId) || [];
+  if (!list.length) {
+    host.innerHTML = '<div class="bg-white rounded-xl border border-dashed border-ink-300 p-8 text-center">' +
+      '<i data-lucide="inbox" class="w-10 h-10 text-ink-300 inline-block"></i>' +
+      '<p class="text-sm text-ink-500 mt-2">Noch keine Vorlagen für diesen Mandanten.</p>' +
+      '<button onclick="_rtOpenEditor(\'\')" class="mt-3 px-4 py-2 bg-rose-600 hover:bg-rose-700 text-white rounded-lg text-sm font-bold inline-flex items-center gap-1.5"><i data-lucide="plus" class="w-4 h-4"></i> Erste Vorlage anlegen</button>' +
+      '</div>';
+    if (window.lucide) lucide.createIcons();
+    return;
+  }
+  host.innerHTML = list.map(t => {
+    const isDef = String(t.is_default) === '1' || t.is_default === true;
+    return '<div class="bg-white rounded-xl border border-ink-200 p-3 mb-2">' +
+      '<div class="flex items-start gap-2">' +
+        '<div class="flex-1 min-w-0">' +
+          '<div class="flex items-center gap-1.5 flex-wrap">' +
+            '<h3 class="font-bold text-ink-900 text-sm">' + escapeHtml(t.title || '(ohne Titel)') + '</h3>' +
+            (t.category ? '<span class="text-[10px] bg-rose-100 text-rose-700 px-1.5 py-0.5 rounded font-bold uppercase tracking-wider">' + escapeHtml(t.category) + '</span>' : '') +
+            (isDef ? '<span class="text-[10px] bg-emerald-100 text-emerald-700 px-1.5 py-0.5 rounded font-bold uppercase tracking-wider">Default</span>' : '') +
+          '</div>' +
+          (t.contact_name ? '<p class="text-[11px] text-ink-600 mt-0.5"><i data-lucide="user" class="w-3 h-3 inline -mt-0.5"></i> ' + escapeHtml(t.contact_name) + (t.contact_phone ? ' · ' + escapeHtml(t.contact_phone) : '') + '</p>' : '') +
+          '<p class="text-[11px] text-ink-500 mt-1 line-clamp-2">' + escapeHtml((t.body_template || '').slice(0, 200)) + (t.body_template?.length > 200 ? '…' : '') + '</p>' +
+        '</div>' +
+        '<div class="flex flex-col gap-1 shrink-0">' +
+          '<button onclick="_rtOpenEditor(\'' + escapeAttr(t.recordId) + '\')" class="w-8 h-8 hover:bg-ink-100 rounded-lg inline-flex items-center justify-center" title="Bearbeiten"><i data-lucide="edit-3" class="w-4 h-4 text-ink-600"></i></button>' +
+          '<button onclick="_rtDelete(\'' + escapeAttr(t.recordId) + '\', \'' + escapeAttr(t.title || '') + '\')" class="w-8 h-8 hover:bg-rose-50 rounded-lg inline-flex items-center justify-center" title="Löschen"><i data-lucide="trash-2" class="w-4 h-4 text-rose-600"></i></button>' +
+        '</div>' +
+      '</div>' +
+    '</div>';
+  }).join('');
+  if (window.lucide) lucide.createIcons();
+}
+
+function _rtOpenEditor(recordId) {
+  const accId = REPLY_TEMPLATES_STATE.currentAccountId;
+  const list = REPLY_TEMPLATES_STATE.byAccount.get(accId) || [];
+  const t = recordId ? list.find(x => x.recordId === recordId) : null;
+  REPLY_TEMPLATES_STATE.editingRecordId = recordId || '';
+  let host = document.getElementById('subModalHost');
+  if (!host) { host = document.createElement('div'); host.id = 'subModalHost'; document.body.appendChild(host); }
+  host.innerHTML =
+    '<div class="fixed inset-0 z-[60] flex items-end sm:items-center justify-center bg-black/40" onclick="if(event.target===this)_rtCloseEditor()">' +
+      '<div class="bg-white w-full max-w-2xl sm:rounded-2xl rounded-t-2xl shadow-2xl flex flex-col safe-bottom" style="max-height:92vh">' +
+        '<div class="px-4 py-3 border-b border-ink-200 flex items-center justify-between gap-2">' +
+          '<h3 class="font-bold text-ink-900 inline-flex items-center gap-2"><i data-lucide="clipboard-list" class="w-4 h-4 text-rose-600"></i> ' + (t ? 'Vorlage bearbeiten' : 'Neue Vorlage') + '</h3>' +
+          '<button onclick="_rtCloseEditor()" class="w-9 h-9 rounded-lg hover:bg-ink-100 flex items-center justify-center"><i data-lucide="x" class="w-5 h-5 text-ink-700"></i></button>' +
+        '</div>' +
+        '<div class="flex-1 overflow-y-auto p-4 space-y-3">' +
+          '<div class="grid grid-cols-2 gap-2">' +
+            '<div><label class="text-[11px] font-semibold text-ink-600 uppercase tracking-wider">Titel *</label>' +
+              '<input id="rtTitle" type="text" value="' + escapeAttr(t?.title || '') + '" placeholder="Standard-Auftragsbestätigung" class="w-full px-2 py-1.5 border border-ink-300 rounded-lg text-sm"></div>' +
+            '<div><label class="text-[11px] font-semibold text-ink-600 uppercase tracking-wider">Kategorie</label>' +
+              '<input id="rtCategory" type="text" value="' + escapeAttr(t?.category || '') + '" placeholder="Auftragsbestätigung" class="w-full px-2 py-1.5 border border-ink-300 rounded-lg text-sm" list="rtCatList">' +
+              '<datalist id="rtCatList"><option value="Auftragsbestätigung"><option value="Wartungsbestätigung"><option value="Reparaturbestätigung"><option value="Angebotszusendung"><option value="Stellungnahme"><option value="Mahnung-Antwort"></datalist></div>' +
+          '</div>' +
+          '<div><label class="text-[11px] font-semibold text-ink-600 uppercase tracking-wider">Vorlagen-Text *</label>' +
+            '<p class="text-[10px] text-ink-500 mb-1">Verwende Platzhalter wie <code>{ANSPRECHPARTNER_NAME}</code>, <code>{STANDORT}</code>, <code>{FABRIKNUMMER}</code>, <code>{ANGEBOTSNUMMER}</code>, <code>{SUMME}</code> — Claude füllt sie aus dem Ticket.</p>' +
+            '<textarea id="rtBody" rows="14" placeholder="' + escapeAttr(DEFAULT_REPLY_TEMPLATE_BODY) + '" class="w-full px-3 py-2 border border-ink-300 rounded-lg text-[12px] leading-relaxed font-mono resize-y">' + escapeHtml(t?.body_template || '') + '</textarea>' +
+            '<button onclick="_rtLoadDefaultBody(this)" class="mt-1 text-[11px] text-rose-700 hover:underline inline-flex items-center gap-1"><i data-lucide="file-plus" class="w-3 h-3"></i> Beispiel-Vorlage laden</button>' +
+          '</div>' +
+          '<div><label class="text-[11px] font-semibold text-ink-600 uppercase tracking-wider">Zusätzliche KI-Anweisung (optional)</label>' +
+            '<textarea id="rtKi" rows="2" placeholder="z.B. „Tonfall freundlich-sachlich, deutsche Höflichkeitsform"" class="w-full px-2 py-1.5 border border-ink-300 rounded-lg text-[12px] resize-y">' + escapeHtml(t?.ki_instruction || '') + '</textarea></div>' +
+          '<div class="border-t border-ink-200 pt-3">' +
+            '<p class="text-[11px] font-bold text-ink-700 uppercase tracking-wider mb-2 inline-flex items-center gap-1"><i data-lucide="user" class="w-3.5 h-3.5"></i> Ansprechpartner / Projektleiter</p>' +
+            '<div class="grid grid-cols-1 sm:grid-cols-3 gap-2">' +
+              '<div><label class="text-[10px] text-ink-500">Name</label><input id="rtCName" type="text" value="' + escapeAttr(t?.contact_name || '') + '" placeholder="Mergim Ademaj" class="w-full px-2 py-1.5 border border-ink-300 rounded-lg text-sm"></div>' +
+              '<div><label class="text-[10px] text-ink-500">Telefon</label><input id="rtCPhone" type="text" value="' + escapeAttr(t?.contact_phone || '') + '" placeholder="0157 92388693" class="w-full px-2 py-1.5 border border-ink-300 rounded-lg text-sm"></div>' +
+              '<div><label class="text-[10px] text-ink-500">Email</label><input id="rtCEmail" type="email" value="' + escapeAttr(t?.contact_email || '') + '" placeholder="ademaj@aszendio.com" class="w-full px-2 py-1.5 border border-ink-300 rounded-lg text-sm"></div>' +
+            '</div>' +
+          '</div>' +
+          '<label class="inline-flex items-center gap-2 text-sm cursor-pointer">' +
+            '<input id="rtDefault" type="checkbox"' + (String(t?.is_default) === '1' || t?.is_default === true ? ' checked' : '') + ' class="w-4 h-4 accent-rose-600">' +
+            '<span>Als Standard-Vorlage für diesen Mandanten markieren</span>' +
+          '</label>' +
+        '</div>' +
+        '<div class="px-4 py-3 border-t border-ink-200 flex gap-2">' +
+          '<button onclick="_rtCloseEditor()" class="flex-1 px-3 py-2 bg-ink-100 hover:bg-ink-200 text-ink-700 rounded-lg text-sm font-bold">Abbrechen</button>' +
+          '<button onclick="_rtSave(this)" class="flex-1 px-3 py-2 bg-rose-600 hover:bg-rose-700 text-white rounded-lg text-sm font-bold inline-flex items-center justify-center gap-1.5"><i data-lucide="save" class="w-4 h-4"></i> Speichern</button>' +
+        '</div>' +
+      '</div>' +
+    '</div>';
+  if (window.lucide) lucide.createIcons();
+}
+
+function _rtCloseEditor() {
+  const host = document.getElementById('subModalHost');
+  if (host) host.innerHTML = '';
+  REPLY_TEMPLATES_STATE.editingRecordId = '';
+}
+
+function _rtLoadDefaultBody(btn) {
+  const ta = document.getElementById('rtBody');
+  if (!ta) return;
+  if (ta.value.trim() && !confirm('Aktuellen Text überschreiben?')) return;
+  ta.value = DEFAULT_REPLY_TEMPLATE_BODY;
+  ta.focus();
+}
+
+async function _rtSave(btn) {
+  const accId = REPLY_TEMPLATES_STATE.currentAccountId;
+  const fields = {
+    title:          (document.getElementById('rtTitle')?.value || '').trim(),
+    category:       (document.getElementById('rtCategory')?.value || '').trim(),
+    body_template:  (document.getElementById('rtBody')?.value || '').trim(),
+    ki_instruction: (document.getElementById('rtKi')?.value || '').trim(),
+    contact_name:   (document.getElementById('rtCName')?.value || '').trim(),
+    contact_phone:  (document.getElementById('rtCPhone')?.value || '').trim(),
+    contact_email:  (document.getElementById('rtCEmail')?.value || '').trim(),
+    is_default:     document.getElementById('rtDefault')?.checked ? '1' : '0',
+  };
+  if (!fields.title) { toast('Titel fehlt', 'warn'); return; }
+  if (!fields.body_template) { toast('Vorlagen-Text fehlt', 'warn'); return; }
+  setBusy(btn, true, 'Speichere…');
+  try {
+    if (REPLY_TEMPLATES_STATE.editingRecordId) {
+      await updateReplyTemplate(REPLY_TEMPLATES_STATE.editingRecordId, accId, fields);
+    } else {
+      await saveReplyTemplate(accId, fields);
+    }
+    await loadReplyTemplates(accId, true);
+    _rtCloseEditor();
+    _renderReplyTemplatesList();
+    setBusy(btn, false);
+    toast('Vorlage gespeichert ✓', 'success', 2500);
+  } catch (e) {
+    setBusy(btn, false);
+    toast('Speichern fehlgeschlagen: ' + (e.message || e), 'error', 6000);
+  }
+}
+
+async function _rtDelete(recordId, title) {
+  if (!confirm('Vorlage „' + (title || '(ohne Titel)') + '" wirklich löschen?')) return;
+  const accId = REPLY_TEMPLATES_STATE.currentAccountId;
+  try {
+    await deleteReplyTemplate(recordId, accId);
+    await loadReplyTemplates(accId, true);
+    _renderReplyTemplatesList();
+    toast('Vorlage gelöscht', 'success', 2500);
+  } catch (e) {
+    toast('Löschen fehlgeschlagen: ' + (e.message || e), 'error', 6000);
+  }
+}
+
+/* === v2.46.160: Vorlagen-Picker im KI-Assistent Plan-Card =============== */
+async function openReplyTemplatePicker(stepIdx, accountId) {
+  if (!accountId) return toast('Kein Mandant', 'warn');
+  let host = document.getElementById('subModalHost');
+  if (!host) { host = document.createElement('div'); host.id = 'subModalHost'; document.body.appendChild(host); }
+  host.innerHTML =
+    '<div class="fixed inset-0 z-[70] flex items-end sm:items-center justify-center bg-black/40" onclick="if(event.target===this)closeReplyTemplatePicker()">' +
+      '<div class="bg-white w-full max-w-lg sm:rounded-2xl rounded-t-2xl shadow-2xl flex flex-col safe-bottom" style="max-height:80vh">' +
+        '<div class="px-4 py-3 border-b border-ink-200 flex items-center justify-between gap-2">' +
+          '<h3 class="font-bold text-ink-900 inline-flex items-center gap-2"><i data-lucide="clipboard-list" class="w-4 h-4 text-rose-600"></i> Vorlage wählen</h3>' +
+          '<button onclick="closeReplyTemplatePicker()" class="w-9 h-9 rounded-lg hover:bg-ink-100 flex items-center justify-center"><i data-lucide="x" class="w-5 h-5 text-ink-700"></i></button>' +
+        '</div>' +
+        '<div id="rtPickerBody" class="flex-1 overflow-y-auto p-3"><div class="p-6 text-center"><span class="spinner inline-block w-5 h-5 border-[2px] text-rose-500"></span><p class="text-sm text-ink-500 mt-2">Lade Vorlagen…</p></div></div>' +
+      '</div>' +
+    '</div>';
+  if (window.lucide) lucide.createIcons();
+  const list = await loadReplyTemplates(accountId, true).catch(() => []);
+  const body = document.getElementById('rtPickerBody');
+  if (!body) return;
+  if (!list.length) {
+    body.innerHTML = '<div class="p-6 text-center">' +
+      '<i data-lucide="inbox" class="w-10 h-10 text-ink-300 inline-block"></i>' +
+      '<p class="text-sm text-ink-500 mt-2">Keine Vorlagen für diesen Mandanten.</p>' +
+      '<button onclick="closeReplyTemplatePicker();navTo(\'reply-templates\')" class="mt-3 px-4 py-2 bg-rose-600 hover:bg-rose-700 text-white rounded-lg text-sm font-bold inline-flex items-center gap-1.5"><i data-lucide="plus" class="w-4 h-4"></i> Erste Vorlage anlegen</button>' +
+      '</div>';
+    if (window.lucide) lucide.createIcons();
+    return;
+  }
+  body.innerHTML = list.map(t => {
+    const isDef = String(t.is_default) === '1' || t.is_default === true;
+    return '<button onclick="applyReplyTemplate(' + stepIdx + ',\'' + escapeAttr(accountId) + '\',\'' + escapeAttr(t.recordId) + '\',this)" class="w-full text-left bg-white border border-ink-200 hover:border-rose-300 hover:bg-rose-50 rounded-xl p-3 mb-2 transition">' +
+      '<div class="flex items-center gap-1.5 flex-wrap mb-1">' +
+        '<span class="font-bold text-ink-900 text-sm">' + escapeHtml(t.title || '(ohne Titel)') + '</span>' +
+        (t.category ? '<span class="text-[10px] bg-rose-100 text-rose-700 px-1.5 py-0.5 rounded font-bold uppercase tracking-wider">' + escapeHtml(t.category) + '</span>' : '') +
+        (isDef ? '<span class="text-[10px] bg-emerald-100 text-emerald-700 px-1.5 py-0.5 rounded font-bold uppercase tracking-wider">Default</span>' : '') +
+      '</div>' +
+      (t.contact_name ? '<p class="text-[11px] text-ink-600"><i data-lucide="user" class="w-3 h-3 inline -mt-0.5"></i> ' + escapeHtml(t.contact_name) + (t.contact_phone ? ' · ' + escapeHtml(t.contact_phone) : '') + '</p>' : '') +
+      '<p class="text-[11px] text-ink-500 mt-0.5 line-clamp-2">' + escapeHtml((t.body_template || '').slice(0, 180)) + (t.body_template?.length > 180 ? '…' : '') + '</p>' +
+    '</button>';
+  }).join('');
+  if (window.lucide) lucide.createIcons();
+}
+
+function closeReplyTemplatePicker() {
+  const host = document.getElementById('subModalHost');
+  if (host) host.innerHTML = '';
+}
+
+/* Wendet die gewählte Vorlage auf das Reply-Textfeld an: schickt
+   Vorlage + Ticket-Inhalt + Ansprechpartner-Daten an Claude, das die
+   Platzhalter ausfüllt. Ergebnis ersetzt den Textarea-Inhalt. */
+async function applyReplyTemplate(stepIdx, accountId, templateId, btn) {
+  const list = await loadReplyTemplates(accountId);
+  const tpl = list.find(x => x.recordId === templateId);
+  if (!tpl) return toast('Vorlage nicht gefunden', 'error');
+  const ctx = ASSISTANT_CTX || {};
+  const ticket = ctx.ticket || CURRENT_TICKET || {};
+  const ta = document.getElementById('stepBody_' + stepIdx);
+  if (!ta) return toast('Textfeld nicht gefunden', 'error');
+  if (ta.value.trim() && !confirm('Aktuellen Text durch Vorlage „' + (tpl.title || '?') + '" ersetzen?\n\nClaude füllt Platzhalter aus dem Ticket aus.')) return;
+  if (btn) setBusy(btn, true, 'KI füllt…');
+  try {
+    const req = ticket.requester || {};
+    const desc = (ticket.description_text || '').slice(0, 4000);
+    const conv = (ticket.conversations || []).slice(-10).map(c => {
+      const who = c.private ? '[INTERN]' : (c.incoming ? 'Kunde' : 'Agent');
+      return who + ': ' + (c.body_text || '').slice(0, 800);
+    }).join('\n---\n');
+    const sysPrompt =
+      'Du bist ein Vorlagen-Befüller. Du bekommst eine Antwort-Vorlage mit Platzhaltern in geschweiften Klammern ({PLATZHALTER}) ' +
+      'und Kontext aus dem Freshdesk-Ticket. Deine Aufgabe: ' +
+      'fülle JEDEN Platzhalter mit dem passenden Wert aus dem Ticket-Kontext aus. ' +
+      'Ändere SONST NICHTS an der Vorlage — kein Umschreiben, keine Stiländerung, keine zusätzlichen Sätze. ' +
+      'Wenn ein Wert nicht im Ticket steht, lass den Platzhalter als »[BITTE PRÜFEN: NAME]« stehen damit der User es merkt. ' +
+      'Behalte die Zeilenumbrüche der Vorlage 1:1. Antworte NUR mit dem befüllten Text, ohne Erklärung, ohne Markdown-Codeblock.' +
+      (tpl.ki_instruction ? ' Zusätzliche Anweisung: ' + tpl.ki_instruction : '');
+    const userText =
+      'VORLAGE:\n========\n' + tpl.body_template + '\n\n' +
+      'ANSPRECHPARTNER (aus Vorlage):\n==============================\n' +
+      'Name: ' + (tpl.contact_name || '?') + '\n' +
+      'Telefon: ' + (tpl.contact_phone || '?') + '\n' +
+      'Email: ' + (tpl.contact_email || '?') + '\n\n' +
+      'TICKET-KONTEXT:\n===============\n' +
+      'Betreff: ' + (ticket.subject || '?') + '\n' +
+      'Kunde: ' + (req.name || '?') + (req.email ? ' <' + req.email + '>' : '') + (req.company?.name ? ' · ' + req.company.name : '') + '\n\n' +
+      'BESCHREIBUNG:\n' + (desc || '(leer)') +
+      (conv ? '\n\nVERLAUF:\n' + conv : '') + '\n\n' +
+      'Bitte fülle die Platzhalter in der Vorlage aus.';
+    const callFn = (typeof _callAnthropicWithRetry === 'function')
+      ? _callAnthropicWithRetry
+      : (body) => proxyJson('/anthropic/v1/messages', { method: 'POST', body: JSON.stringify(body) });
+    const data = await callFn({
+      model: 'claude-sonnet-4-5-20250929',
+      max_tokens: 1500,
+      system: sysPrompt,
+      messages: [{ role: 'user', content: userText }],
+    });
+    let filled = (data?.content?.[0]?.text || '').trim();
+    if (!filled) throw new Error('Leere Antwort');
+    // Sicherheits-Fallback: noch verbleibende {PLATZHALTER} markieren
+    filled = filled.replace(/\{[A-Z_]+\}/g, m => '[BITTE PRÜFEN: ' + m.slice(1, -1) + ']');
+    ta.value = filled;
+    // Plan-Action-Body auch updaten damit es persistiert beim Re-Render
+    if (ctx?.plan?.actions?.[stepIdx]) {
+      ctx.plan.actions[stepIdx].body = filled;
+    }
+    bumpReplyTemplateUsage(templateId, accountId).catch(() => {});
+    closeReplyTemplatePicker();
+    toast('Vorlage „' + (tpl.title || '?') + '" eingesetzt ✓', 'success', 3500);
+  } catch (e) {
+    if (btn) setBusy(btn, false);
+    toast('KI-Befüllung fehlgeschlagen: ' + (e.message || e), 'error', 8000);
+  }
 }
 
 /* Wählt die best-passende Vorlage für einen Kontakt aus der Liste:
