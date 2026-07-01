@@ -779,7 +779,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.167';
+const APP_VERSION = 'v2.46.168';
 
 /* ============================================================
    GLOBAL THEME — v2.46.12
@@ -34094,8 +34094,10 @@ async function renderSettingsPage() {
           <p class="text-[11px] text-ink-500 mb-1.5">Base-ID (beginnt mit <code>app...</code>) der Berichtskonverter-Airtable — dort werden hier erstellte Angebote parallel in die <code>App_Angebote</code>-Tabelle gespeichert (markiert mit <code>source_app=freshdesk_hero</code>). Kein Push ins ERP.</p>
           <div class="flex gap-2 flex-wrap">
             <input id="bkBaseIdInput" type="text" value="${escapeAttr(APP_KEYS.bkAirtableBaseId || '')}" placeholder="app..." autocomplete="off" class="flex-1 min-w-[220px] px-3 py-2 border border-ink-200 rounded-lg text-sm font-mono bg-white focus:ring-2 focus:ring-emerald-500/30 focus:border-emerald-500">
+            <button type="button" onclick="pickBkBaseIdFromMasterBase(this)" class="bg-white border border-emerald-300 text-emerald-700 hover:bg-emerald-50 px-3 py-2 rounded-lg text-sm font-semibold flex items-center gap-2" title="Alle Airtable-Base-IDs aus der Master-Base laden und auswählen"><i data-lucide="search" class="w-4 h-4"></i> Suchen</button>
             <button type="button" onclick="saveBkAirtableBaseId(this)" class="bg-emerald-600 hover:bg-emerald-700 text-white px-4 py-2 rounded-lg text-sm font-semibold flex items-center gap-2"><i data-lucide="save" class="w-4 h-4"></i> Speichern</button>
           </div>
+          <div id="bkBaseIdPickerResult" class="mt-2"></div>
         </div>
 
         <!-- v2.46.164: Firma-Slug-Zuordnung pro Freshdesk-Account -->
@@ -34363,6 +34365,66 @@ async function saveErpSlugMap(btnEl) {
     setBusy(btnEl, false);
     toast('Speichern fehlgeschlagen: ' + e.message, 'error', 8000);
   }
+}
+
+/* v2.46.168: Alle Airtable-Base-IDs aus der Master-Base laden und picken lassen.
+   Master-Base hat pro Projekt einen Key-Record { project_id, key_name='appBaseId', key_value }.
+   Wir zeigen alle → User klickt die vom Berichtskonverter. Kein Airtable-Öffnen nötig. */
+async function pickBkBaseIdFromMasterBase(btnEl) {
+  const out = $('bkBaseIdPickerResult');
+  if (!out) return;
+  setBusy(btnEl, true, 'Lade…');
+  out.innerHTML = '<div class="bg-ink-50 border border-ink-200 rounded-lg p-2 text-xs text-ink-600"><span class="spinner inline-block w-3 h-3 mr-1"></span>Suche in Master-Base…</div>';
+  try {
+    if (!APP_KEYS.airtableWriteKey) throw new Error('Airtable-Key fehlt');
+    const url = 'https://api.airtable.com/v0/' + APP_CONFIG.MASTER_BASE_ID + '/Keys'
+      + '?filterByFormula=' + encodeURIComponent("{key_name}='appBaseId'")
+      + '&pageSize=100';
+    const res = await fetch(url, { headers: { 'Authorization': 'Bearer ' + APP_KEYS.airtableWriteKey } });
+    if (!res.ok) throw new Error('Master-Base-Read: HTTP ' + res.status);
+    const d = await res.json();
+    const records = (d.records || []).map(r => ({
+      projectId: r.fields?.project_id || '',
+      baseId:    r.fields?.key_value  || '',
+      recordId:  r.id,
+    })).filter(x => x.baseId && x.baseId.startsWith('app'));
+    setBusy(btnEl, false);
+    if (!records.length) {
+      out.innerHTML = '<div class="bg-amber-50 border border-amber-200 rounded-lg p-2 text-xs text-amber-800">Keine <code>appBaseId</code>-Einträge in der Master-Base gefunden.</div>';
+      return;
+    }
+    // Aktuelle FD-Hero-Base markieren, damit User nicht die falsche pickt
+    const meBase = APP_KEYS.appBaseId || APP_CONFIG.APP_BASE_ID;
+    out.innerHTML =
+      '<div class="bg-white border border-emerald-200 rounded-lg p-2 space-y-1">' +
+        '<p class="text-[11px] text-ink-600 mb-1">Gefundene Base-IDs — klick die vom <b>Berichtskonverter</b>:</p>' +
+        records.map(r => {
+          const isMe = r.baseId === meBase;
+          return '<button onclick="_bkPickBaseId(\'' + escapeAttr(r.baseId) + '\')"' +
+            (isMe ? ' disabled' : '') +
+            ' class="w-full text-left px-2 py-1.5 rounded-md text-[12px] font-mono transition ' +
+            (isMe
+              ? 'bg-ink-100 text-ink-400 cursor-not-allowed'
+              : 'bg-emerald-50 hover:bg-emerald-100 text-ink-800') +
+            '">' +
+            '<span class="font-bold">' + escapeHtml(r.baseId) + '</span>' +
+            '<span class="text-[10px] text-ink-500 ml-2">project=' + escapeHtml(r.projectId) + '</span>' +
+            (isMe ? '<span class="text-[10px] text-ink-500 ml-2 italic">(diese App)</span>' : '') +
+            '</button>';
+        }).join('') +
+      '</div>';
+  } catch (e) {
+    setBusy(btnEl, false);
+    out.innerHTML = '<div class="bg-red-50 border border-red-200 rounded-lg p-2 text-xs text-red-800"><b>Fehler:</b> ' + escapeHtml(e.message) + '</div>';
+  }
+}
+
+function _bkPickBaseId(baseId) {
+  const inp = $('bkBaseIdInput');
+  if (inp) inp.value = baseId;
+  const out = $('bkBaseIdPickerResult');
+  if (out) out.innerHTML = '<p class="text-[11px] text-emerald-700 inline-flex items-center gap-1"><i data-lucide="check-circle-2" class="w-3.5 h-3.5"></i> Übernommen — jetzt „Speichern" klicken.</p>';
+  if (window.lucide) lucide.createIcons();
 }
 
 /* v2.46.167: Berichtskonverter-Base-ID in Master-Base speichern. */
