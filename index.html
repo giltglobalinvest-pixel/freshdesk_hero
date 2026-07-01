@@ -779,7 +779,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.165';
+const APP_VERSION = 'v2.46.166';
 
 /* ============================================================
    GLOBAL THEME — v2.46.12
@@ -1565,18 +1565,107 @@ function _erpBuildAnlageAdresse(a) {
   return a.name || a.standortname || a.objektName || '';
 }
 
+/* v2.46.166: Robust — probiert viele Quell-Objekte + Feldnamen-Varianten,
+   analog Berichtskonverter. Wenn nichts flach lesbar ist, muss der Aufrufer
+   ggf. asynchron `_erpResolveAdresseId` auf `kunde.adresseId` anwenden. */
 function _erpBuildKundeAdresse(k) {
   if (!k) return '';
+  // Wenn kunde.adresse ein String ist → direkt zurück
   if (typeof k.adresse === 'string' && k.adresse.trim()) return k.adresse.trim();
-  if (k.adresse && typeof k.adresse === 'object') {
-    const ao = k.adresse;
-    const z1 = [ao.strasse || ao.street, ao.hausnummer || ao.houseNumber].filter(Boolean).join(' ').trim();
-    const z2 = [ao.plz || ao.zip, ao.ort || ao.stadt || ao.city].filter(Boolean).join(' ').trim();
-    return [z1, z2].filter(Boolean).join(', ');
+  const sources = [
+    k,
+    (k.adresse && typeof k.adresse === 'object') ? k.adresse : null,
+    (k.rechnungsadresse && typeof k.rechnungsadresse === 'object') ? k.rechnungsadresse : null,
+    (k.rechnungAdresse && typeof k.rechnungAdresse === 'object') ? k.rechnungAdresse : null,
+    (k.billingAddress && typeof k.billingAddress === 'object') ? k.billingAddress : null,
+    (k.invoiceAddress && typeof k.invoiceAddress === 'object') ? k.invoiceAddress : null,
+    (k.lieferadresse && typeof k.lieferadresse === 'object') ? k.lieferadresse : null,
+    (k.lieferAdresse && typeof k.lieferAdresse === 'object') ? k.lieferAdresse : null,
+    (k.shippingAddress && typeof k.shippingAddress === 'object') ? k.shippingAddress : null,
+    (k.postanschrift && typeof k.postanschrift === 'object') ? k.postanschrift : null,
+    (k.standort && typeof k.standort === 'object') ? k.standort : null,
+  ].filter(Boolean);
+  const pickStreet = (o) => o.strasse || o.street || o.strassenname || o.streetName || (typeof o.adresse === 'string' ? o.adresse : '') || '';
+  const pickHnr    = (o) => o.hausnummer || o.houseNumber || o.hnr || '';
+  const pickPlz    = (o) => o.plz || o.postleitzahl || o.zip || o.zipCode || o.postalCode || '';
+  const pickOrt    = (o) => o.ort || o.stadt || o.city || o.town || '';
+  let street = '', hnr = '', plz = '', ort = '';
+  for (const o of sources) {
+    if (!street) street = pickStreet(o);
+    if (!hnr)    hnr    = pickHnr(o);
+    if (!plz)    plz    = pickPlz(o);
+    if (!ort)    ort    = pickOrt(o);
+    if (street && plz && ort) break;
   }
-  const z1 = [k.strasse, k.hausnummer].filter(Boolean).join(' ').trim();
-  const z2 = [k.plz, k.ort].filter(Boolean).join(' ').trim();
-  return [z1, z2].filter(Boolean).join(', ');
+  const streetFull = [street, hnr].filter(Boolean).join(' ').trim();
+  const cityLine   = [plz, ort].filter(Boolean).join(' ').trim();
+  return [streetFull, cityLine].filter(Boolean).join(', ');
+}
+
+/* v2.46.166: Löst eine ERP-adresseId (Google-Places-Style) zu Klartext auf.
+   Probiert diverse bekannte Endpoints durch. Rückgabe: einzeilige Adresse
+   „Straße Hnr, PLZ Ort" oder '' wenn nichts klappt. */
+async function _erpResolveAdresseId(firmaSlug, adresseId) {
+  if (!adresseId || !firmaSlug) return '';
+  const enc = encodeURIComponent(String(adresseId));
+  const candidates = [
+    'api/users/me/google/maps/adresse/' + enc,
+    'api/google/maps/adresse/' + enc,
+    'api/google/maps/adressen/' + enc,
+    'api/google/maps/' + enc,
+    'api/maps/adresse/' + enc,
+    'api/maps/' + enc,
+    'api/Adressen/' + enc,
+    'api/adressen/' + enc,
+    'api/google/places/' + enc,
+  ];
+  for (const path of candidates) {
+    try {
+      const res = await erpFetch('/aufzug/' + firmaSlug + '/' + path);
+      if (!res || typeof res !== 'object') continue;
+      const sources = [res, res.result, res.place, res.adresse, res.address].filter(Boolean);
+      for (const r of sources) {
+        // Strukturierte Adresse?
+        const street = r.strasse || r.street || r.strassenname || r.streetName || '';
+        const hnr    = r.hausnummer || r.houseNumber || r.hnr || '';
+        const plz    = r.plz || r.postleitzahl || r.zip || r.postalCode || r.zipCode || '';
+        const ort    = r.ort || r.stadt || r.city || r.town || '';
+        const sf = [street, hnr].filter(Boolean).join(' ').trim();
+        const co = [plz, ort].filter(Boolean).join(' ').trim();
+        const line = [sf, co].filter(Boolean).join(', ');
+        if (line) { console.log('[ERP] adresseId aufgelöst via', path, '(strukturiert):', line); return line; }
+        // Google-Places formatted_address
+        const fa = r.formatted_address || r.formattedAddress || r.formattedAdress;
+        if (typeof fa === 'string' && fa.trim()) {
+          const parts = fa.split(',').map(s => s.trim()).filter(Boolean);
+          const useful = parts.filter(p => !/^deutschland$|^germany$/i.test(p));
+          const out = useful.slice(0, 2).join(', ');
+          console.log('[ERP] adresseId aufgelöst via', path, '(formatted_address):', out);
+          return out;
+        }
+        // Google address_components → zusammensetzen
+        if (Array.isArray(r.address_components) && r.address_components.length) {
+          const comp = (typeArr) => {
+            const c = r.address_components.find(c => c.types && typeArr.some(t => c.types.includes(t)));
+            return c ? (c.long_name || c.short_name || '') : '';
+          };
+          const route = comp(['route']);
+          const streetNumber = comp(['street_number']);
+          const postal = comp(['postal_code']);
+          const locality = comp(['locality', 'postal_town']);
+          const sf2 = [route, streetNumber].filter(Boolean).join(' ').trim();
+          const co2 = [postal, locality].filter(Boolean).join(' ').trim();
+          const line2 = [sf2, co2].filter(Boolean).join(', ');
+          if (line2) { console.log('[ERP] adresseId aufgelöst via', path, '(address_components):', line2); return line2; }
+        }
+      }
+    } catch (e) {
+      // 404 auf ungenutzten Endpoints ist erwartet — nur echte Fehler loggen
+      if (e.status && e.status !== 404) console.warn('[ERP] Adress-Endpoint', path, '→', e.status, e.message);
+    }
+  }
+  console.warn('[ERP] adresseId konnte nicht aufgelöst werden:', adresseId);
+  return '';
 }
 
 const _ERP_ANLAGEN_CACHE = new Map();  // firmaSlug → { items, loadedAt }
@@ -24109,8 +24198,22 @@ async function pickErpAnlage(idx) {
     } catch (_) {}
   }
   // Push in die Inputs
-  const standort = _erpBuildAnlageAdresse(anlage);
-  const kundeAdresse = _erpBuildKundeAdresse(kunde);
+  let standort = _erpBuildAnlageAdresse(anlage);
+  let kundeAdresse = _erpBuildKundeAdresse(kunde);
+  // v2.46.166: Wenn Kundenadresse leer aber adresseId vorhanden → Google-Places-Resolver
+  if (!kundeAdresse) {
+    const adId = kunde.adresseId
+      || kunde.defaultrechnungsempfaenger?.adresseId
+      || kunde.defaultRechnungsempfaenger?.adresseId
+      || '';
+    if (adId) {
+      try { kundeAdresse = await _erpResolveAdresseId(firmaSlug, adId); } catch (_) {}
+    }
+  }
+  // Analog: wenn Standort noch leer aber Anlage hat adresseId (selten) → auch resolven
+  if (!standort && anlage.adresseId) {
+    try { standort = await _erpResolveAdresseId(firmaSlug, anlage.adresseId); } catch (_) {}
+  }
   if (anlage.fabriknummer)  { const el = $('sdFabrik'); if (el) el.value = anlage.fabriknummer; }
   if (kunde.firmenname)     { const el = $('sdVertragspartner'); if (el) el.value = kunde.firmenname; }
   if (kundeAdresse)         { const el = $('sdAnschrift'); if (el) el.value = kundeAdresse; }
