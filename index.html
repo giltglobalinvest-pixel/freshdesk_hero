@@ -779,7 +779,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.171';
+const APP_VERSION = 'v2.46.172';
 
 /* ============================================================
    GLOBAL THEME — v2.46.12
@@ -23878,16 +23878,22 @@ async function openAngebotsChatModal(accountId, ticketId) {
       accountId, ticketId, ticket, profile, account,
       stepIdx: 0,
       history: [],     // [{role:'user'|'assistant', content:'...'}]
-      collected: {     // gesammelte Felder, werden im Lauf der Konversation befüllt
-        standort: anlage.standort || '',
-        fabriknummer: anlage.fabriknummer || '',
-        // v2.46.161: Stammdaten-Header — überschreiben req-Defaults im PDF wenn befüllt
+      collected: (function() {
+        // v2.46.172: Stammdaten aus localStorage wiederherstellen (persistiert über Modal-Reopen)
+        let persisted = null;
+        try {
+          const raw = localStorage.getItem('fdh_ang_stamm_' + accountId + '_' + ticketId);
+          if (raw) persisted = JSON.parse(raw);
+        } catch (_) {}
+        return {
+        standort:     persisted?.standort     || anlage.standort     || '',
+        fabriknummer: persisted?.fabriknummer || anlage.fabriknummer || '',
         stammdaten: {
-          vertragspartner:        '',  // Firma / Rechnungsanschrift
-          rechnungs_anschrift:    '',  // Straße, PLZ, Ort für Rechnung
-          email:                  '',
-          tel:                    '',
-          ansprechpartner_vor_ort:'',  // Name Person vor Ort
+          vertragspartner:         persisted?.stammdaten?.vertragspartner         || '',
+          rechnungs_anschrift:     persisted?.stammdaten?.rechnungs_anschrift     || '',
+          email:                   persisted?.stammdaten?.email                   || '',
+          tel:                     persisted?.stammdaten?.tel                     || '',
+          ansprechpartner_vor_ort: persisted?.stammdaten?.ansprechpartner_vor_ort || '',
         },
         anrede: '',
         einleitung: '',
@@ -23905,7 +23911,8 @@ async function openAngebotsChatModal(accountId, ticketId) {
         warnung_aktiv: false,
         warnung_text: '',
         schluss: '',
-      },
+      };
+      })(),
       stilReferenzen: null, // wird beim ersten Step gefüllt
     };
     _renderAngChatShell();
@@ -24078,8 +24085,17 @@ function saveAngStammdaten(btn) {
   s.collected.stammdaten.ansprechpartner_vor_ort= ($('sdAnsprech')?.value || '').trim();
   s.collected.standort     = ($('sdStandort')?.value || '').trim();
   s.collected.fabriknummer = ($('sdFabrik')?.value || '').trim();
+  // v2.46.172: In localStorage persistieren damit Stammdaten Modal-Reopen überleben
+  try {
+    localStorage.setItem('fdh_ang_stamm_' + s.accountId + '_' + s.ticketId, JSON.stringify({
+      standort:     s.collected.standort,
+      fabriknummer: s.collected.fabriknummer,
+      stammdaten:   s.collected.stammdaten,
+      savedAt:      new Date().toISOString(),
+    }));
+  } catch (e) { console.warn('Stammdaten-Persist:', e.message); }
   closeAngStammdatenEditor();
-  toast('Stammdaten gespeichert ✓', 'success', 2000);
+  toast('Stammdaten gespeichert ✓ (bleibt beim erneuten Öffnen erhalten)', 'success', 3000);
   // Preview neu rendern damit die neuen Felder sichtbar sind
   if (typeof _angChatRenderPreview === 'function') {
     try { _angChatRenderPreview(); } catch (_) {}
