@@ -779,7 +779,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.164';
+const APP_VERSION = 'v2.46.165';
 
 /* ============================================================
    GLOBAL THEME — v2.46.12
@@ -1579,28 +1579,49 @@ function _erpBuildKundeAdresse(k) {
   return [z1, z2].filter(Boolean).join(', ');
 }
 
-/* Sucht eine Anlage per Fabriknummer im ERP. Gibt einen einzelnen Anlage-Record
-   zurück oder null. Zieht die volle Liste (gecacht 5min) und filtert clientside. */
 const _ERP_ANLAGEN_CACHE = new Map();  // firmaSlug → { items, loadedAt }
 
-async function erpFindAnlageByFabriknummer(firmaSlug, fabriknummer) {
+/* Lädt die komplette Anlagen-Liste für eine Firma (5min gecacht). */
+async function erpLoadAnlagen(firmaSlug) {
   if (!firmaSlug) throw new Error('Firma-Slug fehlt');
-  if (!fabriknummer) throw new Error('Fabriknummer fehlt');
   const cached = _ERP_ANLAGEN_CACHE.get(firmaSlug);
-  let items;
-  if (cached && (Date.now() - cached.loadedAt) < 5 * 60 * 1000) {
-    items = cached.items;
-  } else {
-    const res = await erpFetch('/aufzug/' + encodeURIComponent(firmaSlug) + '/api/anlagen');
-    items = Array.isArray(res) ? res : (res?.content || res?.data || res?.items || []);
-    _ERP_ANLAGEN_CACHE.set(firmaSlug, { items, loadedAt: Date.now() });
-  }
+  if (cached && (Date.now() - cached.loadedAt) < 5 * 60 * 1000) return cached.items;
+  const res = await erpFetch('/aufzug/' + encodeURIComponent(firmaSlug) + '/api/anlagen');
+  const items = Array.isArray(res) ? res : (res?.content || res?.data || res?.items || []);
+  _ERP_ANLAGEN_CACHE.set(firmaSlug, { items, loadedAt: Date.now() });
+  return items;
+}
+
+/* Sucht eine Anlage per Fabriknummer (Exact-Match bevorzugt, sonst substring). */
+async function erpFindAnlageByFabriknummer(firmaSlug, fabriknummer) {
+  if (!fabriknummer) throw new Error('Fabriknummer fehlt');
+  const items = await erpLoadAnlagen(firmaSlug);
   const needle = String(fabriknummer).trim().toLowerCase();
   const hits = items.filter(a => String(a.fabriknummer || '').trim().toLowerCase() === needle);
   if (hits.length) return hits[0];
-  // Fallback: substring-Match
   const softHits = items.filter(a => String(a.fabriknummer || '').trim().toLowerCase().includes(needle));
   return softHits[0] || null;
+}
+
+/* v2.46.165: Multi-Feld-Filter über die Anlagen-Liste. */
+function erpFilterAnlagen(items, query) {
+  const q = String(query || '').trim().toLowerCase();
+  if (!q) return items.slice(0, 100);  // Ohne Query: erste 100 zeigen
+  const tokens = q.split(/\s+/).filter(Boolean);
+  return items.filter(a => {
+    const hay = [
+      a.fabriknummer,
+      a.anzeigeAdresse,
+      _erpBuildAnlageAdresse(a),
+      a.kunde?.firmenname,
+      a.kunde?.kundennummer,
+      a.name,
+      a.objektName,
+      a.standortname,
+      a.kennung,
+    ].filter(Boolean).map(String).join(' ').toLowerCase();
+    return tokens.every(t => hay.includes(t));
+  }).slice(0, 200);
 }
 
 async function erpLoadKundenKontakte(firmaSlug, kundennummer) {
@@ -23973,55 +23994,137 @@ function saveAngStammdaten(btn) {
   }
 }
 
-/* v2.46.163: Anlage per Fabriknummer im ERP nachschlagen und alle
-   Stammdaten-Felder auto-befüllen. Nimmt die aktuell im sdFabrik-Feld
-   eingegebene Nummer, sucht im ERP (per firma_slug des Accounts) und
-   pusht Kunde/Adresse/Standort/Ansprechpartner in die Inputs. */
+/* v2.46.165: Öffnet einen Anlage-Picker: Suche + Liste + Klick zum Auswählen.
+   Zeigt Fabriknummer / Standort / Kunde je Zeile. Erspart das Blindraten
+   ob's die richtige Anlage ist wenn die Fabriknummer nicht 100% eindeutig ist. */
 async function fetchStammdatenFromErp(btn) {
   const s = window._ANG_CHAT;
   if (!s) return;
-  const fabrik = ($('sdFabrik')?.value || '').trim();
-  if (!fabrik) return toast('Fabriknummer eingeben — die brauche ich zum Suchen', 'warn', 5000);
   const firmaSlug = _erpFirmaSlugForAccount(s.account);
-  if (!firmaSlug) return toast('Kein ERP-Firma-Slug für Account „' + (s.account?.name || '?') + '" — Admin muss ihn im Account-Editor eintragen', 'warn', 8000);
+  if (!firmaSlug) return toast('Kein ERP-Firma-Slug für Account „' + (s.account?.name || '?') + '" — Admin → Einstellungen', 'warn', 8000);
   if (!APP_KEYS.erpProxyUrl) return toast('ERP-Proxy-URL nicht konfiguriert — Admin → Einstellungen', 'warn', 8000);
-  setBusy(btn, true, 'ERP…');
+  // Vorbelegung: aktuell im Fabriknummer-Feld eingetragene Nummer als Such-Prefill
+  const prefill = ($('sdFabrik')?.value || '').trim();
+  openErpAnlagePicker(firmaSlug, prefill, btn);
+}
+
+async function openErpAnlagePicker(firmaSlug, prefillQuery, triggerBtn) {
+  let host = document.getElementById('subModalHost3');
+  if (!host) { host = document.createElement('div'); host.id = 'subModalHost3'; document.body.appendChild(host); }
+  host.innerHTML =
+    '<div class="fixed inset-0 z-[80] flex items-end sm:items-center justify-center bg-black/50" onclick="if(event.target===this)closeErpAnlagePicker()">' +
+      '<div class="bg-white w-full max-w-xl sm:rounded-2xl rounded-t-2xl shadow-2xl flex flex-col safe-bottom" style="max-height:88vh">' +
+        '<div class="px-4 py-3 border-b border-ink-200 flex items-center justify-between gap-2 shrink-0">' +
+          '<h3 class="font-bold text-ink-900 inline-flex items-center gap-2"><i data-lucide="database" class="w-4 h-4 text-emerald-600"></i> Anlage aus ERP wählen</h3>' +
+          '<button onclick="closeErpAnlagePicker()" class="w-9 h-9 rounded-lg hover:bg-ink-100 flex items-center justify-center"><i data-lucide="x" class="w-5 h-5 text-ink-700"></i></button>' +
+        '</div>' +
+        '<div class="px-4 py-3 border-b border-ink-100 shrink-0">' +
+          '<div class="relative">' +
+            '<i data-lucide="search" class="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-ink-400"></i>' +
+            '<input id="erpPickerSearch" type="search" placeholder="Fabriknummer, Standort, Kunde…" value="' + escapeAttr(prefillQuery || '') + '" oninput="_erpPickerUpdate()" class="w-full pl-9 pr-3 py-2 border border-ink-300 rounded-lg text-sm focus:ring-2 focus:ring-emerald-500/30 focus:border-emerald-500">' +
+          '</div>' +
+          '<p id="erpPickerCount" class="text-[11px] text-ink-500 mt-1.5"><span class="spinner inline-block w-3 h-3 mr-1"></span>Lade Anlagen…</p>' +
+        '</div>' +
+        '<div id="erpPickerList" class="flex-1 overflow-y-auto p-2 bg-ink-50"></div>' +
+      '</div>' +
+    '</div>';
+  if (window.lucide) lucide.createIcons();
+  if (triggerBtn) setBusy(triggerBtn, true);
   try {
-    const anlage = await erpFindAnlageByFabriknummer(firmaSlug, fabrik);
-    if (!anlage) {
-      setBusy(btn, false);
-      toast('Keine Anlage mit Fabriknummer „' + fabrik + '" im ERP gefunden', 'warn', 8000);
-      return;
-    }
-    const kunde = anlage.kunde || {};
-    const kundennr = kunde.kundennummer || kunde.id || '';
-    let kontakt = null;
-    if (kundennr) {
-      const kontakte = await erpLoadKundenKontakte(firmaSlug, kundennr).catch(() => []);
-      // Ersten Kontakt mit Email nehmen, sonst ersten
-      kontakt = kontakte.find(k => k.email && String(k.email).includes('@')) || kontakte[0] || null;
-    }
-    // In die Inputs pushen
-    const standort = _erpBuildAnlageAdresse(anlage);
-    const kundeAdresse = _erpBuildKundeAdresse(kunde);
-    if (kunde.firmenname)     { const el = $('sdVertragspartner'); if (el) el.value = kunde.firmenname; }
-    if (kundeAdresse)         { const el = $('sdAnschrift'); if (el) el.value = kundeAdresse; }
-    if (standort)             { const el = $('sdStandort'); if (el) el.value = standort; }
-    if (kontakt) {
-      const vollname = [kontakt.vorname, kontakt.nachname].filter(Boolean).join(' ').trim() || kontakt.name || '';
-      if (vollname)          { const el = $('sdAnsprech'); if (el) el.value = vollname; }
-      if (kontakt.email)     { const el = $('sdEmail'); if (el) el.value = kontakt.email; }
-      const tel = kontakt.telefon || kontakt.mobile || '';
-      if (tel)               { const el = $('sdTel'); if (el) el.value = tel; }
-    }
-    setBusy(btn, false);
-    const label = anlage.name || anlage.anzeigeAdresse || ('Anlage #' + (anlage.id || '?'));
-    toast('ERP-Treffer: ' + label + (kontakt ? ' · Kontakt ' + (kontakt.email || kontakt.vorname || '?') : ''), 'success', 5000);
+    const items = await erpLoadAnlagen(firmaSlug);
+    window._ERP_PICKER = { items, firmaSlug };
+    _erpPickerUpdate();
+    // Fokus auf Suche legen (Mobile-freundlich später — hier nur wenn nicht touch)
+    setTimeout(() => { const s = $('erpPickerSearch'); if (s) s.focus(); }, 100);
   } catch (e) {
-    setBusy(btn, false);
-    toast('ERP-Fehler: ' + (e.message || e), 'error', 10000);
-    console.error('fetchStammdatenFromErp:', e);
+    const list = $('erpPickerList');
+    if (list) list.innerHTML = '<div class="bg-white rounded-xl border border-red-200 p-4 text-center text-red-700 text-sm"><b>ERP-Fehler:</b> ' + escapeHtml(e.message || String(e)) + '</div>';
+    const c = $('erpPickerCount'); if (c) c.textContent = 'Fehler beim Laden.';
+  } finally {
+    if (triggerBtn) setBusy(triggerBtn, false);
   }
+}
+
+function _erpPickerUpdate() {
+  const state = window._ERP_PICKER;
+  if (!state) return;
+  const q = ($('erpPickerSearch')?.value || '').trim();
+  const filtered = erpFilterAnlagen(state.items, q);
+  const c = $('erpPickerCount');
+  if (c) {
+    c.innerHTML = q
+      ? '<b>' + filtered.length + '</b> Treffer für „' + escapeHtml(q) + '" · <b>' + state.items.length + '</b> gesamt'
+      : '<b>' + state.items.length + '</b> Anlagen im ERP — bitte suchen';
+  }
+  const list = $('erpPickerList');
+  if (!list) return;
+  if (!filtered.length) {
+    list.innerHTML = '<div class="bg-white rounded-xl border border-ink-200 p-6 text-center text-ink-500 text-sm">' +
+      '<i data-lucide="search-x" class="w-8 h-8 inline text-ink-300"></i>' +
+      '<p class="mt-2">Keine Anlage passt zu „' + escapeHtml(q) + '".</p>' +
+      '</div>';
+    if (window.lucide) lucide.createIcons();
+    return;
+  }
+  list.innerHTML = filtered.map((a, i) => {
+    const fabrik = a.fabriknummer || '';
+    const standort = _erpBuildAnlageAdresse(a) || '(kein Standort)';
+    const kunde = a.kunde?.firmenname || '(kein Kunde)';
+    const kundenr = a.kunde?.kundennummer ? ' · Kd-Nr. ' + a.kunde.kundennummer : '';
+    return '<button onclick="pickErpAnlage(' + i + ')" class="w-full text-left bg-white hover:bg-emerald-50 border border-ink-200 hover:border-emerald-300 rounded-xl p-2.5 mb-1.5 transition">' +
+      '<div class="flex items-baseline gap-2 flex-wrap">' +
+        (fabrik ? '<span class="font-mono font-bold text-ink-900 text-sm">' + escapeHtml(fabrik) + '</span>' : '<span class="text-ink-400 text-xs italic">keine Fabrik-Nr.</span>') +
+        (a.objektTyp ? '<span class="text-[10px] bg-ink-100 text-ink-600 px-1.5 py-0.5 rounded font-semibold">' + escapeHtml(a.objektTyp) + '</span>' : '') +
+      '</div>' +
+      '<p class="text-[12px] text-ink-700 mt-0.5"><i data-lucide="map-pin" class="w-3 h-3 inline -mt-0.5"></i> ' + escapeHtml(standort) + '</p>' +
+      '<p class="text-[11px] text-ink-500 mt-0.5"><i data-lucide="building" class="w-3 h-3 inline -mt-0.5"></i> ' + escapeHtml(kunde) + escapeHtml(kundenr) + '</p>' +
+    '</button>';
+  }).join('');
+  // Auswahl-Index in Reihenfolge merken — pickErpAnlage(i) referenziert die aktuelle Filter-Reihenfolge
+  window._ERP_PICKER.filtered = filtered;
+  if (window.lucide) lucide.createIcons();
+}
+
+function closeErpAnlagePicker() {
+  const host = document.getElementById('subModalHost3');
+  if (host) host.innerHTML = '';
+  delete window._ERP_PICKER;
+}
+
+/* Anlage aus Picker gewählt → Stammdaten-Felder befüllen, Picker zu, Toast. */
+async function pickErpAnlage(idx) {
+  const state = window._ERP_PICKER;
+  if (!state?.filtered?.[idx]) return;
+  const anlage = state.filtered[idx];
+  const firmaSlug = state.firmaSlug;
+  const kunde = anlage.kunde || {};
+  const kundennr = kunde.kundennummer || kunde.id || '';
+  const list = $('erpPickerList');
+  if (list) list.innerHTML = '<div class="bg-white rounded-xl border border-emerald-200 p-4 text-center text-emerald-700 text-sm"><span class="spinner inline-block w-4 h-4 mr-1"></span>Lade Ansprechpartner…</div>';
+  let kontakt = null;
+  if (kundennr) {
+    try {
+      const kontakte = await erpLoadKundenKontakte(firmaSlug, kundennr);
+      kontakt = kontakte.find(k => k.email && String(k.email).includes('@')) || kontakte[0] || null;
+    } catch (_) {}
+  }
+  // Push in die Inputs
+  const standort = _erpBuildAnlageAdresse(anlage);
+  const kundeAdresse = _erpBuildKundeAdresse(kunde);
+  if (anlage.fabriknummer)  { const el = $('sdFabrik'); if (el) el.value = anlage.fabriknummer; }
+  if (kunde.firmenname)     { const el = $('sdVertragspartner'); if (el) el.value = kunde.firmenname; }
+  if (kundeAdresse)         { const el = $('sdAnschrift'); if (el) el.value = kundeAdresse; }
+  if (standort)             { const el = $('sdStandort'); if (el) el.value = standort; }
+  if (kontakt) {
+    const vollname = [kontakt.vorname, kontakt.nachname].filter(Boolean).join(' ').trim() || kontakt.name || '';
+    if (vollname)          { const el = $('sdAnsprech'); if (el) el.value = vollname; }
+    if (kontakt.email)     { const el = $('sdEmail'); if (el) el.value = kontakt.email; }
+    const tel = kontakt.telefon || kontakt.mobile || '';
+    if (tel)               { const el = $('sdTel'); if (el) el.value = tel; }
+  }
+  closeErpAnlagePicker();
+  const label = (anlage.fabriknummer ? anlage.fabriknummer + ' · ' : '') + (kunde.firmenname || standort || 'Anlage');
+  toast('Übernommen: ' + label + (kontakt ? ' · Kontakt ' + (kontakt.email || kontakt.vorname || '?') : ''), 'success', 5000);
 }
 
 /* v2.46.161: KI-Extract der Stammdaten aus Email + Anhängen. */
