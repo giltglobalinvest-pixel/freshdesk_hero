@@ -779,7 +779,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.181';
+const APP_VERSION = 'v2.46.182';
 
 /* ============================================================
    GLOBAL THEME — v2.46.12
@@ -24732,6 +24732,7 @@ async function _angChatGenerateOffer(s, userText) {
     '- Wenn User noch NICHT erwähnt hat ob er ein Anschreiben will → in deiner "message" am Ende kurz fragen: "Möchtest du ein begleitendes Anschreiben (Brief vor dem Angebot)? Wenn ja, schick mir kurze Hinweise oder ich entwerfe was Standardisches." Lass anschreiben_aktiv=false.\n' +
     '- Wenn User SAGT er will ein Anschreiben → setze anschreiben_aktiv=true und fülle anschreiben_betreff + anschreiben_body + anschreiben_anrede + anschreiben_gruss komplett aus.\n' +
     '- WICHTIG: anschreiben_anrede enthält NUR die Anrede-Zeile (z.B. "Sehr geehrte Frau Riegger,"). Der anschreiben_body beginnt NICHT mit der Anrede — er startet direkt mit dem ersten Satz. Zwischen Anrede und Body kommt automatisch eine Leerzeile.\n' +
+    '- anschreiben_anrede IMMER AUSFÜLLEN — auch wenn anschreiben_aktiv=false! Sie wird für die Versand-E-Mail gebraucht. Leite sie aus dem Ticket ab: Name des Anfragenden bekannt → "Sehr geehrte Frau X," / "Sehr geehrter Herr Y,". Geschlecht unklar oder kein Name → "Sehr geehrte Damen und Herren,". Allgemein halten, keine Titel erfinden.\n' +
     '- Wenn User SAGT er will KEIN Anschreiben → anschreiben_aktiv=false.\n\n' +
     'PREISE:\n' +
     '- Wenn User Preise nennt → übernimm EXAKT\n' +
