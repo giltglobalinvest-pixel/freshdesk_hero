@@ -779,7 +779,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.177';
+const APP_VERSION = 'v2.46.178';
 
 /* ============================================================
    GLOBAL THEME — v2.46.12
@@ -25002,7 +25002,7 @@ async function angChatExecuteFinal(btn) {
     let bkNote = '';
     if (APP_KEYS.bkAirtableBaseId) {
       try {
-        const bk = await _bkSaveAngebotToBK(ctx);
+        const bk = await _bkSaveAngebotToBK(s);
         bkNote = ' · Berichtskonverter ANG-' + bk.angNum;
       } catch (e) {
         console.warn('BK-Save fehlgeschlagen:', e);
@@ -25025,8 +25025,7 @@ async function angChatSaveToBerichtskonverter(btn) {
   if (!confirm('Angebot ins Berichtskonverter-System speichern?\n\nKein Push ins ERP · Kein Kundenversand · nur Ablage.')) return;
   setBusy(btn, true, 'Speichere…');
   try {
-    const ctx = _angChatToCtx(s);
-    const bk = await _bkSaveAngebotToBK(ctx);
+    const bk = await _bkSaveAngebotToBK(s);
     setBusy(btn, false);
     toast('Im Berichtskonverter gespeichert als ANG-' + bk.angNum + ' ✓', 'success', 6000);
   } catch (e) {
@@ -26510,78 +26509,42 @@ async function _bkNextAppAngebotNum(bkBaseId) {
   } catch (_) { return 1; }
 }
 
-async function _bkSaveAngebotToBK(ctx) {
+/* v2.46.178: KOMPLETT umgestellt auf den _fdhChatToBkRec-Mapper — derselbe der
+   die Live-Vorschau speist. Damit ist garantiert: was in der Vorschau steht,
+   landet 1:1 im Berichtskonverter (Positionen im titel/leistungsbeschreibung-Format,
+   Stundensätze, Abrechnungsmodus, Anschreiben, Stammdaten-Adresse).
+   Nimmt jetzt den CHAT-STATE (window._ANG_CHAT) statt des Legacy-ctx. */
+async function _bkSaveAngebotToBK(chatState) {
   if (!APP_KEYS.bkAirtableBaseId) throw new Error('Berichtskonverter-Base-ID nicht konfiguriert (Admin → Einstellungen)');
   if (!APP_KEYS.airtableWriteKey) throw new Error('Airtable-Write-Key fehlt');
-  const { accountId, ticketId, plan, ticket, profile } = ctx;
-  const account = (APP_STATE.accounts || []).find(a => a.id === accountId) || {};
-  const firmaSlug = _erpFirmaSlugForAccount(account) || 'unknown';
-  const totals = plan._totals || _angebotCalcTotals(plan);
-  const sd = plan.stammdaten || {};
-  const req = ticket?.requester || {};
+  const s = chatState || window._ANG_CHAT;
+  if (!s) throw new Error('Kein Angebot-State');
+  const rec = _fdhChatToBkRec(s);
+  if (!rec) throw new Error('Mapper lieferte nichts');
+  const account = s.account || {};
   const angNum = await _bkNextAppAngebotNum(APP_KEYS.bkAirtableBaseId);
-  // Positionen normalisieren ins App_Angebote-Format
-  const positionen = (plan.positionen || []).map((p, i) => ({
-    idx:          i + 1,
-    bezeichnung:  p.bezeichnung || '',
-    menge:        +p.menge || 1,
-    einheit:      p.einheit || 'ST',
-    ep_kone:      0,
-    vp:           +p.einzelpreis || 0,
-    hidden:       false,
-  }));
-  // v2.46.177: Zahlungsziel/Gewährleistung/Preisstellung haben eigene kond_*-Felder —
-  // in Hinweise nur noch was sonst keinen Platz hat (Bindefrist + Montagetermin).
-  const kondHinweise = [
-    plan.konditionen?.bindefrist    ? 'Bindefrist: ' + plan.konditionen.bindefrist : '',
-    plan.konditionen?.montagetermin ? 'Geplanter Montagetermin: ' + plan.konditionen.montagetermin : '',
-  ].filter(Boolean).join('\n');
-  const anschreibenBody = [plan.anrede, plan.einleitung, plan.befund_detail].filter(Boolean).join('\n\n');
-  const fdUrl = account.domain ? ('https://' + account.domain + '.freshdesk.com/a/tickets/' + ticketId) : '';
-  const fields = {
+  const fdUrl = account.domain ? ('https://' + account.domain + '.freshdesk.com/a/tickets/' + s.ticketId) : '';
+  const fields = Object.assign({}, rec, {
     app_angebot_num:      angNum,
-    firma:                firmaSlug,
-    bearbeiter:           APP_KEYS.user?.name || '',
-    // v2.46.173: 'sonstiges' statt 'freshdesk_hero' — Berichtskonverter kennt nur 3 Typen
-    // (reparatur/modernisierung/sonstiges), unbekannte crashen sein _renderAngeboteList.
-    // Marker steht weiter unten in source_app.
-    angebot_typ:          'sonstiges',
-    equipmentnummer:      ctx.fabriknummer || plan.fabriknummer || '',
-    anlage_adresse:       ctx.standort || plan.standort || '',
-    kunde_name:           sd.vertragspartner || req.company?.name || req.name || '',
-    kunde_adresse:        sd.rechnungs_anschrift || req.address || '',
-    kontakt_name:         sd.ansprechpartner_vor_ort || req.name || '',
-    anschreiben:          anschreibenBody,
-    abrechnung_modus:     'pauschal',
-    preisanzeige_modus:   positionen.length ? 'einzel' : 'gesamt',
-    pauschalpreis_netto:  positionen.length ? 0 : Math.round((+totals.netto || 0) * 100) / 100,
-    positionen_json:      JSON.stringify(positionen),
-    stundensaetze_json:   '',
-    ust_prozent:          +plan.mwst_satz || 19,
-    summe_netto_kone:     0,
-    summe_netto_vp:       Math.round((+totals.netto  || 0) * 100) / 100,
-    summe_brutto_vp:      Math.round((+totals.brutto || 0) * 100) / 100,
-    kond_lieferzeit:      plan.konditionen?.lieferzeit || '',
-    kond_preisbasis:      plan.konditionen?.preisstellung || '',
-    kond_hinweise:        kondHinweise,
-    kond_zahlung:         plan.konditionen?.zahlungsziel || '',
-    erstellt_am:          new Date().toISOString().slice(0, 10),
-    erstellt_von:         APP_KEYS.user?.name || '',
     status:               'fertig',
-    // Freshdesk-Hero-Marker (ermöglicht Filterung/Badge im Berichtskonverter-Listing)
     source_app:           'freshdesk_hero',
-    freshdesk_ticket_id:  String(ticketId),
-    freshdesk_account_id: accountId,
+    freshdesk_ticket_id:  String(s.ticketId || ''),
+    freshdesk_account_id: s.accountId || '',
     freshdesk_ticket_url: fdUrl,
-    // HTML-Snapshot damit man das gerenderte Angebot im Berichtskonverter sichtbar hat
-    snapshot_html:        _renderAngebotHtml(ctx),
-  };
+    summe_netto_vp:       Math.round((+rec.summe_netto_vp  || 0) * 100) / 100,
+    summe_brutto_vp:      Math.round((+rec.summe_brutto_vp || 0) * 100) / 100,
+    pauschalpreis_netto:  Math.round((+rec.pauschalpreis_netto || 0) * 100) / 100,
+  });
+  // Boolean-Feld weglassen (Checkbox-Auto-Create hat Sonderoptionen; BK-Default ist unchecked)
+  delete fields.gesamtpreis_ausblenden;
   const defaults = {
     app_angebot_num:      'number',
     firma:                'singleLineText',
     bearbeiter:           'singleLineText',
     angebot_typ:          'singleLineText',
     equipmentnummer:      'singleLineText',
+    seriennummer:         'singleLineText',
+    anbieter:             'singleLineText',
     anlage_adresse:       'multilineText',
     kunde_name:           'singleLineText',
     kunde_adresse:        'multilineText',
@@ -26600,6 +26563,7 @@ async function _bkSaveAngebotToBK(ctx) {
     kond_preisbasis:      'singleLineText',
     kond_hinweise:        'multilineText',
     kond_zahlung:         'multilineText',
+    kond_gewaehrleistung: 'multilineText',
     erstellt_am:          'singleLineText',
     erstellt_von:         'singleLineText',
     status:               'singleLineText',
@@ -26607,7 +26571,6 @@ async function _bkSaveAngebotToBK(ctx) {
     freshdesk_ticket_id:  'singleLineText',
     freshdesk_account_id: 'singleLineText',
     freshdesk_ticket_url: 'singleLineText',
-    snapshot_html:        'multilineText',
   };
   // Direct-POST — nicht via airtableWriteWithAutoField, weil das die App-Base fest hat.
   // Wir schreiben in eine ANDERE Base (bkAirtableBaseId).
@@ -26640,7 +26603,46 @@ async function _bkSaveAngebotToBK(ctx) {
   if (!res.ok) throw new Error('Berichtskonverter-Save: ' + res.status + ' — ' + res.body.slice(0, 300));
   const created = JSON.parse(res.body);
   console.log('[BK-Save] Angebot ANG', angNum, 'erstellt:', created.id);
+  // v2.46.178: PDF (BK-Design) als app_pdf-Attachment hochladen — damit im
+  // Berichtskonverter-Listing das fertige PDF direkt sichtbar/downloadbar ist.
+  try {
+    const blob = await _fdhBuildBkAngebotPdfBlob(s);
+    await _bkUploadPdfAttachment(created.id, blob, 'Angebot-ANG' + angNum + '.pdf');
+    console.log('[BK-Save] app_pdf hochgeladen');
+  } catch (e) {
+    console.warn('[BK-Save] app_pdf-Upload fehlgeschlagen (Record ist trotzdem da):', e.message);
+  }
   return { recordId: created.id, angNum };
+}
+
+/* v2.46.178: PDF-Blob als Attachment ins app_pdf-Feld der BK-Base laden.
+   Nutzt die content.airtable.com uploadAttachment-API (wie Letterhead-Logo). */
+async function _bkUploadPdfAttachment(recordId, blob, filename) {
+  const baseId = APP_KEYS.bkAirtableBaseId;
+  if (!baseId || !recordId || !blob) throw new Error('Parameter fehlen');
+  if (blob.size > 5 * 1024 * 1024) throw new Error('PDF zu groß für Upload-API (max 5 MB)');
+  // Feld-ID von app_pdf aus Meta holen
+  const metaRes = await fetch('https://api.airtable.com/v0/meta/bases/' + baseId + '/tables', {
+    headers: { 'Authorization': 'Bearer ' + APP_KEYS.airtableWriteKey },
+  });
+  if (!metaRes.ok) throw new Error('Meta-Read: ' + metaRes.status);
+  const meta = await metaRes.json();
+  const table = (meta.tables || []).find(t => t.name === 'App_Angebote');
+  const field = table && (table.fields || []).find(f => f.name === 'app_pdf');
+  if (!field) throw new Error('app_pdf-Feld nicht in App_Angebote gefunden');
+  const base64 = await _blobToBase64(blob);
+  const upRes = await fetch(
+    'https://content.airtable.com/v0/' + baseId + '/' + recordId + '/' + field.id + '/uploadAttachment',
+    {
+      method: 'POST',
+      headers: { 'Authorization': 'Bearer ' + APP_KEYS.airtableWriteKey, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ contentType: 'application/pdf', file: base64, filename: filename }),
+    }
+  );
+  if (!upRes.ok) {
+    const t = await upRes.text();
+    throw new Error('Upload: ' + t.slice(0, 200));
+  }
 }
 
 /* Airtable-Feld in Berichtskonverter-Base anlegen (auto-provisioning). */
@@ -27237,8 +27239,13 @@ function _fdhChatToBkRec(chatState) {
     konditionen.bindefrist    ? 'Bindefrist: ' + konditionen.bindefrist : '',
     konditionen.montagetermin ? 'Geplanter Montagetermin: ' + konditionen.montagetermin : '',
   ].filter(Boolean).join('\n');
-  // Anschreiben aus anrede + einleitung + befund_detail
-  const anschreiben = [s.collected?.anrede, s.collected?.einleitung, s.collected?.befund_detail].filter(Boolean).join('\n\n');
+  // v2.46.178: Anschreiben aus den KI-Chat-Feldern (anschreiben_anrede/body/gruss)
+  // wenn der User eins wollte — sonst Leistungsbeschreibung + Erläuterung als Intro.
+  // (Vorher wurden anrede/einleitung/befund_detail gelesen — die füllt der Chat nie.)
+  const c = s.collected || {};
+  const anschreiben = (c.anschreiben_aktiv && String(c.anschreiben_body || '').trim())
+    ? [c.anschreiben_anrede, c.anschreiben_body, c.anschreiben_gruss].filter(Boolean).join('\n\n')
+    : [c.leistungsbeschreibung, c.erlaeuterung].filter(Boolean).join('\n\n');
   return {
     app_angebot_num:      'FDH-' + (s.ticketId || '?'),
     firma:                firmaSlug,
