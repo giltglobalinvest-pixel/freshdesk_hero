@@ -779,7 +779,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.169';
+const APP_VERSION = 'v2.46.170';
 
 /* ============================================================
    GLOBAL THEME — v2.46.12
@@ -34367,9 +34367,9 @@ async function saveErpSlugMap(btnEl) {
   }
 }
 
-/* v2.46.168: Alle Airtable-Base-IDs aus der Master-Base laden und picken lassen.
-   Master-Base hat pro Projekt einen Key-Record { project_id, key_name='appBaseId', key_value }.
-   Wir zeigen alle → User klickt die vom Berichtskonverter. Kein Airtable-Öffnen nötig. */
+/* v2.46.170: Alle Airtable-Base-IDs aus der Master-Base laden und picken lassen.
+   Beide Apps (FD-Hero + Berichtskonverter) speichern ihre Base-ID unter
+   key_name='airtableBaseId'. Fix zu v2.46.168 der 'appBaseId' erwartete. */
 async function pickBkBaseIdFromMasterBase(btnEl) {
   const out = $('bkBaseIdPickerResult');
   if (!out) return;
@@ -34378,7 +34378,7 @@ async function pickBkBaseIdFromMasterBase(btnEl) {
   try {
     if (!APP_KEYS.airtableWriteKey) throw new Error('Airtable-Key fehlt');
     const url = 'https://api.airtable.com/v0/' + APP_CONFIG.MASTER_BASE_ID + '/Keys'
-      + '?filterByFormula=' + encodeURIComponent("{key_name}='appBaseId'")
+      + '?filterByFormula=' + encodeURIComponent("{key_name}='airtableBaseId'")
       + '&pageSize=100';
     const res = await fetch(url, { headers: { 'Authorization': 'Bearer ' + APP_KEYS.airtableWriteKey } });
     if (!res.ok) throw new Error('Master-Base-Read: HTTP ' + res.status);
