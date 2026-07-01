@@ -779,7 +779,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.176';
+const APP_VERSION = 'v2.46.177';
 
 /* ============================================================
    GLOBAL THEME — v2.46.12
@@ -26530,11 +26530,11 @@ async function _bkSaveAngebotToBK(ctx) {
     vp:           +p.einzelpreis || 0,
     hidden:       false,
   }));
+  // v2.46.177: Zahlungsziel/Gewährleistung/Preisstellung haben eigene kond_*-Felder —
+  // in Hinweise nur noch was sonst keinen Platz hat (Bindefrist + Montagetermin).
   const kondHinweise = [
-    plan.konditionen?.zahlungsziel   ? 'Zahlungsziel: ' + plan.konditionen.zahlungsziel : '',
-    plan.konditionen?.gewaehrleistung ? 'Gewährleistung: ' + plan.konditionen.gewaehrleistung : '',
-    plan.konditionen?.bindefrist     ? 'Bindefrist: ' + plan.konditionen.bindefrist : '',
-    plan.konditionen?.preisstellung  ? 'Preisstellung: ' + plan.konditionen.preisstellung : '',
+    plan.konditionen?.bindefrist    ? 'Bindefrist: ' + plan.konditionen.bindefrist : '',
+    plan.konditionen?.montagetermin ? 'Geplanter Montagetermin: ' + plan.konditionen.montagetermin : '',
   ].filter(Boolean).join('\n');
   const anschreibenBody = [plan.anrede, plan.einleitung, plan.befund_detail].filter(Boolean).join('\n\n');
   const fdUrl = account.domain ? ('https://' + account.domain + '.freshdesk.com/a/tickets/' + ticketId) : '';
@@ -26564,6 +26564,7 @@ async function _bkSaveAngebotToBK(ctx) {
     kond_lieferzeit:      plan.konditionen?.lieferzeit || '',
     kond_preisbasis:      plan.konditionen?.preisstellung || '',
     kond_hinweise:        kondHinweise,
+    kond_zahlung:         plan.konditionen?.zahlungsziel || '',
     erstellt_am:          new Date().toISOString().slice(0, 10),
     erstellt_von:         APP_KEYS.user?.name || '',
     status:               'fertig',
@@ -26598,6 +26599,7 @@ async function _bkSaveAngebotToBK(ctx) {
     kond_lieferzeit:      'singleLineText',
     kond_preisbasis:      'singleLineText',
     kond_hinweise:        'multilineText',
+    kond_zahlung:         'multilineText',
     erstellt_am:          'singleLineText',
     erstellt_von:         'singleLineText',
     status:               'singleLineText',
@@ -26683,7 +26685,9 @@ const ANGEBOT_KONDITIONEN_DEFAULTS = {
   angebot_gewaehrleistung:   'Auf alle ausgeführten Arbeiten und verbauten Teile gewähren wir eine Gewährleistung von 24 Monaten gemäß §634a BGB.',
   angebot_zahlung:           '30% bei Auftragsvergabe\n60% nach Anlieferung der Komponenten\n10% nach mangelfreier Abnahme\n\nZahlungsziel: 14 Tage netto, ohne Abzug.',
   angebot_geltungsdauer_tage: 30,
-  angebot_agb:               'Allgemeine Geschäftsbedingungen\n\n1. Geltungsbereich\nDieses Angebot gilt ausschließlich für Unternehmen i.S.d. §14 BGB. Es gelten unsere Allgemeinen Geschäftsbedingungen, die der Auftraggeber mit Auftragserteilung anerkennt.\n\n2. Angebotsumfang\nDer Angebotsumfang ist in den Angebots-Positionen abschließend beschrieben. Über den Umfang hinausgehende Leistungen werden nach Aufwand berechnet.\n\n3. Preise\nAlle Preise verstehen sich netto in Euro, zzgl. der gesetzlichen Mehrwertsteuer. Preisbindung bis zur angegebenen Geltungsdauer.\n\n4. Lieferung & Montage\nLieferung und Montage erfolgen nach gesonderter Terminabsprache. Anfahrtskosten innerhalb 50 km sind enthalten. Sonderzubehör (Kran, Gerüst) wird gesondert berechnet, falls nicht ausdrücklich enthalten.\n\n5. Gewährleistung\n24 Monate auf Material und Ausführung gemäß §634a BGB, beginnend mit der mangelfreien Abnahme.\n\n6. Material\nVerbautes oder geliefertes Material bleibt bis zur vollständigen Rechnungsbegleichung in Besitz des Auftragnehmers.\n\nAusgebautes Material:\nDefektes Material geht nach Ausbau in den Besitz des Auftragnehmers über oder wird direkt verschrottet.\n\n7. Haftung\nHaftung für Schäden ist auf Vorsatz und grobe Fahrlässigkeit beschränkt. Für leichte Fahrlässigkeit haften wir nur bei Verletzung wesentlicher Vertragspflichten.\n\n8. Gerichtsstand\nGerichtsstand ist der Sitz des Auftragnehmers, soweit gesetzlich zulässig.',
+  // v2.46.177: Preise/Lieferung/Gewährleistung aus AGB entfernt — stehen bereits
+  // als eigene Konditionen-Blöcke im Angebot (sonst doppelt). Neu durchnummeriert.
+  angebot_agb:               '1. Geltungsbereich\nDieses Angebot gilt ausschließlich für Unternehmen i.S.d. §14 BGB. Es gelten unsere Allgemeinen Geschäftsbedingungen, die der Auftraggeber mit Auftragserteilung anerkennt.\n\n2. Angebotsumfang\nDer Angebotsumfang ist in den Angebots-Positionen abschließend beschrieben. Über den Umfang hinausgehende Leistungen werden nach Aufwand berechnet.\n\n3. Material\nVerbautes oder geliefertes Material bleibt bis zur vollständigen Rechnungsbegleichung in Besitz des Auftragnehmers.\n\nAusgebautes Material:\nDefektes Material geht nach Ausbau in den Besitz des Auftragnehmers über oder wird direkt verschrottet.\n\n4. Haftung\nHaftung für Schäden ist auf Vorsatz und grobe Fahrlässigkeit beschränkt. Für leichte Fahrlässigkeit haften wir nur bei Verletzung wesentlicher Vertragspflichten.\n\n5. Gerichtsstand\nGerichtsstand ist der Sitz des Auftragnehmers, soweit gesetzlich zulässig.',
 };
 
 function _sanPdf(s) {
@@ -26816,13 +26820,15 @@ function _appendAngebotsKonditionen(doc, firmaSlug, ml, mr, yStart, colors, rec)
   const zahlung    = (rec && String(rec.kond_zahlung   ||'').trim()) || k.zahlung;
   const preisbasis = rec && String(rec.kond_preisbasis||'').trim();
   const hinweise   = rec && String(rec.kond_hinweise  ||'').trim();
+  // v2.46.177: KI/Record-Gewährleistung überschreibt Firma-Default (vorher immer Default)
+  const gewaehr    = (rec && String(rec.kond_gewaehrleistung||'').trim()) || k.gewaehrleistung;
   const geltungstext = preisbasis
     ? preisbasis
     : ('Festpreis, gueltig '+k.geltungsdauer+' Tage ab Angebotsdatum. Bei Annahme nach Ablauf behalten wir uns Preisanpassungen vor.');
   drawKondBlock('Lieferzeit',          lieferzeit);
   drawKondBlock('Preisbasis',          geltungstext);
   drawKondBlock('Zahlungsbedingungen', zahlung);
-  drawKondBlock('Gewaehrleistung',     k.gewaehrleistung);
+  drawKondBlock('Gewaehrleistung',     gewaehr);
   if (hinweise) drawKondBlock('Hinweise', hinweise);
   if (k.agb) {
     doc.addPage(); y = 22;
@@ -27224,11 +27230,12 @@ function _fdhChatToBkRec(chatState) {
     preis_aufwand: !!p.preis_aufwand,
   }));
   // Konditionen zusammenstellen
+  // v2.46.177: Gewährleistung + Preisbasis NICHT mehr in Hinweise doppeln —
+  // die haben eigene Konditionen-Blöcke. Hinweise = nur Bindefrist + Montagetermin.
   const konditionen = s.collected?.konditionen || {};
   const kondHinweise = [
-    konditionen.gewaehrleistung ? 'Gewährleistung: ' + konditionen.gewaehrleistung : '',
-    konditionen.bindefrist      ? 'Bindefrist: ' + konditionen.bindefrist : '',
-    konditionen.preisstellung   ? 'Preisbasis: ' + konditionen.preisstellung : '',
+    konditionen.bindefrist    ? 'Bindefrist: ' + konditionen.bindefrist : '',
+    konditionen.montagetermin ? 'Geplanter Montagetermin: ' + konditionen.montagetermin : '',
   ].filter(Boolean).join('\n');
   // Anschreiben aus anrede + einleitung + befund_detail
   const anschreiben = [s.collected?.anrede, s.collected?.einleitung, s.collected?.befund_detail].filter(Boolean).join('\n\n');
@@ -27258,6 +27265,7 @@ function _fdhChatToBkRec(chatState) {
     kond_preisbasis:      konditionen.preisstellung || '',
     kond_hinweise:        kondHinweise,
     kond_zahlung:         konditionen.zahlungsziel || '',
+    kond_gewaehrleistung: konditionen.gewaehrleistung || '',
     erstellt_am:          new Date().toISOString().slice(0, 10),
     erstellt_von:         APP_KEYS.user?.name || '',
     gesamtpreis_ausblenden: false,
