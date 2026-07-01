@@ -779,7 +779,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.162';
+const APP_VERSION = 'v2.46.163';
 
 /* ============================================================
    GLOBAL THEME — v2.46.12
@@ -839,6 +839,7 @@ let APP_KEYS = {
   anthropicKey:     null,    // optional fallback
   valtownKey:       null,    // für Auto-Setup + Re-Deploy
   valtownValId:     null,    // ID des angelegten Vals (für Updates)
+  erpProxyUrl:      null,    // v2.46.163: Berichtskonverter val.town-Instanz für /aufzug/... Endpoints
   sessionToken:     null,
   user:             null,    // { _id, api_key?, name, role, is_admin, ... }
 };
@@ -1386,6 +1387,8 @@ async function loadProjectKeys() {
         if (f.key_name === 'apiProxyUrl')      APP_KEYS.apiProxyUrl      = (f.key_value || '').replace(/\/+$/, '');
         if (f.key_name === 'valtownKey')       APP_KEYS.valtownKey       = f.key_value;
         if (f.key_name === 'valtownValId')     APP_KEYS.valtownValId     = f.key_value;
+        // v2.46.163: ERP-Proxy (Berichtskonverter val.town-Instanz für /aufzug/... Endpoints)
+        if (f.key_name === 'erpProxyUrl')      APP_KEYS.erpProxyUrl      = (f.key_value || '').replace(/\/+$/, '');
       });
     }
   } catch (_) {}
@@ -1432,6 +1435,165 @@ async function writeMasterBaseKey(keyName, value, existingRecordId) {
     throw new Error('Speichern fehlgeschlagen: ' + txt.slice(0, 200));
   }
   return res.json();
+}
+
+/* ============================================================
+   v2.46.163: ERP-INTEGRATION (Berichtskonverter-kompatibel)
+   Ruft die vorhandene val.town-Instanz vom Berichtskonverter an —
+   selbe Auth (user.api_key), selbe Endpoints (/aufzug/<slug>/api/...).
+   ============================================================ */
+let _ERP_SESSION_TOKEN = null;
+
+function erpGetSessionToken() {
+  if (_ERP_SESSION_TOKEN) return _ERP_SESSION_TOKEN;
+  try { return localStorage.getItem('fdh_erp_session'); } catch (_) { return null; }
+}
+function erpSetSessionToken(t) {
+  _ERP_SESSION_TOKEN = t;
+  try { localStorage.setItem('fdh_erp_session', t); } catch (_) {}
+}
+function erpClearSessionToken() {
+  _ERP_SESSION_TOKEN = null;
+  try { localStorage.removeItem('fdh_erp_session'); } catch (_) {}
+}
+
+/* Firma-Slug pro Account ermitteln — aus Account.erp_firma_slug wenn gepflegt,
+   sonst Default aus dem Namen (aufzugshandwerk → aufzug, aszendio → aszendio). */
+function _erpFirmaSlugForAccount(account) {
+  if (!account) return '';
+  if (account.erp_firma_slug && String(account.erp_firma_slug).trim()) return String(account.erp_firma_slug).trim();
+  const name = String(account.name || '').toLowerCase();
+  if (/aufzugshandwerk/.test(name)) return 'aufzug';
+  if (/aszendio/.test(name))        return 'aszendio';
+  return '';
+}
+
+async function erpAuth() {
+  if (!APP_KEYS.erpProxyUrl) throw new Error('ERP-Proxy nicht eingerichtet (Admin → Einstellungen → ERP-Proxy-URL)');
+  if (!APP_KEYS.user?.api_key) throw new Error('Nicht eingeloggt — user.api_key fehlt');
+  const res = await fetch(APP_KEYS.erpProxyUrl + '/auth', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ user_key: APP_KEYS.user.api_key, long_lived: true }),
+  });
+  const text = await res.text();
+  let d = null;
+  try { d = text ? JSON.parse(text) : null; } catch (_) { d = { _raw: text }; }
+  if (!res.ok) {
+    const detail = (d && (d.error || d.message)) || (d?._raw || '').slice(0, 300) || ('HTTP ' + res.status);
+    throw new Error('ERP-Auth: ' + detail);
+  }
+  if (!d?.session_token) throw new Error('ERP-Auth: kein session_token in Antwort');
+  erpSetSessionToken(d.session_token);
+  return d;
+}
+
+async function erpEnsureSession() {
+  if (erpGetSessionToken()) return;
+  await erpAuth();
+}
+
+async function erpFetch(path, opts) {
+  opts = opts || {};
+  if (!APP_KEYS.erpProxyUrl) throw new Error('ERP-Proxy nicht eingerichtet');
+  await erpEnsureSession();
+  const url = APP_KEYS.erpProxyUrl + path;
+  const init = {
+    method: opts.method || 'GET',
+    headers: Object.assign({ 'Authorization': 'Bearer ' + erpGetSessionToken() }, opts.headers || {}),
+  };
+  if (opts.tenant && !init.headers['X-ERP-Tenant']) init.headers['X-ERP-Tenant'] = String(opts.tenant);
+  if (opts.body) {
+    init.body = typeof opts.body === 'string' ? opts.body : JSON.stringify(opts.body);
+    init.headers['Content-Type'] = 'application/json';
+  }
+  let res = await fetch(url, init);
+  if (res.status === 401) {
+    erpClearSessionToken();
+    await erpAuth();
+    init.headers['Authorization'] = 'Bearer ' + erpGetSessionToken();
+    res = await fetch(url, init);
+  }
+  const noBody = res.status === 204 || res.status === 205;
+  const text = noBody ? '' : await res.text();
+  let data = null;
+  try { data = text ? JSON.parse(text) : null; } catch (_) { data = text; }
+  if (!res.ok) {
+    const msg = (data && typeof data === 'object' && (data.error || data.message)) || ('HTTP ' + res.status);
+    const err = new Error('ERP ' + path + ': ' + msg);
+    err.status = res.status; err.body = data;
+    throw err;
+  }
+  return data;
+}
+
+/* Baut aus einem Anlage-Object die Anzeige-Adresse zusammen (Fallback-Kaskade). */
+function _erpBuildAnlageAdresse(a) {
+  if (!a) return '';
+  if (a.anzeigeAdresse && String(a.anzeigeAdresse).trim()) return String(a.anzeigeAdresse).trim();
+  if (typeof a.adresse === 'string' && a.adresse.trim()) return a.adresse.trim();
+  if (a.adresse && typeof a.adresse === 'object') {
+    const ao = a.adresse;
+    const z1 = [ao.strasse || ao.street, ao.hausnummer || ao.houseNumber].filter(Boolean).join(' ').trim();
+    const z2 = [ao.plz || ao.zip, ao.ort || ao.stadt || ao.city].filter(Boolean).join(' ').trim();
+    const co = ao.co || ao.adresszusatz || '';
+    const built = [co, z1, z2].filter(s => s && s.trim()).join(', ');
+    if (built) return built;
+  }
+  if (a.standort && typeof a.standort === 'object') {
+    const so = a.standort;
+    const z1 = [so.strasse, so.hausnummer].filter(Boolean).join(' ').trim();
+    const z2 = [so.plz, so.ort].filter(Boolean).join(' ').trim();
+    const built = [z1, z2].filter(Boolean).join(', ');
+    if (built) return built;
+  }
+  return a.name || a.standortname || a.objektName || '';
+}
+
+function _erpBuildKundeAdresse(k) {
+  if (!k) return '';
+  if (typeof k.adresse === 'string' && k.adresse.trim()) return k.adresse.trim();
+  if (k.adresse && typeof k.adresse === 'object') {
+    const ao = k.adresse;
+    const z1 = [ao.strasse || ao.street, ao.hausnummer || ao.houseNumber].filter(Boolean).join(' ').trim();
+    const z2 = [ao.plz || ao.zip, ao.ort || ao.stadt || ao.city].filter(Boolean).join(' ').trim();
+    return [z1, z2].filter(Boolean).join(', ');
+  }
+  const z1 = [k.strasse, k.hausnummer].filter(Boolean).join(' ').trim();
+  const z2 = [k.plz, k.ort].filter(Boolean).join(' ').trim();
+  return [z1, z2].filter(Boolean).join(', ');
+}
+
+/* Sucht eine Anlage per Fabriknummer im ERP. Gibt einen einzelnen Anlage-Record
+   zurück oder null. Zieht die volle Liste (gecacht 5min) und filtert clientside. */
+const _ERP_ANLAGEN_CACHE = new Map();  // firmaSlug → { items, loadedAt }
+
+async function erpFindAnlageByFabriknummer(firmaSlug, fabriknummer) {
+  if (!firmaSlug) throw new Error('Firma-Slug fehlt');
+  if (!fabriknummer) throw new Error('Fabriknummer fehlt');
+  const cached = _ERP_ANLAGEN_CACHE.get(firmaSlug);
+  let items;
+  if (cached && (Date.now() - cached.loadedAt) < 5 * 60 * 1000) {
+    items = cached.items;
+  } else {
+    const res = await erpFetch('/aufzug/' + encodeURIComponent(firmaSlug) + '/api/anlagen');
+    items = Array.isArray(res) ? res : (res?.content || res?.data || res?.items || []);
+    _ERP_ANLAGEN_CACHE.set(firmaSlug, { items, loadedAt: Date.now() });
+  }
+  const needle = String(fabriknummer).trim().toLowerCase();
+  const hits = items.filter(a => String(a.fabriknummer || '').trim().toLowerCase() === needle);
+  if (hits.length) return hits[0];
+  // Fallback: substring-Match
+  const softHits = items.filter(a => String(a.fabriknummer || '').trim().toLowerCase().includes(needle));
+  return softHits[0] || null;
+}
+
+async function erpLoadKundenKontakte(firmaSlug, kundennummer) {
+  if (!firmaSlug || !kundennummer) return [];
+  try {
+    const res = await erpFetch('/aufzug/' + encodeURIComponent(firmaSlug) + '/api/Kunden/' + encodeURIComponent(kundennummer) + '/Kontakte');
+    return Array.isArray(res) ? res : (res?.content || res?.data || res?.items || []);
+  } catch (_) { return []; }
 }
 
 /* ============================================================
@@ -23751,7 +23913,13 @@ function openAngStammdatenEditor() {
           '</div>' +
           '<div class="grid grid-cols-1 sm:grid-cols-2 gap-2">' +
             '<div><label class="text-[11px] font-bold text-ink-700 uppercase tracking-wider">Fabrik-/Anlagennummer</label>' +
-              '<input id="sdFabrik" type="text" value="' + escapeAttr(s.collected?.fabriknummer || '') + '" placeholder="150623" class="w-full px-2 py-1.5 border border-ink-300 rounded-lg text-sm"></div>' +
+              '<div class="flex gap-1">' +
+                '<input id="sdFabrik" type="text" value="' + escapeAttr(s.collected?.fabriknummer || '') + '" placeholder="150623" class="flex-1 px-2 py-1.5 border border-ink-300 rounded-lg text-sm">' +
+                (APP_KEYS.erpProxyUrl
+                  ? '<button onclick="fetchStammdatenFromErp(this)" class="shrink-0 px-2 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-[11px] font-bold inline-flex items-center gap-1" title="Anlage per Fabriknummer im ERP suchen und alle Stammdaten füllen"><i data-lucide="database" class="w-3 h-3"></i> ERP</button>'
+                  : '') +
+              '</div>' +
+            '</div>' +
             '<div><label class="text-[11px] font-bold text-ink-700 uppercase tracking-wider">Ansprechpartner vor Ort</label>' +
               '<input id="sdAnsprech" type="text" value="' + escapeAttr(val('ansprechpartner_vor_ort', req.name)) + '" placeholder="Hausmeister / Verwalter" class="w-full px-2 py-1.5 border border-ink-300 rounded-lg text-sm"></div>' +
           '</div>' +
@@ -23787,6 +23955,57 @@ function saveAngStammdaten(btn) {
   // Preview neu rendern damit die neuen Felder sichtbar sind
   if (typeof _angChatRenderPreview === 'function') {
     try { _angChatRenderPreview(); } catch (_) {}
+  }
+}
+
+/* v2.46.163: Anlage per Fabriknummer im ERP nachschlagen und alle
+   Stammdaten-Felder auto-befüllen. Nimmt die aktuell im sdFabrik-Feld
+   eingegebene Nummer, sucht im ERP (per firma_slug des Accounts) und
+   pusht Kunde/Adresse/Standort/Ansprechpartner in die Inputs. */
+async function fetchStammdatenFromErp(btn) {
+  const s = window._ANG_CHAT;
+  if (!s) return;
+  const fabrik = ($('sdFabrik')?.value || '').trim();
+  if (!fabrik) return toast('Fabriknummer eingeben — die brauche ich zum Suchen', 'warn', 5000);
+  const firmaSlug = _erpFirmaSlugForAccount(s.account);
+  if (!firmaSlug) return toast('Kein ERP-Firma-Slug für Account „' + (s.account?.name || '?') + '" — Admin muss ihn im Account-Editor eintragen', 'warn', 8000);
+  if (!APP_KEYS.erpProxyUrl) return toast('ERP-Proxy-URL nicht konfiguriert — Admin → Einstellungen', 'warn', 8000);
+  setBusy(btn, true, 'ERP…');
+  try {
+    const anlage = await erpFindAnlageByFabriknummer(firmaSlug, fabrik);
+    if (!anlage) {
+      setBusy(btn, false);
+      toast('Keine Anlage mit Fabriknummer „' + fabrik + '" im ERP gefunden', 'warn', 8000);
+      return;
+    }
+    const kunde = anlage.kunde || {};
+    const kundennr = kunde.kundennummer || kunde.id || '';
+    let kontakt = null;
+    if (kundennr) {
+      const kontakte = await erpLoadKundenKontakte(firmaSlug, kundennr).catch(() => []);
+      // Ersten Kontakt mit Email nehmen, sonst ersten
+      kontakt = kontakte.find(k => k.email && String(k.email).includes('@')) || kontakte[0] || null;
+    }
+    // In die Inputs pushen
+    const standort = _erpBuildAnlageAdresse(anlage);
+    const kundeAdresse = _erpBuildKundeAdresse(kunde);
+    if (kunde.firmenname)     { const el = $('sdVertragspartner'); if (el) el.value = kunde.firmenname; }
+    if (kundeAdresse)         { const el = $('sdAnschrift'); if (el) el.value = kundeAdresse; }
+    if (standort)             { const el = $('sdStandort'); if (el) el.value = standort; }
+    if (kontakt) {
+      const vollname = [kontakt.vorname, kontakt.nachname].filter(Boolean).join(' ').trim() || kontakt.name || '';
+      if (vollname)          { const el = $('sdAnsprech'); if (el) el.value = vollname; }
+      if (kontakt.email)     { const el = $('sdEmail'); if (el) el.value = kontakt.email; }
+      const tel = kontakt.telefon || kontakt.mobile || '';
+      if (tel)               { const el = $('sdTel'); if (el) el.value = tel; }
+    }
+    setBusy(btn, false);
+    const label = anlage.name || anlage.anzeigeAdresse || ('Anlage #' + (anlage.id || '?'));
+    toast('ERP-Treffer: ' + label + (kontakt ? ' · Kontakt ' + (kontakt.email || kontakt.vorname || '?') : ''), 'success', 5000);
+  } catch (e) {
+    setBusy(btn, false);
+    toast('ERP-Fehler: ' + (e.message || e), 'error', 10000);
+    console.error('fetchStammdatenFromErp:', e);
   }
 }
 
@@ -33404,6 +33623,30 @@ async function renderSettingsPage() {
         <div id="proxyTestResult" class="mt-3"></div>
       </div>
 
+      <!-- v2.46.163: ERP-Integration (Berichtskonverter) -->
+      <div class="bg-white rounded-2xl border border-ink-200 p-4">
+        <div class="flex items-center gap-3 mb-3">
+          <div class="w-10 h-10 rounded-xl bg-gradient-to-br from-emerald-500 to-emerald-700 flex items-center justify-center shrink-0">
+            <i data-lucide="database" class="w-5 h-5 text-white"></i>
+          </div>
+          <div class="flex-1 min-w-0">
+            <h3 class="font-bold text-ink-900 text-base leading-tight">ERP-Integration (Anlagen-Datenbank)</h3>
+            <p class="text-[11px] text-ink-600">Val.town-Instanz vom Berichtskonverter — liefert Anlagen/Kunden per Fabriknummer für Angebote</p>
+          </div>
+          ${APP_KEYS.erpProxyUrl ? '<span class="bg-emerald-100 text-emerald-700 px-2 py-1 rounded text-[10px] font-bold uppercase tracking-wider">Aktiv</span>' : ''}
+        </div>
+        <label class="text-xs font-semibold text-ink-700">ERP-Proxy-URL</label>
+        <p class="text-[11px] text-ink-500 mb-1.5">Die val.town-URL vom Berichtskonverter (z.B. <code>https://username-berichtskonverter.web.val.run</code>). Auth läuft über deinen Login-Key.</p>
+        <div class="flex gap-2 flex-wrap">
+          <input id="erpProxyUrlInput" type="url" value="${escapeAttr(APP_KEYS.erpProxyUrl || '')}" placeholder="https://xxx.web.val.run" class="flex-1 min-w-[220px] px-3 py-2 border border-ink-200 rounded-lg text-sm font-mono bg-white focus:ring-2 focus:ring-emerald-500/30 focus:border-emerald-500">
+          <button type="button" onclick="saveErpProxyUrl(this)" class="bg-emerald-600 hover:bg-emerald-700 text-white px-4 py-2 rounded-lg text-sm font-semibold flex items-center gap-2">
+            <i data-lucide="save" class="w-4 h-4"></i> Speichern
+          </button>
+          ${APP_KEYS.erpProxyUrl ? `<button type="button" onclick="testErpConnection(this)" class="px-3 py-2 border border-ink-200 bg-white rounded-lg text-sm font-medium hover:bg-ink-50 flex items-center gap-2"><i data-lucide="activity" class="w-4 h-4"></i> Test</button>` : ''}
+        </div>
+        <div id="erpTestResult" class="mt-2"></div>
+      </div>
+
       <!-- ============ FALLBACK: MANUELLES SETUP ============ -->
       <details class="bg-white border border-ink-200 rounded-2xl group">
         <summary class="cursor-pointer p-4 text-sm font-medium text-ink-700 flex items-center gap-2 select-none">
@@ -33585,6 +33828,57 @@ async function testProxyConnection() {
     </div>`;
   } catch (e) {
     out.innerHTML = `<div class="text-xs bg-red-50 border border-red-200 rounded-lg p-2 text-red-800"><strong>Fehler:</strong> ${escapeHtml(e.message)}</div>`;
+  }
+}
+
+/* v2.46.163: ERP-Proxy-URL in Master-Base speichern + Verbindungstest. */
+async function saveErpProxyUrl(btnEl) {
+  const raw = ($('erpProxyUrlInput')?.value || '').trim();
+  const clean = raw.replace(/\/+$/, '');
+  if (raw && !/^https?:\/\//.test(clean)) return toast('URL muss mit https:// beginnen', 'warn', 5000);
+  setBusy(btnEl, true, 'Speichere…');
+  try {
+    const keys = await fetchMasterBaseKeys();
+    const existing = keys.find(r => r.fields.key_name === 'erpProxyUrl');
+    await writeMasterBaseKey('erpProxyUrl', clean, existing?.id);
+    APP_KEYS.erpProxyUrl = clean || null;
+    erpClearSessionToken();
+    setBusy(btnEl, false);
+    toast(clean ? 'ERP-Proxy-URL gespeichert ✓' : 'ERP-Proxy-URL geleert', 'success', 3000);
+    setTimeout(() => renderSettingsPage(), 1200);
+  } catch (e) {
+    setBusy(btnEl, false);
+    toast('Speichern fehlgeschlagen: ' + e.message, 'error', 8000);
+  }
+}
+
+async function testErpConnection(btnEl) {
+  const out = $('erpTestResult');
+  if (!out) return;
+  out.innerHTML = '<p class="text-xs text-ink-500"><span class="spinner inline-block w-3 h-3 mr-1"></span>Teste…</p>';
+  setBusy(btnEl, true);
+  try {
+    // Erst /auth versuchen, dann eine Firma-Slug-Erkennung via erste Anlagen-Anfrage
+    erpClearSessionToken();
+    await erpAuth();
+    // Test-Slug aus erstem verfügbaren Aufzug-Account
+    const acc = (APP_STATE.accounts || []).find(a => _erpFirmaSlugForAccount(a));
+    const slug = acc ? _erpFirmaSlugForAccount(acc) : 'aufzug';
+    let anlagenCount = 0;
+    try {
+      const res = await erpFetch('/aufzug/' + encodeURIComponent(slug) + '/api/anlagen');
+      const items = Array.isArray(res) ? res : (res?.content || res?.data || res?.items || []);
+      anlagenCount = items.length;
+    } catch (e) {
+      out.innerHTML = '<div class="text-xs bg-amber-50 border border-amber-200 rounded-lg p-2 text-amber-800"><b>Auth OK</b> — aber Anlagen-Endpoint für Slug „' + escapeHtml(slug) + '" hat gemeckert: ' + escapeHtml(e.message) + '</div>';
+      setBusy(btnEl, false);
+      return;
+    }
+    out.innerHTML = '<div class="text-xs bg-emerald-50 border border-emerald-200 rounded-lg p-2 text-emerald-800"><b>OK</b> · Auth erfolgreich · Slug „' + escapeHtml(slug) + '" liefert ' + anlagenCount + ' Anlagen.</div>';
+    setBusy(btnEl, false);
+  } catch (e) {
+    out.innerHTML = '<div class="text-xs bg-red-50 border border-red-200 rounded-lg p-2 text-red-800"><b>Fehler:</b> ' + escapeHtml(e.message) + '</div>';
+    setBusy(btnEl, false);
   }
 }
 
