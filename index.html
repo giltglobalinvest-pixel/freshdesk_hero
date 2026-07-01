@@ -779,7 +779,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.174';
+const APP_VERSION = 'v2.46.175';
 
 /* ============================================================
    GLOBAL THEME — v2.46.12
@@ -23920,8 +23920,10 @@ async function openAngebotsChatModal(accountId, ticketId) {
     // Statt dessen läuft die Ticket-Analyse im HINTERGRUND und wird im State gespeichert.
     // Erste Bubble: kurzer Hint, dann Input bereit.
     const subj = ticket.subject || '';
-    _angChatAppendBubble('assistant', 'Hallo 👋\n\nBeschreib einfach, was das Angebot enthalten soll — ich generiere direkt das fertige PDF rechts in der Vorschau.\n\nZ.B.:\n• „Wartungsvertrag 24 Mon, ca. 145€/Mon mit Notruf"\n• „Frequenzumrichter austauschen, Pauschal 8.500€"\n• „Mach was Sinn macht für dieses Ticket"');
+    _angChatAppendBubble('assistant', 'Hallo 👋\n\nBeschreib einfach, was das Angebot enthalten soll — ich aktualisiere direkt das PDF rechts in der Vorschau (Berichtskonverter-Design).\n\nOben rechts kannst du zwischen **Pauschal** und **Aufwand** umschalten.\n\nZ.B.:\n• „Wartungsvertrag 24 Mon, ca. 145€/Mon mit Notruf"\n• „Frequenzumrichter austauschen, Pauschal 8.500€"\n• „Störungsbehebung nach Aufwand, Monteur 95€"');
     _angChatRenderActions({ awaitingFirstUserInput: true });
+    // v2.46.175: Vorschau SOFORT rendern (BK-Design mit Stammdaten) — nicht erst nach 1. KI-Runde
+    _angChatRenderPreview().catch(e => console.warn('Initial-Preview:', e));
     // Hintergrund-Analyse starten — wenn fertig wird sie ins State geschrieben
     window._ANG_CHAT.ticket_summary = '';
     window._ANG_CHAT.bgAnalysisPromise = _angChatInitialAnalysis(accountId, ticketId, ticket, profile)
@@ -23967,9 +23969,14 @@ function _renderAngChatShell() {
           '</div>' +
           // VORSCHAU-Spalte (rechts, nur auf XL sichtbar; auf Mobile per Toggle)
           '<div id="angChatPreviewCol" class="hidden xl:flex flex-col flex-1 bg-ink-100 min-h-0">' +
-            '<div class="px-3 py-2 border-b border-ink-200 bg-white flex items-center justify-between gap-2 text-[11px] shrink-0">' +
+            '<div class="px-3 py-2 border-b border-ink-200 bg-white flex items-center justify-between gap-2 text-[11px] shrink-0 flex-wrap">' +
               '<span class="font-semibold text-ink-700 inline-flex items-center gap-1"><i data-lucide="file-text" class="w-3.5 h-3.5"></i> Angebots-Vorschau</span>' +
-              '<div class="flex items-center gap-2">' +
+              '<div class="flex items-center gap-2 flex-wrap">' +
+                // v2.46.175: Abrechnungsmodus-Toggle — schaltet das PDF-Layout live um
+                '<div id="angChatModusToggle" class="inline-flex rounded-lg border border-indigo-300 overflow-hidden">' +
+                  '<button onclick="angChatSetAbrechnung(\'pauschal\')" data-modus="pauschal" class="px-2.5 py-1 text-[10px] font-bold transition" title="Festpreis-Angebot mit Positionen">Pauschal</button>' +
+                  '<button onclick="angChatSetAbrechnung(\'aufwand\')" data-modus="aufwand" class="px-2.5 py-1 text-[10px] font-bold transition border-l border-indigo-300" title="Abrechnung nach Aufwand mit Stundensatz-Tabelle">Aufwand</button>' +
+                '</div>' +
                 '<button onclick="openAngStammdatenEditor()" class="inline-flex items-center gap-1 px-2 py-1 bg-indigo-50 hover:bg-indigo-100 border border-indigo-200 text-indigo-700 rounded-md text-[10px] font-bold" title="Stammdaten (Kunde, Anschrift, Ansprechpartner) bearbeiten"><i data-lucide="edit-3" class="w-3 h-3"></i> Stammdaten</button>' +
                 '<span id="angChatIterLabel" class="text-ink-500">Noch keine Daten</span>' +
               '</div>' +
@@ -23999,7 +24006,8 @@ function angChatToggleAnchor() {
   // Chat-Bubbles wiederherstellen
   (s.history || []).forEach(m => _angChatAppendBubble(m.role, m.content));
   // Preview wenn schon generiert wieder einspielen
-  if (typeof _angChatRenderPreview === 'function' && s.collected?.positionen?.length) {
+  // v2.46.175: Preview immer neu bauen (BK-PDF zeigt auch ohne Positionen die Stammdaten)
+  if (typeof _angChatRenderPreview === 'function') {
     try { _angChatRenderPreview(); } catch (_) {}
   }
   // Action-Bar neu rendern (nach Shell ist sie leer)
@@ -24540,8 +24548,8 @@ function _angChatRenderActions(opts) {
   const bkSaveHtml = APP_KEYS.bkAirtableBaseId
     ? '<button onclick="angChatSaveToBerichtskonverter(this)" class="w-full mb-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl px-3 py-2.5 text-xs font-bold inline-flex items-center justify-center gap-1.5 shadow-sm"><i data-lucide="database" class="w-3.5 h-3.5"></i> Im Berichtskonverter speichern</button>'
     : '';
-  // v2.46.174: PDF-Vorschau mit Berichtskonverter-Design
-  const bkPreviewHtml = '<button onclick="angChatPreviewBkPdf(this)" class="w-full mb-2 text-white rounded-xl px-3 py-2 text-[11px] font-bold inline-flex items-center justify-center gap-1.5 hover:opacity-90" style="background:#1a3353"><i data-lucide="file-check-2" class="w-3.5 h-3.5"></i> PDF-Vorschau (Berichtskonverter-Design)</button>';
+  // v2.46.175: Vorschau rechts IST jetzt das BK-PDF — dieser Button öffnet es groß in neuem Tab (Druck/Download)
+  const bkPreviewHtml = '<button onclick="angChatPreviewBkPdf(this)" class="w-full mb-2 text-white rounded-xl px-3 py-2 text-[11px] font-bold inline-flex items-center justify-center gap-1.5 hover:opacity-90" style="background:#1a3353"><i data-lucide="external-link" class="w-3.5 h-3.5"></i> PDF in neuem Tab öffnen (Druck/Download)</button>';
   bar.innerHTML = planActionsHtml + bkSaveHtml + bkPreviewHtml +
     '<div class="flex gap-1.5 items-end">' +
       '<textarea id="angChatTextInput" rows="' + (hasPlan ? '1' : '2') + '" placeholder="' + escapeAttr(isFirstInput ? 'Beschreib was du brauchst… (Cmd+Enter sendet)' : 'Anpassung? z.B. „Preis Pos 2 auf 850" / „wärmer" / „andere Lieferzeit"… (Cmd+Enter)') + '" class="flex-1 px-3 py-2 border border-ink-300 rounded-xl text-sm resize-none" onkeydown="if(event.key===\'Enter\'&&(event.metaKey||event.ctrlKey)){event.preventDefault();angChatSubmitTextInput()}"></textarea>' +
@@ -24612,7 +24620,18 @@ async function angChatUserResponse(userText) {
     if (s.bgAnalysisPromise) { try { await s.bgAnalysisPromise; } catch (_) {} }
     const result = await _angChatGenerateOffer(s, userText);
     s.iteration = (s.iteration || 0) + 1;
-    s.collected = result.plan; // alte Variable für PDF-Save kompatibel halten
+    // v2.46.175: MERGE statt Overwrite — Felder die die KI nicht kennt/zurückgibt
+    // (Stammdaten, Standort, Fabriknummer, Modus, Stundensätze) bleiben erhalten.
+    const prev = s.collected || {};
+    s.collected = Object.assign({}, result.plan, {
+      stammdaten:       prev.stammdaten || {},
+      standort:         prev.standort || '',
+      fabriknummer:     prev.fabriknummer || '',
+      abrechnung_modus: result.plan?.abrechnung_modus || prev.abrechnung_modus || 'pauschal',
+      stundensaetze:    (Array.isArray(result.plan?.stundensaetze) && result.plan.stundensaetze.length)
+                          ? result.plan.stundensaetze
+                          : (prev.stundensaetze || []),
+    });
     s.history.push({ role: 'assistant', content: result.message });
     _angChatAppendBubble('assistant', result.message);
     _angChatRenderPreview();
@@ -24672,6 +24691,11 @@ async function _angChatGenerateOffer(s, userText) {
     'PREISE:\n' +
     '- Wenn User Preise nennt → übernimm EXAKT\n' +
     '- Wenn nicht → realistisch branchenüblich schätzen\n\n' +
+    'ABRECHNUNGSMODUS (pauschal vs. aufwand):\n' +
+    '- "pauschal" (Standard): Festpreis-Positionen mit Einzelpreisen.\n' +
+    '- "aufwand": KEINE Festpreise — stattdessen Stundensätze-Tabelle (stundensaetze-Array). Positionen beschreiben dann nur den Arbeitsumfang (einzelpreis: 0) oder bleiben leer.\n' +
+    '- Wechsle NUR auf "aufwand" wenn der User es explizit will (z.B. „nach Aufwand", „auf Stundenbasis", „Regieleistung"). Sonst: aktuellen Modus aus dem übergebenen Angebot BEIBEHALTEN.\n' +
+    '- Wenn der User Stundensätze anpasst (z.B. „Monteur auf 95€") → nur den betreffenden Satz ändern, Rest behalten.\n\n' +
     'Branche: ' + (profile.ki_branche_hint || 'Aufzug-Service') + '\n' +
     subtypBlock +
     stilBlock +
@@ -24686,6 +24710,8 @@ async function _angChatGenerateOffer(s, userText) {
     '    "konditionen": {"lieferzeit": string, "preisstellung": string, "zahlungsziel": string, "gewaehrleistung": string, "bindefrist": string, "montagetermin": string},\n' +
     '    "mwst_satz": number,\n' +
     '    "einsatzpauschale_anfahrt": number (Pauschale pro Anfahrt, 0 wenn inkludiert),\n' +
+    '    "abrechnung_modus": "pauschal"|"aufwand",\n' +
+    '    "stundensaetze": [{"nr": number, "name": string, "satz": number, "einheit": "Std."|"Anfahrt", "hinweis": string}] (NUR bei aufwand befüllen, sonst []),\n' +
     '    "anschreiben_aktiv": boolean,\n' +
     '    "anschreiben_betreff": string,\n' +
     '    "anschreiben_anrede": string,\n' +
@@ -24721,30 +24747,75 @@ async function _angChatGenerateOffer(s, userText) {
   return parsed;
 }
 
-/* v2.46.82: Aktualisiert die rechte Vorschau-Spalte mit dem aktuellen Angebot. */
-function _angChatRenderPreview() {
+/* v2.46.175: Vorschau rendert jetzt LIVE das Berichtskonverter-Design-PDF
+   (jsPDF → Blob → iframe). Sequence-Guard gegen Race bei schnellen Updates.
+   Fallback auf alte HTML-Vorschau wenn PDF-Bau scheitert. */
+let _ANG_PDF_RENDER_SEQ = 0;
+async function _angChatRenderPreview() {
   const s = window._ANG_CHAT;
   const wrap = document.getElementById('angChatPreviewWrap');
   const lbl = document.getElementById('angChatIterLabel');
   if (!s || !wrap || !s.collected) return;
-  // Adapter zum vorhandenen HTML-Renderer
-  // v2.46.161: standort/fabriknummer aus collected in ctx durchreichen (waren vorher leer)
-  const ctx = {
-    accountId: s.accountId,
-    ticketId: s.ticketId,
-    ticket: s.ticket,
-    profile: s.profile,
-    standort: s.collected.standort || '',
-    fabriknummer: s.collected.fabriknummer || '',
-    plan: Object.assign({}, s.collected, { _totals: _angebotCalcTotals(s.collected) }),
-  };
-  const html = _renderAngebotHtml(ctx);
-  // In iframe mit srcdoc rendern — isolierte Styles
-  wrap.innerHTML = '<iframe id="angChatPreviewFrame" class="w-full bg-white rounded-lg border border-ink-200" style="min-height:80vh" srcdoc="' + escapeAttr(html) + '"></iframe>';
-  if (lbl) lbl.textContent = 'Iteration ' + s.iteration + ' · Brutto: ' + _formatEur(ctx.plan._totals.brutto);
-  // Bei kleineren Bildschirmen Preview-Toggle-Button anzeigen
+  const seq = ++_ANG_PDF_RENDER_SEQ;
+  const totals = _angebotCalcTotals(s.collected);
+  const modus = s.collected.abrechnung_modus || 'pauschal';
+  if (lbl) lbl.textContent = (s.iteration ? 'Iteration ' + s.iteration + ' · ' : '') +
+    (modus === 'aufwand' ? 'Nach Aufwand' : 'Brutto: ' + _formatEur(totals.brutto));
+  _angChatUpdateModusToggle();
+  // Loading-Hint nur beim allerersten Bau (danach bleibt das alte PDF stehen bis das neue da ist)
+  if (!document.getElementById('angChatPreviewFrame')) {
+    wrap.innerHTML = '<div class="bg-white rounded-lg border border-ink-200 p-8 text-center text-ink-400 text-sm"><span class="spinner inline-block w-5 h-5 border-[2px] text-indigo-500"></span><p class="mt-2">Baue PDF-Vorschau…</p></div>';
+  }
+  try {
+    const blob = await _fdhBuildBkAngebotPdfBlob(s);
+    if (seq !== _ANG_PDF_RENDER_SEQ) return;  // inzwischen neuere Anfrage → verwerfen
+    const url = URL.createObjectURL(blob);
+    if (s._previewBlobUrl) { try { URL.revokeObjectURL(s._previewBlobUrl); } catch (_) {} }
+    s._previewBlobUrl = url;
+    wrap.innerHTML = '<iframe id="angChatPreviewFrame" class="w-full bg-white rounded-lg border border-ink-200" style="min-height:80vh" src="' + url + '#toolbar=0&navpanes=0"></iframe>';
+  } catch (e) {
+    if (seq !== _ANG_PDF_RENDER_SEQ) return;
+    console.warn('BK-PDF-Vorschau fehlgeschlagen — Fallback auf HTML:', e);
+    const ctx = {
+      accountId: s.accountId, ticketId: s.ticketId, ticket: s.ticket, profile: s.profile,
+      standort: s.collected.standort || '', fabriknummer: s.collected.fabriknummer || '',
+      plan: Object.assign({}, s.collected, { _totals: totals }),
+    };
+    const html = _renderAngebotHtml(ctx);
+    wrap.innerHTML = '<iframe id="angChatPreviewFrame" class="w-full bg-white rounded-lg border border-ink-200" style="min-height:80vh" srcdoc="' + escapeAttr(html) + '"></iframe>';
+  }
   const togBtn = document.getElementById('angChatMobilePreviewBtn');
   if (togBtn) togBtn.classList.remove('hidden');
+}
+
+/* v2.46.175: Abrechnungsmodus umschalten — Pauschal ↔ Aufwand.
+   Beim ersten Wechsel auf Aufwand: Standard-Stundensätze einsetzen. */
+function angChatSetAbrechnung(modus) {
+  const s = window._ANG_CHAT;
+  if (!s) return;
+  s.collected = s.collected || {};
+  if (s.collected.abrechnung_modus === modus) return;
+  s.collected.abrechnung_modus = modus;
+  if (modus === 'aufwand' && !(s.collected.stundensaetze || []).length) {
+    s.collected.stundensaetze = [
+      { nr: 1, name: 'Servicemonteur',   satz: 89,  einheit: 'Std.',    hinweis: '' },
+      { nr: 2, name: 'Servicetechniker', satz: 105, einheit: 'Std.',    hinweis: '' },
+      { nr: 3, name: 'Fahrtzeit',        satz: 65,  einheit: 'Std.',    hinweis: 'je angefangene Stunde' },
+      { nr: 4, name: 'Einsatzpauschale', satz: 35,  einheit: 'Anfahrt', hinweis: 'Fahrzeug + Rüstzeit' },
+    ];
+    toast('Aufwand-Modus: Standard-Stundensätze eingesetzt — im Chat anpassbar (z.B. „Monteur auf 95€")', 'info', 6000);
+  }
+  _angChatRenderPreview();
+}
+
+function _angChatUpdateModusToggle() {
+  const s = window._ANG_CHAT;
+  const modus = s?.collected?.abrechnung_modus || 'pauschal';
+  document.querySelectorAll('#angChatModusToggle [data-modus]').forEach(btn => {
+    const active = btn.getAttribute('data-modus') === modus;
+    btn.style.background = active ? '#4f46e5' : '#ffffff';
+    btn.style.color = active ? '#ffffff' : '#374151';
+  });
 }
 
 function angChatToggleMobilePreview() {
