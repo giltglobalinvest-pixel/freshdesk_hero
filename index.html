@@ -779,7 +779,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.179';
+const APP_VERSION = 'v2.46.180';
 
 /* ============================================================
    GLOBAL THEME — v2.46.12
@@ -23571,6 +23571,47 @@ async function loadAngebotsLerntexte(accountId, max) {
   }
 }
 
+/* v2.46.180: Selbstlernen — jedes versendete/gespeicherte Angebot wird als
+   Lerntext abgelegt. Zukünftige Generierungen nutzen es als Stil-Referenz
+   (loadAngebotsLerntexte zieht die 5 neuesten aktiven). Fire-and-forget. */
+async function _angRecordLerntext(s) {
+  try {
+    if (!s?.collected) return;
+    const c = s.collected;
+    const rec = (typeof _fdhChatToBkRec === 'function') ? _fdhChatToBkRec(s) : null;
+    const modus = c.abrechnung_modus || 'pauschal';
+    const parts = [
+      'EIGENES ANGEBOT (Freshdesk Hero, ' + (modus === 'aufwand' ? 'nach Aufwand' : 'Pauschal') + '):',
+      rec?.anschreiben ? 'Anschreiben:\n' + rec.anschreiben : '',
+      (c.positionen || []).length
+        ? 'Positionen:\n' + c.positionen.map(p => '- ' + (p.bezeichnung || '') + (p.einzelpreis ? ' (' + p.einzelpreis + '€)' : '')).join('\n')
+        : '',
+      (c.stundensaetze || []).length
+        ? 'Stundensätze:\n' + c.stundensaetze.map(x => '- ' + x.name + ': ' + x.satz + '€/' + x.einheit).join('\n')
+        : '',
+      c.konditionen ? 'Konditionen: ' + Object.entries(c.konditionen).filter(([, v]) => v).map(([k, v]) => k + '=' + v).join(' · ') : '',
+    ].filter(Boolean);
+    await airtableWriteWithAutoField(ANGEBOTS_LERN_TABLE, {
+      account_id:     s.accountId || '',
+      anbieter_name:  'Eigenes Angebot (Freshdesk Hero)',
+      lerntext:       parts.join('\n\n').slice(0, 8000),
+      quell_filename: 'ANG-FDH-' + (s.ticketId || '?'),
+      created_at:     nowIso(),
+      aktiv:          'ja',
+    }, {
+      account_id:     'singleLineText',
+      anbieter_name:  'singleLineText',
+      lerntext:       'multilineText',
+      quell_filename: 'singleLineText',
+      created_at:     'singleLineText',
+      aktiv:          'singleLineText',
+    });
+    console.log('[Angebot-Lernen] Lerntext gespeichert');
+  } catch (e) {
+    console.warn('[Angebot-Lernen] fehlgeschlagen:', e.message);
+  }
+}
+
 /* v2.46.71: Lädt eigene gewonnene Angebote (Status=Auftrag) als Selbstlern-Pool.
    Format kompatibel mit Lerntexten — gleiche Few-Shot-Struktur. */
 async function loadAngeboteAuftrag(accountId, max) {
@@ -24690,6 +24731,7 @@ async function _angChatGenerateOffer(s, userText) {
     'WIE DU MIT DEM ANSCHREIBEN UMGEHST:\n' +
     '- Wenn User noch NICHT erwähnt hat ob er ein Anschreiben will → in deiner "message" am Ende kurz fragen: "Möchtest du ein begleitendes Anschreiben (Brief vor dem Angebot)? Wenn ja, schick mir kurze Hinweise oder ich entwerfe was Standardisches." Lass anschreiben_aktiv=false.\n' +
     '- Wenn User SAGT er will ein Anschreiben → setze anschreiben_aktiv=true und fülle anschreiben_betreff + anschreiben_body + anschreiben_anrede + anschreiben_gruss komplett aus.\n' +
+    '- WICHTIG: anschreiben_anrede enthält NUR die Anrede-Zeile (z.B. "Sehr geehrte Frau Riegger,"). Der anschreiben_body beginnt NICHT mit der Anrede — er startet direkt mit dem ersten Satz. Zwischen Anrede und Body kommt automatisch eine Leerzeile.\n' +
     '- Wenn User SAGT er will KEIN Anschreiben → anschreiben_aktiv=false.\n\n' +
     'PREISE:\n' +
     '- Wenn User Preise nennt → übernimm EXAKT\n' +
@@ -25037,6 +25079,7 @@ async function angChatExecuteFinal(btn) {
         bkNote = ' · BK-Save fehlgeschlagen (' + (e.message || '').slice(0, 80) + ')';
       }
     }
+    _angRecordLerntext(s).catch(() => {});  // v2.46.180: Stil fürs nächste Mal lernen
     closeAngebotsChatModal();
     toast('Angebot ANG-' + s.ticketId + ' an Kunde versendet' + bkNote, 'success', 6000);
   } catch (e) {
@@ -25054,6 +25097,7 @@ async function angChatSaveToBerichtskonverter(btn) {
   setBusy(btn, true, 'Speichere…');
   try {
     const bk = await _bkSaveAngebotToBK(s);
+    _angRecordLerntext(s).catch(() => {});  // v2.46.180: Stil fürs nächste Mal lernen
     setBusy(btn, false);
     toast('Im Berichtskonverter gespeichert als ANG-' + bk.angNum + ' ✓', 'success', 6000);
   } catch (e) {
@@ -27055,7 +27099,7 @@ async function _buildAngebotPdf(rec) {
     doc.setFont('helvetica','bold'); doc.setFontSize(10); doc.setTextColor(91,33,182);
     doc.text(_sanPdf('Abrechnung nach tatsächlichem Aufwand'), ml+4, y+6);
     doc.setFont('helvetica','normal'); doc.setFontSize(8.5); doc.setTextColor(...GREY);
-    const hintLines = doc.splitTextToSize(_sanPdf('Die oben genannten Sätze sind verbindlich. Der tatsächlich angefallene Aufwand wird im Stundenrapport detailliert nachgewiesen. Material wird gegen Vorlage der Lieferschein-/Rechnungsbelege berechnet. Alle Preise zzgl. gesetzl. USt.'), cw-8);
+    const hintLines = doc.splitTextToSize(_sanPdf('Die oben genannten Sätze sind verbindlich. Die Abrechnung erfolgt nach tatsächlichem Aufwand von Lohn und Material. Der angefallene Aufwand wird im Arbeitsbericht detailliert nachgewiesen. Alle Preise zzgl. gesetzl. USt.'), cw-8);
     hintLines.forEach((l, i) => doc.text(l, ml+4, y+11+i*4));
     y += 24;
   } else {
@@ -27130,7 +27174,7 @@ async function _buildAngebotPdf(rec) {
   if (hasAufwandPos && !isGesamt) {
     if (y + 8 > 270) { doc.addPage(); y = 22; _angPdfHeader(doc, ml, mr, BR, GREY_L, GREY_X); y = 30; }
     doc.setFont('helvetica','italic'); doc.setFontSize(8.5); doc.setTextColor(...GREY_L);
-    doc.text(_sanPdf('* Abrechnung dieser Position nach tatsächlichem Aufwand bzw. Verbrauch — gegen Nachweis (Lieferschein / Stundenrapport).'), ml, y+4);
+    doc.text(_sanPdf('* Abrechnung dieser Position nach tatsächlichem Aufwand von Lohn und Material.'), ml, y+4);
     y += 6;
   }
   // SUMMEN / PAUSCHALPREIS
@@ -27271,9 +27315,16 @@ function _fdhChatToBkRec(chatState) {
   // wenn der User eins wollte — sonst Leistungsbeschreibung + Erläuterung als Intro.
   // (Vorher wurden anrede/einleitung/befund_detail gelesen — die füllt der Chat nie.)
   const c = s.collected || {};
-  const anschreiben = (c.anschreiben_aktiv && String(c.anschreiben_body || '').trim())
+  let anschreiben = (c.anschreiben_aktiv && String(c.anschreiben_body || '').trim())
     ? [c.anschreiben_anrede, c.anschreiben_body, c.anschreiben_gruss].filter(Boolean).join('\n\n')
     : [c.leistungsbeschreibung, c.erlaeuterung].filter(Boolean).join('\n\n');
+  // v2.46.180: Absatz nach der Anrede erzwingen — KI klebt sie manchmal inline
+  // an den Body ("Sehr geehrte Frau X, gemäß Ihrer Anfrage…"). Nach dem Anrede-
+  // Komma kommt eine Leerzeile, wie in einem Geschäftsbrief üblich.
+  anschreiben = anschreiben.replace(
+    /^(Sehr geehrte[rn]?\s[^,\n]{2,60},)\s*(?!\n)/,
+    '$1\n\n'
+  );
   return {
     app_angebot_num:      'FDH-' + (s.ticketId || '?'),
     firma:                firmaSlug,
