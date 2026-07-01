@@ -779,7 +779,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.166';
+const APP_VERSION = 'v2.46.167';
 
 /* ============================================================
    GLOBAL THEME — v2.46.12
@@ -842,6 +842,7 @@ let APP_KEYS = {
   erpProxyUrl:      null,    // v2.46.163: Berichtskonverter val.town-Instanz für /aufzug/... Endpoints
   erpLoginKey:      null,    // v2.46.164: separater Login-Key für Berichtskonverter (falls andere User-Tabelle)
   erpFirmaSlugMap:  {},      // v2.46.164: { fdAccountId → firmaSlug }
+  bkAirtableBaseId: null,    // v2.46.167: Airtable-Base-ID vom Berichtskonverter — Angebote landen dort in App_Angebote
   sessionToken:     null,
   user:             null,    // { _id, api_key?, name, role, is_admin, ... }
 };
@@ -1398,6 +1399,8 @@ async function loadProjectKeys() {
           try { APP_KEYS.erpFirmaSlugMap = JSON.parse(f.key_value || '{}'); }
           catch (_) { APP_KEYS.erpFirmaSlugMap = {}; }
         }
+        // v2.46.167: Airtable-Base-ID vom Berichtskonverter (für App_Angebote-Save)
+        if (f.key_name === 'bkAirtableBaseId') APP_KEYS.bkAirtableBaseId = f.key_value || null;
       });
     }
   } catch (_) {}
@@ -24509,7 +24512,11 @@ function _angChatRenderActions(opts) {
         '<button onclick="angChatExecuteFinal(this)" class="flex-1 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl px-3 py-2.5 text-xs font-bold inline-flex items-center justify-center gap-1 shadow-sm"><i data-lucide="send" class="w-3.5 h-3.5"></i> An Kunden senden</button>' +
         '<button onclick="angChatShowPdfOnly(this)" class="shrink-0 bg-white border border-indigo-300 text-indigo-700 hover:bg-indigo-50 rounded-xl px-3 py-2.5 text-xs font-bold inline-flex items-center justify-center gap-1"><i data-lucide="printer" class="w-3.5 h-3.5"></i> Drucken</button>' +
         '<button onclick="angebotSaveDraft(this)" class="shrink-0 bg-white border border-ink-300 text-ink-700 hover:bg-ink-50 rounded-xl px-3 py-2.5 text-xs font-bold inline-flex items-center justify-center gap-1"><i data-lucide="save" class="w-3.5 h-3.5"></i> Entwurf</button>' +
-      '</div>'
+      '</div>' +
+      // v2.46.167: Berichtskonverter-Save als eigener Button (nur wenn konfiguriert)
+      (APP_KEYS.bkAirtableBaseId
+        ? '<button onclick="angChatSaveToBerichtskonverter(this)" class="w-full mb-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl px-3 py-2.5 text-xs font-bold inline-flex items-center justify-center gap-1.5 shadow-sm"><i data-lucide="database" class="w-3.5 h-3.5"></i> Nur im Berichtskonverter speichern (ohne Senden)</button>'
+        : '')
     : '';
   bar.innerHTML = planActionsHtml +
     '<div class="flex gap-1.5 items-end">' +
@@ -24896,11 +24903,41 @@ async function angChatExecuteFinal(btn) {
       body: JSON.stringify(payload),
     });
     try { await _angebotSaveAirtable(ctx, 'Versendet'); } catch (e) { console.warn('Airtable-Save fehlgeschlagen:', e.message); }
+    // v2.46.167: Zusätzlich in Berichtskonverter-Base speichern falls konfiguriert
+    let bkNote = '';
+    if (APP_KEYS.bkAirtableBaseId) {
+      try {
+        const bk = await _bkSaveAngebotToBK(ctx);
+        bkNote = ' · Berichtskonverter ANG-' + bk.angNum;
+      } catch (e) {
+        console.warn('BK-Save fehlgeschlagen:', e);
+        bkNote = ' · BK-Save fehlgeschlagen (' + (e.message || '').slice(0, 80) + ')';
+      }
+    }
     closeAngebotsChatModal();
-    toast('Angebot ANG-' + s.ticketId + ' an Kunde versendet', 'success', 5000);
+    toast('Angebot ANG-' + s.ticketId + ' an Kunde versendet' + bkNote, 'success', 6000);
   } catch (e) {
     setBusy(btn, false);
     toast('Versand fehlgeschlagen: ' + (e.message || e), 'error', 8000);
+  }
+}
+
+/* v2.46.167: Standalone-Save in Berichtskonverter — ohne Kundenversand. */
+async function angChatSaveToBerichtskonverter(btn) {
+  const s = window._ANG_CHAT;
+  if (!s) return;
+  if (!APP_KEYS.bkAirtableBaseId) return toast('Berichtskonverter-Base-ID nicht konfiguriert — Admin → Einstellungen', 'warn', 8000);
+  if (!confirm('Angebot ins Berichtskonverter-System speichern?\n\nKein Push ins ERP · Kein Kundenversand · nur Ablage.')) return;
+  setBusy(btn, true, 'Speichere…');
+  try {
+    const ctx = _angChatToCtx(s);
+    const bk = await _bkSaveAngebotToBK(ctx);
+    setBusy(btn, false);
+    toast('Im Berichtskonverter gespeichert als ANG-' + bk.angNum + ' ✓', 'success', 6000);
+  } catch (e) {
+    setBusy(btn, false);
+    toast('BK-Save fehlgeschlagen: ' + (e.message || e), 'error', 10000);
+    console.error('angChatSaveToBerichtskonverter:', e);
   }
 }
 
@@ -26357,6 +26394,180 @@ async function _angebotSaveAirtable(ctx, status) {
     sent_at: 'singleLineText',
     created_by_api_key: 'singleLineText',
   });
+}
+
+/* v2.46.167: Angebot in Berichtskonverter-Base speichern.
+   Schreibt in {bkAirtableBaseId}/App_Angebote so dass es in dessen Liste
+   erscheint. Markiert mit source_app='freshdesk_hero' + freshdesk_ticket_id.
+   KEIN Push ins ERP (bewusst weggelassen — nur Berichtskonverter-Listing). */
+async function _bkNextAppAngebotNum(bkBaseId) {
+  if (!bkBaseId || !APP_KEYS.airtableWriteKey) return 1;
+  try {
+    const url = 'https://api.airtable.com/v0/' + bkBaseId + '/App_Angebote'
+      + '?fields[]=app_angebot_num'
+      + '&sort[0][field]=app_angebot_num&sort[0][direction]=desc'
+      + '&maxRecords=1';
+    const res = await fetch(url, { headers: { 'Authorization': 'Bearer ' + APP_KEYS.airtableWriteKey } });
+    if (!res.ok) return 1;
+    const d = await res.json();
+    const cur = (d.records?.[0]?.fields?.app_angebot_num) || 0;
+    return (+cur || 0) + 1;
+  } catch (_) { return 1; }
+}
+
+async function _bkSaveAngebotToBK(ctx) {
+  if (!APP_KEYS.bkAirtableBaseId) throw new Error('Berichtskonverter-Base-ID nicht konfiguriert (Admin → Einstellungen)');
+  if (!APP_KEYS.airtableWriteKey) throw new Error('Airtable-Write-Key fehlt');
+  const { accountId, ticketId, plan, ticket, profile } = ctx;
+  const account = (APP_STATE.accounts || []).find(a => a.id === accountId) || {};
+  const firmaSlug = _erpFirmaSlugForAccount(account) || 'unknown';
+  const totals = plan._totals || _angebotCalcTotals(plan);
+  const sd = plan.stammdaten || {};
+  const req = ticket?.requester || {};
+  const angNum = await _bkNextAppAngebotNum(APP_KEYS.bkAirtableBaseId);
+  // Positionen normalisieren ins App_Angebote-Format
+  const positionen = (plan.positionen || []).map((p, i) => ({
+    idx:          i + 1,
+    bezeichnung:  p.bezeichnung || '',
+    menge:        +p.menge || 1,
+    einheit:      p.einheit || 'ST',
+    ep_kone:      0,
+    vp:           +p.einzelpreis || 0,
+    hidden:       false,
+  }));
+  const kondHinweise = [
+    plan.konditionen?.zahlungsziel   ? 'Zahlungsziel: ' + plan.konditionen.zahlungsziel : '',
+    plan.konditionen?.gewaehrleistung ? 'Gewährleistung: ' + plan.konditionen.gewaehrleistung : '',
+    plan.konditionen?.bindefrist     ? 'Bindefrist: ' + plan.konditionen.bindefrist : '',
+    plan.konditionen?.preisstellung  ? 'Preisstellung: ' + plan.konditionen.preisstellung : '',
+  ].filter(Boolean).join('\n');
+  const anschreibenBody = [plan.anrede, plan.einleitung, plan.befund_detail].filter(Boolean).join('\n\n');
+  const fdUrl = account.domain ? ('https://' + account.domain + '.freshdesk.com/a/tickets/' + ticketId) : '';
+  const fields = {
+    app_angebot_num:      angNum,
+    firma:                firmaSlug,
+    bearbeiter:           APP_KEYS.user?.name || '',
+    angebot_typ:          'freshdesk_hero',
+    equipmentnummer:      ctx.fabriknummer || plan.fabriknummer || '',
+    anlage_adresse:       ctx.standort || plan.standort || '',
+    kunde_name:           sd.vertragspartner || req.company?.name || req.name || '',
+    kunde_adresse:        sd.rechnungs_anschrift || req.address || '',
+    kontakt_name:         sd.ansprechpartner_vor_ort || req.name || '',
+    anschreiben:          anschreibenBody,
+    abrechnung_modus:     'pauschal',
+    preisanzeige_modus:   positionen.length ? 'einzel' : 'gesamt',
+    pauschalpreis_netto:  positionen.length ? 0 : Math.round((+totals.netto || 0) * 100) / 100,
+    positionen_json:      JSON.stringify(positionen),
+    stundensaetze_json:   '',
+    ust_prozent:          +plan.mwst_satz || 19,
+    summe_netto_kone:     0,
+    summe_netto_vp:       Math.round((+totals.netto  || 0) * 100) / 100,
+    summe_brutto_vp:      Math.round((+totals.brutto || 0) * 100) / 100,
+    kond_lieferzeit:      plan.konditionen?.lieferzeit || '',
+    kond_preisbasis:      plan.konditionen?.preisstellung || '',
+    kond_hinweise:        kondHinweise,
+    erstellt_am:          new Date().toISOString().slice(0, 10),
+    erstellt_von:         APP_KEYS.user?.name || '',
+    status:               'fertig',
+    // Freshdesk-Hero-Marker (ermöglicht Filterung/Badge im Berichtskonverter-Listing)
+    source_app:           'freshdesk_hero',
+    freshdesk_ticket_id:  String(ticketId),
+    freshdesk_account_id: accountId,
+    freshdesk_ticket_url: fdUrl,
+    // HTML-Snapshot damit man das gerenderte Angebot im Berichtskonverter sichtbar hat
+    snapshot_html:        _renderAngebotHtml(ctx),
+  };
+  const defaults = {
+    app_angebot_num:      'number',
+    firma:                'singleLineText',
+    bearbeiter:           'singleLineText',
+    angebot_typ:          'singleLineText',
+    equipmentnummer:      'singleLineText',
+    anlage_adresse:       'multilineText',
+    kunde_name:           'singleLineText',
+    kunde_adresse:        'multilineText',
+    kontakt_name:         'singleLineText',
+    anschreiben:          'multilineText',
+    abrechnung_modus:     'singleLineText',
+    preisanzeige_modus:   'singleLineText',
+    pauschalpreis_netto:  'number',
+    positionen_json:      'multilineText',
+    stundensaetze_json:   'multilineText',
+    ust_prozent:          'number',
+    summe_netto_kone:     'number',
+    summe_netto_vp:       'number',
+    summe_brutto_vp:      'number',
+    kond_lieferzeit:      'singleLineText',
+    kond_preisbasis:      'singleLineText',
+    kond_hinweise:        'multilineText',
+    erstellt_am:          'singleLineText',
+    erstellt_von:         'singleLineText',
+    status:               'singleLineText',
+    source_app:           'singleLineText',
+    freshdesk_ticket_id:  'singleLineText',
+    freshdesk_account_id: 'singleLineText',
+    freshdesk_ticket_url: 'singleLineText',
+    snapshot_html:        'multilineText',
+  };
+  // Direct-POST — nicht via airtableWriteWithAutoField, weil das die App-Base fest hat.
+  // Wir schreiben in eine ANDERE Base (bkAirtableBaseId).
+  const post = async () => {
+    const r = await fetch('https://api.airtable.com/v0/' + APP_KEYS.bkAirtableBaseId + '/App_Angebote', {
+      method: 'POST',
+      headers: { 'Authorization': 'Bearer ' + APP_KEYS.airtableWriteKey, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ fields }),
+    });
+    return { ok: r.ok, status: r.status, body: await r.text() };
+  };
+  let res = await post();
+  // Bei UNKNOWN_FIELD_NAME → fehlende Felder anlegen und retry
+  if (!res.ok && /UNKNOWN_FIELD_NAME|Unknown field/i.test(res.body)) {
+    console.log('[BK-Save] Auto-lege fehlende Felder an…');
+    const missing = [];
+    (res.body.match(/Unknown field name:? ?"?([\w_]+)"?/gi) || []).forEach(m => {
+      const n = (m.match(/"?([\w_]+)"?$/) || [])[1];
+      if (n && defaults[n]) missing.push(n);
+    });
+    // Auto-add alle vorgesehenen Felder wenn nichts explizit erkannt
+    const toAdd = missing.length ? missing : Object.keys(defaults);
+    for (const fn of toAdd) {
+      try {
+        await _bkEnsureField('App_Angebote', fn, defaults[fn]);
+      } catch (e) { console.warn('[BK-Save] Feld', fn, 'anlegen fehlgeschlagen:', e.message); }
+    }
+    res = await post();
+  }
+  if (!res.ok) throw new Error('Berichtskonverter-Save: ' + res.status + ' — ' + res.body.slice(0, 300));
+  const created = JSON.parse(res.body);
+  console.log('[BK-Save] Angebot ANG', angNum, 'erstellt:', created.id);
+  return { recordId: created.id, angNum };
+}
+
+/* Airtable-Feld in Berichtskonverter-Base anlegen (auto-provisioning). */
+async function _bkEnsureField(tableName, fieldName, fieldType) {
+  const baseId = APP_KEYS.bkAirtableBaseId;
+  if (!baseId) throw new Error('BK-Base-ID fehlt');
+  const metaUrl = 'https://api.airtable.com/v0/meta/bases/' + baseId + '/tables';
+  const metaRes = await fetch(metaUrl, { headers: { 'Authorization': 'Bearer ' + APP_KEYS.airtableWriteKey } });
+  if (!metaRes.ok) throw new Error('Meta-Read: ' + metaRes.status);
+  const meta = await metaRes.json();
+  const table = (meta.tables || []).find(t => t.name === tableName);
+  if (!table) throw new Error('Tabelle „' + tableName + '" existiert nicht im Berichtskonverter — bitte dort einmal ein Angebot anlegen');
+  if ((table.fields || []).find(f => f.name === fieldName)) return;
+  const spec = (typeof _airtableFieldSpec === 'function')
+    ? _airtableFieldSpec(fieldName, fieldType)
+    : { name: fieldName, type: fieldType };
+  const addRes = await fetch(metaUrl + '/' + table.id + '/fields', {
+    method: 'POST',
+    headers: { 'Authorization': 'Bearer ' + APP_KEYS.airtableWriteKey, 'Content-Type': 'application/json' },
+    body: JSON.stringify(spec),
+  });
+  if (!addRes.ok) {
+    const t = await addRes.text();
+    // 422 mit „already exists" ist harmlos
+    if (!/already exists|DUPLICATE/i.test(t)) throw new Error('Feld anlegen: ' + t.slice(0, 200));
+  }
+  await new Promise(r => setTimeout(r, 300));
 }
 
 /* ===================== USERS PAGE (Admin) ===================== */
@@ -33877,6 +34088,16 @@ async function renderSettingsPage() {
         </div>
         <div id="erpTestResult" class="mt-2"></div>
 
+        <!-- v2.46.167: Berichtskonverter-Airtable-Base für Angebot-Save -->
+        <div class="mt-4 pt-3 border-t border-ink-100">
+          <p class="text-xs font-semibold text-ink-700">Berichtskonverter Airtable-Base</p>
+          <p class="text-[11px] text-ink-500 mb-1.5">Base-ID (beginnt mit <code>app...</code>) der Berichtskonverter-Airtable — dort werden hier erstellte Angebote parallel in die <code>App_Angebote</code>-Tabelle gespeichert (markiert mit <code>source_app=freshdesk_hero</code>). Kein Push ins ERP.</p>
+          <div class="flex gap-2 flex-wrap">
+            <input id="bkBaseIdInput" type="text" value="${escapeAttr(APP_KEYS.bkAirtableBaseId || '')}" placeholder="app..." autocomplete="off" class="flex-1 min-w-[220px] px-3 py-2 border border-ink-200 rounded-lg text-sm font-mono bg-white focus:ring-2 focus:ring-emerald-500/30 focus:border-emerald-500">
+            <button type="button" onclick="saveBkAirtableBaseId(this)" class="bg-emerald-600 hover:bg-emerald-700 text-white px-4 py-2 rounded-lg text-sm font-semibold flex items-center gap-2"><i data-lucide="save" class="w-4 h-4"></i> Speichern</button>
+          </div>
+        </div>
+
         <!-- v2.46.164: Firma-Slug-Zuordnung pro Freshdesk-Account -->
         <div class="mt-4 pt-3 border-t border-ink-100">
           <p class="text-xs font-semibold text-ink-700">Firma-Slug pro Mandant</p>
@@ -34138,6 +34359,25 @@ async function saveErpSlugMap(btnEl) {
     setBusy(btnEl, false);
     const n = Object.keys(map).length;
     toast(n ? (n + ' Slug-Zuordnung' + (n === 1 ? '' : 'en') + ' gespeichert ✓') : 'Alle Overrides gelöscht (Auto-Default aktiv)', 'success', 3000);
+  } catch (e) {
+    setBusy(btnEl, false);
+    toast('Speichern fehlgeschlagen: ' + e.message, 'error', 8000);
+  }
+}
+
+/* v2.46.167: Berichtskonverter-Base-ID in Master-Base speichern. */
+async function saveBkAirtableBaseId(btnEl) {
+  const raw = ($('bkBaseIdInput')?.value || '').trim();
+  if (raw && !/^app[a-zA-Z0-9]+$/.test(raw)) return toast('Ungültige Base-ID (erwartet: app…)', 'warn', 5000);
+  setBusy(btnEl, true, 'Speichere…');
+  try {
+    const keys = await fetchMasterBaseKeys();
+    const existing = keys.find(r => r.fields.key_name === 'bkAirtableBaseId');
+    await writeMasterBaseKey('bkAirtableBaseId', raw, existing?.id);
+    APP_KEYS.bkAirtableBaseId = raw || null;
+    setBusy(btnEl, false);
+    toast(raw ? 'Berichtskonverter-Base gespeichert ✓' : 'Base-ID geleert', 'success', 3000);
+    setTimeout(() => renderSettingsPage(), 1200);
   } catch (e) {
     setBusy(btnEl, false);
     toast('Speichern fehlgeschlagen: ' + e.message, 'error', 8000);
