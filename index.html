@@ -779,7 +779,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.178';
+const APP_VERSION = 'v2.46.179';
 
 /* ============================================================
    GLOBAL THEME — v2.46.12
@@ -24213,6 +24213,9 @@ async function pickErpAnlage(idx) {
   if (!state?.filtered?.[idx]) return;
   const anlage = state.filtered[idx];
   const firmaSlug = state.firmaSlug;
+  // v2.46.179: Anlage im Angebot-State merken — Aufwand-Modus liest daraus
+  // die hinterlegten Sätze (stundensatz + einsatzPauschale) ohne Refetch.
+  if (window._ANG_CHAT) window._ANG_CHAT._erpAnlage = anlage;
   const kunde = anlage.kunde || {};
   const kundennr = kunde.kundennummer || kunde.id || '';
   const list = $('erpPickerList');
@@ -24695,7 +24698,8 @@ async function _angChatGenerateOffer(s, userText) {
     '- "pauschal" (Standard): Festpreis-Positionen mit Einzelpreisen.\n' +
     '- "aufwand": KEINE Festpreise — stattdessen Stundensätze-Tabelle (stundensaetze-Array). Positionen beschreiben dann nur den Arbeitsumfang (einzelpreis: 0) oder bleiben leer.\n' +
     '- Wechsle NUR auf "aufwand" wenn der User es explizit will (z.B. „nach Aufwand", „auf Stundenbasis", „Regieleistung"). Sonst: aktuellen Modus aus dem übergebenen Angebot BEIBEHALTEN.\n' +
-    '- Wenn der User Stundensätze anpasst (z.B. „Monteur auf 95€") → nur den betreffenden Satz ändern, Rest behalten.\n\n' +
+    '- STUNDENSÄTZE NIEMALS ERFINDEN: Die Sätze kommen aus dem ERP (an der Anlage hinterlegt) und stehen im übergebenen Angebot. Übernimm sie UNVERÄNDERT. Es gibt typischerweise nur ZWEI Zeilen: Servicetechniker (Std.) + Einsatzpauschale (Anfahrt). KEINE zusätzlichen Zeilen wie „Fahrtzeit" oder „Servicemonteur" hinzuerfinden.\n' +
+    '- NUR wenn der User explizit Sätze nennt (z.B. „Stundensatz 110", „Pauschale 249") → diese exakt übernehmen. Wenn ein Satz 0 ist und der User nichts nennt → in deiner message nachfragen.\n\n' +
     'Branche: ' + (profile.ki_branche_hint || 'Aufzug-Service') + '\n' +
     subtypBlock +
     stilBlock +
@@ -24788,22 +24792,46 @@ async function _angChatRenderPreview() {
   if (togBtn) togBtn.classList.remove('hidden');
 }
 
-/* v2.46.175: Abrechnungsmodus umschalten — Pauschal ↔ Aufwand.
-   Beim ersten Wechsel auf Aufwand: Standard-Stundensätze einsetzen. */
-function angChatSetAbrechnung(modus) {
+/* v2.46.179: Abrechnungsmodus umschalten — Pauschal ↔ Aufwand.
+   Stundensätze kommen aus dem ERP (an der Anlage hinterlegt: stundensatz +
+   einsatzPauschale). KEINE erfundenen Defaults mehr, keine Fahrtzeit-Position. */
+async function angChatSetAbrechnung(modus) {
   const s = window._ANG_CHAT;
   if (!s) return;
   s.collected = s.collected || {};
   if (s.collected.abrechnung_modus === modus) return;
   s.collected.abrechnung_modus = modus;
   if (modus === 'aufwand' && !(s.collected.stundensaetze || []).length) {
-    s.collected.stundensaetze = [
-      { nr: 1, name: 'Servicemonteur',   satz: 89,  einheit: 'Std.',    hinweis: '' },
-      { nr: 2, name: 'Servicetechniker', satz: 105, einheit: 'Std.',    hinweis: '' },
-      { nr: 3, name: 'Fahrtzeit',        satz: 65,  einheit: 'Std.',    hinweis: 'je angefangene Stunde' },
-      { nr: 4, name: 'Einsatzpauschale', satz: 35,  einheit: 'Anfahrt', hinweis: 'Fahrzeug + Rüstzeit' },
-    ];
-    toast('Aufwand-Modus: Standard-Stundensätze eingesetzt — im Chat anpassbar (z.B. „Monteur auf 95€")', 'info', 6000);
+    let saetze = null;
+    // 1) Anlage aus ERP holen (per Fabriknummer) — dort sind die Sätze hinterlegt
+    const firmaSlug = _erpFirmaSlugForAccount(s.account);
+    const fabrik = (s.collected.fabriknummer || '').trim();
+    if (APP_KEYS.erpProxyUrl && firmaSlug && fabrik) {
+      try {
+        const anlage = s._erpAnlage && String(s._erpAnlage.fabriknummer || '').trim() === fabrik
+          ? s._erpAnlage
+          : await erpFindAnlageByFabriknummer(firmaSlug, fabrik);
+        if (anlage) s._erpAnlage = anlage;
+        const satz = +(anlage?.stundensatz) || 0;
+        const pausch = +(anlage?.einsatzPauschale ?? anlage?.einsatzpauschale) || 0;
+        if (satz > 0) {
+          saetze = [{ nr: 1, name: 'Servicetechniker', satz: satz, einheit: 'Std.', hinweis: '' }];
+          if (pausch > 0) saetze.push({ nr: 2, name: 'Einsatzpauschale', satz: pausch, einheit: 'Anfahrt', hinweis: 'Fahrtzeit, Fahrzeug + Rüstzeit' });
+          toast('Sätze aus ERP übernommen: Servicetechniker ' + satz + ' € / Std.' + (pausch ? ' · Einsatzpauschale ' + pausch + ' €' : ''), 'success', 6000);
+        }
+      } catch (e) {
+        console.warn('[Aufwand] ERP-Sätze laden fehlgeschlagen:', e.message);
+      }
+    }
+    if (!saetze) {
+      // Kein ERP-Treffer → NICHT raten. Leere Struktur + klarer Hinweis.
+      saetze = [
+        { nr: 1, name: 'Servicetechniker', satz: 0, einheit: 'Std.',    hinweis: '' },
+        { nr: 2, name: 'Einsatzpauschale', satz: 0, einheit: 'Anfahrt', hinweis: 'Fahrtzeit, Fahrzeug + Rüstzeit' },
+      ];
+      toast('Keine ERP-Sätze gefunden (Fabriknummer prüfen oder Sätze im Chat nennen, z.B. „Stundensatz 110, Pauschale 249")', 'warn', 9000);
+    }
+    s.collected.stundensaetze = saetze;
   }
   _angChatRenderPreview();
 }
