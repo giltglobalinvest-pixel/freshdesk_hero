@@ -779,7 +779,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.168';
+const APP_VERSION = 'v2.46.169';
 
 /* ============================================================
    GLOBAL THEME — v2.46.12
@@ -34388,29 +34388,62 @@ async function pickBkBaseIdFromMasterBase(btnEl) {
       baseId:    r.fields?.key_value  || '',
       recordId:  r.id,
     })).filter(x => x.baseId && x.baseId.startsWith('app'));
-    setBusy(btnEl, false);
     if (!records.length) {
+      setBusy(btnEl, false);
       out.innerHTML = '<div class="bg-amber-50 border border-amber-200 rounded-lg p-2 text-xs text-amber-800">Keine <code>appBaseId</code>-Einträge in der Master-Base gefunden.</div>';
       return;
     }
-    // Aktuelle FD-Hero-Base markieren, damit User nicht die falsche pickt
+    // v2.46.169: Auto-Probe — schau in jede Base rein und prüfe ob sie App_Angebote hat.
+    // Nur der Berichtskonverter hat diese Tabelle → grüner „✓ Berichtskonverter"-Badge.
+    setBusy(btnEl, true, 'Prüfe Bases…');
     const meBase = APP_KEYS.appBaseId || APP_CONFIG.APP_BASE_ID;
+    const probed = await Promise.all(records.map(async r => {
+      const isMe = r.baseId === meBase;
+      if (isMe) return { ...r, hasAppAngebote: false, isMe: true };
+      try {
+        const mr = await fetch(
+          'https://api.airtable.com/v0/meta/bases/' + r.baseId + '/tables',
+          { headers: { 'Authorization': 'Bearer ' + APP_KEYS.airtableWriteKey } }
+        );
+        if (!mr.ok) return { ...r, hasAppAngebote: false, error: 'HTTP ' + mr.status };
+        const md = await mr.json();
+        const has = (md.tables || []).some(t => t.name === 'App_Angebote');
+        // Bonus: erkenne per Tabellen-Auswahl ob wahrscheinlich Berichtskonverter (Anlagen etc.)
+        const looksLikeBK = has || (md.tables || []).some(t => ['App_Angebote', 'App_Berichte', 'App_Anlagen'].includes(t.name));
+        return { ...r, hasAppAngebote: has, looksLikeBK };
+      } catch (e) { return { ...r, hasAppAngebote: false, error: e.message }; }
+    }));
+    setBusy(btnEl, false);
+    // Sortierung: erst Kandidaten (hasAppAngebote), dann Rest, „diese App" ganz unten
+    probed.sort((a, b) => {
+      if (a.isMe) return 1;
+      if (b.isMe) return -1;
+      if (a.hasAppAngebote && !b.hasAppAngebote) return -1;
+      if (b.hasAppAngebote && !a.hasAppAngebote) return 1;
+      return 0;
+    });
     out.innerHTML =
       '<div class="bg-white border border-emerald-200 rounded-lg p-2 space-y-1">' +
-        '<p class="text-[11px] text-ink-600 mb-1">Gefundene Base-IDs — klick die vom <b>Berichtskonverter</b>:</p>' +
-        records.map(r => {
-          const isMe = r.baseId === meBase;
-          return '<button onclick="_bkPickBaseId(\'' + escapeAttr(r.baseId) + '\')"' +
-            (isMe ? ' disabled' : '') +
-            ' class="w-full text-left px-2 py-1.5 rounded-md text-[12px] font-mono transition ' +
-            (isMe
-              ? 'bg-ink-100 text-ink-400 cursor-not-allowed'
-              : 'bg-emerald-50 hover:bg-emerald-100 text-ink-800') +
-            '">' +
-            '<span class="font-bold">' + escapeHtml(r.baseId) + '</span>' +
-            '<span class="text-[10px] text-ink-500 ml-2">project=' + escapeHtml(r.projectId) + '</span>' +
-            (isMe ? '<span class="text-[10px] text-ink-500 ml-2 italic">(diese App)</span>' : '') +
+        '<p class="text-[11px] text-ink-600 mb-1"><b>' + probed.filter(x => x.hasAppAngebote).length + '</b> Berichtskonverter-Kandidat(en) mit <code>App_Angebote</code>-Tabelle gefunden — klicken zum Übernehmen:</p>' +
+        probed.map(r => {
+          if (r.isMe) {
+            return '<button disabled class="w-full text-left px-2 py-1.5 rounded-md text-[11px] font-mono bg-ink-100 text-ink-400 cursor-not-allowed">' +
+              '<span class="font-bold">' + escapeHtml(r.baseId.slice(0, 18)) + '…</span>' +
+              '<span class="ml-2 text-[10px] italic">(diese App)</span>' +
             '</button>';
+          }
+          const isBK = r.hasAppAngebote;
+          return '<button onclick="_bkPickBaseId(\'' + escapeAttr(r.baseId) + '\')" class="w-full text-left px-2 py-2 rounded-md text-[11px] font-mono transition ' +
+            (isBK ? 'bg-emerald-100 hover:bg-emerald-200 text-ink-900 border border-emerald-400'
+                  : 'bg-ink-50 hover:bg-ink-100 text-ink-700') + '">' +
+            '<div class="flex items-center gap-1.5 flex-wrap">' +
+              '<span class="font-bold">' + escapeHtml(r.baseId.slice(0, 22)) + '…</span>' +
+              (isBK ? '<span class="text-[10px] bg-emerald-600 text-white px-1.5 py-0.5 rounded font-bold uppercase tracking-wider not-italic">✓ Berichtskonverter</span>' : '') +
+              (r.error ? '<span class="text-[10px] text-amber-600 not-italic">' + escapeHtml(r.error) + '</span>' : '') +
+              (!isBK && !r.error ? '<span class="text-[10px] text-ink-500 not-italic">keine App_Angebote-Tabelle</span>' : '') +
+            '</div>' +
+            '<div class="text-[10px] text-ink-500 mt-0.5">project=' + escapeHtml(r.projectId) + '</div>' +
+          '</button>';
         }).join('') +
       '</div>';
   } catch (e) {
