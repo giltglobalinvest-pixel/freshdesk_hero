@@ -779,7 +779,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.172';
+const APP_VERSION = 'v2.46.173';
 
 /* ============================================================
    GLOBAL THEME — v2.46.12
@@ -26469,7 +26469,10 @@ async function _bkSaveAngebotToBK(ctx) {
     app_angebot_num:      angNum,
     firma:                firmaSlug,
     bearbeiter:           APP_KEYS.user?.name || '',
-    angebot_typ:          'freshdesk_hero',
+    // v2.46.173: 'sonstiges' statt 'freshdesk_hero' — Berichtskonverter kennt nur 3 Typen
+    // (reparatur/modernisierung/sonstiges), unbekannte crashen sein _renderAngeboteList.
+    // Marker steht weiter unten in source_app.
+    angebot_typ:          'sonstiges',
     equipmentnummer:      ctx.fabriknummer || plan.fabriknummer || '',
     anlage_adresse:       ctx.standort || plan.standort || '',
     kunde_name:           sd.vertragspartner || req.company?.name || req.name || '',
@@ -34119,6 +34122,9 @@ async function renderSettingsPage() {
             <button type="button" onclick="pickBkBaseIdFromMasterBase(this)" class="bg-white border border-emerald-300 text-emerald-700 hover:bg-emerald-50 px-3 py-2 rounded-lg text-sm font-semibold flex items-center gap-2" title="Alle Airtable-Base-IDs aus der Master-Base laden und auswählen"><i data-lucide="search" class="w-4 h-4"></i> Suchen</button>
             <button type="button" onclick="saveBkAirtableBaseId(this)" class="bg-emerald-600 hover:bg-emerald-700 text-white px-4 py-2 rounded-lg text-sm font-semibold flex items-center gap-2"><i data-lucide="save" class="w-4 h-4"></i> Speichern</button>
           </div>
+          ${APP_KEYS.bkAirtableBaseId ? `
+            <button type="button" onclick="bkRepairFreshdeskHeroTypes(this)" class="mt-2 w-full bg-amber-50 hover:bg-amber-100 border border-amber-300 text-amber-800 px-3 py-2 rounded-lg text-[12px] font-semibold flex items-center justify-center gap-2" title="Setzt alle Angebote mit angebot_typ='freshdesk_hero' auf 'sonstiges' — behebt den ANGEBOT_TYP_OPTIONS-Crash im Berichtskonverter"><i data-lucide="wrench" class="w-3.5 h-3.5"></i> Berichtskonverter-Angebote reparieren (angebot_typ fixen)</button>
+          ` : ''}
           <div id="bkBaseIdPickerResult" class="mt-2"></div>
         </div>
 
@@ -34480,6 +34486,56 @@ function _bkPickBaseId(baseId) {
   const out = $('bkBaseIdPickerResult');
   if (out) out.innerHTML = '<p class="text-[11px] text-emerald-700 inline-flex items-center gap-1"><i data-lucide="check-circle-2" class="w-3.5 h-3.5"></i> Übernommen — jetzt „Speichern" klicken.</p>';
   if (window.lucide) lucide.createIcons();
+}
+
+/* v2.46.173: Repair-Tool — findet alle Angebote in der BK-Base mit
+   angebot_typ='freshdesk_hero' (crasht das BK-Listing weil unbekannter Typ)
+   und patcht sie auf 'sonstiges'. Marker source_app bleibt erhalten. */
+async function bkRepairFreshdeskHeroTypes(btnEl) {
+  if (!APP_KEYS.bkAirtableBaseId) return toast('Base-ID fehlt', 'warn');
+  if (!APP_KEYS.airtableWriteKey) return toast('Write-Key fehlt', 'warn');
+  if (!confirm('Alle Angebote mit angebot_typ=\"freshdesk_hero\" auf \"sonstiges\" umstellen?\n\nBehebt den Ladefehler im Berichtskonverter.')) return;
+  setBusy(btnEl, true, 'Suche…');
+  try {
+    // 1) Broken records lesen
+    let all = [];
+    let offset = null;
+    do {
+      const url = 'https://api.airtable.com/v0/' + APP_KEYS.bkAirtableBaseId + '/App_Angebote'
+        + '?filterByFormula=' + encodeURIComponent("{angebot_typ}='freshdesk_hero'")
+        + '&fields[]=angebot_typ'
+        + (offset ? '&offset=' + encodeURIComponent(offset) : '');
+      const r = await fetch(url, { headers: { 'Authorization': 'Bearer ' + APP_KEYS.airtableWriteKey } });
+      if (!r.ok) throw new Error('Read HTTP ' + r.status);
+      const d = await r.json();
+      all = all.concat(d.records || []);
+      offset = d.offset;
+    } while (offset);
+    if (!all.length) {
+      setBusy(btnEl, false);
+      toast('Keine kaputten Angebote gefunden — Berichtskonverter sollte laden.', 'info', 5000);
+      return;
+    }
+    // 2) Batch-PATCH (Airtable erlaubt max 10 pro Request)
+    setBusy(btnEl, true, 'Patch…');
+    let patched = 0;
+    for (let i = 0; i < all.length; i += 10) {
+      const batch = all.slice(i, i + 10).map(r => ({ id: r.id, fields: { angebot_typ: 'sonstiges' } }));
+      const r = await fetch('https://api.airtable.com/v0/' + APP_KEYS.bkAirtableBaseId + '/App_Angebote', {
+        method: 'PATCH',
+        headers: { 'Authorization': 'Bearer ' + APP_KEYS.airtableWriteKey, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ records: batch }),
+      });
+      if (!r.ok) throw new Error('Patch HTTP ' + r.status + ' — ' + (await r.text()).slice(0, 200));
+      patched += batch.length;
+    }
+    setBusy(btnEl, false);
+    toast(patched + ' Angebot(e) repariert ✓ — Berichtskonverter jetzt neu laden', 'success', 6000);
+  } catch (e) {
+    setBusy(btnEl, false);
+    toast('Reparatur fehlgeschlagen: ' + (e.message || e), 'error', 10000);
+    console.error('bkRepair:', e);
+  }
 }
 
 /* v2.46.167: Berichtskonverter-Base-ID in Master-Base speichern. */
