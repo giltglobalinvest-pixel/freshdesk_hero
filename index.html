@@ -779,7 +779,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.163';
+const APP_VERSION = 'v2.46.164';
 
 /* ============================================================
    GLOBAL THEME — v2.46.12
@@ -840,6 +840,8 @@ let APP_KEYS = {
   valtownKey:       null,    // für Auto-Setup + Re-Deploy
   valtownValId:     null,    // ID des angelegten Vals (für Updates)
   erpProxyUrl:      null,    // v2.46.163: Berichtskonverter val.town-Instanz für /aufzug/... Endpoints
+  erpLoginKey:      null,    // v2.46.164: separater Login-Key für Berichtskonverter (falls andere User-Tabelle)
+  erpFirmaSlugMap:  {},      // v2.46.164: { fdAccountId → firmaSlug }
   sessionToken:     null,
   user:             null,    // { _id, api_key?, name, role, is_admin, ... }
 };
@@ -1389,6 +1391,13 @@ async function loadProjectKeys() {
         if (f.key_name === 'valtownValId')     APP_KEYS.valtownValId     = f.key_value;
         // v2.46.163: ERP-Proxy (Berichtskonverter val.town-Instanz für /aufzug/... Endpoints)
         if (f.key_name === 'erpProxyUrl')      APP_KEYS.erpProxyUrl      = (f.key_value || '').replace(/\/+$/, '');
+        // v2.46.164: Separater ERP-Login-Key (falls Berichtskonverter andere User-Tabelle nutzt)
+        if (f.key_name === 'erpLoginKey')      APP_KEYS.erpLoginKey      = f.key_value || null;
+        // v2.46.164: Firma-Slug-Zuordnung pro Freshdesk-Account (JSON-Map)
+        if (f.key_name === 'erpFirmaSlugMap') {
+          try { APP_KEYS.erpFirmaSlugMap = JSON.parse(f.key_value || '{}'); }
+          catch (_) { APP_KEYS.erpFirmaSlugMap = {}; }
+        }
       });
     }
   } catch (_) {}
@@ -1457,10 +1466,14 @@ function erpClearSessionToken() {
   try { localStorage.removeItem('fdh_erp_session'); } catch (_) {}
 }
 
-/* Firma-Slug pro Account ermitteln — aus Account.erp_firma_slug wenn gepflegt,
-   sonst Default aus dem Namen (aufzugshandwerk → aufzug, aszendio → aszendio). */
+/* Firma-Slug pro Account ermitteln — Priorität:
+   1) Master-Base-Map APP_KEYS.erpFirmaSlugMap[accountId]  (user-Override)
+   2) Account.erp_firma_slug  (falls im Account-Editor gepflegt)
+   3) Auto-Default aus dem Namen (aufzugshandwerk → aufzug, aszendio → aszendio) */
 function _erpFirmaSlugForAccount(account) {
   if (!account) return '';
+  const map = APP_KEYS.erpFirmaSlugMap || {};
+  if (map[account.id] && String(map[account.id]).trim()) return String(map[account.id]).trim();
   if (account.erp_firma_slug && String(account.erp_firma_slug).trim()) return String(account.erp_firma_slug).trim();
   const name = String(account.name || '').toLowerCase();
   if (/aufzugshandwerk/.test(name)) return 'aufzug';
@@ -1470,11 +1483,13 @@ function _erpFirmaSlugForAccount(account) {
 
 async function erpAuth() {
   if (!APP_KEYS.erpProxyUrl) throw new Error('ERP-Proxy nicht eingerichtet (Admin → Einstellungen → ERP-Proxy-URL)');
-  if (!APP_KEYS.user?.api_key) throw new Error('Nicht eingeloggt — user.api_key fehlt');
+  // v2.46.164: erpLoginKey bevorzugt (Berichtskonverter-User-Tabelle), fallback auf Freshdesk-Hero-Login
+  const userKey = APP_KEYS.erpLoginKey || APP_KEYS.user?.api_key;
+  if (!userKey) throw new Error('Kein Login-Key — Berichtskonverter-Login-Key in ERP-Settings hinterlegen');
   const res = await fetch(APP_KEYS.erpProxyUrl + '/auth', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ user_key: APP_KEYS.user.api_key, long_lived: true }),
+    body: JSON.stringify({ user_key: userKey, long_lived: true }),
   });
   const text = await res.text();
   let d = null;
@@ -33636,15 +33651,43 @@ async function renderSettingsPage() {
           ${APP_KEYS.erpProxyUrl ? '<span class="bg-emerald-100 text-emerald-700 px-2 py-1 rounded text-[10px] font-bold uppercase tracking-wider">Aktiv</span>' : ''}
         </div>
         <label class="text-xs font-semibold text-ink-700">ERP-Proxy-URL</label>
-        <p class="text-[11px] text-ink-500 mb-1.5">Die val.town-URL vom Berichtskonverter (z.B. <code>https://username-berichtskonverter.web.val.run</code>). Auth läuft über deinen Login-Key.</p>
+        <p class="text-[11px] text-ink-500 mb-1.5">Die val.town-URL vom Berichtskonverter (z.B. <code>https://username-berichtskonverter.web.val.run</code>).</p>
         <div class="flex gap-2 flex-wrap">
           <input id="erpProxyUrlInput" type="url" value="${escapeAttr(APP_KEYS.erpProxyUrl || '')}" placeholder="https://xxx.web.val.run" class="flex-1 min-w-[220px] px-3 py-2 border border-ink-200 rounded-lg text-sm font-mono bg-white focus:ring-2 focus:ring-emerald-500/30 focus:border-emerald-500">
           <button type="button" onclick="saveErpProxyUrl(this)" class="bg-emerald-600 hover:bg-emerald-700 text-white px-4 py-2 rounded-lg text-sm font-semibold flex items-center gap-2">
             <i data-lucide="save" class="w-4 h-4"></i> Speichern
           </button>
+        </div>
+
+        <!-- v2.46.164: ERP-Login-Key (separater Key falls Berichtskonverter andere User-Tabelle nutzt) -->
+        <label class="text-xs font-semibold text-ink-700 block mt-3">ERP-Login-Key</label>
+        <p class="text-[11px] text-ink-500 mb-1.5">Der Login-Key aus dem <b>Berichtskonverter</b> (nicht der Freshdesk-Hero-Key). Leer lassen wenn beide Apps dieselbe User-Tabelle nutzen — dann wird der aktuelle Login benutzt.</p>
+        <div class="flex gap-2 flex-wrap">
+          <input id="erpLoginKeyInput" type="password" value="${escapeAttr(APP_KEYS.erpLoginKey || '')}" placeholder="ak_..." autocomplete="off" class="flex-1 min-w-[220px] px-3 py-2 border border-ink-200 rounded-lg text-sm font-mono bg-white focus:ring-2 focus:ring-emerald-500/30 focus:border-emerald-500">
+          <button type="button" onclick="saveErpLoginKey(this)" class="bg-emerald-600 hover:bg-emerald-700 text-white px-4 py-2 rounded-lg text-sm font-semibold flex items-center gap-2">
+            <i data-lucide="save" class="w-4 h-4"></i> Speichern
+          </button>
           ${APP_KEYS.erpProxyUrl ? `<button type="button" onclick="testErpConnection(this)" class="px-3 py-2 border border-ink-200 bg-white rounded-lg text-sm font-medium hover:bg-ink-50 flex items-center gap-2"><i data-lucide="activity" class="w-4 h-4"></i> Test</button>` : ''}
         </div>
         <div id="erpTestResult" class="mt-2"></div>
+
+        <!-- v2.46.164: Firma-Slug-Zuordnung pro Freshdesk-Account -->
+        <div class="mt-4 pt-3 border-t border-ink-100">
+          <p class="text-xs font-semibold text-ink-700">Firma-Slug pro Mandant</p>
+          <p class="text-[11px] text-ink-500 mb-2">Ordnet jeden Freshdesk-Account einem ERP-Firma-Slug zu (der Teil in der ERP-URL: <code>/aufzug/&lt;slug&gt;/api/...</code>). Auto-Default wird aus dem Account-Namen abgeleitet — hier überschreiben wenn nötig.</p>
+          <div class="space-y-1.5">
+            ${(APP_STATE.accounts || []).map(acc => {
+              const cur = (APP_KEYS.erpFirmaSlugMap || {})[acc.id] || '';
+              const auto = _erpFirmaSlugForAccount({...acc, id: '__no_override__'}) || '';
+              return `<div class="flex items-center gap-2">
+                <span class="text-sm text-ink-700 truncate flex-1" title="${escapeAttr(acc.id)}">${escapeHtml(acc.name || acc.id)}</span>
+                <span class="text-[10px] text-ink-400 shrink-0 hidden sm:inline">Auto: <code class="bg-ink-100 px-1 py-0.5 rounded">${escapeHtml(auto || '–')}</code></span>
+                <input type="text" data-erp-slug-account-id="${escapeAttr(acc.id)}" value="${escapeAttr(cur)}" placeholder="${escapeAttr(auto || 'z.B. aufzug')}" class="w-32 shrink-0 px-2 py-1 border border-ink-300 rounded text-sm font-mono">
+              </div>`;
+            }).join('')}
+          </div>
+          <button type="button" onclick="saveErpSlugMap(this)" class="mt-2 bg-emerald-600 hover:bg-emerald-700 text-white px-3 py-1.5 rounded-lg text-[11px] font-bold inline-flex items-center gap-1"><i data-lucide="save" class="w-3.5 h-3.5"></i> Slug-Zuordnung speichern</button>
+        </div>
       </div>
 
       <!-- ============ FALLBACK: MANUELLES SETUP ============ -->
@@ -33846,6 +33889,49 @@ async function saveErpProxyUrl(btnEl) {
     setBusy(btnEl, false);
     toast(clean ? 'ERP-Proxy-URL gespeichert ✓' : 'ERP-Proxy-URL geleert', 'success', 3000);
     setTimeout(() => renderSettingsPage(), 1200);
+  } catch (e) {
+    setBusy(btnEl, false);
+    toast('Speichern fehlgeschlagen: ' + e.message, 'error', 8000);
+  }
+}
+
+/* v2.46.164: Separater ERP-Login-Key speichern (falls Berichtskonverter andere User-DB nutzt). */
+async function saveErpLoginKey(btnEl) {
+  const raw = ($('erpLoginKeyInput')?.value || '').trim();
+  setBusy(btnEl, true, 'Speichere…');
+  try {
+    const keys = await fetchMasterBaseKeys();
+    const existing = keys.find(r => r.fields.key_name === 'erpLoginKey');
+    await writeMasterBaseKey('erpLoginKey', raw, existing?.id);
+    APP_KEYS.erpLoginKey = raw || null;
+    erpClearSessionToken();
+    setBusy(btnEl, false);
+    toast(raw ? 'ERP-Login-Key gespeichert ✓' : 'ERP-Login-Key geleert — fällt zurück auf Freshdesk-Hero-Key', 'success', 3000);
+  } catch (e) {
+    setBusy(btnEl, false);
+    toast('Speichern fehlgeschlagen: ' + e.message, 'error', 8000);
+  }
+}
+
+/* v2.46.164: Firma-Slug-Map pro Freshdesk-Account speichern. */
+async function saveErpSlugMap(btnEl) {
+  const inputs = document.querySelectorAll('[data-erp-slug-account-id]');
+  const map = {};
+  inputs.forEach(el => {
+    const accId = el.getAttribute('data-erp-slug-account-id');
+    const val = (el.value || '').trim();
+    if (accId && val) map[accId] = val;
+  });
+  setBusy(btnEl, true, 'Speichere…');
+  try {
+    const keys = await fetchMasterBaseKeys();
+    const existing = keys.find(r => r.fields.key_name === 'erpFirmaSlugMap');
+    await writeMasterBaseKey('erpFirmaSlugMap', JSON.stringify(map), existing?.id);
+    APP_KEYS.erpFirmaSlugMap = map;
+    _ERP_ANLAGEN_CACHE.clear();  // Slug geändert → Cache invalidieren
+    setBusy(btnEl, false);
+    const n = Object.keys(map).length;
+    toast(n ? (n + ' Slug-Zuordnung' + (n === 1 ? '' : 'en') + ' gespeichert ✓') : 'Alle Overrides gelöscht (Auto-Default aktiv)', 'success', 3000);
   } catch (e) {
     setBusy(btnEl, false);
     toast('Speichern fehlgeschlagen: ' + e.message, 'error', 8000);
