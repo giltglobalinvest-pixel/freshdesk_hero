@@ -779,7 +779,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.182';
+const APP_VERSION = 'v2.46.183';
 
 /* ============================================================
    GLOBAL THEME — v2.46.12
@@ -25099,6 +25099,10 @@ async function angChatExecuteFinal(btn) {
             '<input id="angSendWithSig" type="checkbox" checked class="w-4 h-4 accent-indigo-600">' +
             '<span>Freshdesk-Signatur anhängen</span>' +
           '</label>' +
+          // v2.46.183: Klar sichtbar OB der Berichtskonverter-Save mitläuft
+          (APP_KEYS.bkAirtableBaseId
+            ? '<p class="text-[11px] text-emerald-700 inline-flex items-center gap-1"><i data-lucide="database" class="w-3.5 h-3.5"></i> Wird nach dem Versand automatisch im Berichtskonverter gespeichert.</p>'
+            : '<p class="text-[11px] text-amber-700 inline-flex items-center gap-1"><i data-lucide="alert-triangle" class="w-3.5 h-3.5"></i> Berichtskonverter-Base nicht konfiguriert — Angebot wird NICHT dort abgelegt. <button onclick="closeAngSendPreview();closeAngebotsChatModal();navTo(\'settings\')" class="underline">Einstellungen</button></p>') +
         '</div>' +
         '<div class="px-4 py-3 border-t border-ink-200 flex gap-2 shrink-0">' +
           '<button onclick="closeAngSendPreview()" class="flex-1 px-3 py-2.5 bg-ink-100 hover:bg-ink-200 text-ink-700 rounded-lg text-sm font-bold">Abbrechen</button>' +
@@ -25141,21 +25145,35 @@ async function angChatConfirmSend(btn) {
     );
     // Lokales Save (Status Versendet) — Legacy-ctx nur für die alte Tabelle
     try { await _angebotSaveAirtable(_angChatToCtx(s), 'Versendet'); } catch (e) { console.warn('Airtable-Save:', e.message); }
-    // Berichtskonverter-Save
+    // v2.46.183: Berichtskonverter-Save GARANTIERT — mit einem Auto-Retry,
+    // und wenn er trotzdem scheitert: eigene, laute Fehlermeldung statt Fußnote.
     let bkNote = '';
+    let bkError = null;
     if (APP_KEYS.bkAirtableBaseId) {
       try {
         const bk = await _bkSaveAngebotToBK(s);
         bkNote = ' · Berichtskonverter ANG-' + bk.angNum;
-      } catch (e) {
-        console.warn('BK-Save fehlgeschlagen:', e);
-        bkNote = ' · BK-Save fehlgeschlagen (' + (e.message || '').slice(0, 80) + ')';
+      } catch (e1) {
+        console.warn('BK-Save Versuch 1 fehlgeschlagen — Retry:', e1.message);
+        await new Promise(r => setTimeout(r, 2000));
+        try {
+          const bk = await _bkSaveAngebotToBK(s);
+          bkNote = ' · Berichtskonverter ANG-' + bk.angNum;
+        } catch (e2) {
+          bkError = e2;
+          console.error('BK-Save endgültig fehlgeschlagen:', e2);
+        }
       }
     }
     _angRecordLerntext(s).catch(() => {});
     closeAngSendPreview();
     closeAngebotsChatModal();
     toast('Angebot ANG-' + s.ticketId + ' mit PDF-Anhang versendet' + bkNote, 'success', 6000);
+    if (!APP_KEYS.bkAirtableBaseId) {
+      toast('Hinweis: NICHT im Berichtskonverter gespeichert — Base-ID fehlt (Admin → Einstellungen → ERP-Block)', 'warn', 10000);
+    } else if (bkError) {
+      toast('ACHTUNG: Versand OK, aber Berichtskonverter-Save fehlgeschlagen: ' + (bkError.message || bkError).slice(0, 150), 'error', 12000);
+    }
   } catch (e) {
     setBusy(btn, false);
     toast('Versand fehlgeschlagen: ' + (e.message || e), 'error', 10000);
