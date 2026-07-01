@@ -779,7 +779,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.160';
+const APP_VERSION = 'v2.46.161';
 
 /* ============================================================
    GLOBAL THEME — v2.46.12
@@ -23591,6 +23591,14 @@ async function openAngebotsChatModal(accountId, ticketId) {
       collected: {     // gesammelte Felder, werden im Lauf der Konversation befüllt
         standort: anlage.standort || '',
         fabriknummer: anlage.fabriknummer || '',
+        // v2.46.161: Stammdaten-Header — überschreiben req-Defaults im PDF wenn befüllt
+        stammdaten: {
+          vertragspartner:        '',  // Firma / Rechnungsanschrift
+          rechnungs_anschrift:    '',  // Straße, PLZ, Ort für Rechnung
+          email:                  '',
+          tel:                    '',
+          ansprechpartner_vor_ort:'',  // Name Person vor Ort
+        },
         anrede: '',
         einleitung: '',
         befund_detail: '',
@@ -23633,14 +23641,23 @@ function _renderAngChatShell() {
   if (!host) return;
   const s = window._ANG_CHAT;
   // v2.46.82: 2-Spalten-Layout — Chat links, PDF-Vorschau rechts (auf grossen Screens)
+  // v2.46.161: Anker links/rechts umschaltbar (persistent in localStorage 'ang_anchor')
+  const anchor = (localStorage.getItem('ang_anchor') === 'left') ? 'left' : 'right';
+  const anchorCls = anchor === 'left'
+    ? 'sm:inset-y-0 sm:left-0 sm:right-auto justify-center sm:justify-start'
+    : 'sm:inset-y-0 sm:right-0 sm:left-auto justify-center sm:justify-end';
+  const borderCls = anchor === 'left' ? 'sm:border-r' : 'sm:border-l';
+  const swapTitle = anchor === 'left' ? 'Modal nach rechts verschieben' : 'Modal nach links verschieben';
+  const swapIcon = anchor === 'left' ? 'arrow-right-to-line' : 'arrow-left-to-line';
   host.innerHTML =
-    '<div class="fixed inset-0 sm:inset-y-0 sm:right-0 sm:left-auto z-[60] flex items-end sm:items-stretch justify-center sm:justify-end bg-black/50 sm:bg-transparent sm:pointer-events-none">' +
-      '<div class="bg-white w-full max-w-md sm:w-[460px] xl:w-[940px] sm:max-w-none rounded-t-3xl sm:rounded-none shadow-2xl flex flex-col safe-bottom max-h-[96vh] sm:h-screen sm:max-h-screen sm:border-l sm:border-ink-200 sm:pointer-events-auto">' +
+    '<div class="fixed inset-0 z-[60] flex items-end sm:items-stretch ' + anchorCls + ' bg-black/50 sm:bg-transparent sm:pointer-events-none">' +
+      '<div class="bg-white w-full max-w-md sm:w-[460px] xl:w-[940px] sm:max-w-none rounded-t-3xl sm:rounded-none shadow-2xl flex flex-col safe-bottom max-h-[96vh] sm:h-screen sm:max-h-screen ' + borderCls + ' sm:border-ink-200 sm:pointer-events-auto">' +
         '<div class="safe-top px-4 py-3 border-b border-ink-200 flex items-center justify-between gap-2 shrink-0">' +
           '<div class="flex-1 min-w-0">' +
             '<h3 class="font-bold text-ink-900 inline-flex items-center gap-2"><i data-lucide="message-square" class="w-5 h-5 text-indigo-600"></i> Angebot erstellen</h3>' +
             '<p class="text-[10px] text-ink-500" id="angChatStepLabel">Schreib was du brauchst — KI generiert direkt das PDF</p>' +
           '</div>' +
+          '<button onclick="angChatToggleAnchor()" class="hidden sm:inline-flex w-9 h-9 rounded-lg hover:bg-ink-100 items-center justify-center" title="' + swapTitle + '"><i data-lucide="' + swapIcon + '" class="w-5 h-5 text-ink-600"></i></button>' +
           '<button onclick="angChatToggleMobilePreview()" id="angChatMobilePreviewBtn" class="xl:hidden text-[11px] font-semibold text-indigo-600 px-2 py-1 rounded-lg border border-indigo-200 hidden">PDF anzeigen</button>' +
           '<button onclick="closeAngebotsChatModal()" class="w-9 h-9 rounded-lg hover:bg-ink-100 flex items-center justify-center"><i data-lucide="x" class="w-5 h-5 text-ink-700"></i></button>' +
         '</div>' +
@@ -23653,9 +23670,12 @@ function _renderAngChatShell() {
           '</div>' +
           // VORSCHAU-Spalte (rechts, nur auf XL sichtbar; auf Mobile per Toggle)
           '<div id="angChatPreviewCol" class="hidden xl:flex flex-col flex-1 bg-ink-100 min-h-0">' +
-            '<div class="px-3 py-2 border-b border-ink-200 bg-white flex items-center justify-between text-[11px] shrink-0">' +
+            '<div class="px-3 py-2 border-b border-ink-200 bg-white flex items-center justify-between gap-2 text-[11px] shrink-0">' +
               '<span class="font-semibold text-ink-700 inline-flex items-center gap-1"><i data-lucide="file-text" class="w-3.5 h-3.5"></i> Angebots-Vorschau</span>' +
-              '<span id="angChatIterLabel" class="text-ink-500">Noch keine Daten</span>' +
+              '<div class="flex items-center gap-2">' +
+                '<button onclick="openAngStammdatenEditor()" class="inline-flex items-center gap-1 px-2 py-1 bg-indigo-50 hover:bg-indigo-100 border border-indigo-200 text-indigo-700 rounded-md text-[10px] font-bold" title="Stammdaten (Kunde, Anschrift, Ansprechpartner) bearbeiten"><i data-lucide="edit-3" class="w-3 h-3"></i> Stammdaten</button>' +
+                '<span id="angChatIterLabel" class="text-ink-500">Noch keine Daten</span>' +
+              '</div>' +
             '</div>' +
             '<div id="angChatPreviewWrap" class="flex-1 overflow-y-auto p-3">' +
               '<div class="bg-white rounded-lg border border-ink-200 p-8 text-center text-ink-400 text-sm">' +
@@ -23668,6 +23688,175 @@ function _renderAngChatShell() {
       '</div>' +
     '</div>';
   if (window.lucide) lucide.createIcons();
+}
+
+/* v2.46.161: Modal-Anker links/rechts umschalten + persistieren */
+function angChatToggleAnchor() {
+  const cur = localStorage.getItem('ang_anchor') === 'left' ? 'left' : 'right';
+  localStorage.setItem('ang_anchor', cur === 'left' ? 'right' : 'left');
+  // Shell neu rendern (Chat-Historie + Preview bleiben via State erhalten,
+  // wir müssen sie nach dem Re-Shell wieder einspielen)
+  const s = window._ANG_CHAT;
+  if (!s) return;
+  _renderAngChatShell();
+  // Chat-Bubbles wiederherstellen
+  (s.history || []).forEach(m => _angChatAppendBubble(m.role, m.content));
+  // Preview wenn schon generiert wieder einspielen
+  if (typeof _angChatRenderPreview === 'function' && s.collected?.positionen?.length) {
+    try { _angChatRenderPreview(); } catch (_) {}
+  }
+  // Action-Bar neu rendern (nach Shell ist sie leer)
+  if (typeof _angChatRenderActions === 'function') {
+    try { _angChatRenderActions({ awaitingFirstUserInput: !s.history?.length }); } catch (_) {}
+  }
+}
+
+/* v2.46.161: Stammdaten-Editor — überschreibt die aus dem Ticket
+   automatisch übernommenen Vertragspartner/Anschrift/Tel/Email/Ansprechpartner. */
+function openAngStammdatenEditor() {
+  const s = window._ANG_CHAT;
+  if (!s) return;
+  const t = s.ticket || {};
+  const req = t.requester || {};
+  const sd = s.collected?.stammdaten || {};
+  // Fallback-Kaskade: manuell gespeichert > KI-extrahiert > FD-Requester
+  const val = (k, fdVal) => sd[k] || fdVal || '';
+  let host = document.getElementById('subModalHost2');
+  if (!host) { host = document.createElement('div'); host.id = 'subModalHost2'; document.body.appendChild(host); }
+  host.innerHTML =
+    '<div class="fixed inset-0 z-[70] flex items-end sm:items-center justify-center bg-black/50" onclick="if(event.target===this)closeAngStammdatenEditor()">' +
+      '<div class="bg-white w-full max-w-lg sm:rounded-2xl rounded-t-2xl shadow-2xl flex flex-col safe-bottom" style="max-height:90vh">' +
+        '<div class="px-4 py-3 border-b border-ink-200 flex items-center justify-between gap-2">' +
+          '<h3 class="font-bold text-ink-900 inline-flex items-center gap-2"><i data-lucide="user-circle" class="w-4 h-4 text-indigo-600"></i> Stammdaten bearbeiten</h3>' +
+          '<button onclick="closeAngStammdatenEditor()" class="w-9 h-9 rounded-lg hover:bg-ink-100 flex items-center justify-center"><i data-lucide="x" class="w-5 h-5 text-ink-700"></i></button>' +
+        '</div>' +
+        '<div class="flex-1 overflow-y-auto p-4 space-y-3">' +
+          '<div class="bg-indigo-50 border border-indigo-200 rounded-lg p-2.5 text-[11px] text-indigo-900">' +
+            '<b>Auto-erkannt aus Ticket + Email.</b> Alles hier ist manuell überschreibbar — Änderungen erscheinen sofort in der PDF-Vorschau.' +
+            '<button onclick="reExtractAngStammdaten(this)" class="mt-1.5 w-full px-2 py-1.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded text-[11px] font-bold inline-flex items-center justify-center gap-1"><i data-lucide="sparkles" class="w-3 h-3"></i> Neu aus Email/Anhängen extrahieren (KI)</button>' +
+          '</div>' +
+          '<div><label class="text-[11px] font-bold text-ink-700 uppercase tracking-wider">Vertragspartner (Rechnungsanschrift)</label>' +
+            '<input id="sdVertragspartner" type="text" value="' + escapeAttr(val('vertragspartner', req.company?.name || req.name)) + '" placeholder="Firma XY GmbH" class="w-full px-2 py-1.5 border border-ink-300 rounded-lg text-sm"></div>' +
+          '<div><label class="text-[11px] font-bold text-ink-700 uppercase tracking-wider">Anschrift (Straße, PLZ, Ort)</label>' +
+            '<input id="sdAnschrift" type="text" value="' + escapeAttr(val('rechnungs_anschrift', req.address)) + '" placeholder="Musterstr. 12 · 12345 Musterstadt" class="w-full px-2 py-1.5 border border-ink-300 rounded-lg text-sm"></div>' +
+          '<div class="grid grid-cols-1 sm:grid-cols-2 gap-2">' +
+            '<div><label class="text-[11px] font-bold text-ink-700 uppercase tracking-wider">E-Mail Adresse</label>' +
+              '<input id="sdEmail" type="email" value="' + escapeAttr(val('email', req.email)) + '" placeholder="empfang@kunde.de" class="w-full px-2 py-1.5 border border-ink-300 rounded-lg text-sm"></div>' +
+            '<div><label class="text-[11px] font-bold text-ink-700 uppercase tracking-wider">Telefon</label>' +
+              '<input id="sdTel" type="text" value="' + escapeAttr(val('tel', req.phone || req.mobile)) + '" placeholder="0711 96 88 23 48" class="w-full px-2 py-1.5 border border-ink-300 rounded-lg text-sm"></div>' +
+          '</div>' +
+          '<div class="border-t border-ink-200 pt-3">' +
+            '<label class="text-[11px] font-bold text-ink-700 uppercase tracking-wider">Standort/Anschrift der Aufzugsanlage</label>' +
+            '<input id="sdStandort" type="text" value="' + escapeAttr(s.collected?.standort || '') + '" placeholder="Otto-Hahn-Platz 9-15 · 69120 Heidelberg" class="w-full px-2 py-1.5 border border-ink-300 rounded-lg text-sm">' +
+          '</div>' +
+          '<div class="grid grid-cols-1 sm:grid-cols-2 gap-2">' +
+            '<div><label class="text-[11px] font-bold text-ink-700 uppercase tracking-wider">Fabrik-/Anlagennummer</label>' +
+              '<input id="sdFabrik" type="text" value="' + escapeAttr(s.collected?.fabriknummer || '') + '" placeholder="150623" class="w-full px-2 py-1.5 border border-ink-300 rounded-lg text-sm"></div>' +
+            '<div><label class="text-[11px] font-bold text-ink-700 uppercase tracking-wider">Ansprechpartner vor Ort</label>' +
+              '<input id="sdAnsprech" type="text" value="' + escapeAttr(val('ansprechpartner_vor_ort', req.name)) + '" placeholder="Hausmeister / Verwalter" class="w-full px-2 py-1.5 border border-ink-300 rounded-lg text-sm"></div>' +
+          '</div>' +
+        '</div>' +
+        '<div class="px-4 py-3 border-t border-ink-200 flex gap-2">' +
+          '<button onclick="closeAngStammdatenEditor()" class="flex-1 px-3 py-2 bg-ink-100 hover:bg-ink-200 text-ink-700 rounded-lg text-sm font-bold">Abbrechen</button>' +
+          '<button onclick="saveAngStammdaten(this)" class="flex-1 px-3 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg text-sm font-bold inline-flex items-center justify-center gap-1.5"><i data-lucide="save" class="w-4 h-4"></i> Speichern</button>' +
+        '</div>' +
+      '</div>' +
+    '</div>';
+  if (window.lucide) lucide.createIcons();
+}
+
+function closeAngStammdatenEditor() {
+  const host = document.getElementById('subModalHost2');
+  if (host) host.innerHTML = '';
+}
+
+function saveAngStammdaten(btn) {
+  const s = window._ANG_CHAT;
+  if (!s) return;
+  s.collected = s.collected || {};
+  s.collected.stammdaten = s.collected.stammdaten || {};
+  s.collected.stammdaten.vertragspartner        = ($('sdVertragspartner')?.value || '').trim();
+  s.collected.stammdaten.rechnungs_anschrift    = ($('sdAnschrift')?.value || '').trim();
+  s.collected.stammdaten.email                  = ($('sdEmail')?.value || '').trim();
+  s.collected.stammdaten.tel                    = ($('sdTel')?.value || '').trim();
+  s.collected.stammdaten.ansprechpartner_vor_ort= ($('sdAnsprech')?.value || '').trim();
+  s.collected.standort     = ($('sdStandort')?.value || '').trim();
+  s.collected.fabriknummer = ($('sdFabrik')?.value || '').trim();
+  closeAngStammdatenEditor();
+  toast('Stammdaten gespeichert ✓', 'success', 2000);
+  // Preview neu rendern damit die neuen Felder sichtbar sind
+  if (typeof _angChatRenderPreview === 'function') {
+    try { _angChatRenderPreview(); } catch (_) {}
+  }
+}
+
+/* v2.46.161: KI-Extract der Stammdaten aus Email + Anhängen. */
+async function reExtractAngStammdaten(btn) {
+  const s = window._ANG_CHAT;
+  if (!s) return;
+  setBusy(btn, true, 'KI liest Email + Anhänge…');
+  try {
+    const t = s.ticket || {};
+    const req = t.requester || {};
+    let attachments = [];
+    try {
+      attachments = await _angChatCollectAttachments(s.accountId, s.ticketId, t, { maxCount: 4, maxBytes: 20 * 1024 * 1024 });
+    } catch (_) {}
+    const subj = t.subject || '';
+    const desc = htmlToText(t.description_text || t.description || '').slice(0, 5000);
+    const conv = (t.conversations || []).slice(0, 6).map(c =>
+      (c.incoming ? 'Kunde' : 'Agent') + ': ' + htmlToText(c.body_text || c.body || '').slice(0, 1200)
+    ).join('\n\n---\n\n');
+    const sysPrompt =
+      'Du bist ein präziser Datenextrahierer. Extrahiere aus Email + Anhängen die Angebots-Stammdaten. ' +
+      'Antworte NUR mit einem JSON-Objekt in genau dieser Form, KEINE Erklärung, KEINE Codeblock-Fences:\n' +
+      '{"vertragspartner":"","rechnungs_anschrift":"","email":"","tel":"","ansprechpartner_vor_ort":"","standort":"","fabriknummer":""}\n\n' +
+      'Regeln:\n' +
+      '- vertragspartner = Firma / Rechnungsanschrift des Auftraggebers (z.B. "FLP Lift Parts GmbH", "Sprinkenhof GmbH")\n' +
+      '- rechnungs_anschrift = Straße + Hausnummer + PLZ + Ort in EINER Zeile (z.B. "Erich-Herion-Straße 16, 70736 Fellbach")\n' +
+      '- email = Kontakt-Email des Auftraggebers\n' +
+      '- tel = Kontakt-Telefonnummer (fest oder mobil)\n' +
+      '- ansprechpartner_vor_ort = Name der Person vor Ort (Hausmeister, Verwalter — falls im Ticket erkennbar)\n' +
+      '- standort = Adresse der Aufzugsanlage (kann eine andere sein als Rechnungsanschrift)\n' +
+      '- fabriknummer = Fabrik-/Anlagennummer des Aufzugs (Zahl, meist 4-6-stellig, aus Anhängen)\n' +
+      'Wenn ein Wert nicht erkennbar ist, leerer String "". NIEMALS raten.';
+    const userContent = [
+      { type: 'text', text:
+        'EMAIL-KONTEXT:\n' +
+        'Betreff: ' + subj + '\n' +
+        'Requester (aus FD): ' + (req.name || '?') + (req.email ? ' <' + req.email + '>' : '') + (req.company?.name ? ' · Firma: ' + req.company.name : '') + '\n\n' +
+        'BESCHREIBUNG:\n' + desc +
+        (conv ? '\n\nVERLAUF:\n' + conv : '') +
+        (attachments.length ? '\n\nANHÄNGE folgen als separate Content-Blocks (' + attachments.length + ').' : '')
+      }
+    ];
+    attachments.forEach(a => {
+      if (a.mediaType === 'application/pdf') userContent.push({ type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: a.base64 }});
+      else if (a.mediaType.startsWith('image/')) userContent.push({ type: 'image', source: { type: 'base64', media_type: a.mediaType, data: a.base64 }});
+    });
+    const callFn = (typeof _callAnthropicWithRetry === 'function') ? _callAnthropicWithRetry : (body) => proxyJson('/anthropic/v1/messages', { method: 'POST', body: JSON.stringify(body) });
+    const data = await callFn({
+      model: 'claude-sonnet-4-5-20250929',
+      max_tokens: 800,
+      system: sysPrompt,
+      messages: [{ role: 'user', content: userContent }],
+    });
+    const raw = (data?.content?.[0]?.text || '').trim();
+    const parsed = (typeof parseAIJson === 'function') ? parseAIJson(raw) : JSON.parse(raw);
+    setBusy(btn, false);
+    // In die Input-Felder pushen (User sieht + kann noch überschreiben)
+    if (parsed.vertragspartner)         { const el = $('sdVertragspartner'); if (el) el.value = parsed.vertragspartner; }
+    if (parsed.rechnungs_anschrift)     { const el = $('sdAnschrift'); if (el) el.value = parsed.rechnungs_anschrift; }
+    if (parsed.email)                   { const el = $('sdEmail'); if (el) el.value = parsed.email; }
+    if (parsed.tel)                     { const el = $('sdTel'); if (el) el.value = parsed.tel; }
+    if (parsed.ansprechpartner_vor_ort) { const el = $('sdAnsprech'); if (el) el.value = parsed.ansprechpartner_vor_ort; }
+    if (parsed.standort)                { const el = $('sdStandort'); if (el) el.value = parsed.standort; }
+    if (parsed.fabriknummer)            { const el = $('sdFabrik'); if (el) el.value = parsed.fabriknummer; }
+    toast('KI-Extract fertig — bitte prüfen und speichern', 'success', 3500);
+  } catch (e) {
+    setBusy(btn, false);
+    toast('KI-Extract fehlgeschlagen: ' + (e.message || e), 'error', 8000);
+  }
 }
 
 /* v2.46.78: Ersetzt die letzte KI-Bubble (z.B. "🔍 lese…" → analyse-Ergebnis) */
@@ -24068,13 +24257,14 @@ function _angChatRenderPreview() {
   const lbl = document.getElementById('angChatIterLabel');
   if (!s || !wrap || !s.collected) return;
   // Adapter zum vorhandenen HTML-Renderer
+  // v2.46.161: standort/fabriknummer aus collected in ctx durchreichen (waren vorher leer)
   const ctx = {
     accountId: s.accountId,
     ticketId: s.ticketId,
     ticket: s.ticket,
     profile: s.profile,
-    standort: '',
-    fabriknummer: '',
+    standort: s.collected.standort || '',
+    fabriknummer: s.collected.fabriknummer || '',
     plan: Object.assign({}, s.collected, { _totals: _angebotCalcTotals(s.collected) }),
   };
   const html = _renderAngebotHtml(ctx);
@@ -25230,21 +25420,26 @@ function _renderAngebotHtmlV2(ctx, opts) {
     '</div>';
   }
   // === Servicebot (Hauptseite) ===
-  const eAdr = (req.address || '') || '';
-  const ePhone = (req.phone || req.mobile || '') || '';
+  // v2.46.161: Fallback-Kaskade — manuell in Stammdaten-Editor gesetzt > KI-extrahiert > Freshdesk-Requester
+  const sd = (plan.stammdaten) || {};
+  const eAdr    = sd.rechnungs_anschrift || req.address || '';
+  const ePhone  = sd.tel || req.phone || req.mobile || '';
+  const eEmail  = sd.email || empfaengerEmail || '';
+  const eFirma  = sd.vertragspartner || empfaengerFirma || empfaengerName || '';
+  const eAnspr  = sd.ansprechpartner_vor_ort || empfaengerName || '';
   const ansprechpartner = senderName || '';
   // Stammdaten-Felder
   const stammHtml =
     '<div class="stamm-grid">' +
       '<div class="col">' +
-        '<div class="row"><div class="lbl">Vertragspartner (Rechnungsanschrift)</div><div class="val">' + escapeHtml(empfaengerFirma || empfaengerName || '–') + '</div></div>' +
-        '<div class="row"><div class="lbl">E-Mail Adresse</div><div class="val">' + escapeHtml(empfaengerEmail) + '</div></div>' +
+        '<div class="row"><div class="lbl">Vertragspartner (Rechnungsanschrift)</div><div class="val">' + escapeHtml(eFirma || '–') + '</div></div>' +
+        '<div class="row"><div class="lbl">E-Mail Adresse</div><div class="val">' + escapeHtml(eEmail || '–') + '</div></div>' +
         '<div class="row"><div class="lbl">Standort/e der Aufzugsanlage/n</div><div class="val">' + escapeHtml(standort || '–') + '</div></div>' +
       '</div>' +
       '<div class="col">' +
         '<div class="row"><div class="lbl">Anschrift (Straße, PLZ, Ort)</div><div class="val">' + escapeHtml(eAdr || '–') + '</div></div>' +
-        '<div class="row"><div class="lbl">Tel. Nr.</div><div class="val">' + escapeHtml(ePhone) + '</div></div>' +
-        '<div class="row"><div class="lbl">Ansprechpartner vor Ort</div><div class="val">' + escapeHtml(empfaengerName || '–') + '</div></div>' +
+        '<div class="row"><div class="lbl">Tel. Nr.</div><div class="val">' + escapeHtml(ePhone || '–') + '</div></div>' +
+        '<div class="row"><div class="lbl">Ansprechpartner vor Ort</div><div class="val">' + escapeHtml(eAnspr || '–') + '</div></div>' +
       '</div>' +
     '</div>' +
     (fabriknummer ? '<div class="stamm-grid"><div class="col"><div class="row"><div class="lbl">Anlagen-Nr / Fabriknummer</div><div class="val">' + escapeHtml(fabriknummer) + '</div></div></div></div>' : '');
