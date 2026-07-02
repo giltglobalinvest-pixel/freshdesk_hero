@@ -781,7 +781,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.195';
+const APP_VERSION = 'v2.46.196';
 
 /* ============================================================
    GLOBAL THEME — v2.46.12
@@ -23984,9 +23984,10 @@ async function openAngebotsChatModal(accountId, ticketId) {
     const subj = ticket.subject || '';
     if (restored?.collected && (window._ANG_CHAT.iteration > 0 || (restored.collected.positionen || []).length || (restored.collected.stundensaetze || []).length)) {
       // Wiederhergestellter Stand: Chat-Verlauf abspielen + direkt weiterarbeiten
-      _angChatAppendBubble('assistant', restored.fromBK
-        ? '📂 Zuletzt versendetes Angebot ' + restored.fromBK + ' aus dem Berichtskonverter geladen' + (restored.savedAt ? ' (vom ' + new Date(restored.savedAt).toLocaleDateString('de-DE') + ')' : '') + ' — rechts siehst du das PDF.\n\nSag mir einfach, was angepasst werden soll. Über das ↺-Icon oben startest du komplett neu.'
-        : '📂 Letztes Angebot wiederhergestellt' + (restored.savedAt ? ' (Stand ' + new Date(restored.savedAt).toLocaleString('de-DE') + ')' : '') + ' — rechts siehst du das PDF.\n\nDu kannst direkt weiter anpassen oder senden. Über das ↺-Icon oben startest du neu.');
+      _angChatAppendBubble('assistant', (restored.fromBK
+        ? '📂 Zuletzt versendetes Angebot ' + restored.fromBK + ' aus dem Berichtskonverter geladen' + (restored.savedAt ? ' (vom ' + new Date(restored.savedAt).toLocaleDateString('de-DE') + ')' : '') + ' — rechts siehst du das PDF.\n\nSag mir einfach, was angepasst werden soll.'
+        : '📂 Letztes gespeichertes Angebot geladen' + (restored.savedAt ? ' (Stand ' + new Date(restored.savedAt).toLocaleString('de-DE') + ')' : '') + ' — rechts siehst du das PDF.') +
+        '\n\nÄnderungen gelten erst nach Senden/Speichern — mit ↶ oben verwirfst du sie und lädst diese Version zurück. ↺ startet komplett neu.');
       (window._ANG_CHAT.history || []).forEach(m => _angChatAppendBubble(m.role, m.content));
       _angChatRenderActions({ hasPlan: true });
     } else {
@@ -24029,7 +24030,8 @@ function _renderAngChatShell() {
             '<h3 class="font-bold text-ink-900 inline-flex items-center gap-2"><i data-lucide="message-square" class="w-5 h-5 text-indigo-600"></i> Angebot erstellen <span class="text-indigo-600">· Ticket #' + escapeHtml(String(s?.ticketId || '?')) + '</span></h3>' +
             '<p class="text-[10px] text-ink-500" id="angChatStepLabel">' + escapeHtml(s?.ticket?.subject ? String(s.ticket.subject).slice(0, 70) : 'Schreib was du brauchst — KI generiert direkt das PDF') + '</p>' +
           '</div>' +
-          '<button onclick="angChatResetState()" class="w-9 h-9 rounded-lg hover:bg-ink-100 inline-flex items-center justify-center" title="Neues Angebot beginnen (gespeicherten Stand verwerfen)"><i data-lucide="rotate-ccw" class="w-4.5 h-4.5 text-ink-600" style="width:18px;height:18px"></i></button>' +
+          '<button onclick="angChatRevertToSaved()" class="w-9 h-9 rounded-lg hover:bg-ink-100 inline-flex items-center justify-center" title="Änderungen verwerfen — letzte gespeicherte Version laden"><i data-lucide="undo-2" class="text-ink-600" style="width:18px;height:18px"></i></button>' +
+          '<button onclick="angChatResetState()" class="w-9 h-9 rounded-lg hover:bg-ink-100 inline-flex items-center justify-center" title="Neues Angebot beginnen (gespeicherten Stand verwerfen)"><i data-lucide="rotate-ccw" class="text-ink-600" style="width:18px;height:18px"></i></button>' +
           '<button onclick="angChatToggleAnchor()" class="hidden sm:inline-flex w-9 h-9 rounded-lg hover:bg-ink-100 items-center justify-center" title="' + swapTitle + '"><i data-lucide="' + swapIcon + '" class="w-5 h-5 text-ink-600"></i></button>' +
           '<button onclick="angChatToggleMobilePreview()" id="angChatMobilePreviewBtn" class="xl:hidden text-[11px] font-semibold text-indigo-600 px-2 py-1 rounded-lg border border-indigo-200 hidden">PDF anzeigen</button>' +
           '<button onclick="closeAngebotsChatModal()" class="w-9 h-9 rounded-lg hover:bg-ink-100 flex items-center justify-center"><i data-lucide="x" class="w-5 h-5 text-ink-700"></i></button>' +
@@ -24233,6 +24235,18 @@ function _angPersistState() {
   } catch (e) { console.warn('[Angebot-Persist]', e.message); }
 }
 
+/* v2.46.196: Ungespeicherte Änderungen verwerfen → letzte GESPEICHERTE Version
+   laden (localStorage bzw. Berichtskonverter). Der gespeicherte Stand bleibt
+   unangetastet — nur der Arbeitsstand im Modal wird ersetzt. */
+function angChatRevertToSaved() {
+  const s = window._ANG_CHAT;
+  if (!s) return;
+  if (!confirm('Ungespeicherte Änderungen verwerfen und die letzte gespeicherte Version laden?')) return;
+  const { accountId, ticketId } = s;
+  closeAngebotsChatModal();
+  openAngebotsChatModal(accountId, ticketId);
+}
+
 /* v2.46.191: Gespeicherten Stand verwerfen + Modal frisch starten. */
 function angChatResetState() {
   const s = window._ANG_CHAT;
@@ -24355,7 +24369,8 @@ function saveAngStammdaten(btn) {
   } catch (e) { console.warn('Stammdaten-Persist:', e.message); }
   closeAngStammdatenEditor();
   toast('Stammdaten gespeichert ✓ (bleibt beim erneuten Öffnen erhalten)', 'success', 3000);
-  _angPersistState();  // v2.46.191: auch im Voll-Stand mitsichern
+  // v2.46.196: KEIN Voll-Stand-Persist mehr hier — nur der Stammdaten-Key.
+  // Positionen/Preise werden erst bei Senden/Speichern/Entwurf gesichert.
   // Preview neu rendern damit die neuen Felder sichtbar sind
   if (typeof _angChatRenderPreview === 'function') {
     try { _angChatRenderPreview(); } catch (_) {}
@@ -24895,7 +24910,9 @@ async function angChatUserResponse(userText) {
     _angChatAppendBubble('assistant', result.message);
     _angChatRenderPreview();
     _angChatRenderActions({ hasPlan: true });
-    _angPersistState();  // v2.46.191: letztes Angebot überlebt Modal-Schließen
+    // v2.46.196: KEIN Auto-Persist mehr — Änderungen sind nur ein Arbeitsstand.
+    // Gespeichert wird erst bei „An Kunden senden", „Im Berichtskonverter speichern"
+    // oder „Entwurf". Ohne Speichern lädt das nächste Öffnen die letzte gespeicherte Version.
     // v2.46.193: Ab der 2. Iteration ist die Eingabe eine KORREKTUR — prüfen ob
     // sie eine generalisierbare Regel enthält und diese dauerhaft lernen.
     if (s.iteration >= 2) _angLearnFromCorrection(s, userText);
@@ -25139,7 +25156,6 @@ async function angChatSetAbrechnung(modus) {
   s.collected.abrechnung_modus = modus;
   await _angEnsureAufwandSaetze(s);
   _angChatRenderPreview();
-  _angPersistState();  // v2.46.191
 }
 
 function _angChatUpdateModusToggle() {
@@ -25538,6 +25554,7 @@ async function angChatConfirmSend(btn) {
       }
     }
     _angRecordLerntext(s).catch(() => {});
+    _angPersistState();  // v2.46.196: VERSENDET = gespeichert — das ist ab jetzt die Referenz-Version
     closeAngSendPreview();
     closeAngebotsChatModal();
     toast('Angebot ANG-' + s.ticketId + ' mit PDF-Anhang versendet' + bkNote, 'success', 6000);
@@ -25562,6 +25579,7 @@ async function angChatSaveToBerichtskonverter(btn) {
   try {
     const bk = await _bkSaveAngebotToBK(s);
     _angRecordLerntext(s).catch(() => {});  // v2.46.180: Stil fürs nächste Mal lernen
+    _angPersistState();  // v2.46.196: explizit gespeichert = neue Referenz-Version
     setBusy(btn, false);
     toast('Im Berichtskonverter gespeichert als ANG-' + bk.angNum + ' ✓', 'success', 6000);
   } catch (e) {
@@ -26655,6 +26673,7 @@ async function angebotSaveDraft(btn) {
   setBusy(btn, true, 'Speichere…');
   try {
     await _angebotSaveAirtable(ctx, 'Entwurf');
+    if (chatState) _angPersistState();  // v2.46.196: Entwurf = expliziter Speicherpunkt
     setBusy(btn, false);
     toast('Entwurf gespeichert', 'success', 3500);
   } catch (e) {
