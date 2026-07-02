@@ -781,7 +781,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.190';
+const APP_VERSION = 'v2.46.191';
 
 /* ============================================================
    GLOBAL THEME — v2.46.12
@@ -23965,13 +23965,27 @@ async function openAngebotsChatModal(accountId, ticketId) {
       })(),
       stilReferenzen: null, // wird beim ersten Step gefüllt
     };
+    // v2.46.191: Zuletzt erstelltes Angebot für dieses Ticket wiederherstellen
+    let restored = null;
+    try {
+      restored = JSON.parse(localStorage.getItem('fdh_ang_state_' + accountId + '_' + ticketId) || 'null');
+    } catch (_) {}
+    if (restored?.collected) {
+      window._ANG_CHAT.collected = Object.assign({}, window._ANG_CHAT.collected, restored.collected);
+      window._ANG_CHAT.history   = Array.isArray(restored.history) ? restored.history : [];
+      window._ANG_CHAT.iteration = restored.iteration || 0;
+    }
     _renderAngChatShell();
-    // v2.46.82: User beginnt SOFORT — keine vorgeschaltete KI-Analyse mehr im Chat.
-    // Statt dessen läuft die Ticket-Analyse im HINTERGRUND und wird im State gespeichert.
-    // Erste Bubble: kurzer Hint, dann Input bereit.
     const subj = ticket.subject || '';
-    _angChatAppendBubble('assistant', 'Hallo 👋\n\nBeschreib einfach, was das Angebot enthalten soll — ich aktualisiere direkt das PDF rechts in der Vorschau (Berichtskonverter-Design).\n\nOben rechts kannst du zwischen **Pauschal** und **Aufwand** umschalten.\n\nZ.B.:\n• „Wartungsvertrag 24 Mon, ca. 145€/Mon mit Notruf"\n• „Frequenzumrichter austauschen, Pauschal 8.500€"\n• „Störungsbehebung nach Aufwand, Monteur 95€"');
-    _angChatRenderActions({ awaitingFirstUserInput: true });
+    if (restored?.collected && (window._ANG_CHAT.iteration > 0 || (restored.collected.positionen || []).length || (restored.collected.stundensaetze || []).length)) {
+      // Wiederhergestellter Stand: Chat-Verlauf abspielen + direkt weiterarbeiten
+      _angChatAppendBubble('assistant', '📂 Letztes Angebot wiederhergestellt' + (restored.savedAt ? ' (Stand ' + new Date(restored.savedAt).toLocaleString('de-DE') + ')' : '') + ' — rechts siehst du das PDF.\n\nDu kannst direkt weiter anpassen oder senden. Über das ↺-Icon oben startest du neu.');
+      (window._ANG_CHAT.history || []).forEach(m => _angChatAppendBubble(m.role, m.content));
+      _angChatRenderActions({ hasPlan: true });
+    } else {
+      _angChatAppendBubble('assistant', 'Hallo 👋\n\nBeschreib einfach, was das Angebot enthalten soll — ich aktualisiere direkt das PDF rechts in der Vorschau (Berichtskonverter-Design).\n\nOben rechts kannst du zwischen **Pauschal** und **Aufwand** umschalten.\n\nZ.B.:\n• „Wartungsvertrag 24 Mon, ca. 145€/Mon mit Notruf"\n• „Frequenzumrichter austauschen, Pauschal 8.500€"\n• „Störungsbehebung nach Aufwand, Monteur 95€"');
+      _angChatRenderActions({ awaitingFirstUserInput: true });
+    }
     // v2.46.175: Vorschau SOFORT rendern (BK-Design mit Stammdaten) — nicht erst nach 1. KI-Runde
     _angChatRenderPreview().catch(e => console.warn('Initial-Preview:', e));
     // Hintergrund-Analyse starten — wenn fertig wird sie ins State geschrieben
@@ -24008,6 +24022,7 @@ function _renderAngChatShell() {
             '<h3 class="font-bold text-ink-900 inline-flex items-center gap-2"><i data-lucide="message-square" class="w-5 h-5 text-indigo-600"></i> Angebot erstellen <span class="text-indigo-600">· Ticket #' + escapeHtml(String(s?.ticketId || '?')) + '</span></h3>' +
             '<p class="text-[10px] text-ink-500" id="angChatStepLabel">' + escapeHtml(s?.ticket?.subject ? String(s.ticket.subject).slice(0, 70) : 'Schreib was du brauchst — KI generiert direkt das PDF') + '</p>' +
           '</div>' +
+          '<button onclick="angChatResetState()" class="w-9 h-9 rounded-lg hover:bg-ink-100 inline-flex items-center justify-center" title="Neues Angebot beginnen (gespeicherten Stand verwerfen)"><i data-lucide="rotate-ccw" class="w-4.5 h-4.5 text-ink-600" style="width:18px;height:18px"></i></button>' +
           '<button onclick="angChatToggleAnchor()" class="hidden sm:inline-flex w-9 h-9 rounded-lg hover:bg-ink-100 items-center justify-center" title="' + swapTitle + '"><i data-lucide="' + swapIcon + '" class="w-5 h-5 text-ink-600"></i></button>' +
           '<button onclick="angChatToggleMobilePreview()" id="angChatMobilePreviewBtn" class="xl:hidden text-[11px] font-semibold text-indigo-600 px-2 py-1 rounded-lg border border-indigo-200 hidden">PDF anzeigen</button>' +
           '<button onclick="closeAngebotsChatModal()" class="w-9 h-9 rounded-lg hover:bg-ink-100 flex items-center justify-center"><i data-lucide="x" class="w-5 h-5 text-ink-700"></i></button>' +
@@ -24044,6 +24059,35 @@ function _renderAngChatShell() {
       '</div>' +
     '</div>';
   if (window.lucide) lucide.createIcons();
+}
+
+/* v2.46.191: Kompletten Angebot-Stand pro Ticket in localStorage sichern.
+   Beim nächsten Öffnen wird immer das ZULETZT erstellte Angebot geladen.
+   Bewusst NICHT persistiert: _genAtts (base64-Anhänge), _sendPdfBlob,
+   _erpAnlage — zu groß bzw. reproduzierbar. */
+function _angPersistState() {
+  const s = window._ANG_CHAT;
+  if (!s) return;
+  try {
+    localStorage.setItem('fdh_ang_state_' + s.accountId + '_' + s.ticketId, JSON.stringify({
+      collected: s.collected || {},
+      history:   (s.history || []).slice(-30),
+      iteration: s.iteration || 0,
+      savedAt:   new Date().toISOString(),
+    }));
+  } catch (e) { console.warn('[Angebot-Persist]', e.message); }
+}
+
+/* v2.46.191: Gespeicherten Stand verwerfen + Modal frisch starten. */
+function angChatResetState() {
+  const s = window._ANG_CHAT;
+  if (!s) return;
+  if (!confirm('Gespeichertes Angebot zu Ticket #' + s.ticketId + ' verwerfen und neu beginnen?')) return;
+  try { localStorage.removeItem('fdh_ang_state_' + s.accountId + '_' + s.ticketId); } catch (_) {}
+  try { localStorage.removeItem('fdh_ang_stamm_' + s.accountId + '_' + s.ticketId); } catch (_) {}
+  const { accountId, ticketId } = s;
+  closeAngebotsChatModal();
+  openAngebotsChatModal(accountId, ticketId);
 }
 
 /* v2.46.161: Modal-Anker links/rechts umschalten + persistieren */
@@ -24156,6 +24200,7 @@ function saveAngStammdaten(btn) {
   } catch (e) { console.warn('Stammdaten-Persist:', e.message); }
   closeAngStammdatenEditor();
   toast('Stammdaten gespeichert ✓ (bleibt beim erneuten Öffnen erhalten)', 'success', 3000);
+  _angPersistState();  // v2.46.191: auch im Voll-Stand mitsichern
   // Preview neu rendern damit die neuen Felder sichtbar sind
   if (typeof _angChatRenderPreview === 'function') {
     try { _angChatRenderPreview(); } catch (_) {}
@@ -24691,6 +24736,7 @@ async function angChatUserResponse(userText) {
     _angChatAppendBubble('assistant', result.message);
     _angChatRenderPreview();
     _angChatRenderActions({ hasPlan: true });
+    _angPersistState();  // v2.46.191: letztes Angebot überlebt Modal-Schließen
   } catch (e) {
     if (bar) bar.innerHTML = '<div class="bg-red-50 border border-red-200 rounded-xl p-3 text-sm text-red-800"><b>Fehler:</b> ' + escapeHtml(e.message || String(e)) + '</div>' +
       '<button onclick="angChatUserResponse(\'' + escapeAttr(userText.replace(/\\/g, '').replace(/\'/g, '')) + '\')" class="w-full mt-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl px-3 py-2 text-xs font-semibold">Nochmal versuchen</button>';
@@ -24922,6 +24968,7 @@ async function angChatSetAbrechnung(modus) {
     s.collected.stundensaetze = saetze;
   }
   _angChatRenderPreview();
+  _angPersistState();  // v2.46.191
 }
 
 function _angChatUpdateModusToggle() {
