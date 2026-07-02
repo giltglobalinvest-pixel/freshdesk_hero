@@ -781,7 +781,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.189';
+const APP_VERSION = 'v2.46.190';
 
 /* ============================================================
    GLOBAL THEME — v2.46.12
@@ -24760,6 +24760,10 @@ async function _angChatGenerateOffer(s, userText) {
     '- KEINE Formulierungen, die rechtlich binden oder einen Erfolg garantieren: NIEMALS "Behebung sämtlicher Mängel", "dauerhafte Störungsfreiheit", "vollständige Instandsetzung garantiert" o.ä.\n' +
     '- Stattdessen neutrale, absichernde Formulierungen: "nach Befund", "gemäß Herstellervorgaben", "im beschriebenen Umfang", "soweit zugänglich".\n' +
     '- Im Zweifel WENIGER schreiben als zu viel versprechen.\n\n' +
+    'VERBOTENE POSITIONEN:\n' +
+    '- NIEMALS eigenständig Sammel-/Füller-Positionen hinzufügen wie „Material und Ersatzteile", „Kleinmaterial", „Verbrauchsmaterial", „Sonstiges", „Anfahrt" o.ä. — NUR Positionen, die der User explizit nennt oder die sich KONKRET aus Ticket/Anhängen ergeben.\n' +
+    '- NIEMALS Aufschläge, Margen oder Abrechnungsmodelle erfinden (z.B. „Selbstkostenpreis zzgl. 15% Aufschlag") — solche Konditionen kommen ausschließlich vom User.\n' +
+    '- Materialabrechnung nach Aufwand ist im Aufwand-Modus bereits durch den Standard-Hinweiskasten abgedeckt („Abrechnung nach tatsächlichem Aufwand von Lohn und Material") — dafür braucht es KEINE eigene Position.\n\n' +
     'ABRECHNUNGSMODUS (pauschal vs. aufwand):\n' +
     '- "pauschal" (Standard): Festpreis-Positionen mit Einzelpreisen.\n' +
     '- "aufwand": KEINE Festpreise — stattdessen Stundensätze-Tabelle (stundensaetze-Array). Positionen beschreiben dann nur den Arbeitsumfang (einzelpreis: 0) oder bleiben leer.\n' +
