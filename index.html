@@ -781,7 +781,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.200';
+const APP_VERSION = 'v2.46.201';
 
 /* ============================================================
    GLOBAL THEME — v2.46.12
@@ -845,6 +845,7 @@ let APP_KEYS = {
   erpLoginKey:      null,    // v2.46.164: separater Login-Key für Berichtskonverter (falls andere User-Tabelle)
   erpFirmaSlugMap:  {},      // v2.46.164: { fdAccountId → firmaSlug }
   bkAirtableBaseId: null,    // v2.46.167: Airtable-Base-ID vom Berichtskonverter — Angebote landen dort in App_Angebote
+  googleMapsKey:    null,    // v2.46.201: Google Geocoding API (Adresse → Place-ID fürs ERP)
   sessionToken:     null,
   user:             null,    // { _id, api_key?, name, role, is_admin, ... }
 };
@@ -1403,6 +1404,8 @@ async function loadProjectKeys() {
         }
         // v2.46.167: Airtable-Base-ID vom Berichtskonverter (für App_Angebote-Save)
         if (f.key_name === 'bkAirtableBaseId') APP_KEYS.bkAirtableBaseId = f.key_value || null;
+        // v2.46.201: Google-Maps-Key für Geocoding (Adresse → Place-ID, wie BK v7.01)
+        if (f.key_name === 'googleMapsKey')    APP_KEYS.googleMapsKey    = f.key_value || null;
       });
     }
   } catch (_) {}
@@ -1418,6 +1421,22 @@ async function loadProjectKeys() {
         (data.records || []).forEach(rec => {
           if (rec.fields.key_name === 'anthropicKey') APP_KEYS.anthropicKey = rec.fields.key_value;
         });
+      }
+    } catch (_) {}
+  }
+  // v2.46.201: googleMapsKey projektübergreifend suchen — er wurde vom User
+  // vermutlich unter dem Berichtskonverter-Projekt angelegt, nicht unter FD-Hero.
+  if (!APP_KEYS.googleMapsKey) {
+    try {
+      const res = await fetch(
+        'https://api.airtable.com/v0/' + APP_CONFIG.MASTER_BASE_ID + '/Keys?filterByFormula=' +
+        encodeURIComponent("{key_name}='googleMapsKey'") + '&maxRecords=1',
+        { headers }
+      );
+      if (res.ok) {
+        const data = await res.json();
+        const v = data.records?.[0]?.fields?.key_value;
+        if (v) { APP_KEYS.googleMapsKey = v; console.log('[Keys] googleMapsKey projektübergreifend geladen'); }
       }
     } catch (_) {}
   }
@@ -1738,52 +1757,74 @@ async function erpLoadKunden(firmaSlug, force) {
   return items;
 }
 
-/* Google-Maps-Adress-Lookup über den ERP-Proxy — liefert [{placeId, label}].
-   adresseId im ERP MUSS eine Place-ID sein (ChIJ…), Text wird abgelehnt. */
+/* v2.46.201: Adress-Lookup 1:1 wie Berichtskonverter v7.00/7.01.
+   Das ERP erwartet in adresseId eine Google-Place-ID (ChIJ…) — es hat aber
+   KEINEN Text-Suchendpunkt (die Suche läuft dort im Frontend-SDK).
+   → BEVORZUGT: Google Geocoding API direkt (CORS-fähig, liefert place_id).
+     Key aus der Keys-Tabelle (key_name: googleMapsKey).
+   → FALLBACK: bereinigte Query-Varianten gegen die ERP-Endpoints (Spring
+     matcht Pfad-Variablen mit Punkten/Kommas nicht → "Str." expandieren,
+     Satzzeichen raus). */
+function _gmapsQueryVariants(q) {
+  const base = String(q || '').trim().replace(/\n/g, ' ').replace(/\s+/g, ' ');
+  const out = [];
+  const push = v => { v = v.replace(/\s+/g, ' ').trim(); if (v && !out.includes(v)) out.push(v); };
+  push(base.replace(/\bstr\.?(?=\s|$)/gi, 'Straße').replace(/[.,;]/g, ''));
+  push(base.replace(/[.,;]/g, ''));
+  push(base);
+  return out;
+}
+
 async function _erpGmapsLookup(firmaSlug, query) {
-  const enc = encodeURIComponent(String(query || '').trim());
-  if (!enc) return [];
-  // v2.46.200: VOLLSTÄNDIGE Kandidaten-Liste aus dem Berichtskonverter (v6.98) —
-  // die Query-Param-Varianten fehlten und genau dort liegt der funktionierende Endpoint.
-  const candidates = [
-    // Autocomplete-Varianten (Google Places Autocomplete Proxy)
-    'api/google/maps/autocomplete/' + enc,
-    'api/users/me/google/maps/autocomplete/' + enc,
-    'api/google/maps/autocomplete?input=' + enc,
-    'api/google/maps/autocomplete?query=' + enc,
-    // Such-Varianten
-    'api/google/maps/suche/' + enc,
-    'api/google/maps/search/' + enc,
-    'api/google/maps/adressen/' + enc,
-    'api/users/me/google/maps/adressen/' + enc,
-    'api/google/maps/predictions/' + enc,
-    // Query-Param auf adresse
-    'api/google/maps/adresse?query=' + enc,
-    'api/google/maps/adresse?suche=' + enc,
-    'api/google/maps/adresse?input=' + enc,
-    // Direkte Pfade (falls Endpoint doch Text kann)
-    'api/google/maps/adresse/' + enc,
-    'api/users/me/google/maps/adresse/' + enc,
-    'api/google/maps/places/' + enc,
-    'api/google/maps/place/' + enc,
-  ];
-  for (const path of candidates) {
+  const q = String(query || '').trim();
+  if (!q) return [];
+  // 1) Google Geocoding API direkt (wie BK v7.01)
+  if (APP_KEYS.googleMapsKey) {
     try {
-      const res = await erpFetch('/aufzug/' + firmaSlug + '/' + path);
-      if (!res) continue;
-      let items = [];
-      if (Array.isArray(res)) items = res;
-      else if (Array.isArray(res.results)) items = res.results;
-      else if (Array.isArray(res.predictions)) items = res.predictions;
-      else if (Array.isArray(res.items)) items = res.items;
-      else if (res.result) items = [res.result];
-      else if (typeof res === 'object' && Object.keys(res).length) items = [res];
-      const norm = items.map(r => ({
-        placeId: r.place_id || r.placeId || r.id || '',
-        label:   r.formatted_address || r.formattedAddress || r.adresse || r.description || r.beschreibung || r.name || '',
-      })).filter(x => x.placeId && /^ChIJ|^Ei|^Gh/.test(String(x.placeId)));
-      if (norm.length) return norm;
-    } catch (_) { /* nächsten Endpoint probieren */ }
+      const r = await fetch('https://maps.googleapis.com/maps/api/geocode/json?address=' + encodeURIComponent(q) + '&language=de&region=de&key=' + encodeURIComponent(APP_KEYS.googleMapsKey));
+      const j = await r.json();
+      console.log('[GMaps] Geocoding-Status:', j.status, '· Treffer:', (j.results || []).length);
+      if (j.status === 'OK' && Array.isArray(j.results) && j.results.length) {
+        return j.results.slice(0, 5).map(res => ({
+          placeId: res.place_id,
+          label:   res.formatted_address || '',
+        })).filter(x => x.placeId);
+      }
+      if (j.status === 'REQUEST_DENIED') {
+        console.warn('[GMaps] Geocoding REQUEST_DENIED:', j.error_message);
+        toast('Google-Maps-Key abgelehnt: ' + (j.error_message || '').slice(0, 120), 'warn', 8000);
+      }
+    } catch (e) { console.warn('[GMaps] Geocoding-Fehler:', e.message); }
+  } else {
+    console.warn('[GMaps] Kein googleMapsKey in der Keys-Tabelle — nur ERP-Fallback (unzuverlässig)');
+  }
+  // 2) ERP-Fallback mit bereinigten Varianten
+  const endpoints = [
+    v => 'api/google/maps/adresse/' + encodeURIComponent(v),
+    v => 'api/users/me/google/maps/adresse/' + encodeURIComponent(v),
+    v => 'api/google/maps/place/' + encodeURIComponent(v),
+    v => 'api/google/maps/places/' + encodeURIComponent(v),
+    v => 'api/google/maps/autocomplete/' + encodeURIComponent(v),
+  ];
+  for (const v of _gmapsQueryVariants(q)) {
+    for (const ep of endpoints) {
+      try {
+        const res = await erpFetch('/aufzug/' + firmaSlug + '/' + ep(v));
+        if (!res) continue;
+        let items = [];
+        if (Array.isArray(res)) items = res;
+        else if (Array.isArray(res.results)) items = res.results;
+        else if (Array.isArray(res.predictions)) items = res.predictions;
+        else if (Array.isArray(res.items)) items = res.items;
+        else if (res.result) items = [res.result];
+        else if (typeof res === 'object' && Object.keys(res).length) items = [res];
+        const norm = items.map(r => ({
+          placeId: r.place_id || r.placeId || r.id || '',
+          label:   r.formatted_address || r.formattedAddress || r.adresse || r.description || r.beschreibung || r.name || '',
+        })).filter(x => x.placeId && /^ChIJ|^Ei|^Gh/.test(String(x.placeId)));
+        if (norm.length) return norm;
+      } catch (_) { /* nächste Kombination */ }
+    }
   }
   return [];
 }
@@ -1791,7 +1832,7 @@ async function _erpGmapsLookup(firmaSlug, query) {
 /* Kunde im ERP anlegen. adresse wird zu einer Google-Place-ID aufgelöst. */
 async function erpCreateKunde(firmaSlug, data) {
   const results = await _erpGmapsLookup(firmaSlug, data.adresse);
-  if (!results.length) throw new Error('Keine Google-Maps-Adresse für „' + data.adresse + '" gefunden — bitte präzisieren (Straße Hausnr, PLZ Ort)');
+  if (!results.length) throw new Error('Keine Google-Maps-Adresse für „' + data.adresse + '" gefunden' + (APP_KEYS.googleMapsKey ? ' — bitte präzisieren (Straße Hausnr, PLZ Ort)' : ' — googleMapsKey fehlt in der Airtable Keys-Tabelle (gleicher Key wie im Berichtskonverter)'));
   const placeId = results[0].placeId;
   const payload = {
     firmenname:       data.firmenname,
@@ -1818,7 +1859,7 @@ async function erpCreateKunde(firmaSlug, data) {
    (ERP wirft sonst NullPointerException — bekannter Workaround aus dem BK). */
 async function erpCreateAnlage(firmaSlug, data) {
   const results = await _erpGmapsLookup(firmaSlug, data.adresse);
-  if (!results.length) throw new Error('Keine Google-Maps-Adresse für „' + data.adresse + '" gefunden — bitte präzisieren (Straße Hausnr, PLZ Ort)');
+  if (!results.length) throw new Error('Keine Google-Maps-Adresse für „' + data.adresse + '" gefunden' + (APP_KEYS.googleMapsKey ? ' — bitte präzisieren (Straße Hausnr, PLZ Ort)' : ' — googleMapsKey fehlt in der Airtable Keys-Tabelle (gleicher Key wie im Berichtskonverter)'));
   const placeId = results[0].placeId;
   const kunde = data.kunde;
   const kundenNr = kunde.kundennummer || kunde.id;
