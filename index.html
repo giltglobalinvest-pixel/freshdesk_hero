@@ -779,7 +779,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.186';
+const APP_VERSION = 'v2.46.187';
 
 /* ============================================================
    GLOBAL THEME — v2.46.12
@@ -24743,6 +24743,12 @@ async function _angChatGenerateOffer(s, userText) {
     '- Lies sie VOLLSTÄNDIG. Enthalten sie Leistungsbeschreibungen — z.B. Subunternehmer-Angebote, TÜV-/Prüfberichte, Mängellisten, Serviceberichte — arbeite die relevanten Arbeitsschritte in die "beschreibung" der passenden Positionen ein (sinngemäß und strukturiert, EIGENE Formulierung, ein Arbeitsschritt pro Zeile mit \\n getrennt). Der User soll nichts manuell abtippen müssen.\n' +
     '- EINKAUFSPREISE aus Subunternehmer-Angeboten NIEMALS als Verkaufspreise übernehmen. Preise kommen nur vom User oder aus deiner Kalkulation.\n' +
     '- Interne Vermerke aus Anhängen (Marge, Sub-Konditionen, interne Notizen) gehören NICHT in den Angebots-Text.\n\n' +
+    'LEISTUNGSBESCHREIBUNG JE POSITION (Feld "beschreibung" — IMMER generieren):\n' +
+    '- MODERAT UND ALLGEMEIN halten: 2-4 kurze Arbeitsschritte, die den üblichen Ablauf beschreiben (z.B. "Demontage der Altteile", "Montage und Einstellung", "Funktionsprüfung und Inbetriebnahme").\n' +
+    '- NUR aus Ticket, Anhängen oder User-Angaben ableiten. NICHTS frei erfinden — keine Normen, Teilenummern, Materialangaben oder Fristen, die nirgends stehen.\n' +
+    '- KEINE Formulierungen, die rechtlich binden oder einen Erfolg garantieren: NIEMALS "Behebung sämtlicher Mängel", "dauerhafte Störungsfreiheit", "vollständige Instandsetzung garantiert" o.ä.\n' +
+    '- Stattdessen neutrale, absichernde Formulierungen: "nach Befund", "gemäß Herstellervorgaben", "im beschriebenen Umfang", "soweit zugänglich".\n' +
+    '- Im Zweifel WENIGER schreiben als zu viel versprechen.\n\n' +
     'ABRECHNUNGSMODUS (pauschal vs. aufwand):\n' +
     '- "pauschal" (Standard): Festpreis-Positionen mit Einzelpreisen.\n' +
     '- "aufwand": KEINE Festpreise — stattdessen Stundensätze-Tabelle (stundensaetze-Array). Positionen beschreiben dann nur den Arbeitsumfang (einzelpreis: 0) oder bleiben leer.\n' +
@@ -24759,7 +24765,7 @@ async function _angChatGenerateOffer(s, userText) {
     '  "plan": {\n' +
     '    "leistungsbeschreibung": string (WAS angeboten wird, sachlich, 1-3 Sätze — z.B. "Austausch Frequenzumrichter inklusive Montage, Parametrierung und Inbetriebnahme."),\n' +
     '    "erlaeuterung": string (OPTIONAL, kurzer Hinweis 1-2 Sätze — z.B. zu Voraussetzungen, Anschluss, Ausschlüssen — oder leer),\n' +
-    '    "positionen": [{"bezeichnung": string (kurzer Titel), "beschreibung": string (OPTIONAL: detaillierte Arbeitsbeschreibung — mehrere Punkte mit \\n getrennt, erscheint im PDF als Liste unter dem Titel), "menge": number, "einheit": "ST"|"STD"|"Pauschal"|"Monat", "einzelpreis": number, "kategorie": "Material"|"Montage", "preis_aufwand": boolean}],\n' +
+    '    "positionen": [{"bezeichnung": string (kurzer Titel), "beschreibung": string (IMMER ausfüllen: 2-4 Arbeitsschritte, je einer pro Zeile mit \\n getrennt — erscheint im PDF als Liste unter dem Titel), "menge": number, "einheit": "ST"|"STD"|"Pauschal"|"Monat", "einzelpreis": number, "kategorie": "Material"|"Montage", "preis_aufwand": boolean}],\n' +
     '    "konditionen": {"lieferzeit": string, "preisstellung": string, "zahlungsziel": string, "gewaehrleistung": string, "bindefrist": string, "montagetermin": string},\n' +
     '    "mwst_satz": number,\n' +
     '    "einsatzpauschale_anfahrt": number (Pauschale pro Anfahrt, 0 wenn inkludiert),\n' +
