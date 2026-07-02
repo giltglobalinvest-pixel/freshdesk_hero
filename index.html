@@ -781,7 +781,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.194';
+const APP_VERSION = 'v2.46.195';
 
 /* ============================================================
    GLOBAL THEME — v2.46.12
@@ -23970,6 +23970,11 @@ async function openAngebotsChatModal(accountId, ticketId) {
     try {
       restored = JSON.parse(localStorage.getItem('fdh_ang_state_' + accountId + '_' + ticketId) || 'null');
     } catch (_) {}
+    // v2.46.195: Fallback — letztes VERSENDETES Angebot aus dem Berichtskonverter
+    // (greift wenn localStorage leer: anderes Gerät, Cache geleert, altes Angebot)
+    if (!restored?.collected) {
+      restored = await _angRestoreFromBK(accountId, ticketId);
+    }
     if (restored?.collected) {
       window._ANG_CHAT.collected = Object.assign({}, window._ANG_CHAT.collected, restored.collected);
       window._ANG_CHAT.history   = Array.isArray(restored.history) ? restored.history : [];
@@ -23979,7 +23984,9 @@ async function openAngebotsChatModal(accountId, ticketId) {
     const subj = ticket.subject || '';
     if (restored?.collected && (window._ANG_CHAT.iteration > 0 || (restored.collected.positionen || []).length || (restored.collected.stundensaetze || []).length)) {
       // Wiederhergestellter Stand: Chat-Verlauf abspielen + direkt weiterarbeiten
-      _angChatAppendBubble('assistant', '📂 Letztes Angebot wiederhergestellt' + (restored.savedAt ? ' (Stand ' + new Date(restored.savedAt).toLocaleString('de-DE') + ')' : '') + ' — rechts siehst du das PDF.\n\nDu kannst direkt weiter anpassen oder senden. Über das ↺-Icon oben startest du neu.');
+      _angChatAppendBubble('assistant', restored.fromBK
+        ? '📂 Zuletzt versendetes Angebot ' + restored.fromBK + ' aus dem Berichtskonverter geladen' + (restored.savedAt ? ' (vom ' + new Date(restored.savedAt).toLocaleDateString('de-DE') + ')' : '') + ' — rechts siehst du das PDF.\n\nSag mir einfach, was angepasst werden soll. Über das ↺-Icon oben startest du komplett neu.'
+        : '📂 Letztes Angebot wiederhergestellt' + (restored.savedAt ? ' (Stand ' + new Date(restored.savedAt).toLocaleString('de-DE') + ')' : '') + ' — rechts siehst du das PDF.\n\nDu kannst direkt weiter anpassen oder senden. Über das ↺-Icon oben startest du neu.');
       (window._ANG_CHAT.history || []).forEach(m => _angChatAppendBubble(m.role, m.content));
       _angChatRenderActions({ hasPlan: true });
     } else {
@@ -24131,6 +24138,81 @@ async function _angLearnFromCorrection(s, userText) {
     console.log('[Angebot-Regeln] Neu gelernt:', regel);
   } catch (e) {
     console.warn('[Angebot-Regeln] Lernen fehlgeschlagen:', e.message);
+  }
+}
+
+/* v2.46.195: Letztes VERSENDETES Angebot aus dem Berichtskonverter laden —
+   Fallback wenn kein localStorage-Stand existiert (anderes Gerät, Cache
+   geleert, oder Angebot vor v2.46.191 erstellt). Sucht in App_Angebote nach
+   freshdesk_ticket_id und mappt das BK-Format zurück ins Chat-Format. */
+async function _angRestoreFromBK(accountId, ticketId) {
+  if (!APP_KEYS.bkAirtableBaseId || !APP_KEYS.airtableWriteKey) return null;
+  try {
+    const url = 'https://api.airtable.com/v0/' + APP_KEYS.bkAirtableBaseId + '/App_Angebote'
+      + '?filterByFormula=' + encodeURIComponent("{freshdesk_ticket_id}='" + String(ticketId).replace(/'/g, "\\'") + "'")
+      + '&sort[0][field]=app_angebot_num&sort[0][direction]=desc&maxRecords=1';
+    const r = await fetch(url, { headers: { 'Authorization': 'Bearer ' + APP_KEYS.airtableWriteKey } });
+    if (!r.ok) return null;
+    const d = await r.json();
+    const f = d.records?.[0]?.fields;
+    if (!f) return null;
+    let positionen = [];
+    try {
+      positionen = JSON.parse(f.positionen_json || '[]').map(p => ({
+        bezeichnung:   p.titel || p.bezeichnung || '',
+        beschreibung:  Array.isArray(p.leistungsbeschreibung) ? p.leistungsbeschreibung.join('\n') : (p.beschreibung || ''),
+        menge:         +p.menge || 1,
+        einheit:       p.einheit || 'ST',
+        einzelpreis:   +p.vp || +p.einzelpreis || 0,
+        kategorie:     'Montage',
+        preis_aufwand: !!p.preis_aufwand,
+      }));
+    } catch (_) {}
+    let stundensaetze = [];
+    try { stundensaetze = JSON.parse(f.stundensaetze_json || '[]'); } catch (_) {}
+    // Anschreiben grob in Anrede + Body zerlegen
+    const ans = String(f.anschreiben || '');
+    let anrede = '', body = ans;
+    const m = ans.match(/^(Sehr geehrte[^,\n]{0,80},)\s*\n*/);
+    if (m) { anrede = m[1]; body = ans.slice(m[0].length); }
+    return {
+      collected: {
+        abrechnung_modus:       f.abrechnung_modus || 'pauschal',
+        preisanzeige_modus:     f.preisanzeige_modus || 'einzel',
+        gesamtpreis_ausblenden: !!f.gesamtpreis_ausblenden,
+        positionen, stundensaetze,
+        mwst_satz:              +f.ust_prozent || 19,
+        pauschalpreis_netto:    +f.pauschalpreis_netto || 0,
+        anschreiben_aktiv:      !!body.trim(),
+        anschreiben_anrede:     anrede,
+        anschreiben_body:       body.trim(),
+        anschreiben_gruss:      '',
+        leistungsbeschreibung:  '',
+        erlaeuterung:           '',
+        standort:               f.anlage_adresse || '',
+        fabriknummer:           f.seriennummer || '',
+        stammdaten: {
+          vertragspartner:         f.kunde_name || '',
+          rechnungs_anschrift:     f.kunde_adresse || '',
+          ansprechpartner_vor_ort: f.kontakt_name || '',
+          email: '', tel: '',
+        },
+        konditionen: {
+          lieferzeit:      f.kond_lieferzeit || '',
+          preisstellung:   f.kond_preisbasis || '',
+          zahlungsziel:    f.kond_zahlung || '',
+          gewaehrleistung: f.kond_gewaehrleistung || '',
+          bindefrist:      '',
+        },
+      },
+      history:   [],
+      iteration: 1,
+      savedAt:   f.erstellt_am || '',
+      fromBK:    'ANG-' + (f.app_angebot_num || '?'),
+    };
+  } catch (e) {
+    console.warn('[Angebot-Restore-BK]', e.message);
+    return null;
   }
 }
 
