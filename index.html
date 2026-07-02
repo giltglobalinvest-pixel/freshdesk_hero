@@ -781,7 +781,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.188';
+const APP_VERSION = 'v2.46.189';
 
 /* ============================================================
    GLOBAL THEME — v2.46.12
@@ -12532,6 +12532,13 @@ async function _reloadTicketDetail(accountId, ticketId, btn) {
 
 async function openTicketDetail(accountId, ticketId) {
   CURRENT_TICKET = null;
+  // v2.46.189: Offenes Angebot-Panel eines ANDEREN Tickets schließen — sonst
+  // arbeitet der User versehentlich mit dem alten Chat-State weiter (Ticket-Mix).
+  if (window._ANG_CHAT && String(window._ANG_CHAT.ticketId) !== String(ticketId)) {
+    const oldId = window._ANG_CHAT.ticketId;
+    try { closeAngebotsChatModal(); } catch (_) {}
+    toast('Angebot-Chat zu Ticket #' + oldId + ' geschlossen (Ticket-Wechsel)', 'info', 4000);
+  }
   const acc = APP_STATE.accounts.find(a => a.id === accountId);
   $('modalHost').innerHTML = `
     <div class="fixed inset-0 z-50 bg-white flex flex-col">
@@ -23996,8 +24003,10 @@ function _renderAngChatShell() {
       '<div class="bg-white w-full max-w-md sm:w-[460px] xl:w-[940px] sm:max-w-none rounded-t-3xl sm:rounded-none shadow-2xl flex flex-col safe-bottom max-h-[96vh] sm:h-screen sm:max-h-screen ' + borderCls + ' sm:border-ink-200 sm:pointer-events-auto">' +
         '<div class="safe-top px-4 py-3 border-b border-ink-200 flex items-center justify-between gap-2 shrink-0">' +
           '<div class="flex-1 min-w-0">' +
-            '<h3 class="font-bold text-ink-900 inline-flex items-center gap-2"><i data-lucide="message-square" class="w-5 h-5 text-indigo-600"></i> Angebot erstellen</h3>' +
-            '<p class="text-[10px] text-ink-500" id="angChatStepLabel">Schreib was du brauchst — KI generiert direkt das PDF</p>' +
+            // v2.46.189: Ticket-Nr. immer sichtbar — verhindert Verwechslung wenn
+            // darunter zu einem anderen Ticket navigiert wird
+            '<h3 class="font-bold text-ink-900 inline-flex items-center gap-2"><i data-lucide="message-square" class="w-5 h-5 text-indigo-600"></i> Angebot erstellen <span class="text-indigo-600">· Ticket #' + escapeHtml(String(s?.ticketId || '?')) + '</span></h3>' +
+            '<p class="text-[10px] text-ink-500" id="angChatStepLabel">' + escapeHtml(s?.ticket?.subject ? String(s.ticket.subject).slice(0, 70) : 'Schreib was du brauchst — KI generiert direkt das PDF') + '</p>' +
           '</div>' +
           '<button onclick="angChatToggleAnchor()" class="hidden sm:inline-flex w-9 h-9 rounded-lg hover:bg-ink-100 items-center justify-center" title="' + swapTitle + '"><i data-lucide="' + swapIcon + '" class="w-5 h-5 text-ink-600"></i></button>' +
           '<button onclick="angChatToggleMobilePreview()" id="angChatMobilePreviewBtn" class="xl:hidden text-[11px] font-semibold text-indigo-600 px-2 py-1 rounded-lg border border-indigo-200 hidden">PDF anzeigen</button>' +
