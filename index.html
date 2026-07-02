@@ -781,7 +781,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.192';
+const APP_VERSION = 'v2.46.193';
 
 /* ============================================================
    GLOBAL THEME — v2.46.12
@@ -24014,7 +24014,7 @@ function _renderAngChatShell() {
   const swapIcon = anchor === 'left' ? 'arrow-right-to-line' : 'arrow-left-to-line';
   host.innerHTML =
     '<div class="fixed inset-0 z-[60] flex items-end sm:items-stretch ' + anchorCls + ' bg-black/50 sm:bg-transparent sm:pointer-events-none">' +
-      '<div class="bg-white w-full max-w-md sm:w-[460px] xl:w-[940px] sm:max-w-none rounded-t-3xl sm:rounded-none shadow-2xl flex flex-col safe-bottom max-h-[96vh] sm:h-screen sm:max-h-screen ' + borderCls + ' sm:border-ink-200 sm:pointer-events-auto">' +
+      '<div class="bg-white w-full max-w-md sm:w-[460px] xl:w-[1050px] 2xl:w-[1400px] sm:max-w-none rounded-t-3xl sm:rounded-none shadow-2xl flex flex-col safe-bottom max-h-[96vh] sm:h-screen sm:max-h-screen ' + borderCls + ' sm:border-ink-200 sm:pointer-events-auto">' +
         '<div class="safe-top px-4 py-3 border-b border-ink-200 flex items-center justify-between gap-2 shrink-0">' +
           '<div class="flex-1 min-w-0">' +
             // v2.46.189: Ticket-Nr. immer sichtbar — verhindert Verwechslung wenn
@@ -24030,7 +24030,7 @@ function _renderAngChatShell() {
         // 2-Spalten-Wrapper: Chat | Vorschau
         '<div class="flex-1 flex overflow-hidden">' +
           // CHAT-Spalte (links)
-          '<div id="angChatCol" class="flex flex-col xl:w-[340px] xl:shrink-0 xl:border-r xl:border-ink-200 flex-1 min-h-0">' +
+          '<div id="angChatCol" class="flex flex-col xl:w-[380px] 2xl:w-[430px] xl:shrink-0 xl:border-r xl:border-ink-200 flex-1 min-h-0">' +
             '<div id="angChatBubbles" class="flex-1 overflow-y-auto p-3 space-y-2 bg-ink-50"></div>' +
             '<div id="angChatActionBar" class="border-t border-ink-200 p-3 bg-white shrink-0"></div>' +
           '</div>' +
@@ -24059,6 +24059,82 @@ function _renderAngChatShell() {
       '</div>' +
     '</div>';
   if (window.lucide) lucide.createIcons();
+}
+
+/* === v2.46.193: Selbstverbessernder Prompt =============================
+   Jede Angebots-KORREKTUR im Chat wird von Haiku analysiert: enthält sie
+   eine GENERALISIERBARE Regel (z.B. „keine Fahrtzeit-Position", „Anrede
+   immer mit Nachnamen"), wird sie in der Tabelle AngebotsRegeln gespeichert
+   und ab sofort in JEDEN Angebots-Prompt injiziert. Ticket-spezifische
+   Anweisungen („Preis Pos 2 auf 850") werden ignoriert. */
+const ANGEBOTS_REGELN_TABLE = 'AngebotsRegeln';
+const ANGEBOTS_REGELN_CACHE = { byAccount: new Map() };  // accountId → { list, loadedAt }
+
+async function loadAngebotsRegeln(accountId, force) {
+  if (!accountId) return [];
+  const c = ANGEBOTS_REGELN_CACHE.byAccount.get(accountId);
+  if (!force && c && (Date.now() - c.loadedAt) < 5 * 60 * 1000) return c.list;
+  let list = [];
+  try {
+    const recs = await airtableRead(ANGEBOTS_REGELN_TABLE, {
+      filter: "AND(OR({account_id}='" + escapeFormula(accountId) + "',{account_id}=''),{aktiv}!='nein')",
+      sort: [{ field: 'created_at', direction: 'desc' }],
+      maxRecords: 40,
+    });
+    list = recs.map(r => ({ recordId: r.id, regel: r.fields.regel || '' })).filter(x => x.regel.trim());
+  } catch (_) { /* Tabelle existiert ggf. noch nicht */ }
+  ANGEBOTS_REGELN_CACHE.byAccount.set(accountId, { list, loadedAt: Date.now() });
+  return list;
+}
+
+/* Fire-and-forget nach jeder Korrektur-Iteration. */
+async function _angLearnFromCorrection(s, userText) {
+  try {
+    if (!userText || userText.length < 8) return;
+    const existing = await loadAngebotsRegeln(s.accountId);
+    const existingBlock = existing.length
+      ? existing.map(r => '- ' + r.regel).join('\n')
+      : '(noch keine)';
+    const data = await _callAnthropicWithRetry({
+      model: 'claude-haiku-4-5-20251001',
+      max_tokens: 200,
+      system:
+        'Du analysierst eine Korrektur-Anweisung eines Users an eine Angebots-KI (Aufzug-Service-Angebote). ' +
+        'Entscheide: enthält sie eine GENERALISIERBARE Regel, die für ALLE zukünftigen Angebote gelten soll?\n' +
+        '- Ticket-spezifisch („Preis Pos 2 auf 850", „Mangel 3 entfernen", „Anlage XY") → NEIN\n' +
+        '- Generelle Präferenz („nie 0,00 € anzeigen", „keine Fahrtzeit als Position", „Anschreiben immer kurz halten") → JA\n' +
+        'BESTEHENDE REGELN (KEINE Duplikate oder Umformulierungen davon zurückgeben):\n' + existingBlock + '\n\n' +
+        'Antworte NUR mit JSON, ohne Markdown: {"regel": "<kurze imperative Regel, max 140 Zeichen>"} oder {"regel": null}',
+      messages: [{ role: 'user', content: 'Korrektur des Users: „' + userText.slice(0, 600) + '"' }],
+    });
+    const raw = (data?.content?.[0]?.text || '').trim();
+    let parsed = null;
+    try { parsed = JSON.parse(raw.replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/i, '')); } catch (_) {}
+    const regel = (parsed?.regel || '').trim();
+    if (!regel) return;
+    await airtableWriteWithAutoField(ANGEBOTS_REGELN_TABLE, {
+      account_id:    s.accountId || '',
+      regel:         regel.slice(0, 200),
+      quelle_ticket: String(s.ticketId || ''),
+      quelle_text:   userText.slice(0, 500),
+      aktiv:         'ja',
+      created_by:    APP_KEYS.user?.email || '',
+      created_at:    nowIso(),
+    }, {
+      account_id:    'singleLineText',
+      regel:         'singleLineText',
+      quelle_ticket: 'singleLineText',
+      quelle_text:   'multilineText',
+      aktiv:         'singleLineText',
+      created_by:    'singleLineText',
+      created_at:    'singleLineText',
+    });
+    ANGEBOTS_REGELN_CACHE.byAccount.delete(s.accountId);
+    toast('📚 Regel gelernt: ' + regel, 'info', 6000);
+    console.log('[Angebot-Regeln] Neu gelernt:', regel);
+  } catch (e) {
+    console.warn('[Angebot-Regeln] Lernen fehlgeschlagen:', e.message);
+  }
 }
 
 /* v2.46.191: Kompletten Angebot-Stand pro Ticket in localStorage sichern.
@@ -24737,6 +24813,9 @@ async function angChatUserResponse(userText) {
     _angChatRenderPreview();
     _angChatRenderActions({ hasPlan: true });
     _angPersistState();  // v2.46.191: letztes Angebot überlebt Modal-Schließen
+    // v2.46.193: Ab der 2. Iteration ist die Eingabe eine KORREKTUR — prüfen ob
+    // sie eine generalisierbare Regel enthält und diese dauerhaft lernen.
+    if (s.iteration >= 2) _angLearnFromCorrection(s, userText);
   } catch (e) {
     if (bar) bar.innerHTML = '<div class="bg-red-50 border border-red-200 rounded-xl p-3 text-sm text-red-800"><b>Fehler:</b> ' + escapeHtml(e.message || String(e)) + '</div>' +
       '<button onclick="angChatUserResponse(\'' + escapeAttr(userText.replace(/\\/g, '').replace(/\'/g, '')) + '\')" class="w-full mt-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl px-3 py-2 text-xs font-semibold">Nochmal versuchen</button>';
@@ -24770,6 +24849,13 @@ async function _angChatGenerateOffer(s, userText) {
   const subtypList = ANGEBOTS_SUBTYPEN.filter(t => (profile.subtypen_keys || []).includes(t.key));
   const subtypBlock = subtypList.length
     ? '\n\nAKTIVE SUB-TYPEN BEI DIESEM ACCOUNT:\n' + subtypList.map(t => '- ' + t.label + ': ' + t.ki_hint).join('\n') + '\n'
+    : '';
+  // v2.46.193: Gelernte Regeln aus früheren User-Korrekturen — der Prompt
+  // verbessert sich mit jeder Korrektur von selbst.
+  const regeln = await loadAngebotsRegeln(accountId).catch(() => []);
+  const regelnBlock = regeln.length
+    ? '\n\nGELERNTE REGELN AUS FRÜHEREN KORREKTUREN DES USERS (STRIKT BEFOLGEN — haben Vorrang vor allgemeinen Vorgaben):\n' +
+      regeln.map(r => '- ' + r.regel).join('\n').slice(0, 2500) + '\n'
     : '';
   const sysPrompt =
     'Du erstellst SCHLANK STRUKTURIERTE Aufzug-Service-Angebote im Stil von Aufzugshandwerk GmbH (Referenz-Beispiel). ' +
@@ -24819,6 +24905,7 @@ async function _angChatGenerateOffer(s, userText) {
     'Branche: ' + (profile.ki_branche_hint || 'Aufzug-Service') + '\n' +
     subtypBlock +
     stilBlock +
+    regelnBlock +
     '\nTICKET-HINTERGRUND (bereits analysiert):\n' + (s.ticket_summary || '(keine Hintergrund-Analyse verfügbar)') + '\n\n' +
     'Antworte AUSSCHLIESSLICH mit gültigem JSON ohne Markdown-Codeblock:\n' +
     '{\n' +
