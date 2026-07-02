@@ -779,7 +779,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.183';
+const APP_VERSION = 'v2.46.184';
 
 /* ============================================================
    GLOBAL THEME — v2.46.12
@@ -24736,7 +24736,9 @@ async function _angChatGenerateOffer(s, userText) {
     '- Wenn User SAGT er will KEIN Anschreiben → anschreiben_aktiv=false.\n\n' +
     'PREISE:\n' +
     '- Wenn User Preise nennt → übernimm EXAKT\n' +
-    '- Wenn nicht → realistisch branchenüblich schätzen\n\n' +
+    '- Wenn nicht → realistisch branchenüblich schätzen\n' +
+    '- User will bei EINZELNEN Positionen keinen Preis zeigen (z.B. „Preis bei Pos 1+2 weglassen", „Pos 1 nach Aufwand") → setze bei GENAU diesen Positionen preis_aufwand=true und einzelpreis=0. Das PDF zeigt dann „nach Aufwand*" statt 0,00 EUR. NIEMALS 0,00 als sichtbaren Preis stehen lassen.\n' +
+    '- User will KEINEN Gesamtpreis (z.B. „kein Gesamtpreis anzeigen", „Summe weglassen") → gesamtpreis_ausblenden=true. Sonst false bzw. Wert aus dem übergebenen Angebot beibehalten.\n\n' +
     'ABRECHNUNGSMODUS (pauschal vs. aufwand):\n' +
     '- "pauschal" (Standard): Festpreis-Positionen mit Einzelpreisen.\n' +
     '- "aufwand": KEINE Festpreise — stattdessen Stundensätze-Tabelle (stundensaetze-Array). Positionen beschreiben dann nur den Arbeitsumfang (einzelpreis: 0) oder bleiben leer.\n' +
@@ -24753,12 +24755,13 @@ async function _angChatGenerateOffer(s, userText) {
     '  "plan": {\n' +
     '    "leistungsbeschreibung": string (WAS angeboten wird, sachlich, 1-3 Sätze — z.B. "Austausch Frequenzumrichter inklusive Montage, Parametrierung und Inbetriebnahme."),\n' +
     '    "erlaeuterung": string (OPTIONAL, kurzer Hinweis 1-2 Sätze — z.B. zu Voraussetzungen, Anschluss, Ausschlüssen — oder leer),\n' +
-    '    "positionen": [{"bezeichnung": string, "menge": number, "einheit": "ST"|"STD"|"Pauschal"|"Monat", "einzelpreis": number, "kategorie": "Material"|"Montage"}],\n' +
+    '    "positionen": [{"bezeichnung": string, "menge": number, "einheit": "ST"|"STD"|"Pauschal"|"Monat", "einzelpreis": number, "kategorie": "Material"|"Montage", "preis_aufwand": boolean}],\n' +
     '    "konditionen": {"lieferzeit": string, "preisstellung": string, "zahlungsziel": string, "gewaehrleistung": string, "bindefrist": string, "montagetermin": string},\n' +
     '    "mwst_satz": number,\n' +
     '    "einsatzpauschale_anfahrt": number (Pauschale pro Anfahrt, 0 wenn inkludiert),\n' +
     '    "abrechnung_modus": "pauschal"|"aufwand",\n' +
     '    "stundensaetze": [{"nr": number, "name": string, "satz": number, "einheit": "Std."|"Anfahrt", "hinweis": string}] (NUR bei aufwand befüllen, sonst []),\n' +
+    '    "gesamtpreis_ausblenden": boolean (true = Summen-Block Netto/USt/Brutto wird im PDF NICHT gezeigt),\n' +
     '    "anschreiben_aktiv": boolean,\n' +
     '    "anschreiben_betreff": string,\n' +
     '    "anschreiben_anrede": string,\n' +
@@ -26699,8 +26702,10 @@ async function _bkSaveAngebotToBK(chatState) {
     summe_brutto_vp:      Math.round((+rec.summe_brutto_vp || 0) * 100) / 100,
     pauschalpreis_netto:  Math.round((+rec.pauschalpreis_netto || 0) * 100) / 100,
   });
-  // Boolean-Feld weglassen (Checkbox-Auto-Create hat Sonderoptionen; BK-Default ist unchecked)
-  delete fields.gesamtpreis_ausblenden;
+  // v2.46.184: Checkbox nur mitschicken wenn true (BK-Base hat das Feld aus
+  // seiner eigenen App; bei false reicht der Default „unchecked" — und wir
+  // vermeiden Auto-Create-Sonderfälle für Checkbox-Typen).
+  if (!fields.gesamtpreis_ausblenden) delete fields.gesamtpreis_ausblenden;
   const defaults = {
     app_angebot_num:      'number',
     firma:                'singleLineText',
@@ -27446,7 +27451,8 @@ function _fdhChatToBkRec(chatState) {
     kond_gewaehrleistung: konditionen.gewaehrleistung || '',
     erstellt_am:          new Date().toISOString().slice(0, 10),
     erstellt_von:         APP_KEYS.user?.name || '',
-    gesamtpreis_ausblenden: false,
+    // v2.46.184: von der KI steuerbar („kein Gesamtpreis anzeigen")
+    gesamtpreis_ausblenden: !!c.gesamtpreis_ausblenden,
   };
 }
 
