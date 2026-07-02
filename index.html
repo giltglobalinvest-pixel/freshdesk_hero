@@ -781,7 +781,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.191';
+const APP_VERSION = 'v2.46.192';
 
 /* ============================================================
    GLOBAL THEME — v2.46.12
@@ -27561,7 +27561,9 @@ function _fdhChatToBkRec(chatState) {
     vp: +p.einzelpreis || 0,
     menge: +p.menge || 1,
     einheit: p.einheit || 'ST',
-    preis_aufwand: !!p.preis_aufwand,
+    // v2.46.192: 0,00 € darf im Pauschalangebot nie sichtbar sein — Positionen
+    // ohne Preis werden automatisch als „nach Aufwand*" dargestellt.
+    preis_aufwand: !!p.preis_aufwand || !(+p.einzelpreis > 0),
   }));
   // Konditionen zusammenstellen
   // v2.46.177: Gewährleistung + Preisbasis NICHT mehr in Hinweise doppeln —
