@@ -770,7 +770,9 @@
 </button>
 
 <!-- ===================== TOAST ===================== -->
-<div id="toastContainer" class="fixed bottom-20 inset-x-0 z-50 flex flex-col items-center gap-2 px-4 pointer-events-none safe-bottom"></div>
+<!-- v2.46.188: z-[100] statt z-50 — Toasts müssen ÜBER Modals (z-60/70/80) liegen,
+     sonst sind Fehlermeldungen hinter dem Send-Dialog unsichtbar -->
+<div id="toastContainer" class="fixed bottom-20 inset-x-0 z-[100] flex flex-col items-center gap-2 px-4 pointer-events-none safe-bottom"></div>
 
 <!-- ===================== MODAL HOST ===================== -->
 <div id="modalHost"></div>
@@ -779,7 +781,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.187';
+const APP_VERSION = 'v2.46.188';
 
 /* ============================================================
    GLOBAL THEME — v2.46.12
@@ -25113,7 +25115,7 @@ async function angChatExecuteFinal(btn) {
     const k = a.attachment_url || a.id;
     if (!a.attachment_url || !k || seenAtt.has(k)) return;
     seenAtt.add(k);
-    ticketAtts.push({ name: a.name || 'anhang', url: a.attachment_url, size: +a.size || 0, type: a.content_type || '' });
+    ticketAtts.push({ id: a.id, name: a.name || 'anhang', url: a.attachment_url, size: +a.size || 0, type: a.content_type || '' });
   };
   (s.ticket?.attachments || []).forEach(collectAtt);
   (s.ticket?.conversations || []).forEach(cv => (cv.attachments || []).forEach(collectAtt));
@@ -25204,18 +25206,35 @@ async function angChatConfirmSend(btn) {
       .filter(Boolean);
     if (checked.length) {
       setBusy(btn, true, 'Lade Anhänge…');
+      // v2.46.188: Freshdesk-Anhang-URLs sind prä-signierte S3-Links mit Ablaufzeit.
+      // Wenn das Modal länger offen war → 403. Deshalb Ticket frisch laden und
+      // die URLs per Attachment-ID/Name erneuern.
+      const freshMap = new Map();
+      try {
+        const fresh = await fetchTicketDetail(s.accountId, s.ticketId);
+        const put = (a) => {
+          if (!a?.attachment_url) return;
+          if (a.id != null) freshMap.set('id:' + a.id, a.attachment_url);
+          if (a.name) freshMap.set('name:' + a.name, a.attachment_url);
+        };
+        (fresh?.attachments || []).forEach(put);
+        (fresh?.conversations || []).forEach(cv => (cv.attachments || []).forEach(put));
+      } catch (e) {
+        console.warn('[Angebot-Send] Fresh-Ticket für Anhang-URLs fehlgeschlagen:', e.message);
+      }
       const corsProblemHosts = /s3[.\-]|amazonaws\.com|freshdesk\.com/i;
       for (const att of checked) {
+        const url = (att.id != null && freshMap.get('id:' + att.id)) || freshMap.get('name:' + att.name) || att.url;
         let blob = null;
-        if (!corsProblemHosts.test(att.url)) {
+        if (!corsProblemHosts.test(url)) {
           try {
-            const r = await fetch(att.url, { mode: 'cors' });
+            const r = await fetch(url, { mode: 'cors' });
             if (r.ok) blob = await r.blob();
           } catch (_) {}
         }
         if (!blob) {
-          const r = await proxyFetch('/attachment-fetch?url=' + encodeURIComponent(att.url));
-          if (!r.ok) throw new Error('Anhang „' + att.name + '" konnte nicht geladen werden (HTTP ' + r.status + ')');
+          const r = await proxyFetch('/attachment-fetch?url=' + encodeURIComponent(url));
+          if (!r.ok) throw new Error('Anhang „' + att.name + '" konnte nicht geladen werden (HTTP ' + r.status + ') — Ticket neu laden und nochmal versuchen');
           blob = await r.blob();
         }
         sendAtts.push({ blob, name: att.name });
