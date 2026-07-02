@@ -781,7 +781,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.199';
+const APP_VERSION = 'v2.46.200';
 
 /* ============================================================
    GLOBAL THEME — v2.46.12
@@ -1743,14 +1743,29 @@ async function erpLoadKunden(firmaSlug, force) {
 async function _erpGmapsLookup(firmaSlug, query) {
   const enc = encodeURIComponent(String(query || '').trim());
   if (!enc) return [];
+  // v2.46.200: VOLLSTÄNDIGE Kandidaten-Liste aus dem Berichtskonverter (v6.98) —
+  // die Query-Param-Varianten fehlten und genau dort liegt der funktionierende Endpoint.
   const candidates = [
+    // Autocomplete-Varianten (Google Places Autocomplete Proxy)
     'api/google/maps/autocomplete/' + enc,
     'api/users/me/google/maps/autocomplete/' + enc,
+    'api/google/maps/autocomplete?input=' + enc,
+    'api/google/maps/autocomplete?query=' + enc,
+    // Such-Varianten
     'api/google/maps/suche/' + enc,
+    'api/google/maps/search/' + enc,
     'api/google/maps/adressen/' + enc,
     'api/users/me/google/maps/adressen/' + enc,
+    'api/google/maps/predictions/' + enc,
+    // Query-Param auf adresse
+    'api/google/maps/adresse?query=' + enc,
+    'api/google/maps/adresse?suche=' + enc,
+    'api/google/maps/adresse?input=' + enc,
+    // Direkte Pfade (falls Endpoint doch Text kann)
     'api/google/maps/adresse/' + enc,
     'api/users/me/google/maps/adresse/' + enc,
+    'api/google/maps/places/' + enc,
+    'api/google/maps/place/' + enc,
   ];
   for (const path of candidates) {
     try {
