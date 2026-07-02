@@ -781,7 +781,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.197';
+const APP_VERSION = 'v2.46.198';
 
 /* ============================================================
    GLOBAL THEME — v2.46.12
@@ -1724,6 +1724,140 @@ async function erpLoadKundenKontakte(firmaSlug, kundennummer) {
     const res = await erpFetch('/aufzug/' + encodeURIComponent(firmaSlug) + '/api/Kunden/' + encodeURIComponent(kundennummer) + '/Kontakte');
     return Array.isArray(res) ? res : (res?.content || res?.data || res?.items || []);
   } catch (_) { return []; }
+}
+
+/* === v2.46.198: Anlage + Kunde im ERP ANLEGEN (portiert aus Berichtskonverter) === */
+const _ERP_KUNDEN_CACHE = new Map();  // firmaSlug → { items, loadedAt }
+
+async function erpLoadKunden(firmaSlug, force) {
+  const c = _ERP_KUNDEN_CACHE.get(firmaSlug);
+  if (!force && c && (Date.now() - c.loadedAt) < 5 * 60 * 1000) return c.items;
+  const res = await erpFetch('/aufzug/' + encodeURIComponent(firmaSlug) + '/api/kunden');
+  const items = Array.isArray(res) ? res : (res?.content || res?.items || res?.data || []);
+  _ERP_KUNDEN_CACHE.set(firmaSlug, { items, loadedAt: Date.now() });
+  return items;
+}
+
+/* Google-Maps-Adress-Lookup über den ERP-Proxy — liefert [{placeId, label}].
+   adresseId im ERP MUSS eine Place-ID sein (ChIJ…), Text wird abgelehnt. */
+async function _erpGmapsLookup(firmaSlug, query) {
+  const enc = encodeURIComponent(String(query || '').trim());
+  if (!enc) return [];
+  const candidates = [
+    'api/google/maps/autocomplete/' + enc,
+    'api/users/me/google/maps/autocomplete/' + enc,
+    'api/google/maps/suche/' + enc,
+    'api/google/maps/adressen/' + enc,
+    'api/users/me/google/maps/adressen/' + enc,
+    'api/google/maps/adresse/' + enc,
+    'api/users/me/google/maps/adresse/' + enc,
+  ];
+  for (const path of candidates) {
+    try {
+      const res = await erpFetch('/aufzug/' + firmaSlug + '/' + path);
+      if (!res) continue;
+      let items = [];
+      if (Array.isArray(res)) items = res;
+      else if (Array.isArray(res.results)) items = res.results;
+      else if (Array.isArray(res.predictions)) items = res.predictions;
+      else if (Array.isArray(res.items)) items = res.items;
+      else if (res.result) items = [res.result];
+      else if (typeof res === 'object' && Object.keys(res).length) items = [res];
+      const norm = items.map(r => ({
+        placeId: r.place_id || r.placeId || r.id || '',
+        label:   r.formatted_address || r.formattedAddress || r.adresse || r.description || r.beschreibung || r.name || '',
+      })).filter(x => x.placeId && /^ChIJ|^Ei|^Gh/.test(String(x.placeId)));
+      if (norm.length) return norm;
+    } catch (_) { /* nächsten Endpoint probieren */ }
+  }
+  return [];
+}
+
+/* Kunde im ERP anlegen. adresse wird zu einer Google-Place-ID aufgelöst. */
+async function erpCreateKunde(firmaSlug, data) {
+  const results = await _erpGmapsLookup(firmaSlug, data.adresse);
+  if (!results.length) throw new Error('Keine Google-Maps-Adresse für „' + data.adresse + '" gefunden — bitte präzisieren (Straße Hausnr, PLZ Ort)');
+  const placeId = results[0].placeId;
+  const payload = {
+    firmenname:       data.firmenname,
+    adresseId:        placeId,
+    email:            data.email,
+    telefon:          data.telefon,
+    fax:              '',
+    rechnungsversand: 'EMAIL',
+    defaultrechnungsempfaenger: {
+      firmenname:       data.firmenname,
+      adresseId:        placeId,
+      email:            data.email,
+      telefonnummer:    data.telefon,
+      rechnungsversand: 'EMAIL',
+    },
+  };
+  const created = await erpFetch('/aufzug/' + firmaSlug + '/api/kunden', { method: 'POST', body: payload });
+  if (!created || (!created.kundennummer && !created.id)) throw new Error('ERP gab keine Kundennummer zurück');
+  _ERP_KUNDEN_CACHE.delete(firmaSlug);
+  return created;
+}
+
+/* Anlage im ERP anlegen. Lädt Kontakt/Ansprechpartner des Kunden mit
+   (ERP wirft sonst NullPointerException — bekannter Workaround aus dem BK). */
+async function erpCreateAnlage(firmaSlug, data) {
+  const results = await _erpGmapsLookup(firmaSlug, data.adresse);
+  if (!results.length) throw new Error('Keine Google-Maps-Adresse für „' + data.adresse + '" gefunden — bitte präzisieren (Straße Hausnr, PLZ Ort)');
+  const placeId = results[0].placeId;
+  const kunde = data.kunde;
+  const kundenNr = kunde.kundennummer || kunde.id;
+  const payload = {
+    kundenId:            +kundenNr,
+    adresseId:           placeId,
+    anzeigeAdresse:      data.adresse,
+    anzahlAufzuege:      1,
+    stundensatz:         +data.stundensatz || 0,
+    einsatzPauschale:    +data.einsatzPauschale || 0,
+    objektTyp:           data.objektTyp || 'Wohnen',
+    betreiberTyp:        data.betreiberTyp || 'Hausverwaltung',
+    rechnungsempfaenger: kunde.firmenname || '',
+    fabriknummer:        data.fabriknummer || '',
+    sonstigerHinweis:    '',
+    archived:            false,
+  };
+  // Kontakt + Ansprechpartner mitgeben (alle Feld-Varianten — ERP-NPE-Workaround)
+  try {
+    const [kontakte, ansprechsRaw] = await Promise.all([
+      erpLoadKundenKontakte(firmaSlug, kundenNr),
+      (async () => {
+        const paths = [
+          'api/ansprechpartner?kundennummer=' + encodeURIComponent(kundenNr),
+          'api/Kunden/' + encodeURIComponent(kundenNr) + '/Ansprechpartner',
+          'api/kunden/' + encodeURIComponent(kundenNr) + '/ansprechpartner',
+        ];
+        for (const p of paths) {
+          try {
+            const r = await erpFetch('/aufzug/' + firmaSlug + '/' + p);
+            const arr = Array.isArray(r) ? r : (r?.content || r?.items || r?.data || []);
+            if (Array.isArray(arr) && arr.length) return arr;
+          } catch (_) {}
+        }
+        return [];
+      })(),
+    ]);
+    const kontakt  = kontakte[0] || null;
+    const ansprech = ansprechsRaw[0] || null;
+    if (kontakt?.id != null) {
+      payload.kontaktId = +kontakt.id;
+      payload.kontakt = kontakt;
+      payload.kundenkontaktId = +kontakt.id;
+    }
+    if (ansprech?.id != null) {
+      const aid = +ansprech.id;
+      ['ansprechpartnerId', 'standardansprechpartnerId', 'standardAnsprechpartnerId', 'defaultAnsprechpartnerId', 'hauptansprechpartnerId', 'hauptAnsprechpartnerId'].forEach(k => payload[k] = aid);
+      ['ansprechpartner', 'standardansprechpartner', 'standardAnsprechpartner', 'defaultAnsprechpartner', 'hauptansprechpartner'].forEach(k => payload[k] = ansprech);
+    }
+  } catch (e) { console.warn('[Anlage-Create] Kontakt/Ansprech-Load:', e.message); }
+  const created = await erpFetch('/aufzug/' + firmaSlug + '/api/anlagen', { method: 'POST', body: payload });
+  if (!created || !created.id) throw new Error('ERP gab keine Anlagen-ID zurück');
+  _ERP_ANLAGEN_CACHE.delete(firmaSlug);
+  return created;
 }
 
 /* ============================================================
@@ -24445,6 +24579,8 @@ function _erpPickerUpdate() {
     list.innerHTML = '<div class="bg-white rounded-xl border border-ink-200 p-6 text-center text-ink-500 text-sm">' +
       '<i data-lucide="search-x" class="w-8 h-8 inline text-ink-300"></i>' +
       '<p class="mt-2">Keine Anlage passt zu „' + escapeHtml(q) + '".</p>' +
+      // v2.46.198: Anlage fehlt im ERP → direkt anlegen können
+      '<button onclick="openErpAnlageCreate(\'' + escapeAttr(q) + '\')" class="mt-3 px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-sm font-bold inline-flex items-center gap-1.5"><i data-lucide="plus" class="w-4 h-4"></i> Anlage im ERP anlegen</button>' +
       '</div>';
     if (window.lucide) lucide.createIcons();
     return;
@@ -24525,6 +24661,166 @@ async function pickErpAnlage(idx) {
   closeErpAnlagePicker();
   const label = (anlage.fabriknummer ? anlage.fabriknummer + ' · ' : '') + (kunde.firmenname || standort || 'Anlage');
   toast('Übernommen: ' + label + (kontakt ? ' · Kontakt ' + (kontakt.email || kontakt.vorname || '?') : ''), 'success', 5000);
+}
+
+/* === v2.46.198: Anlage (+ optional Kunde) im ERP anlegen ================= */
+function openErpAnlageCreate(prefillFabrik) {
+  const picker = window._ERP_PICKER;
+  const firmaSlug = picker?.firmaSlug || _erpFirmaSlugForAccount(window._ANG_CHAT?.account);
+  if (!firmaSlug) return toast('Kein ERP-Firma-Slug', 'warn');
+  window._ERP_CREATE = { firmaSlug, kunden: [], selectedKunde: null, newKunde: false };
+  let host = document.getElementById('subModalHost4');
+  if (!host) { host = document.createElement('div'); host.id = 'subModalHost4'; document.body.appendChild(host); }
+  host.innerHTML =
+    '<div class="fixed inset-0 z-[90] flex items-end sm:items-center justify-center bg-black/50" onclick="if(event.target===this)closeErpAnlageCreate()">' +
+      '<div class="bg-white w-full max-w-xl sm:rounded-2xl rounded-t-2xl shadow-2xl flex flex-col safe-bottom" style="max-height:92vh">' +
+        '<div class="px-4 py-3 border-b border-ink-200 flex items-center justify-between gap-2 shrink-0">' +
+          '<h3 class="font-bold text-ink-900 inline-flex items-center gap-2"><i data-lucide="plus-circle" class="w-4 h-4 text-emerald-600"></i> Anlage im ERP anlegen</h3>' +
+          '<button onclick="closeErpAnlageCreate()" class="w-9 h-9 rounded-lg hover:bg-ink-100 flex items-center justify-center"><i data-lucide="x" class="w-5 h-5 text-ink-700"></i></button>' +
+        '</div>' +
+        '<div class="flex-1 overflow-y-auto p-4 space-y-3">' +
+          // KUNDE
+          '<div class="border border-ink-200 rounded-xl p-3">' +
+            '<div class="flex items-center justify-between mb-1.5">' +
+              '<p class="text-[11px] font-bold text-ink-700 uppercase tracking-wider inline-flex items-center gap-1"><i data-lucide="building" class="w-3.5 h-3.5"></i> Kunde</p>' +
+              '<button onclick="_erpCreateToggleNewKunde()" id="ecNewKundeBtn" class="text-[11px] text-emerald-700 font-semibold underline">➕ Neuen Kunden anlegen</button>' +
+            '</div>' +
+            '<div id="ecKundeSearch">' +
+              '<input id="ecKundeQuery" type="search" placeholder="Kunde suchen (Name/Nr)…" oninput="_erpCreateRenderKunden()" class="w-full px-2 py-1.5 border border-ink-300 rounded-lg text-sm">' +
+              '<div id="ecKundeList" class="mt-1.5 max-h-36 overflow-y-auto space-y-1"><p class="text-[11px] text-ink-500"><span class="spinner inline-block w-3 h-3 mr-1"></span>Lade Kunden…</p></div>' +
+              '<p id="ecKundeSelected" class="text-[11px] text-emerald-700 font-semibold mt-1 hidden"></p>' +
+            '</div>' +
+            '<div id="ecKundeNew" class="hidden space-y-1.5">' +
+              '<input id="ecKFirma" type="text" placeholder="Firmenname *" class="w-full px-2 py-1.5 border border-ink-300 rounded-lg text-sm">' +
+              '<input id="ecKAdresse" type="text" placeholder="Anschrift (Straße Hausnr, PLZ Ort) *" class="w-full px-2 py-1.5 border border-ink-300 rounded-lg text-sm">' +
+              '<div class="grid grid-cols-2 gap-1.5">' +
+                '<input id="ecKEmail" type="email" placeholder="E-Mail *" class="px-2 py-1.5 border border-ink-300 rounded-lg text-sm">' +
+                '<input id="ecKTel" type="text" placeholder="Telefon *" class="px-2 py-1.5 border border-ink-300 rounded-lg text-sm">' +
+              '</div>' +
+            '</div>' +
+          '</div>' +
+          // ANLAGE
+          '<div class="border border-ink-200 rounded-xl p-3 space-y-1.5">' +
+            '<p class="text-[11px] font-bold text-ink-700 uppercase tracking-wider inline-flex items-center gap-1"><i data-lucide="map-pin" class="w-3.5 h-3.5"></i> Anlage</p>' +
+            '<input id="ecAdresse" type="text" placeholder="Standort-Adresse (Straße Hausnr, PLZ Ort) *" value="' + escapeAttr(window._ANG_CHAT?.collected?.standort || '') + '" class="w-full px-2 py-1.5 border border-ink-300 rounded-lg text-sm">' +
+            '<div class="grid grid-cols-3 gap-1.5">' +
+              '<input id="ecFabrik" type="text" placeholder="Fabriknummer" value="' + escapeAttr(prefillFabrik || '') + '" class="px-2 py-1.5 border border-ink-300 rounded-lg text-sm">' +
+              '<input id="ecSatz" type="number" step="0.5" min="0" value="70" title="Stundensatz €" class="px-2 py-1.5 border border-ink-300 rounded-lg text-sm">' +
+              '<input id="ecPausch" type="number" step="0.5" min="0" value="50" title="Einsatzpauschale €" class="px-2 py-1.5 border border-ink-300 rounded-lg text-sm">' +
+            '</div>' +
+            '<p class="text-[10px] text-ink-500">Fabriknummer · Stundensatz € · Einsatzpauschale € — Objekttyp „Wohnen" / Betreiber „Hausverwaltung" als Default (im ERP änderbar).</p>' +
+          '</div>' +
+        '</div>' +
+        '<div class="px-4 py-3 border-t border-ink-200 flex gap-2 shrink-0">' +
+          '<button onclick="closeErpAnlageCreate()" class="flex-1 px-3 py-2 bg-ink-100 hover:bg-ink-200 text-ink-700 rounded-lg text-sm font-bold">Abbrechen</button>' +
+          '<button onclick="submitErpAnlageCreate(this)" class="flex-1 px-3 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-sm font-bold inline-flex items-center justify-center gap-1.5"><i data-lucide="rocket" class="w-4 h-4"></i> Im ERP anlegen</button>' +
+        '</div>' +
+      '</div>' +
+    '</div>';
+  if (window.lucide) lucide.createIcons();
+  erpLoadKunden(firmaSlug).then(items => {
+    if (window._ERP_CREATE) { window._ERP_CREATE.kunden = items; _erpCreateRenderKunden(); }
+  }).catch(e => {
+    const l = document.getElementById('ecKundeList');
+    if (l) l.innerHTML = '<p class="text-[11px] text-red-600">Kunden laden fehlgeschlagen: ' + escapeHtml(e.message) + '</p>';
+  });
+}
+
+function closeErpAnlageCreate() {
+  const host = document.getElementById('subModalHost4');
+  if (host) host.innerHTML = '';
+  delete window._ERP_CREATE;
+}
+
+function _erpCreateRenderKunden() {
+  const st = window._ERP_CREATE;
+  const list = document.getElementById('ecKundeList');
+  if (!st || !list) return;
+  const q = (document.getElementById('ecKundeQuery')?.value || '').trim().toLowerCase();
+  const hits = (st.kunden || []).filter(k => {
+    if (!q) return true;
+    return [k.firmenname, k.kundennummer, k.email].filter(Boolean).map(String).join(' ').toLowerCase().includes(q);
+  }).slice(0, 30);
+  list.innerHTML = hits.length
+    ? hits.map((k, i) =>
+        '<button onclick="_erpCreateSelectKunde(' + (st.kunden.indexOf(k)) + ')" class="w-full text-left px-2 py-1.5 rounded-md text-[12px] bg-ink-50 hover:bg-emerald-50 border border-transparent hover:border-emerald-300">' +
+          '<b>' + escapeHtml(k.firmenname || '?') + '</b>' +
+          (k.kundennummer ? ' <span class="text-ink-400">· Kd-Nr. ' + escapeHtml(String(k.kundennummer)) + '</span>' : '') +
+        '</button>'
+      ).join('')
+    : '<p class="text-[11px] text-ink-500 px-1">Kein Kunde gefunden — über „➕ Neuen Kunden anlegen" erstellen.</p>';
+}
+
+function _erpCreateSelectKunde(idx) {
+  const st = window._ERP_CREATE;
+  if (!st?.kunden?.[idx]) return;
+  st.selectedKunde = st.kunden[idx];
+  st.newKunde = false;
+  const sel = document.getElementById('ecKundeSelected');
+  if (sel) {
+    sel.textContent = '✓ Gewählt: ' + (st.selectedKunde.firmenname || '?') + (st.selectedKunde.kundennummer ? ' (Kd-Nr. ' + st.selectedKunde.kundennummer + ')' : '');
+    sel.classList.remove('hidden');
+  }
+}
+
+function _erpCreateToggleNewKunde() {
+  const st = window._ERP_CREATE;
+  if (!st) return;
+  st.newKunde = !st.newKunde;
+  document.getElementById('ecKundeSearch')?.classList.toggle('hidden', st.newKunde);
+  document.getElementById('ecKundeNew')?.classList.toggle('hidden', !st.newKunde);
+  const btn = document.getElementById('ecNewKundeBtn');
+  if (btn) btn.textContent = st.newKunde ? '← Bestehenden Kunden wählen' : '➕ Neuen Kunden anlegen';
+}
+
+async function submitErpAnlageCreate(btn) {
+  const st = window._ERP_CREATE;
+  if (!st) return;
+  const adresse = ($('ecAdresse')?.value || '').trim();
+  const fabrik  = ($('ecFabrik')?.value || '').trim();
+  if (!adresse) return toast('Standort-Adresse fehlt', 'warn');
+  try {
+    let kunde = st.selectedKunde;
+    if (st.newKunde) {
+      const kd = {
+        firmenname: ($('ecKFirma')?.value || '').trim(),
+        adresse:    ($('ecKAdresse')?.value || '').trim(),
+        email:      ($('ecKEmail')?.value || '').trim(),
+        telefon:    ($('ecKTel')?.value || '').trim(),
+      };
+      if (!kd.firmenname || !kd.adresse || !kd.email || !kd.telefon) return toast('Bitte alle Kunden-Felder ausfüllen', 'warn');
+      setBusy(btn, true, 'Lege Kunde an…');
+      kunde = await erpCreateKunde(st.firmaSlug, kd);
+      toast('Kunde „' + kd.firmenname + '" im ERP angelegt ✓', 'success', 4000);
+    }
+    if (!kunde) return toast('Bitte Kunde wählen oder neu anlegen', 'warn');
+    setBusy(btn, true, 'Lege Anlage an…');
+    const created = await erpCreateAnlage(st.firmaSlug, {
+      kunde, adresse,
+      fabriknummer:     fabrik,
+      stundensatz:      +($('ecSatz')?.value) || 0,
+      einsatzPauschale: +($('ecPausch')?.value) || 0,
+    });
+    toast('Anlage im ERP angelegt ✓ (ID ' + created.id + ')', 'success', 5000);
+    // Frisch laden + direkt in die Stammdaten übernehmen
+    setBusy(btn, true, 'Übernehme…');
+    const firmaSlug = st.firmaSlug;
+    closeErpAnlageCreate();
+    try {
+      const items = await erpLoadAnlagen(firmaSlug);
+      const full = items.find(a => String(a.id) === String(created.id)) || created;
+      window._ERP_PICKER = { items: [full], filtered: [full], firmaSlug };
+      await pickErpAnlage(0);
+    } catch (e) {
+      console.warn('[Anlage-Create] Auto-Übernahme:', e.message);
+      const el = $('sdFabrik'); if (el && fabrik) el.value = fabrik;
+    }
+    setBusy(btn, false);
+  } catch (e) {
+    setBusy(btn, false);
+    toast('Anlegen fehlgeschlagen: ' + (e.message || e), 'error', 10000);
+    console.error('submitErpAnlageCreate:', e);
+  }
 }
 
 /* v2.46.161: KI-Extract der Stammdaten aus Email + Anhängen. */
