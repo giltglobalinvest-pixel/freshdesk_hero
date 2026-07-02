@@ -781,7 +781,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.196';
+const APP_VERSION = 'v2.46.197';
 
 /* ============================================================
    GLOBAL THEME — v2.46.12
@@ -24798,10 +24798,12 @@ function _angChatRenderActions(opts) {
       bkSaveFinalHtml +
       // Auch im Final-Step Input erlaubt — falls User noch anpassen möchte vor PDF
       '<div class="mt-3 pt-3 border-t border-ink-100">' +
+        '<div id="angChatPendingImgs" class="flex flex-wrap items-center"></div>' +
         '<textarea id="angChatTextInput" rows="2" placeholder="Letzte Änderung wünschen? Z.B. „Preis Position 2 auf 850€"" class="w-full px-3 py-2 border border-ink-300 rounded-xl text-sm resize-y" onkeydown="if(event.key===\'Enter\'&&(event.metaKey||event.ctrlKey)){event.preventDefault();angChatSubmitTextInput()}"></textarea>' +
         '<button onclick="angChatSubmitTextInput()" class="w-full mt-1.5 bg-ink-100 hover:bg-ink-200 text-ink-700 rounded-xl px-3 py-2 text-xs font-semibold inline-flex items-center justify-center gap-1.5"><i data-lucide="send" class="w-3.5 h-3.5"></i> Anpassen</button>' +
       '</div>';
     if (window.lucide) lucide.createIcons();
+    _angChatRenderPendingImages();
     return;
   }
   // Standard: Input + Final-Buttons wenn Plan generiert
@@ -24821,21 +24823,78 @@ function _angChatRenderActions(opts) {
   // v2.46.175: Vorschau rechts IST jetzt das BK-PDF — dieser Button öffnet es groß in neuem Tab (Druck/Download)
   const bkPreviewHtml = '<button onclick="angChatPreviewBkPdf(this)" class="w-full mb-2 text-white rounded-xl px-3 py-2 text-[11px] font-bold inline-flex items-center justify-center gap-1.5 hover:opacity-90" style="background:#1a3353"><i data-lucide="external-link" class="w-3.5 h-3.5"></i> PDF in neuem Tab öffnen (Druck/Download)</button>';
   bar.innerHTML = planActionsHtml + bkSaveHtml + bkPreviewHtml +
+    '<div id="angChatPendingImgs" class="flex flex-wrap items-center"></div>' +
     '<div class="flex gap-1.5 items-end">' +
       '<textarea id="angChatTextInput" rows="' + (hasPlan ? '1' : '2') + '" placeholder="' + escapeAttr(isFirstInput ? 'Beschreib was du brauchst… (Cmd+Enter sendet)' : 'Anpassung? z.B. „Preis Pos 2 auf 850" / „wärmer" / „andere Lieferzeit"… (Cmd+Enter)') + '" class="flex-1 px-3 py-2 border border-ink-300 rounded-xl text-sm resize-none" onkeydown="if(event.key===\'Enter\'&&(event.metaKey||event.ctrlKey)){event.preventDefault();angChatSubmitTextInput()}"></textarea>' +
       (speechOn ? '<button onclick="angChatToggleVoice()" id="angChatMicBtn" class="shrink-0 w-10 h-10 rounded-xl bg-purple-50 hover:bg-purple-100 border border-purple-200 text-purple-700 inline-flex items-center justify-center" title="Spracheingabe"><i data-lucide="mic" class="w-4 h-4"></i></button>' : '') +
       '<button onclick="angChatSubmitTextInput()" class="shrink-0 w-10 h-10 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white inline-flex items-center justify-center" title="Senden"><i data-lucide="send" class="w-4 h-4"></i></button>' +
     '</div>';
   if (window.lucide) lucide.createIcons();
+  _angChatRenderPendingImages();
   if (isFirstInput) setTimeout(() => document.getElementById('angChatTextInput')?.focus(), 80);
 }
 
 async function angChatSubmitTextInput() {
   const ta = document.getElementById('angChatTextInput');
   const txt = (ta?.value || '').trim();
-  if (!txt) return toast('Bitte etwas eintippen', 'warn');
+  const hasImgs = (window._ANG_CHAT?._pendingImages || []).length > 0;
+  if (!txt && !hasImgs) return toast('Bitte etwas eintippen', 'warn');
   if (ta) ta.value = '';
-  await angChatUserResponse(txt);
+  await angChatUserResponse(txt || 'Bitte die angehängten Screenshots berücksichtigen.');
+}
+
+/* === v2.46.197: Screenshots per Copy&Paste in den Angebot-Chat ============
+   Cmd/Ctrl+V im Chat-Eingabefeld hängt Bilder aus der Zwischenablage an die
+   nächste Nachricht — die KI bekommt sie als image-Content-Blocks mit
+   (z.B. Screenshot einer Mängelliste oder eines Sub-Angebots). */
+document.addEventListener('paste', (e) => {
+  const s = window._ANG_CHAT;
+  if (!s) return;
+  const ta = document.getElementById('angChatTextInput');
+  if (!ta || document.activeElement !== ta) return;
+  const items = e.clipboardData?.items || [];
+  const files = [];
+  for (const it of items) {
+    if (it.type && it.type.startsWith('image/')) {
+      const f = it.getAsFile();
+      if (f) files.push(f);
+    }
+  }
+  if (!files.length) return;
+  e.preventDefault();
+  files.forEach(async (file) => {
+    if (file.size > 8 * 1024 * 1024) { toast('Bild zu groß (max 8 MB)', 'warn', 5000); return; }
+    try {
+      const base64 = await _blobToBase64(file);
+      s._pendingImages = s._pendingImages || [];
+      s._pendingImages.push({ mediaType: file.type || 'image/png', base64 });
+      _angChatRenderPendingImages();
+      toast('Screenshot angehängt — wird mit der nächsten Nachricht gesendet', 'success', 2500);
+    } catch (err) { toast('Bild konnte nicht gelesen werden: ' + err.message, 'error', 5000); }
+  });
+});
+
+function _angChatRenderPendingImages() {
+  const host = document.getElementById('angChatPendingImgs');
+  const s = window._ANG_CHAT;
+  if (!host) return;
+  const imgs = s?._pendingImages || [];
+  host.innerHTML = imgs.length
+    ? imgs.map((im, i) =>
+        '<div class="relative inline-block mr-1.5 mb-1">' +
+          '<img src="data:' + im.mediaType + ';base64,' + im.base64 + '" class="h-12 w-12 object-cover rounded-lg border-2 border-indigo-300">' +
+          '<button onclick="_angChatRemovePendingImage(' + i + ')" class="absolute -top-1.5 -right-1.5 w-4 h-4 bg-rose-600 text-white rounded-full text-[9px] leading-none font-bold flex items-center justify-center" title="Entfernen">×</button>' +
+        '</div>'
+      ).join('') +
+      '<span class="text-[10px] text-indigo-600 font-semibold ml-1">' + imgs.length + ' Screenshot(s) — geht mit der nächsten Nachricht an die KI</span>'
+    : '';
+}
+
+function _angChatRemovePendingImage(i) {
+  const s = window._ANG_CHAT;
+  if (!s?._pendingImages) return;
+  s._pendingImages.splice(i, 1);
+  _angChatRenderPendingImages();
 }
 
 let ANG_CHAT_REC = null;
@@ -24906,6 +24965,8 @@ async function angChatUserResponse(userText) {
     // → automatisch die an der ERP-Anlage hinterlegten Sätze laden.
     // Chat-Angaben (Sätze > 0) haben Prio und bleiben unangetastet.
     await _angEnsureAufwandSaetze(s);
+    // v2.46.197: eingefügte Screenshots wurden mit diesem Call verbraucht
+    s._pendingImages = [];
     s.history.push({ role: 'assistant', content: result.message });
     _angChatAppendBubble('assistant', result.message);
     _angChatRenderPreview();
@@ -25044,6 +25105,14 @@ async function _angChatGenerateOffer(s, userText) {
       lastContent.push({ type: 'image', source: { type: 'base64', media_type: att.mediaType, data: att.base64 } });
     }
   });
+  // v2.46.197: per Copy&Paste eingefügte Screenshots des Users mitgeben —
+  // die haben für DIESE Anweisung Vorrang (z.B. Screenshot einer Mängelliste)
+  if ((s._pendingImages || []).length) {
+    s._pendingImages.forEach(im => {
+      lastContent.push({ type: 'image', source: { type: 'base64', media_type: im.mediaType, data: im.base64 } });
+    });
+    lastContent[0].text += '\n\n[Der User hat ' + s._pendingImages.length + ' Screenshot(s) direkt an diese Nachricht angehängt — deren Inhalt für die Anweisung berücksichtigen.]';
+  }
   messages.push({ role: 'user', content: lastContent });
   const data = await proxyJson('/anthropic/v1/messages', {
     method: 'POST',
