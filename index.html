@@ -779,7 +779,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.184';
+const APP_VERSION = 'v2.46.185';
 
 /* ============================================================
    GLOBAL THEME — v2.46.12
@@ -25079,6 +25079,33 @@ async function angChatExecuteFinal(btn) {
   }
   const pdfName = 'Angebot-ANG-' + s.ticketId + '.pdf';
   const pdfKb = Math.round(pdfBlob.size / 1024);
+  // v2.46.185: Ticket-Anhänge sammeln — auswählbar zum Mitsenden (z.B. TÜV-Mängelbericht)
+  const ticketAtts = [];
+  const seenAtt = new Set();
+  const collectAtt = (a) => {
+    const k = a.attachment_url || a.id;
+    if (!a.attachment_url || !k || seenAtt.has(k)) return;
+    seenAtt.add(k);
+    ticketAtts.push({ name: a.name || 'anhang', url: a.attachment_url, size: +a.size || 0, type: a.content_type || '' });
+  };
+  (s.ticket?.attachments || []).forEach(collectAtt);
+  (s.ticket?.conversations || []).forEach(cv => (cv.attachments || []).forEach(collectAtt));
+  s._sendTicketAtts = ticketAtts;
+  const ticketAttsHtml = ticketAtts.length
+    ? '<div><label class="text-[11px] font-bold text-ink-700 uppercase tracking-wider">Anhänge aus dem Ticket mitsenden (optional)</label>' +
+        '<div class="mt-1 space-y-1 max-h-40 overflow-y-auto border border-ink-200 rounded-lg p-2 bg-ink-50">' +
+        ticketAtts.map((a, i) =>
+          '<label class="flex items-center gap-2 text-sm cursor-pointer hover:bg-white rounded px-1.5 py-1">' +
+            '<input type="checkbox" data-send-att-idx="' + i + '" class="w-4 h-4 accent-indigo-600 shrink-0">' +
+            '<i data-lucide="' + (/pdf/i.test(a.type) ? 'file-text' : (/image/i.test(a.type) ? 'image' : 'file')) + '" class="w-3.5 h-3.5 text-ink-500 shrink-0"></i>' +
+            '<span class="truncate flex-1">' + escapeHtml(a.name) + '</span>' +
+            '<span class="text-[10px] text-ink-400 shrink-0">' + (a.size ? Math.round(a.size / 1024) + ' KB' : '') + '</span>' +
+          '</label>'
+        ).join('') +
+        '</div>' +
+        '<p class="text-[10px] text-ink-500 mt-1">Freshdesk-Limit: max. 20 MB gesamt pro Antwort.</p>' +
+      '</div>'
+    : '';
   let host = document.getElementById('subModalHost2');
   if (!host) { host = document.createElement('div'); host.id = 'subModalHost2'; document.body.appendChild(host); }
   host.innerHTML =
@@ -25098,6 +25125,7 @@ async function angChatExecuteFinal(btn) {
             '<span class="text-[11px] text-indigo-600">' + pdfKb + ' KB</span>' +
             '<button onclick="angChatPreviewBkPdf(this)" class="ml-auto text-[11px] text-indigo-700 underline shrink-0">ansehen</button>' +
           '</div>' +
+          ticketAttsHtml +
           '<label class="inline-flex items-center gap-2 text-sm cursor-pointer">' +
             '<input id="angSendWithSig" type="checkbox" checked class="w-4 h-4 accent-indigo-600">' +
             '<span>Freshdesk-Signatur anhängen</span>' +
@@ -25142,9 +25170,38 @@ async function angChatConfirmSend(btn) {
       } catch (_) {}
     }
     const pdfName = 'Angebot-ANG-' + s.ticketId + '.pdf';
+    const sendAtts = [{ blob: s._sendPdfBlob, name: pdfName }];
+    // v2.46.185: ausgewählte Ticket-Anhänge (z.B. TÜV-Mängelbericht) laden + mitsenden
+    const checked = Array.from(document.querySelectorAll('[data-send-att-idx]:checked'))
+      .map(el => (s._sendTicketAtts || [])[+el.getAttribute('data-send-att-idx')])
+      .filter(Boolean);
+    if (checked.length) {
+      setBusy(btn, true, 'Lade Anhänge…');
+      const corsProblemHosts = /s3[.\-]|amazonaws\.com|freshdesk\.com/i;
+      for (const att of checked) {
+        let blob = null;
+        if (!corsProblemHosts.test(att.url)) {
+          try {
+            const r = await fetch(att.url, { mode: 'cors' });
+            if (r.ok) blob = await r.blob();
+          } catch (_) {}
+        }
+        if (!blob) {
+          const r = await proxyFetch('/attachment-fetch?url=' + encodeURIComponent(att.url));
+          if (!r.ok) throw new Error('Anhang „' + att.name + '" konnte nicht geladen werden (HTTP ' + r.status + ')');
+          blob = await r.blob();
+        }
+        sendAtts.push({ blob, name: att.name });
+      }
+      const totalBytes = sendAtts.reduce((sum, a) => sum + (a.blob.size || 0), 0);
+      if (totalBytes > 19 * 1024 * 1024) {
+        throw new Error('Anhänge zu groß: ' + Math.round(totalBytes / 1024 / 1024) + ' MB — Freshdesk erlaubt max. 20 MB. Bitte Auswahl reduzieren.');
+      }
+    }
+    setBusy(btn, true, 'Sende…');
     await _fdPostMultipart(s.accountId, 'tickets/' + s.ticketId + '/reply',
       { body: bodyHtml },
-      [{ blob: s._sendPdfBlob, name: pdfName }]
+      sendAtts
     );
     // Lokales Save (Status Versendet) — Legacy-ctx nur für die alte Tabelle
     try { await _angebotSaveAirtable(_angChatToCtx(s), 'Versendet'); } catch (e) { console.warn('Airtable-Save:', e.message); }
