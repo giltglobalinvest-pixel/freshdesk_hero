@@ -781,7 +781,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.204';
+const APP_VERSION = 'v2.46.205';
 
 /* ============================================================
    GLOBAL THEME — v2.46.12
@@ -12538,11 +12538,18 @@ async function _qaCollectAttachments(accountId, ticketId, ticket, opts) {
     if (!blob) { skipped.push(a.name + ' (fetch: ' + err + ')'); console.warn('[qa-collect] fetch-fail:', a.name, err); continue; }
     if (blob.size > maxPerFile) { skipped.push(a.name + ' (>' + Math.round(maxPerFile / 1024 / 1024) + 'MB)'); continue; }
     if (blob.size + totalBytes > maxBytes) { skipped.push(a.name + ' (total-cap)'); continue; }
+    // v2.46.205: Kaputte PDFs überspringen — sonst 400 vom Anthropic-API
+    const qaMediaType = String(a.content_type || '').toLowerCase();
+    if (qaMediaType === 'application/pdf' && !(await _isValidPdfBlob(blob))) {
+      skipped.push(a.name + ' (kein gültiges PDF)');
+      console.warn('[qa-collect] ' + a.name + ' — PDF-Magic-Bytes fehlen, übersprungen');
+      continue;
+    }
     try {
       const base64 = await _blobToBase64(blob);
       result.push({
         name: a.name || ('attachment-' + a.id),
-        mediaType: String(a.content_type || '').toLowerCase(),
+        mediaType: qaMediaType,
         base64: base64,
         size: blob.size,
       });
@@ -25088,10 +25095,20 @@ async function _angChatCollectAttachments(accountId, ticketId, ticket, opts) {
     if (!blob) continue;
     try {
       if (blob.size + totalBytes > maxBytes) continue;
+      const mediaType = String(a.content_type || '').toLowerCase();
+      // v2.46.205: Kaputte PDFs überspringen — sonst 400 vom Anthropic-API
+      if (mediaType === 'application/pdf' && !(await _isValidPdfBlob(blob))) {
+        console.warn('[Anhänge] ' + a.name + ' ist kein gültiges PDF (Magic-Bytes fehlen) — übersprungen');
+        continue;
+      }
+      if (mediaType.startsWith('image/') && blob.size < 50) {
+        console.warn('[Anhänge] ' + a.name + ' ist leer/zu klein — übersprungen');
+        continue;
+      }
       const base64 = await _blobToBase64(blob);
       result.push({
         name: a.name || ('attachment-' + a.id),
-        mediaType: String(a.content_type || '').toLowerCase(),
+        mediaType: mediaType,
         base64: base64,
       });
       totalBytes += blob.size;
@@ -25112,6 +25129,18 @@ function _blobToBase64(blob) {
     reader.onerror = (e) => reject(new Error('FileReader: ' + (e.target?.error?.message || 'unbekannt')));
     reader.readAsDataURL(blob);
   });
+}
+
+/* v2.46.205: Prüft ob ein Blob wirklich ein PDF ist (Magic-Bytes %PDF-).
+   Freshdesk liefert manchmal content_type=application/pdf für kaputte/leere
+   Dateien — Anthropic lehnt die dann mit HTTP 400 ab und die ganze
+   KI-Generierung stirbt. Ungültige PDFs werden übersprungen. */
+async function _isValidPdfBlob(blob) {
+  if (!blob || blob.size < 100) return false;
+  try {
+    const head = new Uint8Array(await blob.slice(0, 5).arrayBuffer());
+    return head[0] === 0x25 && head[1] === 0x50 && head[2] === 0x44 && head[3] === 0x46 && head[4] === 0x2D; // "%PDF-"
+  } catch (_) { return false; }
 }
 
 /* Eine Chat-Bubble (KI oder User) rendern + an Liste anhängen. */
