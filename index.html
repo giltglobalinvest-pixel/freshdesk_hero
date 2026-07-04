@@ -781,7 +781,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.203';
+const APP_VERSION = 'v2.46.204';
 
 /* ============================================================
    GLOBAL THEME — v2.46.12
@@ -12769,6 +12769,9 @@ async function openTicketDetail(accountId, ticketId) {
     ticket._accountId = accountId;
     CURRENT_TICKET = ticket;
     renderTicketDetailBody(ticket);
+    // v2.46.204: Signatur-Crawler — scannt eingehende Signaturen nach neuen
+    // Kontakten (fire-and-forget, 1x pro Ticket pro Session)
+    _crawlTicketSignatures(accountId, ticket).catch(e => console.warn('[Crawler]', e.message));
     // Telefonnummern lazy nachladen falls sie nicht im Ticket-Payload waren —
     // re-rendert die Detail-View damit die anklickbaren Phone-Pills erscheinen
     if (ticket.requester_id) {
@@ -32699,6 +32702,311 @@ async function _checkFsForEmail(accountId, email) {
   }
 }
 
+/* === v2.46.204: SIGNATUR-CRAWLER ==========================================
+   Beim Öffnen eines Tickets scannt Haiku die Signaturen der eingehenden
+   Nachrichten und legt neue Kontakte in CrawledContacts ab — inkl. Status:
+   ist der Kontakt vollständig in Freshdesk / Freshsales / zu Mailchimp
+   gepusht? Kontakte-Seite bekommt eine „Gecrawlt"-Ansicht mit manuellen
+   Push-Buttons (nutzen die vorhandenen Flows) + Kontakttyp-Verwaltung. */
+const CRAWLED_TABLE = 'CrawledContacts';
+const CONTACT_TYPES_TABLE = 'ContactTypes';
+const CRAWL_STATE = {
+  done: new Set(),        // 'accountId|ticketId' — pro Session nur 1x crawlen
+  cacheByAccount: new Map(),  // accountId → Set(lowercase emails) bereits erfasst
+  list: [],               // aktuell geladene gecrawlte Kontakte (für die Ansicht)
+  types: null,            // ContactTypes-Liste
+  filterTyp: '',
+};
+
+const CRAWLED_TYPES_MAP = {
+  account_id: 'singleLineText', email: 'singleLineText', name: 'singleLineText',
+  firma: 'singleLineText', telefon: 'singleLineText', mobil: 'singleLineText',
+  position: 'singleLineText', quelle_ticket: 'singleLineText', kontakt_typ: 'singleLineText',
+  fd_status: 'singleLineText', fs_status: 'singleLineText', mc_status: 'singleLineText',
+  fd_contact_id: 'singleLineText', crawled_at: 'singleLineText', updated_at: 'singleLineText',
+};
+
+async function _crawlLoadExisting(accountId) {
+  if (CRAWL_STATE.cacheByAccount.has(accountId)) return CRAWL_STATE.cacheByAccount.get(accountId);
+  const set = new Set();
+  try {
+    const recs = await airtableRead(CRAWLED_TABLE, {
+      filter: "{account_id}='" + escapeFormula(accountId) + "'",
+      maxRecords: 2000,
+    });
+    recs.forEach(r => { const e = (r.fields.email || '').toLowerCase(); if (e) set.add(e); });
+  } catch (_) {}
+  CRAWL_STATE.cacheByAccount.set(accountId, set);
+  return set;
+}
+
+/* FD-Vollständigkeit prüfen: fehlt / teilweise / komplett (+contact_id). */
+async function _crawlCheckFd(accountId, email) {
+  try {
+    const list = await proxyJson('/freshdesk/' + encodeURIComponent(accountId) + '/api/v2/contacts?email=' + encodeURIComponent(email));
+    const c = Array.isArray(list) ? list[0] : null;
+    if (!c) return { status: 'fehlt', id: '' };
+    const complete = !!(c.name && (c.phone || c.mobile));
+    return { status: complete ? 'komplett' : 'teilweise', id: String(c.id) };
+  } catch (_) { return { status: 'fehlt', id: '' }; }
+}
+
+/* FS-Existenz prüfen (nur bei Accounts mit Freshsales). */
+async function _crawlCheckFs(accountId, email) {
+  const acc = (APP_STATE.accounts || []).find(a => a.id === accountId);
+  if (!acc || typeof accountHasFreshsales !== 'function' || !accountHasFreshsales(acc)) return 'n/a';
+  try {
+    const r = await proxyJson('/freshsales/' + encodeURIComponent(accountId) + '/api/lookup?q=' + encodeURIComponent(email) + '&f=email&entities=contact');
+    const hits = r?.contacts?.contacts || [];
+    return hits.length ? 'komplett' : 'fehlt';
+  } catch (_) { return 'fehlt'; }
+}
+
+/* Haupt-Crawler — fire-and-forget beim Ticket-Öffnen. */
+async function _crawlTicketSignatures(accountId, ticket) {
+  try {
+    const key = accountId + '|' + ticket.id;
+    if (CRAWL_STATE.done.has(key)) return;
+    CRAWL_STATE.done.add(key);
+    // Nur EINGEHENDE Inhalte (Kunden-Signaturen), Signaturen stehen am Ende
+    const chunks = [];
+    const desc = (ticket.description_text || '');
+    if (desc) chunks.push(desc.slice(-900));
+    (ticket.conversations || []).filter(c => c.incoming && !c.private).slice(-8).forEach(c => {
+      const t = (c.body_text || '');
+      if (t) chunks.push(t.slice(-900));
+    });
+    if (!chunks.length) return;
+    const req = ticket.requester || {};
+    const data = await _callAnthropicWithRetry({
+      model: 'claude-haiku-4-5-20251001',
+      max_tokens: 900,
+      system:
+        'Du extrahierst KONTAKTDATEN aus Email-Signaturen (Aufzug-Service-Branche). ' +
+        'Gegeben sind Text-Ausschnitte (Enden eingehender Emails). Finde alle PERSONEN mit Email-Adresse. ' +
+        'Antworte NUR mit JSON-Array, ohne Markdown: ' +
+        '[{"name":"Vorname Nachname","email":"...","firma":"...","telefon":"...","mobil":"...","position":"..."}] ' +
+        'Regeln: email ist PFLICHT (sonst weglassen). Keine noreply/no-reply/info@-Sammeladressen erfinden — nur was wirklich in Signaturen steht. ' +
+        'Keine Duplikate. Leeres Array [] wenn nichts gefunden.',
+      messages: [{ role: 'user', content: 'Ticket-Anfragender: ' + (req.name || '?') + ' <' + (req.email || '?') + '>\n\nTEXT-AUSSCHNITTE:\n\n' + chunks.join('\n\n=====\n\n') }],
+    });
+    const raw = (data?.content?.[0]?.text || '').trim().replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/i, '');
+    let found = [];
+    try { found = JSON.parse(raw); } catch (_) { return; }
+    if (!Array.isArray(found) || !found.length) return;
+    const existing = await _crawlLoadExisting(accountId);
+    let added = 0;
+    for (const p of found) {
+      const email = String(p.email || '').trim().toLowerCase();
+      if (!email || !email.includes('@') || /noreply|no-reply|mailer-daemon/.test(email)) continue;
+      if (existing.has(email)) continue;
+      existing.add(email);
+      const [fd, fs] = await Promise.all([_crawlCheckFd(accountId, email), _crawlCheckFs(accountId, email)]);
+      await airtableWriteWithAutoField(CRAWLED_TABLE, {
+        account_id: accountId, email,
+        name: p.name || '', firma: p.firma || '',
+        telefon: p.telefon || '', mobil: p.mobil || '', position: p.position || '',
+        quelle_ticket: String(ticket.id), kontakt_typ: '',
+        fd_status: fd.status, fd_contact_id: fd.id, fs_status: fs, mc_status: 'unbekannt',
+        crawled_at: nowIso(), updated_at: nowIso(),
+      }, CRAWLED_TYPES_MAP);
+      added++;
+    }
+    if (added) toast('🕸 ' + added + ' neue(r) Kontakt(e) aus Signaturen erfasst — Kontakte → „Gecrawlt"', 'info', 6000);
+  } catch (e) { console.warn('[Crawler]', e.message); }
+}
+
+/* === Kontakttypen ======================================================== */
+async function loadContactTypes(force) {
+  if (!force && CRAWL_STATE.types) return CRAWL_STATE.types;
+  let list = [];
+  try {
+    const recs = await airtableRead(CONTACT_TYPES_TABLE, { maxRecords: 100 });
+    list = recs.map(r => ({ recordId: r.id, name: r.fields.name || '' })).filter(x => x.name);
+  } catch (_) {}
+  CRAWL_STATE.types = list;
+  return list;
+}
+
+async function _crawlTypChange(recordId, val) {
+  if (val === '__new__') {
+    const name = prompt('Neuer Kontakttyp (z.B. Hausverwaltung, Sub, TÜV):');
+    if (!name || !name.trim()) { _renderCrawledContacts(); return; }
+    try {
+      await airtableWriteWithAutoField(CONTACT_TYPES_TABLE, { name: name.trim() }, { name: 'singleLineText' });
+      await loadContactTypes(true);
+      val = name.trim();
+    } catch (e) { toast('Typ anlegen fehlgeschlagen: ' + e.message, 'error', 6000); return; }
+  }
+  try {
+    await airtableUpdateWithAutoField(CRAWLED_TABLE, recordId, { kontakt_typ: val, updated_at: nowIso() }, CRAWLED_TYPES_MAP);
+    const rec = CRAWL_STATE.list.find(r => r.recordId === recordId);
+    if (rec) rec.kontakt_typ = val;
+    _renderCrawledContacts();
+    toast('Typ gesetzt: ' + (val || '(kein)'), 'success', 2000);
+  } catch (e) { toast('Typ speichern fehlgeschlagen: ' + e.message, 'error', 6000); }
+}
+
+/* === Gecrawlt-Ansicht in der Kontakte-Seite ============================== */
+async function showCrawledContacts(btn) {
+  if (btn) setBusy(btn, true);
+  try {
+    const [recs] = await Promise.all([
+      airtableRead(CRAWLED_TABLE, { sort: [{ field: 'crawled_at', direction: 'desc' }], maxRecords: 500 }),
+      loadContactTypes(),
+    ]);
+    CRAWL_STATE.list = recs.map(r => Object.assign({ recordId: r.id }, r.fields));
+  } catch (_) { CRAWL_STATE.list = []; }
+  if (btn) setBusy(btn, false);
+  _renderCrawledContacts();
+}
+
+function _crawlBadge(label, status) {
+  const map = {
+    komplett: 'bg-emerald-100 text-emerald-700 border-emerald-300',
+    gepusht:  'bg-emerald-100 text-emerald-700 border-emerald-300',
+    teilweise:'bg-amber-100 text-amber-700 border-amber-300',
+    fehlt:    'bg-rose-100 text-rose-700 border-rose-300',
+    unbekannt:'bg-ink-100 text-ink-500 border-ink-300',
+    'n/a':    'bg-ink-50 text-ink-400 border-ink-200',
+  };
+  return '<span class="text-[9px] font-bold px-1.5 py-0.5 rounded border ' + (map[status] || map.unbekannt) + '">' + label + ': ' + escapeHtml(status) + '</span>';
+}
+
+function _renderCrawledContacts() {
+  const host = $('contactsResults');
+  if (!host) return;
+  const types = CRAWL_STATE.types || [];
+  const list = CRAWL_STATE.list.filter(r => !CRAWL_STATE.filterTyp || r.kontakt_typ === CRAWL_STATE.filterTyp);
+  const typOpts = (sel) => '<option value="">(kein Typ)</option>' +
+    types.map(t => '<option value="' + escapeAttr(t.name) + '"' + (sel === t.name ? ' selected' : '') + '>' + escapeHtml(t.name) + '</option>').join('') +
+    '<option value="__new__">➕ Neuer Typ…</option>';
+  host.innerHTML =
+    '<div class="bg-gradient-to-br from-violet-50 to-indigo-50 border border-violet-200 rounded-xl p-3 mb-2">' +
+      '<div class="flex items-center gap-2 flex-wrap">' +
+        '<p class="font-bold text-violet-900 text-sm inline-flex items-center gap-1.5"><i data-lucide="radar" class="w-4 h-4"></i> Gecrawlte Kontakte (' + list.length + (CRAWL_STATE.filterTyp ? ' / ' + CRAWL_STATE.list.length : '') + ')</p>' +
+        '<select onchange="CRAWL_STATE.filterTyp=this.value;_renderCrawledContacts()" class="ml-auto px-2 py-1 border border-violet-300 rounded-lg text-[11px] bg-white">' +
+          '<option value="">Alle Typen</option>' +
+          types.map(t => '<option value="' + escapeAttr(t.name) + '"' + (CRAWL_STATE.filterTyp === t.name ? ' selected' : '') + '>' + escapeHtml(t.name) + '</option>').join('') +
+        '</select>' +
+        '<button onclick="showCrawledContacts(this)" class="px-2 py-1 bg-white border border-violet-300 text-violet-700 rounded-lg text-[11px] font-bold" title="Neu laden">↻</button>' +
+      '</div>' +
+      '<p class="text-[10px] text-violet-700 mt-1">Aus Ticket-Signaturen erfasst. Push-Buttons legen an bzw. aktualisieren — FD/FS nutzen die bestehenden Flows, MC = Mailchimp-Upsert.</p>' +
+    '</div>' +
+    (list.length ? list.map((r, i) =>
+      '<div class="bg-white rounded-xl border border-ink-200 p-3 mb-2">' +
+        '<div class="flex items-start gap-2 flex-wrap">' +
+          '<div class="flex-1 min-w-[220px]">' +
+            '<p class="font-bold text-ink-900 text-sm">' + escapeHtml(r.name || r.email) + (r.position ? ' <span class="font-normal text-ink-500">· ' + escapeHtml(r.position) + '</span>' : '') + '</p>' +
+            '<p class="text-[11px] text-ink-600">' + escapeHtml(r.firma || '') + '</p>' +
+            '<p class="text-[11px] text-ink-500 font-mono">' + escapeHtml(r.email) + (r.telefon ? ' · ' + escapeHtml(r.telefon) : '') + (r.mobil ? ' · ' + escapeHtml(r.mobil) : '') + '</p>' +
+            '<div class="flex gap-1 mt-1.5 flex-wrap">' +
+              _crawlBadge('FD', r.fd_status || 'unbekannt') + _crawlBadge('FS', r.fs_status || 'unbekannt') + _crawlBadge('MC', r.mc_status || 'unbekannt') +
+              '<span class="text-[9px] text-ink-400">Ticket #' + escapeHtml(r.quelle_ticket || '?') + '</span>' +
+            '</div>' +
+          '</div>' +
+          '<div class="flex flex-col gap-1 items-end shrink-0">' +
+            '<select onchange="_crawlTypChange(\'' + escapeAttr(r.recordId) + '\', this.value)" class="px-1.5 py-1 border border-ink-300 rounded text-[10px] bg-white max-w-[140px]">' + typOpts(r.kontakt_typ || '') + '</select>' +
+            '<div class="flex gap-1">' +
+              '<button onclick="_crawlPushFd(' + i + ', this)" class="px-2 py-1 bg-blue-600 hover:bg-blue-700 text-white rounded text-[10px] font-bold" title="In Freshdesk anlegen/aktualisieren">→ FD</button>' +
+              (r.fs_status !== 'n/a' ? '<button onclick="_crawlPushFs(' + i + ', this)" class="px-2 py-1 bg-orange-600 hover:bg-orange-700 text-white rounded text-[10px] font-bold" title="Nach Freshsales pushen (bestehende Funktion)">→ FS</button>' : '') +
+              '<button onclick="_crawlPushMc(' + i + ', this)" class="px-2 py-1 bg-yellow-500 hover:bg-yellow-600 text-white rounded text-[10px] font-bold" title="Zu Mailchimp pushen (Upsert)">→ MC</button>' +
+              '<button onclick="_crawlRecheck(' + i + ', this)" class="px-2 py-1 bg-ink-100 hover:bg-ink-200 text-ink-700 rounded text-[10px] font-bold" title="Status neu prüfen">↻</button>' +
+            '</div>' +
+          '</div>' +
+        '</div>' +
+      '</div>'
+    ).join('') : '<div class="bg-white rounded-xl border border-dashed border-ink-300 p-6 text-center text-ink-500 text-sm">Noch keine gecrawlten Kontakte' + (CRAWL_STATE.filterTyp ? ' mit diesem Typ' : '') + '. Öffne Tickets — Signaturen werden automatisch gescannt.</div>');
+  if (window.lucide) lucide.createIcons();
+}
+
+/* Der gefilterte Index i bezieht sich auf die AKTUELL gerenderte Liste. */
+function _crawlRecAt(i) {
+  const list = CRAWL_STATE.list.filter(r => !CRAWL_STATE.filterTyp || r.kontakt_typ === CRAWL_STATE.filterTyp);
+  return list[i] || null;
+}
+
+async function _crawlPushFd(i, btn) {
+  const r = _crawlRecAt(i);
+  if (!r) return;
+  setBusy(btn, true);
+  try {
+    const base = '/freshdesk/' + encodeURIComponent(r.account_id) + '/api/v2';
+    const payload = { name: r.name || r.email, email: r.email };
+    if (r.telefon)  payload.phone = r.telefon;
+    if (r.mobil)    payload.mobile = r.mobil;
+    if (r.position) payload.job_title = r.position;
+    const list = await proxyJson(base + '/contacts?email=' + encodeURIComponent(r.email)).catch(() => []);
+    let cid;
+    if (Array.isArray(list) && list[0]) {
+      cid = list[0].id;
+      await proxyJson(base + '/contacts/' + cid, { method: 'PUT', body: JSON.stringify(payload) });
+    } else {
+      const created = await proxyJson(base + '/contacts', { method: 'POST', body: JSON.stringify(payload) });
+      cid = created?.id;
+    }
+    await airtableUpdateWithAutoField(CRAWLED_TABLE, r.recordId, { fd_status: 'komplett', fd_contact_id: String(cid || ''), updated_at: nowIso() }, CRAWLED_TYPES_MAP);
+    r.fd_status = 'komplett'; r.fd_contact_id = String(cid || '');
+    _renderCrawledContacts();
+    toast('Freshdesk aktualisiert ✓', 'success', 3000);
+  } catch (e) { setBusy(btn, false); toast('FD-Push: ' + (e.message || e), 'error', 8000); }
+}
+
+async function _crawlPushFs(i, btn) {
+  const r = _crawlRecAt(i);
+  if (!r) return;
+  // Bestehende Funktion nutzen: _pushContactToFs liest aus CONTACTS_STATE.results
+  const email = String(r.email).toLowerCase();
+  if (!CONTACTS_STATE.results.find(x => String(x.email || '').toLowerCase() === email)) {
+    CONTACTS_STATE.results.push({ _accountId: r.account_id, email: r.email, name: r.name || '', phone: r.telefon || '', mobile: r.mobil || '', job_title: r.position || '', address: '' });
+  }
+  await _pushContactToFs(email, btn);
+  try {
+    await airtableUpdateWithAutoField(CRAWLED_TABLE, r.recordId, { fs_status: 'komplett', updated_at: nowIso() }, CRAWLED_TYPES_MAP);
+    r.fs_status = 'komplett';
+    _renderCrawledContacts();
+  } catch (_) {}
+}
+
+async function _crawlPushMc(i, btn) {
+  const r = _crawlRecAt(i);
+  if (!r) return;
+  const acc = (APP_STATE.accounts || []).find(a => a.id === r.account_id);
+  const slug = _erpFirmaSlugForAccount(acc);
+  if (!APP_KEYS.erpProxyUrl || !slug) return toast('Mailchimp läuft über den Berichtskonverter-Proxy — ERP-Settings prüfen', 'warn', 6000);
+  setBusy(btn, true);
+  try {
+    const parts = String(r.name || '').trim().split(/\s+/);
+    const member = {
+      email_address: r.email.toLowerCase(),
+      merge_fields: {
+        FNAME: parts.slice(0, -1).join(' ') || parts[0] || '',
+        LNAME: parts.length > 1 ? parts[parts.length - 1] : '',
+        COMPANY: r.firma || '',
+        PHONE: r.telefon || r.mobil || '',
+      },
+      tags: [r.firma, r.kontakt_typ].filter(Boolean),
+    };
+    await erpFetch('/mailchimp/' + encodeURIComponent(slug) + '/upsert', { method: 'POST', body: member });
+    await airtableUpdateWithAutoField(CRAWLED_TABLE, r.recordId, { mc_status: 'gepusht', updated_at: nowIso() }, CRAWLED_TYPES_MAP);
+    r.mc_status = 'gepusht';
+    _renderCrawledContacts();
+    toast('Mailchimp: ' + r.email + ' gepusht ✓', 'success', 3000);
+  } catch (e) { setBusy(btn, false); toast('Mailchimp-Push: ' + (e.message || e), 'error', 8000); }
+}
+
+async function _crawlRecheck(i, btn) {
+  const r = _crawlRecAt(i);
+  if (!r) return;
+  setBusy(btn, true);
+  const [fd, fs] = await Promise.all([_crawlCheckFd(r.account_id, r.email), _crawlCheckFs(r.account_id, r.email)]);
+  try {
+    await airtableUpdateWithAutoField(CRAWLED_TABLE, r.recordId, { fd_status: fd.status, fd_contact_id: fd.id, fs_status: fs, updated_at: nowIso() }, CRAWLED_TYPES_MAP);
+    r.fd_status = fd.status; r.fd_contact_id = fd.id; r.fs_status = fs;
+  } catch (_) {}
+  _renderCrawledContacts();
+}
+
 async function renderContactsPage() {
   setPageTitle('Kontakte', 'KI-Suche · Marketing-History · Sales-Filter');
   const accountsCount = (APP_STATE.accounts || []).length;
@@ -32738,6 +33046,8 @@ async function renderContactsPage() {
       '</div>' +
       '<div id="contactsActionRow" class="flex flex-wrap gap-2 items-center">' +
         '<button id="contactsSearchBtn" onclick="_runContactSearch(this)" class="flex-1 min-w-[140px] px-3 py-2 bg-gradient-to-br from-orange-500 to-amber-600 hover:from-orange-600 hover:to-amber-700 text-white rounded-lg text-sm font-bold inline-flex items-center justify-center gap-1"><i data-lucide="search" class="w-4 h-4"></i> Suchen</button>' +
+        // v2.46.204: Gecrawlte Kontakte (aus Ticket-Signaturen) anzeigen
+        '<button onclick="showCrawledContacts(this)" class="px-3 py-2 bg-gradient-to-br from-violet-500 to-indigo-600 hover:from-violet-600 hover:to-indigo-700 text-white rounded-lg text-sm font-bold inline-flex items-center justify-center gap-1" title="Zeige alle aus Ticket-Signaturen gecrawlten Kontakte"><i data-lucide="radar" class="w-4 h-4"></i> Gecrawlt</button>' +
         '<select id="contactsSort" onchange="_onContactsSort(this.value)" class="px-2 py-2 border border-ink-300 rounded-lg text-sm bg-white">' +
           '<option value="name"'   + (CONTACTS_STATE.sort === 'name'   ? ' selected' : '') + '>A → Z</option>' +
           '<option value="recent"' + (CONTACTS_STATE.sort === 'recent' ? ' selected' : '') + '>Letzte Marketing-Mail</option>' +
