@@ -781,7 +781,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.202';
+const APP_VERSION = 'v2.46.203';
 
 /* ============================================================
    GLOBAL THEME — v2.46.12
@@ -25763,6 +25763,7 @@ async function angChatExecuteFinal(btn) {
   }
   setBusy(btn, false);
   s._sendPdfBlob = pdfBlob;
+  s._sendLocalFiles = [];  // v2.46.203: eigene Dateien vom Rechner
   // Email-Text vorbefüllen: KI-Anschreiben wenn vorhanden, sonst Standard
   const c = s.collected || {};
   const req = s.ticket?.requester || {};
@@ -25843,6 +25844,14 @@ async function angChatExecuteFinal(btn) {
           '</div>' +
           ticketAttsHtml +
           libAttsHtml +
+          // v2.46.203: Eigene Dateien vom Rechner anhängen
+          '<div><label class="text-[11px] font-bold text-ink-700 uppercase tracking-wider">Eigene Dateien anhängen (optional)</label>' +
+            '<div id="angSendLocalList" class="mt-1 space-y-1"></div>' +
+            '<label class="mt-1 inline-flex items-center gap-1.5 px-3 py-1.5 bg-white border border-indigo-300 text-indigo-700 rounded-lg text-[12px] font-semibold cursor-pointer hover:bg-indigo-50">' +
+              '<i data-lucide="upload" class="w-3.5 h-3.5"></i> Datei wählen…' +
+              '<input type="file" multiple class="hidden" onchange="_angSendAddLocalFiles(this)">' +
+            '</label>' +
+          '</div>' +
           '<label class="inline-flex items-center gap-2 text-sm cursor-pointer">' +
             '<input id="angSendWithSig" type="checkbox" checked class="w-4 h-4 accent-indigo-600">' +
             '<span>Freshdesk-Signatur anhängen</span>' +
@@ -25864,6 +25873,42 @@ async function angChatExecuteFinal(btn) {
 function closeAngSendPreview() {
   const host = document.getElementById('subModalHost2');
   if (host) host.innerHTML = '';
+}
+
+/* v2.46.203: Eigene Dateien im Send-Modal anhängen. */
+function _angSendAddLocalFiles(input) {
+  const s = window._ANG_CHAT;
+  if (!s) return;
+  s._sendLocalFiles = s._sendLocalFiles || [];
+  Array.from(input.files || []).forEach(f => {
+    if (f.size > 19 * 1024 * 1024) { toast('„' + f.name + '" ist zu groß (max 19 MB)', 'warn', 5000); return; }
+    s._sendLocalFiles.push(f);
+  });
+  input.value = '';
+  _angSendRenderLocalFiles();
+}
+
+function _angSendRenderLocalFiles() {
+  const host = document.getElementById('angSendLocalList');
+  const s = window._ANG_CHAT;
+  if (!host) return;
+  const files = s?._sendLocalFiles || [];
+  host.innerHTML = files.map((f, i) =>
+    '<div class="flex items-center gap-2 bg-indigo-50 border border-indigo-200 rounded-lg px-2.5 py-1.5 text-sm">' +
+      '<i data-lucide="file" class="w-3.5 h-3.5 text-indigo-600 shrink-0"></i>' +
+      '<span class="truncate flex-1">' + escapeHtml(f.name) + '</span>' +
+      '<span class="text-[10px] text-ink-400 shrink-0">' + Math.round(f.size / 1024) + ' KB</span>' +
+      '<button onclick="_angSendRemoveLocalFile(' + i + ')" class="shrink-0 text-rose-600 hover:text-rose-800 font-bold px-1" title="Entfernen">×</button>' +
+    '</div>'
+  ).join('');
+  if (window.lucide) lucide.createIcons();
+}
+
+function _angSendRemoveLocalFile(i) {
+  const s = window._ANG_CHAT;
+  if (!s?._sendLocalFiles) return;
+  s._sendLocalFiles.splice(i, 1);
+  _angSendRenderLocalFiles();
 }
 
 /* v2.46.181: Tatsächlicher Versand — PDF als multipart-Anhang, Text als Body,
@@ -25943,6 +25988,8 @@ async function angChatConfirmSend(btn) {
         sendAtts.push({ blob: f.blob, name: f.name });
       }
     }
+    // v2.46.203: eigene Dateien vom Rechner mitsenden
+    (s._sendLocalFiles || []).forEach(f => sendAtts.push({ blob: f, name: f.name }));
     const totalAll = sendAtts.reduce((sum, a) => sum + (a.blob.size || 0), 0);
     if (totalAll > 19 * 1024 * 1024) {
       throw new Error('Anhänge zu groß: ' + Math.round(totalAll / 1024 / 1024) + ' MB — Freshdesk erlaubt max. 20 MB. Bitte Auswahl reduzieren.');
