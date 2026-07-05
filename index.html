@@ -781,7 +781,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.206';
+const APP_VERSION = 'v2.46.207';
 
 /* ============================================================
    GLOBAL THEME — v2.46.12
@@ -24347,6 +24347,136 @@ async function _angLearnFromCorrection(s, userText) {
    Fallback wenn kein localStorage-Stand existiert (anderes Gerät, Cache
    geleert, oder Angebot vor v2.46.191 erstellt). Sucht in App_Angebote nach
    freshdesk_ticket_id und mappt das BK-Format zurück ins Chat-Format. */
+/* === v2.46.207: Preiskonsistenz über frühere Angebote desselben Kunden =====
+   Lädt aus dem Berichtskonverter (App_Angebote) alle Angebote mit gleichem
+   Kundennamen, baut eine Preis-Referenz (Leistungsbezeichnung → letzter Preis).
+   Zwei Verwendungen:
+   1) als Prompt-Kontext → die KI schlägt konsistente Preise vor
+   2) nach der Generierung → Abweichungen werden als (ignorierbare) Warnung
+      im Chat gezeigt. */
+function _angNormLeistung(s) {
+  return String(s || '').toLowerCase()
+    .replace(/[^a-zäöüß0-9 ]/g, ' ')
+    .replace(/\b(inkl|inklusive|incl|zzgl|netto|brutto|pauschal|stück|stk|st|pro|je|nach|und|der|die|das|für|mit|ca|ggf|neue?r?)\b/g, ' ')
+    .replace(/\s+/g, ' ').trim();
+}
+
+async function _angLoadKundenPreishistorie(kundeName, exclTicketId) {
+  const out = { byLeistung: new Map(), angebote: 0 };
+  if (!APP_KEYS.bkAirtableBaseId || !APP_KEYS.airtableWriteKey) return out;
+  const name = String(kundeName || '').trim();
+  if (name.length < 3) return out;
+  try {
+    const url = 'https://api.airtable.com/v0/' + APP_KEYS.bkAirtableBaseId + '/App_Angebote'
+      + '?filterByFormula=' + encodeURIComponent("LOWER({kunde_name})='" + name.toLowerCase().replace(/'/g, "\\'") + "'")
+      + '&sort[0][field]=app_angebot_num&sort[0][direction]=desc&maxRecords=25';
+    const r = await fetch(url, { headers: { 'Authorization': 'Bearer ' + APP_KEYS.airtableWriteKey } });
+    if (!r.ok) return out;
+    const d = await r.json();
+    for (const rec of (d.records || [])) {
+      const f = rec.fields || {};
+      if (exclTicketId && String(f.freshdesk_ticket_id || '') === String(exclTicketId)) continue; // aktuelles Ticket ausklammern
+      let positionen = [];
+      try { positionen = JSON.parse(f.positionen_json || '[]'); } catch (_) {}
+      const datum = f.erstellt_am || '';
+      const angNr = 'ANG-' + (f.app_angebot_num || '?');
+      out.angebote++;
+      for (const p of positionen) {
+        const preis = +p.vp || +p.einzelpreis || 0;
+        if (preis <= 0) continue;
+        const key = _angNormLeistung(p.titel || p.bezeichnung || '');
+        if (!key || key.length < 4) continue;
+        // neueste (erstes App_Angebote-Ergebnis, da desc sortiert) gewinnt
+        if (!out.byLeistung.has(key)) {
+          out.byLeistung.set(key, { preis, label: (p.titel || p.bezeichnung || ''), angNr, datum });
+        }
+      }
+    }
+  } catch (e) { console.warn('[Preishistorie]', e.message); }
+  return out;
+}
+
+function _angPreisReferenzBlock(hist) {
+  if (!hist || !hist.byLeistung.size) return '';
+  const lines = [];
+  hist.byLeistung.forEach(v => lines.push('- „' + v.label + '": ' + _formatEur(v.preis) + ' (aus ' + v.angNr + (v.datum ? ', ' + v.datum : '') + ')'));
+  return '\n\nPREIS-REFERENZEN AUS FRÜHEREN ANGEBOTEN AN DIESEN KUNDEN (' + hist.angebote + ' Angebot(e)):\n' +
+    'Wenn du eine dieser Leistungen anbietest, verwende MÖGLICHST DENSELBEN Preis (Preiskonsistenz zum Kunden). ' +
+    'Nur abweichen wenn der User es explizit sagt oder sich der Leistungsumfang klar unterscheidet.\n' +
+    lines.slice(0, 30).join('\n') + '\n';
+}
+
+/* Vergleicht die aktuellen Positionen mit der Historie → Liste von Abweichungen. */
+function _angFindPreisabweichungen(s) {
+  const hist = s?._preishist;
+  if (!hist || !hist.byLeistung.size) return [];
+  const abw = [];
+  (s.collected?.positionen || []).forEach(p => {
+    const preis = +p.einzelpreis || 0;
+    if (preis <= 0) return;
+    const ref = hist.byLeistung.get(_angNormLeistung(p.bezeichnung || ''));
+    if (!ref) return;
+    const diff = Math.abs(preis - ref.preis);
+    const pct = ref.preis ? (diff / ref.preis) : 0;
+    if (diff >= 1 && pct >= 0.03) {  // >= 3% und >= 1 € Unterschied
+      abw.push({ bezeichnung: p.bezeichnung || '', neu: preis, alt: ref.preis, angNr: ref.angNr, pct: Math.round(pct * 100) });
+    }
+  });
+  return abw;
+}
+
+/* Zeigt (oder entfernt) die Inkonsistenz-Warnung als Chat-Bubble. Ignorierbar. */
+function _angRenderPreiswarnung(s) {
+  const list = document.getElementById('angChatBubbles');
+  if (!list) return;
+  const old = document.getElementById('angPreisWarn');
+  if (old) old.remove();
+  if (s._preisWarnIgnored) return;
+  const abw = _angFindPreisabweichungen(s);
+  if (!abw.length) return;
+  const div = document.createElement('div');
+  div.id = 'angPreisWarn';
+  div.className = 'flex justify-start';
+  div.innerHTML =
+    '<div class="max-w-[90%] bg-amber-50 border-2 border-amber-300 rounded-2xl px-3 py-2 text-[12px] text-amber-900">' +
+      '<p class="font-bold inline-flex items-center gap-1 mb-1"><i data-lucide="alert-triangle" class="w-4 h-4"></i> Preisabweichung zu früheren Angeboten an diesen Kunden</p>' +
+      abw.map(a => '<div class="mt-0.5">• <b>' + escapeHtml(a.bezeichnung) + '</b>: jetzt <b>' + _formatEur(a.neu) + '</b> — früher ' + _formatEur(a.alt) + ' (' + a.angNr + ', ' + (a.neu > a.alt ? '+' : '−') + a.pct + '%)</div>').join('') +
+      '<div class="mt-2 flex gap-2">' +
+        '<button onclick="_angApplyHistPreise(this)" class="px-2.5 py-1 bg-amber-600 hover:bg-amber-700 text-white rounded-lg text-[11px] font-bold">Frühere Preise übernehmen</button>' +
+        '<button onclick="_angIgnorePreiswarnung()" class="px-2.5 py-1 bg-white border border-amber-300 text-amber-800 rounded-lg text-[11px] font-bold">Ignorieren</button>' +
+      '</div>' +
+    '</div>';
+  list.appendChild(div);
+  list.scrollTop = list.scrollHeight;
+  if (window.lucide) lucide.createIcons();
+}
+
+function _angIgnorePreiswarnung() {
+  const s = window._ANG_CHAT;
+  if (s) s._preisWarnIgnored = true;
+  const old = document.getElementById('angPreisWarn');
+  if (old) old.remove();
+  toast('Preisabweichung ignoriert — Angebot bleibt wie es ist', 'info', 3000);
+}
+
+/* Setzt die Positions-Preise auf die historischen Referenzwerte. */
+function _angApplyHistPreise(btn) {
+  const s = window._ANG_CHAT;
+  if (!s?._preishist) return;
+  let changed = 0;
+  (s.collected?.positionen || []).forEach(p => {
+    const ref = s._preishist.byLeistung.get(_angNormLeistung(p.bezeichnung || ''));
+    if (ref && +p.einzelpreis !== ref.preis) { p.einzelpreis = ref.preis; changed++; }
+  });
+  if (changed) {
+    _angChatRenderPreview();
+    _angChatAppendBubble('assistant', '✓ ' + changed + ' Position(en) auf die früheren Kundenpreise gesetzt.');
+  }
+  const old = document.getElementById('angPreisWarn');
+  if (old) old.remove();
+  s._preisWarnIgnored = true;
+}
+
 async function _angRestoreFromBK(accountId, ticketId) {
   if (!APP_KEYS.bkAirtableBaseId || !APP_KEYS.airtableWriteKey) return null;
   try {
@@ -25355,6 +25485,8 @@ async function angChatUserResponse(userText) {
     _angChatAppendBubble('assistant', result.message);
     _angChatRenderPreview();
     _angChatRenderActions({ hasPlan: true });
+    // v2.46.207: Preiskonsistenz-Check gegen frühere Angebote des Kunden — Warnung (ignorierbar)
+    _angRenderPreiswarnung(s);
     // v2.46.196: KEIN Auto-Persist mehr — Änderungen sind nur ein Arbeitsstand.
     // Gespeichert wird erst bei „An Kunden senden", „Im Berichtskonverter speichern"
     // oder „Entwurf". Ohne Speichern lädt das nächste Öffnen die letzte gespeicherte Version.
@@ -25402,6 +25534,13 @@ async function _angChatGenerateOffer(s, userText) {
     ? '\n\nGELERNTE REGELN AUS FRÜHEREN KORREKTUREN DES USERS (STRIKT BEFOLGEN — haben Vorrang vor allgemeinen Vorgaben):\n' +
       regeln.map(r => '- ' + r.regel).join('\n').slice(0, 2500) + '\n'
     : '';
+  // v2.46.207: Preishistorie desselben Kunden (einmal pro Angebot laden + cachen)
+  if (s._preishist === undefined) {
+    const kundeName = s.collected?.stammdaten?.vertragspartner || req.company?.name || req.name || '';
+    s._preishist = await _angLoadKundenPreishistorie(kundeName, ticketId).catch(() => null);
+    if (s._preishist?.byLeistung.size) console.log('[Preishistorie] ' + s._preishist.byLeistung.size + ' Referenz-Positionen von „' + kundeName + '"');
+  }
+  const preisRefBlock = _angPreisReferenzBlock(s._preishist);
   const sysPrompt =
     'Du erstellst SCHLANK STRUKTURIERTE Aufzug-Service-Angebote im Stil von Aufzugshandwerk GmbH (Referenz-Beispiel). ' +
     'WICHTIG: Das ANGEBOT ist sachlich-formular-artig (NICHT erzählerisch). ' +
@@ -25446,6 +25585,7 @@ async function _angChatGenerateOffer(s, userText) {
     subtypBlock +
     stilBlock +
     regelnBlock +
+    preisRefBlock +
     '\nTICKET-HINTERGRUND (bereits analysiert):\n' + (s.ticket_summary || '(keine Hintergrund-Analyse verfügbar)') + '\n\n' +
     'Antworte AUSSCHLIESSLICH mit gültigem JSON ohne Markdown-Codeblock:\n' +
     '{\n' +
