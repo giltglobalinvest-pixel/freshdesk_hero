@@ -781,7 +781,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.210';
+const APP_VERSION = 'v2.46.211';
 
 /* ============================================================
    GLOBAL THEME — v2.46.12
@@ -4121,12 +4121,34 @@ function parseAIJson(rawText) {
   // 2. Versuche zuerst sauberes Parse
   try { return JSON.parse(s); } catch (_) {}
 
+  // v2.46.211: Literale Steuerzeichen (Newline/CR/Tab) INNERHALB von String-Werten
+  // zu Escapes umwandeln — häufigste Fehlerquelle bei mehrzeiligen Feldern
+  // (anschreiben_body, beschreibung). Iteriert zeichenweise mit String-State.
+  const _escapeCtrlInStrings = (str) => {
+    let out = '', inStr = false, esc = false;
+    for (let i = 0; i < str.length; i++) {
+      const c = str[i];
+      if (esc) { out += c; esc = false; continue; }
+      if (c === '\\') { out += c; esc = true; continue; }
+      if (c === '"') { inStr = !inStr; out += c; continue; }
+      if (inStr) {
+        if (c === '\n') { out += '\\n'; continue; }
+        if (c === '\r') { out += '\\r'; continue; }
+        if (c === '\t') { out += '\\t'; continue; }
+      }
+      out += c;
+    }
+    return out;
+  };
+  try { return JSON.parse(_escapeCtrlInStrings(s)); } catch (_) {}
+
   // 3. Suche das erste { bis zum letzten } im String
   const firstBrace = s.indexOf('{');
   const lastBrace  = s.lastIndexOf('}');
   if (firstBrace >= 0 && lastBrace > firstBrace) {
     const candidate = s.slice(firstBrace, lastBrace + 1);
     try { return JSON.parse(candidate); } catch (_) {}
+    try { return JSON.parse(_escapeCtrlInStrings(candidate)); } catch (_) {}
   }
 
   // 4. Abgeschnittenes JSON (max_tokens erreicht): String wahrscheinlich mitten
@@ -25748,13 +25770,20 @@ async function _angChatGenerateOffer(s, userText) {
     }),
   });
   const raw = (data?.content?.[0]?.text || '').trim();
-  const json = raw.replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/i, '').trim();
+  // v2.46.211: robuster Parser (parseAIJson) — repariert unescapte Quotes/Newlines
+  // in String-Werten (z.B. Anschreiben mit Zitaten), abgeschnittene Antworten etc.
   let parsed;
-  try { parsed = JSON.parse(json); }
-  catch (_) {
-    const m = json.match(/\{[\s\S]*\}/);
-    if (m) parsed = JSON.parse(m[0]);
-    else throw new Error('KI-Antwort kein gültiges JSON');
+  try {
+    parsed = parseAIJson(raw);
+  } catch (e1) {
+    // Fallback auf den simplen Parser (falls parseAIJson mal versagt)
+    const json = raw.replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/i, '').trim();
+    try { parsed = JSON.parse(json); }
+    catch (_) {
+      const m = json.match(/\{[\s\S]*\}/);
+      if (m) { try { parsed = JSON.parse(m[0]); } catch (_2) {} }
+    }
+    if (!parsed) throw new Error('KI-Antwort kein gültiges JSON (' + (e1.message || '').slice(0, 60) + ')');
   }
   if (!parsed.plan) throw new Error('KI lieferte kein Plan-Feld');
   return parsed;
