@@ -781,7 +781,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.208';
+const APP_VERSION = 'v2.46.209';
 
 /* ============================================================
    GLOBAL THEME — v2.46.12
@@ -24209,6 +24209,10 @@ async function openAngebotsChatModal(accountId, ticketId) {
     }
     // v2.46.175: Vorschau SOFORT rendern (BK-Design mit Stammdaten) — nicht erst nach 1. KI-Runde
     _angChatRenderPreview().catch(e => console.warn('Initial-Preview:', e));
+    // v2.46.209: Stammdaten SOFORT aus dem ERP laden (per Fabriknummer) — ohne
+    // dass der User den ERP-Button drücken muss. Bei Fehler: Hinweis-Bubble,
+    // manueller Weg bleibt. Nicht wenn schon ein gespeicherter Stand da ist.
+    if (!restored?.collected) _angAutoLoadErp(window._ANG_CHAT);
     // Hintergrund-Analyse starten — wenn fertig wird sie ins State geschrieben
     window._ANG_CHAT.ticket_summary = '';
     window._ANG_CHAT.bgAnalysisPromise = _angChatInitialAnalysis(accountId, ticketId, ticket, profile)
@@ -24671,9 +24675,23 @@ function openAngStammdatenEditor() {
                   : '') +
               '</div>' +
             '</div>' +
-            '<div><label class="text-[11px] font-bold text-ink-700 uppercase tracking-wider">Ansprechpartner vor Ort</label>' +
-              '<input id="sdAnsprech" type="text" value="' + escapeAttr(val('ansprechpartner_vor_ort', req.name)) + '" placeholder="Hausmeister / Verwalter" class="w-full px-2 py-1.5 border border-ink-300 rounded-lg text-sm"></div>' +
+            '<div><label class="text-[11px] font-bold text-ink-700 uppercase tracking-wider">Kontakt (Empfänger)</label>' +
+              '<input id="sdAnsprech" type="text" value="' + escapeAttr(val('ansprechpartner_vor_ort', req.name)) + '" placeholder="Ansprechpartner beim Kunden" class="w-full px-2 py-1.5 border border-ink-300 rounded-lg text-sm"></div>' +
           '</div>' +
+          // v2.46.209: Empfänger-Dropdown bei mehreren ERP-Kontakten des Kunden
+          ((s._erpKontakte || []).length > 1
+            ? '<div class="bg-emerald-50 border border-emerald-200 rounded-lg p-2.5">' +
+                '<label class="text-[11px] font-bold text-emerald-800 uppercase tracking-wider inline-flex items-center gap-1"><i data-lucide="users" class="w-3.5 h-3.5"></i> Empfänger aus ERP wählen (' + s._erpKontakte.length + ' Kontakte)</label>' +
+                '<select id="sdKontaktPick" onchange="_angPickErpKontakt(this.value)" class="w-full mt-1 px-2 py-1.5 border border-emerald-300 rounded-lg text-sm bg-white">' +
+                  s._erpKontakte.map((k, i) => {
+                    const nm = _erpKontaktName(k);
+                    const cur = (sd.email && k.email && sd.email.toLowerCase() === String(k.email).toLowerCase());
+                    return '<option value="' + i + '"' + (cur ? ' selected' : '') + '>' + escapeHtml(nm || k.email || ('Kontakt ' + (i + 1))) + (k.email ? ' · ' + escapeHtml(k.email) : '') + (k.funktion || k.position ? ' · ' + escapeHtml(k.funktion || k.position) : '') + '</option>';
+                  }).join('') +
+                '</select>' +
+                '<p class="text-[10px] text-emerald-700 mt-1">Setzt Kontaktname, E-Mail und Telefon des gewählten Ansprechpartners.</p>' +
+              '</div>'
+            : '') +
         '</div>' +
         '<div class="px-4 py-3 border-t border-ink-200 flex gap-2">' +
           '<button onclick="closeAngStammdatenEditor()" class="flex-1 px-3 py-2 bg-ink-100 hover:bg-ink-200 text-ink-700 rounded-lg text-sm font-bold">Abbrechen</button>' +
@@ -24718,6 +24736,18 @@ function saveAngStammdaten(btn) {
   if (typeof _angChatRenderPreview === 'function') {
     try { _angChatRenderPreview(); } catch (_) {}
   }
+}
+
+/* v2.46.209: Empfänger aus dem ERP-Kontakt-Dropdown wählen → Felder setzen. */
+function _angPickErpKontakt(idx) {
+  const s = window._ANG_CHAT;
+  const k = s?._erpKontakte?.[+idx];
+  if (!k) return;
+  const nm = _erpKontaktName(k);
+  const em = $('sdAnsprech'); if (em) em.value = nm;
+  const ee = $('sdEmail');    if (ee && k.email) ee.value = k.email;
+  const et = $('sdTel');      if (et) et.value = k.telefon || k.mobile || '';
+  toast('Empfänger: ' + (nm || k.email || '?'), 'info', 2500);
 }
 
 /* v2.46.165: Öffnet einen Anlage-Picker: Suche + Liste + Klick zum Auswählen.
@@ -24820,56 +24850,93 @@ function closeErpAnlagePicker() {
 }
 
 /* Anlage aus Picker gewählt → Stammdaten-Felder befüllen, Picker zu, Toast. */
+/* v2.46.209: Kontakt-Vollname robust aus einem ERP-Kontakt-Objekt. */
+function _erpKontaktName(k) {
+  if (!k) return '';
+  return [k.vorname, k.nachname].filter(Boolean).join(' ').trim() || k.name || k.anzeigename || '';
+}
+
+/* v2.46.209: Kern — übernimmt eine ERP-Anlage KOMPLETT in den Angebot-State
+   (nicht nur DOM-Inputs). Lädt ALLE Kunden-Kontakte, wählt einen Default und
+   merkt sie für das Empfänger-Dropdown. Wird von Picker UND Auto-Load genutzt.
+   Gibt { ok, label, kontaktCount } zurück. */
+async function _angApplyErpAnlage(s, anlage, firmaSlug) {
+  if (!s || !anlage) return { ok: false };
+  s._erpAnlage = anlage;
+  const kunde = anlage.kunde || {};
+  const kundennr = kunde.kundennummer || kunde.id || '';
+  // Alle Kontakte laden — fürs Empfänger-Dropdown
+  let kontakte = [];
+  if (kundennr) { try { kontakte = await erpLoadKundenKontakte(firmaSlug, kundennr); } catch (_) {} }
+  s._erpKontakte = Array.isArray(kontakte) ? kontakte : [];
+  const kontakt = s._erpKontakte.find(k => k.email && String(k.email).includes('@')) || s._erpKontakte[0] || null;
+  // Adressen (mit Google-Places-Resolver-Fallback)
+  let standort = _erpBuildAnlageAdresse(anlage);
+  let kundeAdresse = _erpBuildKundeAdresse(kunde);
+  if (!kundeAdresse) {
+    const adId = kunde.adresseId || kunde.defaultrechnungsempfaenger?.adresseId || kunde.defaultRechnungsempfaenger?.adresseId || '';
+    if (adId) { try { kundeAdresse = await _erpResolveAdresseId(firmaSlug, adId); } catch (_) {} }
+  }
+  if (!standort && anlage.adresseId) { try { standort = await _erpResolveAdresseId(firmaSlug, anlage.adresseId); } catch (_) {} }
+  // In den State schreiben (persistent + PDF-Vorschau)
+  s.collected = s.collected || {};
+  s.collected.stammdaten = s.collected.stammdaten || {};
+  if (anlage.fabriknummer) s.collected.fabriknummer = String(anlage.fabriknummer);
+  if (standort)            s.collected.standort = standort;
+  if (kunde.firmenname)    s.collected.stammdaten.vertragspartner = kunde.firmenname;
+  if (kundeAdresse)        s.collected.stammdaten.rechnungs_anschrift = kundeAdresse;
+  if (kontakt) {
+    const vollname = _erpKontaktName(kontakt);
+    if (vollname)        s.collected.stammdaten.ansprechpartner_vor_ort = vollname;
+    if (kontakt.email)   s.collected.stammdaten.email = kontakt.email;
+    const tel = kontakt.telefon || kontakt.mobile || '';
+    if (tel)             s.collected.stammdaten.tel = tel;
+  }
+  const label = (anlage.fabriknummer ? anlage.fabriknummer + ' · ' : '') + (kunde.firmenname || standort || 'Anlage');
+  return { ok: true, label, kontaktCount: s._erpKontakte.length, kontaktEmail: kontakt?.email || '' };
+}
+
+/* v2.46.209: Auto-Load der Stammdaten aus dem ERP beim Modal-Start.
+   Fire-and-forget. Sucht die Anlage per Fabriknummer, übernimmt Kunde/Adresse/
+   Kontakte. Erfolg → Info-Bubble; Fehler/kein Treffer → Hinweis-Bubble mit
+   Verweis auf den manuellen ERP-Button (nie blockierend). */
+async function _angAutoLoadErp(s) {
+  if (!s) return;
+  const firmaSlug = _erpFirmaSlugForAccount(s.account);
+  const fabrik = (s.collected?.fabriknummer || '').trim();
+  if (!APP_KEYS.erpProxyUrl || !firmaSlug || !fabrik) return;  // nichts zu tun
+  s._erpAutoTried = true;
+  try {
+    const anlage = await erpFindAnlageByFabriknummer(firmaSlug, fabrik);
+    if (!anlage) {
+      _angChatAppendBubble('assistant', '🔎 Keine ERP-Anlage zu Fabriknummer „' + fabrik + '" gefunden — Stammdaten bitte über „✎ Stammdaten → ERP" prüfen oder manuell eintragen.');
+      return;
+    }
+    const res = await _angApplyErpAnlage(s, anlage, firmaSlug);
+    try { _angChatRenderPreview(); } catch (_) {}
+    const kd = s.collected?.stammdaten || {};
+    _angChatAppendBubble('assistant', '🗄 Stammdaten automatisch aus dem ERP geladen: **' + (kd.vertragspartner || res.label) + '**' +
+      (res.kontaktCount > 1 ? '\n\n' + res.kontaktCount + ' Kontakte hinterlegt — den Empfänger wählst du unter „✎ Stammdaten".' : (kd.email ? '\n\nEmpfänger: ' + kd.email : '')));
+  } catch (e) {
+    console.warn('[Auto-ERP]', e.message);
+    _angChatAppendBubble('assistant', '⚠ ERP-Stammdaten konnten nicht automatisch geladen werden (' + (e.message || '').slice(0, 80) + '). Über „✎ Stammdaten → ERP" erneut versuchen oder manuell eintragen.');
+  }
+}
+
 async function pickErpAnlage(idx) {
   const state = window._ERP_PICKER;
   if (!state?.filtered?.[idx]) return;
   const anlage = state.filtered[idx];
   const firmaSlug = state.firmaSlug;
-  // v2.46.179: Anlage im Angebot-State merken — Aufwand-Modus liest daraus
-  // die hinterlegten Sätze (stundensatz + einsatzPauschale) ohne Refetch.
-  if (window._ANG_CHAT) window._ANG_CHAT._erpAnlage = anlage;
-  const kunde = anlage.kunde || {};
-  const kundennr = kunde.kundennummer || kunde.id || '';
   const list = $('erpPickerList');
-  if (list) list.innerHTML = '<div class="bg-white rounded-xl border border-emerald-200 p-4 text-center text-emerald-700 text-sm"><span class="spinner inline-block w-4 h-4 mr-1"></span>Lade Ansprechpartner…</div>';
-  let kontakt = null;
-  if (kundennr) {
-    try {
-      const kontakte = await erpLoadKundenKontakte(firmaSlug, kundennr);
-      kontakt = kontakte.find(k => k.email && String(k.email).includes('@')) || kontakte[0] || null;
-    } catch (_) {}
-  }
-  // Push in die Inputs
-  let standort = _erpBuildAnlageAdresse(anlage);
-  let kundeAdresse = _erpBuildKundeAdresse(kunde);
-  // v2.46.166: Wenn Kundenadresse leer aber adresseId vorhanden → Google-Places-Resolver
-  if (!kundeAdresse) {
-    const adId = kunde.adresseId
-      || kunde.defaultrechnungsempfaenger?.adresseId
-      || kunde.defaultRechnungsempfaenger?.adresseId
-      || '';
-    if (adId) {
-      try { kundeAdresse = await _erpResolveAdresseId(firmaSlug, adId); } catch (_) {}
-    }
-  }
-  // Analog: wenn Standort noch leer aber Anlage hat adresseId (selten) → auch resolven
-  if (!standort && anlage.adresseId) {
-    try { standort = await _erpResolveAdresseId(firmaSlug, anlage.adresseId); } catch (_) {}
-  }
-  if (anlage.fabriknummer)  { const el = $('sdFabrik'); if (el) el.value = anlage.fabriknummer; }
-  if (kunde.firmenname)     { const el = $('sdVertragspartner'); if (el) el.value = kunde.firmenname; }
-  if (kundeAdresse)         { const el = $('sdAnschrift'); if (el) el.value = kundeAdresse; }
-  if (standort)             { const el = $('sdStandort'); if (el) el.value = standort; }
-  if (kontakt) {
-    const vollname = [kontakt.vorname, kontakt.nachname].filter(Boolean).join(' ').trim() || kontakt.name || '';
-    if (vollname)          { const el = $('sdAnsprech'); if (el) el.value = vollname; }
-    if (kontakt.email)     { const el = $('sdEmail'); if (el) el.value = kontakt.email; }
-    const tel = kontakt.telefon || kontakt.mobile || '';
-    if (tel)               { const el = $('sdTel'); if (el) el.value = tel; }
-  }
+  if (list) list.innerHTML = '<div class="bg-white rounded-xl border border-emerald-200 p-4 text-center text-emerald-700 text-sm"><span class="spinner inline-block w-4 h-4 mr-1"></span>Lade Kontakte…</div>';
+  const s = window._ANG_CHAT;
+  const res = await _angApplyErpAnlage(s, anlage, firmaSlug);
   closeErpAnlagePicker();
-  const label = (anlage.fabriknummer ? anlage.fabriknummer + ' · ' : '') + (kunde.firmenname || standort || 'Anlage');
-  toast('Übernommen: ' + label + (kontakt ? ' · Kontakt ' + (kontakt.email || kontakt.vorname || '?') : ''), 'success', 5000);
+  // Stammdaten-Editor neu aufbauen (zeigt jetzt das Empfänger-Dropdown) + Vorschau
+  if (document.getElementById('subModalHost2')?.innerHTML.trim()) openAngStammdatenEditor();
+  try { _angChatRenderPreview(); } catch (_) {}
+  toast('Übernommen: ' + res.label + (res.kontaktCount > 1 ? ' · ' + res.kontaktCount + ' Kontakte (Empfänger wählbar)' : (res.kontaktEmail ? ' · ' + res.kontaktEmail : '')), 'success', 5000);
 }
 
 /* === v2.46.198: Anlage (+ optional Kunde) im ERP anlegen ================= */
