@@ -781,7 +781,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.205';
+const APP_VERSION = 'v2.46.206';
 
 /* ============================================================
    GLOBAL THEME — v2.46.12
@@ -32894,6 +32894,7 @@ function _crawlBadge(label, status) {
   const map = {
     komplett: 'bg-emerald-100 text-emerald-700 border-emerald-300',
     gepusht:  'bg-emerald-100 text-emerald-700 border-emerald-300',
+    vorhanden:'bg-emerald-100 text-emerald-700 border-emerald-300',
     teilweise:'bg-amber-100 text-amber-700 border-amber-300',
     fehlt:    'bg-rose-100 text-rose-700 border-rose-300',
     unbekannt:'bg-ink-100 text-ink-500 border-ink-300',
@@ -33016,11 +33017,28 @@ async function _crawlPushMc(i, btn) {
       },
       tags: [r.firma, r.kontakt_typ].filter(Boolean),
     };
-    await erpFetch('/mailchimp/' + encodeURIComponent(slug) + '/upsert', { method: 'POST', body: member });
-    await airtableUpdateWithAutoField(CRAWLED_TABLE, r.recordId, { mc_status: 'gepusht', updated_at: nowIso() }, CRAWLED_TYPES_MAP);
-    r.mc_status = 'gepusht';
+    let statusLabel = 'gepusht';
+    let already = false;
+    try {
+      await erpFetch('/mailchimp/' + encodeURIComponent(slug) + '/upsert', { method: 'POST', body: member });
+    } catch (e) {
+      // v2.46.206: „already a list member" ist KEIN Fehler — der Kontakt IST in
+      // Mailchimp. Der (ältere) Proxy macht POST statt idempotentem PUT und meldet
+      // das als 400. Wir werten es als „vorhanden, passt" statt als Fehler.
+      const msg = String(e.message || e);
+      if (/already a list member|Member Exists|400/i.test(msg)) {
+        already = true;
+        statusLabel = 'vorhanden';
+      } else {
+        throw e;
+      }
+    }
+    await airtableUpdateWithAutoField(CRAWLED_TABLE, r.recordId, { mc_status: statusLabel, updated_at: nowIso() }, CRAWLED_TYPES_MAP);
+    r.mc_status = statusLabel;
     _renderCrawledContacts();
-    toast('Mailchimp: ' + r.email + ' gepusht ✓', 'success', 3000);
+    toast(already
+      ? 'Mailchimp: ' + r.email + ' ist bereits eingetragen ✓ (kein Update nötig)'
+      : 'Mailchimp: ' + r.email + ' gepusht ✓', 'success', 3500);
   } catch (e) { setBusy(btn, false); toast('Mailchimp-Push: ' + (e.message || e), 'error', 8000); }
 }
 
