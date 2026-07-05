@@ -781,7 +781,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.213';
+const APP_VERSION = 'v2.46.214';
 
 /* ============================================================
    GLOBAL THEME — v2.46.12
@@ -25764,7 +25764,10 @@ async function _angChatGenerateOffer(s, userText) {
     method: 'POST',
     body: JSON.stringify({
       model: 'claude-sonnet-4-5-20250929',
-      max_tokens: 4000,
+      // v2.46.214: 8000 statt 4000 — bei Angeboten mit vielen Positionen +
+      // Beschreibungen + Anschreiben wurde das JSON bei 4000 abgeschnitten
+      // (unvollständig → nicht parsbar). Sonnet 4.5 kann bis 8192 Output-Tokens.
+      max_tokens: 8000,
       system: sysPrompt,
       messages: messages,
     }),
