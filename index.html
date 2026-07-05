@@ -781,7 +781,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.214';
+const APP_VERSION = 'v2.46.215';
 
 /* ============================================================
    GLOBAL THEME — v2.46.12
@@ -33027,7 +33027,17 @@ const CRAWL_STATE = {
   list: [],               // aktuell geladene gecrawlte Kontakte (für die Ansicht)
   types: null,            // ContactTypes-Liste
   filterTyp: '',
+  showHidden: false,      // v2.46.215: Spam/ausgeblendete Kontakte mit anzeigen
 };
+
+/* Sichtbare Liste (Typ-Filter + Spam-Filter) — MUSS mit _crawlRecAt synchron
+   bleiben, damit der gefilterte Index i auf denselben Record zeigt. */
+function _crawlVisible() {
+  return CRAWL_STATE.list.filter(r =>
+    (!CRAWL_STATE.filterTyp || r.kontakt_typ === CRAWL_STATE.filterTyp) &&
+    (CRAWL_STATE.showHidden || r.hidden !== 'spam')
+  );
+}
 
 const CRAWLED_TYPES_MAP = {
   account_id: 'singleLineText', email: 'singleLineText', name: 'singleLineText',
@@ -33035,6 +33045,7 @@ const CRAWLED_TYPES_MAP = {
   position: 'singleLineText', quelle_ticket: 'singleLineText', kontakt_typ: 'singleLineText',
   fd_status: 'singleLineText', fs_status: 'singleLineText', mc_status: 'singleLineText',
   fd_contact_id: 'singleLineText', crawled_at: 'singleLineText', updated_at: 'singleLineText',
+  hidden: 'singleLineText', // v2.46.215: 'spam' = als Spam ausgeblendet
 };
 
 async function _crawlLoadExisting(accountId) {
@@ -33189,7 +33200,8 @@ function _renderCrawledContacts() {
   const host = $('contactsResults');
   if (!host) return;
   const types = CRAWL_STATE.types || [];
-  const list = CRAWL_STATE.list.filter(r => !CRAWL_STATE.filterTyp || r.kontakt_typ === CRAWL_STATE.filterTyp);
+  const list = _crawlVisible();
+  const hiddenCount = CRAWL_STATE.list.filter(r => r.hidden === 'spam').length;
   const typOpts = (sel) => '<option value="">(kein Typ)</option>' +
     types.map(t => '<option value="' + escapeAttr(t.name) + '"' + (sel === t.name ? ' selected' : '') + '>' + escapeHtml(t.name) + '</option>').join('') +
     '<option value="__new__">➕ Neuer Typ…</option>';
@@ -33203,13 +33215,19 @@ function _renderCrawledContacts() {
         '</select>' +
         '<button onclick="showCrawledContacts(this)" class="px-2 py-1 bg-white border border-violet-300 text-violet-700 rounded-lg text-[11px] font-bold" title="Neu laden">↻</button>' +
       '</div>' +
+      (hiddenCount ?
+        '<label class="mt-1.5 inline-flex items-center gap-1.5 text-[10px] text-violet-800 cursor-pointer">' +
+          '<input type="checkbox"' + (CRAWL_STATE.showHidden ? ' checked' : '') + ' onchange="CRAWL_STATE.showHidden=this.checked;_renderCrawledContacts()" class="rounded border-violet-300">' +
+          '<span>Ausgeblendete (Spam) anzeigen (' + hiddenCount + ')</span>' +
+        '</label>' : '') +
       '<p class="text-[10px] text-violet-700 mt-1">Aus Ticket-Signaturen erfasst. Push-Buttons legen an bzw. aktualisieren — FD/FS nutzen die bestehenden Flows, MC = Mailchimp-Upsert.</p>' +
     '</div>' +
     (list.length ? list.map((r, i) =>
-      '<div class="bg-white rounded-xl border border-ink-200 p-3 mb-2">' +
+      '<div class="' + (r.hidden === 'spam' ? 'bg-rose-50 border-rose-200' : 'bg-white border-ink-200') + ' rounded-xl border p-3 mb-2">' +
         '<div class="flex items-start gap-2 flex-wrap">' +
           '<div class="flex-1 min-w-[220px]">' +
-            '<p class="font-bold text-ink-900 text-sm">' + escapeHtml(r.name || r.email) + (r.position ? ' <span class="font-normal text-ink-500">· ' + escapeHtml(r.position) + '</span>' : '') + '</p>' +
+            '<p class="font-bold text-ink-900 text-sm">' + escapeHtml(r.name || r.email) + (r.position ? ' <span class="font-normal text-ink-500">· ' + escapeHtml(r.position) + '</span>' : '') +
+              (r.hidden === 'spam' ? ' <span class="text-[9px] font-bold px-1.5 py-0.5 rounded border bg-rose-100 text-rose-700 border-rose-300 align-middle">SPAM</span>' : '') + '</p>' +
             '<p class="text-[11px] text-ink-600">' + escapeHtml(r.firma || '') + '</p>' +
             '<p class="text-[11px] text-ink-500 font-mono">' + escapeHtml(r.email) + (r.telefon ? ' · ' + escapeHtml(r.telefon) : '') + (r.mobil ? ' · ' + escapeHtml(r.mobil) : '') + '</p>' +
             '<div class="flex gap-1 mt-1.5 flex-wrap">' +
@@ -33224,6 +33242,10 @@ function _renderCrawledContacts() {
               (r.fs_status !== 'n/a' ? '<button onclick="_crawlPushFs(' + i + ', this)" class="px-2 py-1 bg-orange-600 hover:bg-orange-700 text-white rounded text-[10px] font-bold" title="Nach Freshsales pushen (bestehende Funktion)">→ FS</button>' : '') +
               '<button onclick="_crawlPushMc(' + i + ', this)" class="px-2 py-1 bg-yellow-500 hover:bg-yellow-600 text-white rounded text-[10px] font-bold" title="Zu Mailchimp pushen (Upsert)">→ MC</button>' +
               '<button onclick="_crawlRecheck(' + i + ', this)" class="px-2 py-1 bg-ink-100 hover:bg-ink-200 text-ink-700 rounded text-[10px] font-bold" title="Status neu prüfen">↻</button>' +
+              '<button onclick="_crawlEdit(' + i + ')" class="px-2 py-1 bg-ink-100 hover:bg-ink-200 text-ink-700 rounded text-[10px] font-bold" title="Kontaktdaten bearbeiten (Name/Firma/Kontakt)">✎</button>' +
+              (r.hidden === 'spam'
+                ? '<button onclick="_crawlToggleHidden(' + i + ', this)" class="px-2 py-1 bg-emerald-600 hover:bg-emerald-700 text-white rounded text-[10px] font-bold" title="Nicht mehr als Spam — wieder einblenden">↩ Kein Spam</button>'
+                : '<button onclick="_crawlToggleHidden(' + i + ', this)" class="px-2 py-1 bg-rose-600 hover:bg-rose-700 text-white rounded text-[10px] font-bold" title="Als Spam markieren & ausblenden">🚫 Spam</button>') +
             '</div>' +
           '</div>' +
         '</div>' +
@@ -33234,8 +33256,7 @@ function _renderCrawledContacts() {
 
 /* Der gefilterte Index i bezieht sich auf die AKTUELL gerenderte Liste. */
 function _crawlRecAt(i) {
-  const list = CRAWL_STATE.list.filter(r => !CRAWL_STATE.filterTyp || r.kontakt_typ === CRAWL_STATE.filterTyp);
-  return list[i] || null;
+  return _crawlVisible()[i] || null;
 }
 
 async function _crawlPushFd(i, btn) {
@@ -33334,6 +33355,86 @@ async function _crawlRecheck(i, btn) {
     r.fd_status = fd.status; r.fd_contact_id = fd.id; r.fs_status = fs;
   } catch (_) {}
   _renderCrawledContacts();
+}
+
+/* v2.46.215: Manuelle Korrektur der Kontaktdaten (z.B. fehlender Nachname). */
+function _crawlEdit(i) {
+  const r = _crawlRecAt(i);
+  if (!r) return;
+  let host = document.getElementById('subModalHost');
+  if (!host) { host = document.createElement('div'); host.id = 'subModalHost'; document.body.appendChild(host); }
+  const fld = (label, id, val, ph) =>
+    '<label class="block">' +
+      '<span class="text-[11px] font-semibold text-ink-600">' + label + '</span>' +
+      '<input id="' + id + '" value="' + escapeAttr(val || '') + '" placeholder="' + escapeAttr(ph || '') + '" class="mt-0.5 w-full px-3 py-2 border border-ink-300 rounded-lg text-sm">' +
+    '</label>';
+  host.innerHTML =
+    '<div class="fixed inset-0 z-[70] flex items-end sm:items-center justify-center bg-black/50 px-4" onclick="if(event.target===this)closeCrawlEdit()">' +
+      '<div class="bg-white w-full max-w-md rounded-t-3xl sm:rounded-3xl shadow-2xl flex flex-col safe-bottom" style="max-height:90vh">' +
+        '<div class="px-4 py-3 border-b border-ink-200 flex items-center justify-between gap-2 shrink-0">' +
+          '<h3 class="font-bold text-ink-900 inline-flex items-center gap-2"><i data-lucide="user-pen" class="w-5 h-5 text-violet-600"></i> Kontakt bearbeiten</h3>' +
+          '<button onclick="closeCrawlEdit()" class="w-9 h-9 rounded-lg hover:bg-ink-100 flex items-center justify-center" title="Schließen"><i data-lucide="x" class="w-5 h-5 text-ink-700"></i></button>' +
+        '</div>' +
+        '<div class="flex-1 overflow-y-auto px-4 py-4 space-y-3">' +
+          fld('Name (Vor- und Nachname)', 'crawlEditName', r.name, 'z.B. Carmen Musterfrau') +
+          fld('Firma', 'crawlEditFirma', r.firma, '') +
+          fld('Position', 'crawlEditPosition', r.position, 'z.B. Hausverwaltung') +
+          fld('E-Mail', 'crawlEditEmail', r.email, '') +
+          '<div class="grid grid-cols-2 gap-2">' +
+            fld('Telefon', 'crawlEditTelefon', r.telefon, '') +
+            fld('Mobil', 'crawlEditMobil', r.mobil, '') +
+          '</div>' +
+          '<p class="text-[10px] text-ink-400">Änderungen werden in den gecrawlten Kontakten gespeichert. Push-Buttons übertragen die korrigierten Daten anschließend nach FD/FS/MC.</p>' +
+        '</div>' +
+        '<div class="border-t border-ink-200 p-3 shrink-0 flex gap-2">' +
+          '<button onclick="closeCrawlEdit()" class="flex-1 bg-ink-100 hover:bg-ink-200 text-ink-700 rounded-xl px-3 py-3 text-sm font-bold">Abbrechen</button>' +
+          '<button onclick="_crawlSaveEdit(\'' + escapeAttr(r.recordId) + '\', this)" class="flex-1 bg-violet-600 hover:bg-violet-700 text-white rounded-xl px-3 py-3 text-sm font-bold">Speichern</button>' +
+        '</div>' +
+      '</div>' +
+    '</div>';
+  if (window.lucide) lucide.createIcons();
+}
+
+function closeCrawlEdit() {
+  const host = document.getElementById('subModalHost');
+  if (host) host.innerHTML = '';
+}
+
+async function _crawlSaveEdit(recordId, btn) {
+  const rec = CRAWL_STATE.list.find(r => r.recordId === recordId);
+  if (!rec) return closeCrawlEdit();
+  const g = (id) => (document.getElementById(id)?.value || '').trim();
+  const patch = {
+    name: g('crawlEditName'),
+    firma: g('crawlEditFirma'),
+    position: g('crawlEditPosition'),
+    email: g('crawlEditEmail'),
+    telefon: g('crawlEditTelefon'),
+    mobil: g('crawlEditMobil'),
+  };
+  if (!patch.email) return toast('E-Mail darf nicht leer sein', 'warn', 4000);
+  setBusy(btn, true);
+  try {
+    await airtableUpdateWithAutoField(CRAWLED_TABLE, recordId, Object.assign({}, patch, { updated_at: nowIso() }), CRAWLED_TYPES_MAP);
+    Object.assign(rec, patch);
+    closeCrawlEdit();
+    _renderCrawledContacts();
+    toast('Kontakt aktualisiert ✓', 'success', 2500);
+  } catch (e) { setBusy(btn, false); toast('Speichern fehlgeschlagen: ' + (e.message || e), 'error', 6000); }
+}
+
+/* v2.46.215: Spam-Markierung togglen — hidden='spam' blendet aus. */
+async function _crawlToggleHidden(i, btn) {
+  const r = _crawlRecAt(i);
+  if (!r) return;
+  const next = r.hidden === 'spam' ? '' : 'spam';
+  setBusy(btn, true);
+  try {
+    await airtableUpdateWithAutoField(CRAWLED_TABLE, r.recordId, { hidden: next, updated_at: nowIso() }, CRAWLED_TYPES_MAP);
+    r.hidden = next;
+    _renderCrawledContacts();
+    toast(next === 'spam' ? 'Als Spam markiert & ausgeblendet' : 'Spam-Markierung entfernt ✓', 'success', 2500);
+  } catch (e) { setBusy(btn, false); toast('Fehlgeschlagen: ' + (e.message || e), 'error', 6000); }
 }
 
 async function renderContactsPage() {
