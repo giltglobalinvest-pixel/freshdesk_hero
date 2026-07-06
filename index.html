@@ -781,7 +781,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.222';
+const APP_VERSION = 'v2.46.223';
 
 /* ============================================================
    GLOBAL THEME — v2.46.12
@@ -12521,6 +12521,8 @@ function _ticketActionBarIcons(accountId, ticketId) {
     btn('wand-2',         'purple',  'KI-Regel aus diesem Ticket erstellen',                   `openRuleFromTicket('${accIdAttr}', ${ticketId})`),
     btn('refresh-cw',     'purple',  'Aktive Regeln auf dieses Ticket anwenden (Diagnose)',    `forceApplyRulesToTicket('${accIdAttr}', ${ticketId}, this)`),
     btn('lightbulb',      'amber',   'Vorschlag aus Team-Historie',                            `openKnowledgeSuggestionModal('${accIdAttr}', ${ticketId})`),
+    // v2.46.223: Signaturen dieses Tickets manuell crawlen (mit Rückmeldung)
+    btn('radar',          'violet',  'Signaturen dieses Tickets crawlen (Kontakte erfassen · mit Rückmeldung)', `_crawlTicketManual('${accIdAttr}', ${ticketId}, this)`),
     `<span class="shrink-0 w-px h-5 bg-ink-200 mx-0.5"></span>`,
     btn('clock',          'indigo',  'Auf Wiedervorlage / aus meiner Sicht ausblenden',        `openWiedervorlagePicker('${accIdAttr}', ${ticketId})`),
     btn('text-cursor-input', 'sky',  'Titel als „ANFRAGE Nr | Standort | Fabriknr" strukturieren', `openRestructureTitleModal('${accIdAttr}', ${ticketId})`),
@@ -33132,11 +33134,16 @@ async function _crawlCheckFs(accountId, email) {
   } catch (_) { return 'fehlt'; }
 }
 
-/* Haupt-Crawler — fire-and-forget beim Ticket-Öffnen. */
-async function _crawlTicketSignatures(accountId, ticket) {
+/* Haupt-Crawler. Auto: fire-and-forget beim Ticket-Öffnen (still, außer bei Treffer).
+   Manuell (opts.manual=true, v2.46.223): ignoriert den Session-Guard und gibt IMMER
+   eine Rückmeldung — auch wenn nichts gefunden wurde oder ein Fehler auftritt. */
+async function _crawlTicketSignatures(accountId, ticket, opts) {
+  opts = opts || {};
+  const manual = !!opts.manual;
+  const say = (msg, type, ms) => { if (manual) toast(msg, type || 'info', ms || 5000); };
   try {
     const key = accountId + '|' + ticket.id;
-    if (CRAWL_STATE.done.has(key)) return;
+    if (!manual && CRAWL_STATE.done.has(key)) return { status: 'skip' };
     CRAWL_STATE.done.add(key);
     // Nur EINGEHENDE Inhalte (Kunden-Signaturen), Signaturen stehen am Ende
     const chunks = [];
@@ -33146,30 +33153,46 @@ async function _crawlTicketSignatures(accountId, ticket) {
       const t = (c.body_text || '');
       if (t) chunks.push(t.slice(-900));
     });
-    if (!chunks.length) return;
+    if (!chunks.length) {
+      say('Crawlen: keine eingehenden Nachrichten mit Signatur in diesem Ticket. Prüfe, ob es eine Kundenmail (nicht nur interne Notizen) enthält.', 'warn', 7000);
+      return { status: 'empty' };
+    }
     const req = ticket.requester || {};
-    const data = await _callAnthropicWithRetry({
-      model: 'claude-haiku-4-5-20251001',
-      max_tokens: 900,
-      system:
-        'Du extrahierst KONTAKTDATEN aus Email-Signaturen (Aufzug-Service-Branche). ' +
-        'Gegeben sind Text-Ausschnitte (Enden eingehender Emails). Finde alle PERSONEN mit Email-Adresse. ' +
-        'Antworte NUR mit JSON-Array, ohne Markdown: ' +
-        '[{"name":"Vorname Nachname","email":"...","firma":"...","telefon":"...","mobil":"...","position":"..."}] ' +
-        'Regeln: email ist PFLICHT (sonst weglassen). Keine noreply/no-reply/info@-Sammeladressen erfinden — nur was wirklich in Signaturen steht. ' +
-        'Keine Duplikate. Leeres Array [] wenn nichts gefunden.',
-      messages: [{ role: 'user', content: 'Ticket-Anfragender: ' + (req.name || '?') + ' <' + (req.email || '?') + '>\n\nTEXT-AUSSCHNITTE:\n\n' + chunks.join('\n\n=====\n\n') }],
-    });
+    let data;
+    try {
+      data = await _callAnthropicWithRetry({
+        model: 'claude-haiku-4-5-20251001',
+        max_tokens: 900,
+        system:
+          'Du extrahierst KONTAKTDATEN aus Email-Signaturen (Aufzug-Service-Branche). ' +
+          'Gegeben sind Text-Ausschnitte (Enden eingehender Emails). Finde alle PERSONEN mit Email-Adresse. ' +
+          'Antworte NUR mit JSON-Array, ohne Markdown: ' +
+          '[{"name":"Vorname Nachname","email":"...","firma":"...","telefon":"...","mobil":"...","position":"..."}] ' +
+          'Regeln: email ist PFLICHT (sonst weglassen). Keine noreply/no-reply/info@-Sammeladressen erfinden — nur was wirklich in Signaturen steht. ' +
+          'Keine Duplikate. Leeres Array [] wenn nichts gefunden.',
+        messages: [{ role: 'user', content: 'Ticket-Anfragender: ' + (req.name || '?') + ' <' + (req.email || '?') + '>\n\nTEXT-AUSSCHNITTE:\n\n' + chunks.join('\n\n=====\n\n') }],
+      });
+    } catch (e) {
+      say('Crawlen fehlgeschlagen (KI/Verbindung): ' + (e.message || e), 'error', 9000);
+      return { status: 'error', reason: e.message };
+    }
     const raw = (data?.content?.[0]?.text || '').trim().replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/i, '');
     let found = [];
-    try { found = JSON.parse(raw); } catch (_) { return; }
-    if (!Array.isArray(found) || !found.length) return;
+    try { found = JSON.parse(raw); } catch (_) {
+      say('Crawlen: KI-Antwort war nicht lesbar (kein JSON). Bitte erneut versuchen.', 'error', 8000);
+      return { status: 'error', reason: 'json' };
+    }
+    if (!Array.isArray(found) || !found.length) {
+      say('Crawlen: in diesem Ticket wurden keine Kontaktdaten in Signaturen erkannt.', 'warn', 7000);
+      return { status: 'none' };
+    }
     const existing = await _crawlLoadExisting(accountId);
-    let added = 0;
+    let added = 0, skippedExisting = 0, skippedInvalid = 0;
+    const addedNames = [];
     for (const p of found) {
       const email = String(p.email || '').trim().toLowerCase();
-      if (!email || !email.includes('@') || /noreply|no-reply|mailer-daemon/.test(email)) continue;
-      if (existing.has(email)) continue;
+      if (!email || !email.includes('@') || /noreply|no-reply|mailer-daemon/.test(email)) { skippedInvalid++; continue; }
+      if (existing.has(email)) { skippedExisting++; continue; }
       existing.add(email);
       const [fd, fs] = await Promise.all([_crawlCheckFd(accountId, email), _crawlCheckFs(accountId, email)]);
       await airtableWriteWithAutoField(CRAWLED_TABLE, {
@@ -33180,10 +33203,39 @@ async function _crawlTicketSignatures(accountId, ticket) {
         fd_status: fd.status, fd_contact_id: fd.id, fs_status: fs, mc_status: 'unbekannt',
         crawled_at: nowIso(), updated_at: nowIso(),
       }, CRAWLED_TYPES_MAP);
-      added++;
+      added++; addedNames.push(p.name || email);
     }
-    if (added) toast('🕸 ' + added + ' neue(r) Kontakt(e) aus Signaturen erfasst — Kontakte → „Gecrawlt"', 'info', 6000);
-  } catch (e) { console.warn('[Crawler]', e.message); }
+    if (added) {
+      toast('🕸 ' + added + ' neue(r) Kontakt(e) aus Signaturen erfasst' +
+        (manual && addedNames.length ? ' (' + addedNames.slice(0, 4).join(', ') + (addedNames.length > 4 ? ' …' : '') + ')' : '') +
+        ' — Kontakte → „Gecrawlt"', 'success', 6000);
+    } else {
+      say('Crawlen: ' + found.length + ' Person(en) in Signaturen erkannt, aber alle bereits erfasst' +
+        (skippedExisting ? ' (' + skippedExisting + ' vorhanden)' : '') + '. Nichts Neues hinzugefügt.', 'info', 7000);
+    }
+    return { status: 'ok', added, skippedExisting, foundCount: found.length };
+  } catch (e) {
+    console.warn('[Crawler]', e.message);
+    say('Crawlen fehlgeschlagen: ' + (e.message || e), 'error', 9000);
+    return { status: 'error', reason: e.message };
+  }
+}
+
+/* v2.46.223: Manueller Crawl-Trigger für das aktuelle Ticket. Holt frische Ticket-
+   Daten (inkl. Verlauf), ignoriert den Session-Guard und meldet das Ergebnis. */
+async function _crawlTicketManual(accountId, ticketId, btn) {
+  if (btn) setBusy(btn, true);
+  try {
+    let ticket = null;
+    try { ticket = await fetchTicketDetail(accountId, ticketId); } catch (_) {}
+    if (!ticket) ticket = (APP_STATE.ticketCache?.get?.(accountId + '|' + ticketId)) || { id: ticketId };
+    toast('Crawle Signaturen im Ticket #' + ticketId + '…', 'info', 2500);
+    await _crawlTicketSignatures(accountId, ticket, { manual: true });
+  } catch (e) {
+    toast('Crawlen fehlgeschlagen: ' + (e.message || e), 'error', 9000);
+  } finally {
+    if (btn) setBusy(btn, false);
+  }
 }
 
 /* === Kontakttypen ======================================================== */
