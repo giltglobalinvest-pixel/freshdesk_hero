@@ -781,7 +781,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.216';
+const APP_VERSION = 'v2.46.217';
 
 /* ============================================================
    GLOBAL THEME — v2.46.12
@@ -10653,6 +10653,9 @@ function _mfcDraftKey(accountId, email) {
 function _mfcSaveDraft() {
   const ctx = window._MFC_CTX;
   if (!ctx) return;
+  // v2.46.217: Wenn das Marketing-Modal (noch) nicht im DOM ist, NICHT speichern —
+  // sonst würde ein leerer Snapshot einen guten Entwurf (Betreff/Body) überschreiben.
+  if (!document.getElementById('mfcSubject') && !document.getElementById('mfcBody')) return;
   const subject = document.getElementById('mfcSubject')?.value || '';
   const body = document.getElementById('mfcBody')?.value || '';
   const aiPrompt = document.getElementById('mfcAiPrompt')?.value || '';
@@ -32076,8 +32079,12 @@ async function _deleteAtt(recordId) {
 let _ATT_PICKER_CTX = null;
 async function _openAttachmentPicker(accountId, alreadyPickedRecordIds, onPicked) {
   _ATT_PICKER_CTX = { accountId, selected: new Set(alreadyPickedRecordIds || []), onPicked };
-  let host = document.getElementById('subModalHost');
-  if (!host) { host = document.createElement('div'); host.id = 'subModalHost'; document.body.appendChild(host); }
+  // v2.46.217: EIGENER Host (z-80) statt subModalHost — der Picker legt sich damit
+  // ÜBER das Eltern-Modal (Marketing/Telefon/Bulk in subModalHost, z-60/70) und
+  // zerstört es nicht mehr. Vorher wurde beim Öffnen des Bibliothek-Pickers das
+  // Marketing-Modal überschrieben → nach dem Auswählen war die erstellte Email weg.
+  let host = document.getElementById('attPickerHost');
+  if (!host) { host = document.createElement('div'); host.id = 'attPickerHost'; document.body.appendChild(host); }
   host.innerHTML =
     '<div class="fixed inset-0 z-[80] flex items-end justify-center bg-black/60" onclick="if(event.target===this)_closeAttPicker()">' +
       '<div class="bg-white w-full max-w-lg rounded-t-3xl shadow-2xl flex flex-col safe-bottom" style="max-height:90vh">' +
@@ -32104,7 +32111,9 @@ async function _openAttachmentPicker(accountId, alreadyPickedRecordIds, onPicked
 
 function _closeAttPicker() {
   _ATT_PICKER_CTX = null;
-  const host = document.getElementById('subModalHost');
+  // v2.46.217: nur den eigenen Picker-Host leeren — das Eltern-Modal in
+  // subModalHost bleibt unangetastet.
+  const host = document.getElementById('attPickerHost');
   if (host) host.innerHTML = '';
 }
 
