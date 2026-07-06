@@ -781,7 +781,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.226';
+const APP_VERSION = 'v2.46.227';
 
 /* ============================================================
    GLOBAL THEME — v2.46.12
@@ -24170,6 +24170,18 @@ const ANG_CHAT_STEPS = [
 ];
 
 /* Öffnet das Chat-Modal. */
+/* v2.46.227: Fertiger Textvorschlag für „Abweichungen vom Sollzustand"-Mängel-Angebote.
+   Wird beim Öffnen des Angebots-Chats automatisch ins Eingabefeld gesetzt. */
+const ANG_MAENGEL_VORSCHLAG =
+  'Erstelle ein Angebot zur Behebung der in dieser E-Mail aufgeführten Mängel — eine gebündelte Position je Mangel (Material + Arbeit zusammen). ' +
+  'Erzeuge eine Einleitung mit passender Anrede. ' +
+  'Ergänze in den Angebotsbedingungen den Hinweis, dass dieses Angebot auf Grundlage der vorab übermittelten Informationen erstellt wurde und ein verbindlicher Vertrag nach Beauftragung erst nach Anlagenbegehung und Zusendung unserer Auftragsbestätigung zustande kommt.';
+
+function _angIstMaengelAnfrage(ticket) {
+  const s = (ticket?.subject || '') + ' ' + (ticket?.description_text || ticket?.description || '');
+  return /abweichung(?:en)?\s+vom\s+sollzustand/i.test(s);
+}
+
 async function openAngebotsChatModal(accountId, ticketId) {
   let host = document.getElementById('subModalHost');
   if (!host) { host = document.createElement('div'); host.id = 'subModalHost'; document.body.appendChild(host); }
@@ -24263,7 +24275,16 @@ async function openAngebotsChatModal(accountId, ticketId) {
       _angChatRenderActions({ hasPlan: true });
     } else {
       _angChatAppendBubble('assistant', 'Hallo 👋\n\nBeschreib einfach, was das Angebot enthalten soll — ich aktualisiere direkt das PDF rechts in der Vorschau (Berichtskonverter-Design).\n\nOben rechts kannst du zwischen **Pauschal** und **Aufwand** umschalten.\n\nZ.B.:\n• „Wartungsvertrag 24 Mon, ca. 145€/Mon mit Notruf"\n• „Frequenzumrichter austauschen, Pauschal 8.500€"\n• „Störungsbehebung nach Aufwand, Monteur 95€"');
+      // v2.46.227: Bei „Abweichungen vom Sollzustand" direkt einen Textvorschlag anbieten
+      const _istMaengel = _angIstMaengelAnfrage(ticket);
+      if (_istMaengel) {
+        _angChatAppendBubble('assistant', 'Das sieht nach einer Mängel-Anfrage („Abweichungen vom Sollzustand") aus. Ich habe dir unten einen fertigen Textvorschlag ins Eingabefeld gelegt — prüfen, ggf. anpassen und mit Cmd+Enter senden.');
+      }
       _angChatRenderActions({ awaitingFirstUserInput: true });
+      if (_istMaengel) {
+        const _inp = document.getElementById('angChatTextInput');
+        if (_inp && !_inp.value.trim()) { _inp.value = ANG_MAENGEL_VORSCHLAG; try { _inp.focus(); } catch (_) {} }
+      }
     }
     // v2.46.175: Vorschau SOFORT rendern (BK-Design mit Stammdaten) — nicht erst nach 1. KI-Runde
     _angChatRenderPreview().catch(e => console.warn('Initial-Preview:', e));
@@ -25822,7 +25843,7 @@ async function _angChatGenerateOffer(s, userText) {
     '    "leistungsbeschreibung": string (WAS angeboten wird, sachlich, 1-3 Sätze — z.B. "Austausch Frequenzumrichter inklusive Montage, Parametrierung und Inbetriebnahme."),\n' +
     '    "erlaeuterung": string (OPTIONAL, kurzer Hinweis 1-2 Sätze — z.B. zu Voraussetzungen, Anschluss, Ausschlüssen — oder leer),\n' +
     '    "positionen": [{"bezeichnung": string (kurzer Titel), "beschreibung": string (IMMER ausfüllen: 2-4 Arbeitsschritte, je einer pro Zeile mit \\n getrennt — erscheint im PDF als Liste unter dem Titel), "menge": number, "einheit": "ST"|"STD"|"Pauschal"|"Monat", "einzelpreis": number (Material + Arbeit gebündelt), "kategorie": "Material"|"Montage" (nur interne Zuordnung — KEINE Aufteilung einer Reparatur in zwei Positionen), "preis_aufwand": boolean}],\n' +
-    '    "konditionen": {"lieferzeit": string, "preisstellung": string, "zahlungsziel": string, "gewaehrleistung": string, "bindefrist": string, "montagetermin": string},\n' +
+    '    "konditionen": {"lieferzeit": string, "preisstellung": string, "zahlungsziel": string, "gewaehrleistung": string, "bindefrist": string, "montagetermin": string, "hinweise": string (optionaler Zusatz-/Vorbehalts-Hinweis für die Angebotsbedingungen, z.B. Vertrags-/Gültigkeits-Vorbehalt — sonst leer)},\n' +
     '    "mwst_satz": number,\n' +
     '    "einsatzpauschale_anfahrt": number (Pauschale pro Anfahrt, 0 wenn inkludiert),\n' +
     '    "abrechnung_modus": "pauschal"|"aufwand",\n' +
@@ -28683,6 +28704,8 @@ function _fdhChatToBkRec(chatState) {
   // die haben eigene Konditionen-Blöcke. Hinweise = nur Bindefrist + Montagetermin.
   const konditionen = s.collected?.konditionen || {};
   const kondHinweise = [
+    // v2.46.227: KI-Zusatzhinweis (z.B. Vertrags-Vorbehalt bei Mängel-Angeboten) zuerst
+    (konditionen.hinweise || '').trim(),
     konditionen.bindefrist    ? 'Bindefrist: ' + konditionen.bindefrist : '',
     konditionen.montagetermin ? 'Geplanter Montagetermin: ' + konditionen.montagetermin : '',
   ].filter(Boolean).join('\n');
