@@ -781,7 +781,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.220';
+const APP_VERSION = 'v2.46.221';
 
 /* ============================================================
    GLOBAL THEME — v2.46.12
@@ -10810,6 +10810,7 @@ async function _mfcAiGenerate(btn) {
       '- Direkte Anrede mit Vornamen wenn passend\n' +
       '- Maximal 180 Wörter, sachlich, freundlich, kurz\n' +
       '- Keine Signatur am Ende — die wird automatisch angefügt\n' +
+      '- Links IMMER auf eine EIGENE Zeile stellen (NICHT mitten in einen Satz einbetten, sonst gehen sie unter) und IMMER mit vollstaendigem https://-Schema schreiben (z.B. https://check.flp-stock.com, NICHT nur check.flp-stock.com), damit sie als echte klickbare Links erscheinen. Optional die Zeile direkt davor als kurze Bezeichnung nutzen (z.B. "Lagerbestand ansehen:").\n' +
       '- Kurzer CTA am Ende\n' +
       'Kontext:\n' +
       '- Absender-Firma: ' + (acc?.name || '') + '\n' +
@@ -17626,10 +17627,20 @@ function _formatInline(line) {
   // Erst HTML-escape, dann URL/Email-Linkify (escape macht keine URL-Zeichen kaputt
   // außer & → &amp;, was im href trotzdem korrekt ist)
   let out = escapeHtml(line);
-  // URL erkennen (http/https)
+  // 1) URL mit Schema (http/https)
   out = out.replace(/(https?:\/\/[^\s<>"']+[^\s<>"'.,;:!?)\]])/g, '<a href="$1" target="_blank" rel="noopener">$1</a>');
-  // Bare-Email
+  // 2) Bare-Email
   out = out.replace(/\b([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})\b/g, '<a href="mailto:$1">$1</a>');
+  // 3) v2.46.221: Domains OHNE Schema (z.B. check.flp-stock.com, www.example.de) klickbar machen.
+  //    TLD-Whitelist verhindert False-Positives (z.B. "z.B.", "index.html", "v2.46.220").
+  //    Läuft NACH 1)+2): Domains innerhalb bereits erzeugter <a>-Tags/Emails werden durch
+  //    die Vorzeichen-Klasse (Space/Klammer/>) NICHT erneut erfasst → kein Doppel-Linkify.
+  out = out.replace(
+    /(^|[\s(> ])((?:www\.)?[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)*\.(?:com|de|net|org|io|shop|app|eu|info|biz|co|dev|ai|cloud|online|store|tech|it|at|ch)(?:\/[^\s<]*)?)(?=$|[\s.,;:!?)< ])/gi,
+    function (m, pre, dom) {
+      return pre + '<a href="https://' + dom + '" target="_blank" rel="noopener">' + dom + '</a>';
+    }
+  );
   return out;
 }
 
@@ -34530,6 +34541,7 @@ async function _bulkAiGenerate(btn) {
       '- Verwende die Platzhalter {{contactFirstName}} (Vorname) als Anrede und {{userFirstName}} für deinen Namen\n' +
       '- Maximal 180 Wörter, sachlich, freundlich, kein Marketing-Slang\n' +
       '- Keine Signatur am Ende — die wird automatisch angefügt\n' +
+      '- Links IMMER auf eine EIGENE Zeile stellen (NICHT mitten in einen Satz einbetten, sonst gehen sie unter) und IMMER mit vollstaendigem https://-Schema schreiben (z.B. https://check.flp-stock.com, NICHT nur check.flp-stock.com), damit sie als echte klickbare Links erscheinen. Optional die Zeile direkt davor als kurze Bezeichnung nutzen (z.B. "Lagerbestand ansehen:").\n' +
       '- Falls passend, kurzer CTA am Ende (z.B. „Rufen Sie uns gern an" oder „Antworten Sie auf diese Mail")\n' +
       'Kontext für die Tonart:\n' +
       '- Absender-Firma: ' + (acc?.name || '') + '\n' +
