@@ -781,7 +781,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.227';
+const APP_VERSION = 'v2.46.228';
 
 /* ============================================================
    GLOBAL THEME — v2.46.12
@@ -28402,11 +28402,7 @@ async function _buildAngebotPdf(rec) {
   doc.setTextColor(...NAVY); doc.setFont('helvetica','bold'); doc.setFontSize(9.5);
   doc.text(angNr, mr-2, metaY+5, { align:'right' });
   doc.setFont('helvetica','normal'); doc.setFontSize(8.5); doc.setTextColor(...GREY_L);
-  if (rec.bearbeiter) {
-    doc.text('Bearbeiter:', mr-50, metaY+10);
-    doc.setTextColor(...GREY);
-    doc.text(_sanPdf(rec.bearbeiter), mr-2, metaY+10, { align:'right' });
-  }
+  // v2.46.228: „Bearbeiter"-Zeile entfernt (auf Wunsch nicht mehr im Angebot anzeigen).
   y = Math.max(y, 72);  // genug Luft nach Empfänger-Block
   // BETREFF — prominenter Titel mit feiner Unterstreichung
   y += 4;
