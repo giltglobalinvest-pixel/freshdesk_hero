@@ -781,7 +781,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.223';
+const APP_VERSION = 'v2.46.224';
 
 /* ============================================================
    GLOBAL THEME — v2.46.12
@@ -25733,6 +25733,14 @@ async function _angChatGenerateOffer(s, userText) {
     '- NIEMALS eigenständig Sammel-/Füller-Positionen hinzufügen wie „Material und Ersatzteile", „Kleinmaterial", „Verbrauchsmaterial", „Sonstiges", „Anfahrt" o.ä. — NUR Positionen, die der User explizit nennt oder die sich KONKRET aus Ticket/Anhängen ergeben.\n' +
     '- NIEMALS Aufschläge, Margen oder Abrechnungsmodelle erfinden (z.B. „Selbstkostenpreis zzgl. 15% Aufschlag") — solche Konditionen kommen ausschließlich vom User.\n' +
     '- Materialabrechnung nach Aufwand ist im Aufwand-Modus bereits durch den Standard-Hinweiskasten abgedeckt („Abrechnung nach tatsächlichem Aufwand von Lohn und Material") — dafür braucht es KEINE eigene Position.\n\n' +
+    'POSITIONEN-BÜNDELUNG — MATERIAL + ARBEIT IMMER ZUSAMMEN (WICHTIG):\n' +
+    '- Eine Reparatur / ein Mangel = GENAU EINE Position. Material und Arbeit NIEMALS in getrennte Positionen aufteilen (also NICHT „X - Montage" und „X - Material" als zwei Zeilen). Beides in EINE Position inkl. Arbeit packen; das Material ist im Positionspreis enthalten und wird NICHT separat ausgewiesen.\n' +
+    '- Das gilt AUCH DANN, wenn der Kunde in der Anfrage eine Aufteilung „nach Lohn und Material" wünscht — der Betreiber gibt gebündelte Positionen vor. NUR wenn der BETREIBER (User im Chat) ausdrücklich eine Aufteilung verlangt, wird aufgeteilt.\n' +
+    '- Das Feld "kategorie" dient NUR der internen Zuordnung und rechtfertigt KEINE zweite Zeile für dasselbe Gewerk.\n\n' +
+    'ABWEICHUNGEN VOM SOLLZUSTAND / MÄNGEL-TICKETS:\n' +
+    '- Enthält das Ticket eine Mängel-/Abweichungs-Tabelle (z.B. Spalten Typ, Beschreibung, Klassifizierung, Ursprung — aus TÜV-/Hauptprüfung): erstelle GENAU EINE gebündelte Position pro tatsächlich aufgeführtem Mangel. Nichts hinzufügen, was nicht in der Tabelle steht.\n' +
+    '- Positions-Titel knapp aus der Mangel-Beschreibung ableiten; die "beschreibung" nennt die konkreten Behebungs-Arbeitsschritte (Material inklusive). KEINE getrennten Material-/Montage-Zeilen für denselben Mangel.\n' +
+    '- KEINE Zusatz-Positionen wie „Prüfbericht", „Dokumentation" oder „Nachrüstung allgemein" erfinden, wenn sie nicht als eigener Mangel in der Tabelle stehen.\n\n' +
     'ABRECHNUNGSMODUS (pauschal vs. aufwand):\n' +
     '- "pauschal" (Standard): Festpreis-Positionen mit Einzelpreisen.\n' +
     '- "aufwand": KEINE Festpreise — stattdessen Stundensätze-Tabelle (stundensaetze-Array). Positionen beschreiben dann nur den Arbeitsumfang (einzelpreis: 0) oder bleiben leer.\n' +
@@ -25751,7 +25759,7 @@ async function _angChatGenerateOffer(s, userText) {
     '  "plan": {\n' +
     '    "leistungsbeschreibung": string (WAS angeboten wird, sachlich, 1-3 Sätze — z.B. "Austausch Frequenzumrichter inklusive Montage, Parametrierung und Inbetriebnahme."),\n' +
     '    "erlaeuterung": string (OPTIONAL, kurzer Hinweis 1-2 Sätze — z.B. zu Voraussetzungen, Anschluss, Ausschlüssen — oder leer),\n' +
-    '    "positionen": [{"bezeichnung": string (kurzer Titel), "beschreibung": string (IMMER ausfüllen: 2-4 Arbeitsschritte, je einer pro Zeile mit \\n getrennt — erscheint im PDF als Liste unter dem Titel), "menge": number, "einheit": "ST"|"STD"|"Pauschal"|"Monat", "einzelpreis": number, "kategorie": "Material"|"Montage", "preis_aufwand": boolean}],\n' +
+    '    "positionen": [{"bezeichnung": string (kurzer Titel), "beschreibung": string (IMMER ausfüllen: 2-4 Arbeitsschritte, je einer pro Zeile mit \\n getrennt — erscheint im PDF als Liste unter dem Titel), "menge": number, "einheit": "ST"|"STD"|"Pauschal"|"Monat", "einzelpreis": number (Material + Arbeit gebündelt), "kategorie": "Material"|"Montage" (nur interne Zuordnung — KEINE Aufteilung einer Reparatur in zwei Positionen), "preis_aufwand": boolean}],\n' +
     '    "konditionen": {"lieferzeit": string, "preisstellung": string, "zahlungsziel": string, "gewaehrleistung": string, "bindefrist": string, "montagetermin": string},\n' +
     '    "mwst_satz": number,\n' +
     '    "einsatzpauschale_anfahrt": number (Pauschale pro Anfahrt, 0 wenn inkludiert),\n' +
