@@ -784,7 +784,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.230';
+const APP_VERSION = 'v2.46.231';
 
 /* ============================================================
    GLOBAL THEME — v2.46.12
@@ -33377,7 +33377,7 @@ async function _crawlTicketSignatures(accountId, ticket, opts) {
     try {
       data = await _callAnthropicWithRetry({
         model: 'claude-haiku-4-5-20251001',
-        max_tokens: 900,
+        max_tokens: 1500,
         system:
           'Du extrahierst KONTAKTDATEN aus Email-Signaturen (Aufzug-Service-Branche). ' +
           'Gegeben sind Text-Ausschnitte (Enden eingehender Emails). Finde alle PERSONEN mit Email-Adresse. ' +
@@ -33391,13 +33391,25 @@ async function _crawlTicketSignatures(accountId, ticket, opts) {
       say('Crawlen fehlgeschlagen (KI/Verbindung): ' + (e.message || e), 'error', 9000);
       return { status: 'error', reason: e.message };
     }
-    const raw = (data?.content?.[0]?.text || '').trim().replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/i, '');
-    let found = [];
-    try { found = JSON.parse(raw); } catch (_) {
+    // v2.46.231: robust parsen — parseAIJson toleriert Fences, Prosa drumherum und
+    // Steuerzeichen in Strings. Fallback: erstes JSON-Array aus der Antwort schneiden.
+    const raw = (data?.content?.[0]?.text || '').trim();
+    let found = null;
+    try {
+      const p = (typeof parseAIJson === 'function') ? parseAIJson(raw) : JSON.parse(raw);
+      if (Array.isArray(p)) found = p;
+      else if (p && Array.isArray(p.kontakte)) found = p.kontakte;
+      else if (p && typeof p === 'object' && p.email) found = [p];
+    } catch (_) {}
+    if (!Array.isArray(found)) {
+      const m = raw.replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/i, '').match(/\[[\s\S]*\]/);
+      if (m) { try { found = JSON.parse(m[0]); } catch (_) {} }
+    }
+    if (!Array.isArray(found)) {
       say('Crawlen: KI-Antwort war nicht lesbar (kein JSON). Bitte erneut versuchen.', 'error', 8000);
       return { status: 'error', reason: 'json' };
     }
-    if (!Array.isArray(found) || !found.length) {
+    if (!found.length) {
       say('Crawlen: in diesem Ticket wurden keine Kontaktdaten in Signaturen erkannt.', 'warn', 7000);
       return { status: 'none' };
     }
