@@ -781,7 +781,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.228';
+const APP_VERSION = 'v2.46.229';
 
 /* ============================================================
    GLOBAL THEME — v2.46.12
@@ -23728,11 +23728,11 @@ function getAngebotsProfile(account) {
    `angebots_subtypen_json` als JSON-Array gespeichert. */
 const ANGEBOTS_SUBTYPEN = [
   { key: 'wartungsvertrag',  label: 'Wartungsvertrag',                ki_hint: 'Laufender Vertrag mit Monatspauschale × Laufzeit. Übliche Laufzeit 24-36 Monate. Beinhaltet typisch: Wartungspauschale, Notrufbereitschaft, optional Inspektion BetrSichV.' },
-  { key: 'reparatur',        label: 'Reparatur (Pauschal)',           ki_hint: 'Einmal-Reparatur mit Festpreis. 1-3 Pauschal-Positionen, Anfahrt inkludiert oder separat. Klare Leistungsabgrenzung.' },
+  { key: 'reparatur',        label: 'Reparatur (Pauschal)',           ki_hint: 'Einmal-Reparatur mit Festpreis. 1-3 Pauschal-Positionen, Anfahrt inkludiert (keine separate Anfahrtspauschale). Klare Leistungsabgrenzung.' },
   { key: 'inspektion',       label: 'Inspektion BetrSichV',           ki_hint: 'Einmal-Pauschale für die Hauptprüfung gem. §16 BetrSichV. ZÜS-Begleitung optional. Typisch 150-300€ pro Anlage.' },
   { key: 'modernisierung',   label: 'Modernisierung',                 ki_hint: 'Projektartig: Steuerungs-Update, Tableaus, Frequenzumrichter, Türen erneuern. Größere Summen 3.000-50.000€. Eventuell mehrere Phasen.' },
   { key: 'notdienst',        label: 'Notdienst-Pauschale (24/7)',     ki_hint: 'Monats-Pauschale für 24/7-Bereitschaft, oft Add-on zum Wartungsvertrag. Typisch 25-50€/Monat.' },
-  { key: 'aufwand',          label: 'Arbeit nach Aufwand',            ki_hint: 'Variable Abrechnung: Stundensatz × ca. Stunden + Material + Anfahrt. Bereich angeben (z.B. "ca. 4-6 Std"), kein Festpreis.' },
+  { key: 'aufwand',          label: 'Arbeit nach Aufwand',            ki_hint: 'Variable Abrechnung: Stundensatz × ca. Stunden + Material (keine separate Anfahrtspauschale). Bereich angeben (z.B. "ca. 4-6 Std"), kein Festpreis.' },
 ];
 
 /* v2.46.73: Liest Account-spezifische Angebots-Konfiguration aus dem Airtable-Account.
@@ -25813,6 +25813,7 @@ async function _angChatGenerateOffer(s, userText) {
     '- KEINE Formulierungen, die rechtlich binden oder einen Erfolg garantieren: NIEMALS "Behebung sämtlicher Mängel", "dauerhafte Störungsfreiheit", "vollständige Instandsetzung garantiert" o.ä. Wenn nötig absichernd: "nach Befund", "im beschriebenen Umfang".\n\n' +
     'VERBOTENE POSITIONEN:\n' +
     '- NIEMALS eigenständig Sammel-/Füller-Positionen hinzufügen wie „Material und Ersatzteile", „Kleinmaterial", „Verbrauchsmaterial", „Sonstiges", „Anfahrt" o.ä. — NUR Positionen, die der User explizit nennt oder die sich KONKRET aus Ticket/Anhängen ergeben.\n' +
+    '- NIEMALS eine Anfahrtspauschale / Einsatzpauschale / Anfahrtskosten aufnehmen — weder als Position NOCH als Stundensatz-Zeile. Generell weglassen (einsatzpauschale_anfahrt=0).\n' +
     '- NIEMALS Aufschläge, Margen oder Abrechnungsmodelle erfinden (z.B. „Selbstkostenpreis zzgl. 15% Aufschlag") — solche Konditionen kommen ausschließlich vom User.\n' +
     '- Materialabrechnung nach Aufwand ist im Aufwand-Modus bereits durch den Standard-Hinweiskasten abgedeckt („Abrechnung nach tatsächlichem Aufwand von Lohn und Material") — dafür braucht es KEINE eigene Position.\n\n' +
     'POSITIONEN-BÜNDELUNG — MATERIAL + ARBEIT IMMER ZUSAMMEN (WICHTIG):\n' +
@@ -25828,7 +25829,7 @@ async function _angChatGenerateOffer(s, userText) {
     '- "pauschal" (Standard): Festpreis-Positionen mit Einzelpreisen.\n' +
     '- "aufwand": KEINE Festpreise — stattdessen Stundensätze-Tabelle (stundensaetze-Array). Positionen beschreiben dann nur den Arbeitsumfang (einzelpreis: 0) oder bleiben leer.\n' +
     '- Wechsle NUR auf "aufwand" wenn der User es explizit will (z.B. „nach Aufwand", „auf Stundenbasis", „Regieleistung"). Sonst: aktuellen Modus aus dem übergebenen Angebot BEIBEHALTEN.\n' +
-    '- STUNDENSÄTZE NIEMALS ERFINDEN: Die Sätze kommen aus dem ERP (an der Anlage hinterlegt) und stehen im übergebenen Angebot. Übernimm sie UNVERÄNDERT. Es gibt typischerweise nur ZWEI Zeilen: Servicetechniker (Std.) + Einsatzpauschale (Anfahrt). KEINE zusätzlichen Zeilen wie „Fahrtzeit" oder „Servicemonteur" hinzuerfinden.\n' +
+    '- STUNDENSÄTZE NIEMALS ERFINDEN: Die Sätze kommen aus dem ERP (an der Anlage hinterlegt) und stehen im übergebenen Angebot. Übernimm sie UNVERÄNDERT. Es gibt nur EINE Zeile: Servicetechniker (Std.). KEINE Einsatzpauschale-/Anfahrtspauschale-Zeile und keine zusätzlichen Zeilen wie „Fahrtzeit" oder „Servicemonteur" hinzufügen.\n' +
     '- NUR wenn der User explizit Sätze nennt (z.B. „Stundensatz 110", „Pauschale 249") → diese exakt übernehmen. Wenn ein Satz 0 ist und der User nichts nennt → in deiner message nachfragen.\n\n' +
     'Branche: ' + (profile.ki_branche_hint || 'Aufzug-Service') + '\n' +
     subtypBlock +
@@ -25845,7 +25846,7 @@ async function _angChatGenerateOffer(s, userText) {
     '    "positionen": [{"bezeichnung": string (kurzer Titel), "beschreibung": string (IMMER ausfüllen: 2-4 Arbeitsschritte, je einer pro Zeile mit \\n getrennt — erscheint im PDF als Liste unter dem Titel), "menge": number, "einheit": "ST"|"STD"|"Pauschal"|"Monat", "einzelpreis": number (Material + Arbeit gebündelt), "kategorie": "Material"|"Montage" (nur interne Zuordnung — KEINE Aufteilung einer Reparatur in zwei Positionen), "preis_aufwand": boolean}],\n' +
     '    "konditionen": {"lieferzeit": string, "preisstellung": string, "zahlungsziel": string, "gewaehrleistung": string, "bindefrist": string, "montagetermin": string, "hinweise": string (optionaler Zusatz-/Vorbehalts-Hinweis für die Angebotsbedingungen, z.B. Vertrags-/Gültigkeits-Vorbehalt — sonst leer)},\n' +
     '    "mwst_satz": number,\n' +
-    '    "einsatzpauschale_anfahrt": number (Pauschale pro Anfahrt, 0 wenn inkludiert),\n' +
+    '    "einsatzpauschale_anfahrt": number (IMMER 0 — Anfahrts-/Einsatzpauschale wird generell NICHT ins Angebot aufgenommen),\n' +
     '    "abrechnung_modus": "pauschal"|"aufwand",\n' +
     '    "stundensaetze": [{"nr": number, "name": string, "satz": number, "einheit": "Std."|"Anfahrt", "hinweis": string}] (NUR bei aufwand befüllen, sonst []),\n' +
     '    "gesamtpreis_ausblenden": boolean (true = Summen-Block Netto/USt/Brutto wird im PDF NICHT gezeigt),\n' +
@@ -25991,9 +25992,9 @@ async function _angEnsureAufwandSaetze(s) {
       const satz = +(anlage?.stundensatz) || 0;
       const pausch = +(anlage?.einsatzPauschale ?? anlage?.einsatzpauschale) || 0;
       if (satz > 0) {
+        // v2.46.229: Anfahrts-/Einsatzpauschale generell NICHT ins Angebot aufnehmen — nur Stundensatz.
         saetze = [{ nr: 1, name: 'Servicetechniker', satz: satz, einheit: 'Std.', hinweis: '' }];
-        if (pausch > 0) saetze.push({ nr: 2, name: 'Einsatzpauschale', satz: pausch, einheit: 'Anfahrt', hinweis: 'Fahrtzeit, Fahrzeug + Rüstzeit' });
-        toast('Sätze aus ERP übernommen: Servicetechniker ' + satz + ' € / Std.' + (pausch ? ' · Einsatzpauschale ' + pausch + ' €' : ''), 'success', 6000);
+        toast('Satz aus ERP übernommen: Servicetechniker ' + satz + ' € / Std.', 'success', 6000);
       }
     } catch (e) {
       console.warn('[Aufwand] ERP-Sätze laden fehlgeschlagen:', e.message);
@@ -26001,10 +26002,9 @@ async function _angEnsureAufwandSaetze(s) {
   }
   if (!saetze) {
     saetze = [
-      { nr: 1, name: 'Servicetechniker', satz: 0, einheit: 'Std.',    hinweis: '' },
-      { nr: 2, name: 'Einsatzpauschale', satz: 0, einheit: 'Anfahrt', hinweis: 'Fahrtzeit, Fahrzeug + Rüstzeit' },
+      { nr: 1, name: 'Servicetechniker', satz: 0, einheit: 'Std.', hinweis: '' },
     ];
-    toast('Keine ERP-Sätze gefunden (Fabriknummer prüfen oder Sätze im Chat nennen, z.B. „Stundensatz 110, Pauschale 249")', 'warn', 9000);
+    toast('Kein ERP-Stundensatz gefunden (Fabriknummer prüfen oder Satz im Chat nennen, z.B. „Stundensatz 110")', 'warn', 9000);
   }
   c.stundensaetze = saetze;
 }
@@ -27505,12 +27505,10 @@ function _renderAngebotHtmlV2(ctx, opts) {
         '<tr class="total"><td>Brutto:</td><td class="r">' + _formatEur(totals.brutto) + '</td></tr>' +
       '</table></div>';
   }
-  // Preis-Boxen (Pauschalpreis + Einsatzpauschale)
-  const einsatzpausch = Number(plan.einsatzpauschale_anfahrt || 0) || 0;
+  // Preis-Box (Pauschalpreis) — v2.46.229: Einsatzpauschale/Anfahrt generell weggelassen
   const preisBoxenHtml = !hasPositionen
     ? '<div class="preis-grid">' +
         '<div class="box"><div class="lbl">Pauschalpreis (netto)</div><div class="val big">' + _formatEur(totals.netto) + '</div></div>' +
-        '<div class="box"><div class="lbl">Einsatzpauschale je Anfahrt</div><div class="val">' + _formatEur(einsatzpausch) + '</div></div>' +
       '</div>' +
       '<div class="konditionen-mini">Zzgl. ' + (plan.mwst_satz || 19) + ' % MwSt — Bruttogesamt: <b>' + _formatEur(totals.brutto) + '</b></div>'
     : '';
@@ -28736,7 +28734,9 @@ function _fdhChatToBkRec(chatState) {
     preisanzeige_modus:   s.collected?.preisanzeige_modus || (positionen.length ? 'einzel' : 'gesamt'),
     pauschalpreis_netto:  positionen.length ? 0 : +totals.netto || 0,
     positionen_json:      JSON.stringify(positionen),
-    stundensaetze_json:   JSON.stringify(s.collected?.stundensaetze || []),
+    // v2.46.229: Anfahrts-/Einsatzpauschale-Zeilen generell aus dem Angebot filtern
+    // (auch bei wiederhergestellten Alt-Angeboten, die die Zeile noch enthalten könnten)
+    stundensaetze_json:   JSON.stringify((s.collected?.stundensaetze || []).filter(x => !/anfahrt|pauschale/i.test(String(x.name || '') + ' ' + String(x.einheit || '')))),
     ust_prozent:          +s.collected?.mwst_satz || 19,
     summe_netto_kone:     0,
     summe_netto_vp:       +totals.netto  || 0,
