@@ -781,7 +781,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.224';
+const APP_VERSION = 'v2.46.225';
 
 /* ============================================================
    GLOBAL THEME — v2.46.12
@@ -25721,6 +25721,7 @@ async function _angChatGenerateOffer(s, userText) {
     '- User will KEINEN Gesamtpreis (z.B. „kein Gesamtpreis anzeigen", „Summe weglassen") → gesamtpreis_ausblenden=true. Sonst false bzw. Wert aus dem übergebenen Angebot beibehalten.\n\n' +
     'ANHÄNGE (PDFs/Bilder aus dem Ticket werden dir mitgeliefert):\n' +
     '- Lies sie VOLLSTÄNDIG. Enthalten sie Leistungsbeschreibungen — z.B. Subunternehmer-Angebote, TÜV-/Prüfberichte, Mängellisten, Serviceberichte — arbeite die relevanten Arbeitsschritte in die "beschreibung" der passenden Positionen ein (sinngemäß und strukturiert, EIGENE Formulierung, ein Arbeitsschritt pro Zeile mit \\n getrennt). Der User soll nichts manuell abtippen müssen.\n' +
+    '- AUSNAHME: Listet die EMAIL selbst bereits eine Mängel-/Abweichungs-Tabelle auf (siehe Regel „ABWEICHUNGEN VOM SOLLZUSTAND"), bestimmt AUSSCHLIESSLICH diese Email-Tabelle die Positionen — der Anhang wird dann NICHT als Quelle für Positionen herangezogen.\n' +
     '- EINKAUFSPREISE aus Subunternehmer-Angeboten NIEMALS als Verkaufspreise übernehmen. Preise kommen nur vom User oder aus deiner Kalkulation.\n' +
     '- Interne Vermerke aus Anhängen (Marge, Sub-Konditionen, interne Notizen) gehören NICHT in den Angebots-Text.\n\n' +
     'LEISTUNGSBESCHREIBUNG JE POSITION (Feld "beschreibung"):\n' +
@@ -25737,10 +25738,11 @@ async function _angChatGenerateOffer(s, userText) {
     '- Eine Reparatur / ein Mangel = GENAU EINE Position. Material und Arbeit NIEMALS in getrennte Positionen aufteilen (also NICHT „X - Montage" und „X - Material" als zwei Zeilen). Beides in EINE Position inkl. Arbeit packen; das Material ist im Positionspreis enthalten und wird NICHT separat ausgewiesen.\n' +
     '- Das gilt AUCH DANN, wenn der Kunde in der Anfrage eine Aufteilung „nach Lohn und Material" wünscht — der Betreiber gibt gebündelte Positionen vor. NUR wenn der BETREIBER (User im Chat) ausdrücklich eine Aufteilung verlangt, wird aufgeteilt.\n' +
     '- Das Feld "kategorie" dient NUR der internen Zuordnung und rechtfertigt KEINE zweite Zeile für dasselbe Gewerk.\n\n' +
-    'ABWEICHUNGEN VOM SOLLZUSTAND / MÄNGEL-TICKETS:\n' +
-    '- Enthält das Ticket eine Mängel-/Abweichungs-Tabelle (z.B. Spalten Typ, Beschreibung, Klassifizierung, Ursprung — aus TÜV-/Hauptprüfung): erstelle GENAU EINE gebündelte Position pro tatsächlich aufgeführtem Mangel. Nichts hinzufügen, was nicht in der Tabelle steht.\n' +
-    '- Positions-Titel knapp aus der Mangel-Beschreibung ableiten; die "beschreibung" nennt die konkreten Behebungs-Arbeitsschritte (Material inklusive). KEINE getrennten Material-/Montage-Zeilen für denselben Mangel.\n' +
-    '- KEINE Zusatz-Positionen wie „Prüfbericht", „Dokumentation" oder „Nachrüstung allgemein" erfinden, wenn sie nicht als eigener Mangel in der Tabelle stehen.\n\n' +
+    'ABWEICHUNGEN VOM SOLLZUSTAND / MÄNGEL-TICKETS (WICHTIG — ÜBERSCHREIBT DIE ANHANG-REGEL):\n' +
+    '- Enthält die EMAIL selbst eine Mängel-/Abweichungs-Tabelle (Spalten wie Typ, Beschreibung, Klassifizierung, Datum, Ursprung): die Positionen kommen AUSSCHLIESSLICH aus dieser Tabelle im EMAIL-Text. Erstelle GENAU EINE gebündelte Position pro dort aufgeführter Mangel-Zeile. Anzahl der Angebots-Positionen = Anzahl der Mangel-Zeilen in der Email.\n' +
+    '- Den ANHANG (Prüfbericht / Prüfbescheinigung / TÜV-Report) dabei NICHT als Quelle für Positionen verwenden — er enthält oft die komplette Prüfung mit weiteren Punkten, die der Kunde NICHT beauftragt hat. Aus dem Anhang KEINE zusätzlichen Mängel/Positionen ziehen. Nur die in der Email gelisteten Mängel zählen.\n' +
+    '- Titel + "beschreibung" knapp aus der jeweiligen EMAIL-Mangel-Beschreibung ableiten (konkrete Behebungs-Arbeitsschritte, Material inklusive, EINE Position, keine getrennten Material-/Montage-Zeilen).\n' +
+    '- KEINE Zusatz-Positionen erfinden (z.B. „Prüfbericht", „Dokumentation", „Cybersicherheit", „Zugang Triebwerksraum", „Nachrüstung allgemein"), wenn sie nicht als eigene Mangel-Zeile in der EMAIL-Tabelle stehen.\n\n' +
     'ABRECHNUNGSMODUS (pauschal vs. aufwand):\n' +
     '- "pauschal" (Standard): Festpreis-Positionen mit Einzelpreisen.\n' +
     '- "aufwand": KEINE Festpreise — stattdessen Stundensätze-Tabelle (stundensaetze-Array). Positionen beschreiben dann nur den Arbeitsumfang (einzelpreis: 0) oder bleiben leer.\n' +
