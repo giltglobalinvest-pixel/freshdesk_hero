@@ -781,7 +781,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.221';
+const APP_VERSION = 'v2.46.222';
 
 /* ============================================================
    GLOBAL THEME — v2.46.12
@@ -4414,15 +4414,26 @@ async function fetchCompanyById(accountId, companyId) {
 
 async function searchCompanies(accountId, term) {
   if (!accountId || !term || term.length < 2) return [];
+  const base = '/freshdesk/' + encodeURIComponent(accountId) + '/api/v2';
+  // 1) Autocomplete (schnell, Prefix-Suche)
   try {
-    const path = '/freshdesk/' + encodeURIComponent(accountId) +
-      '/api/v2/companies/autocomplete?name=' + encodeURIComponent(term);
-    const data = await proxyJson(path);
+    const data = await proxyJson(base + '/companies/autocomplete?name=' + encodeURIComponent(term));
     // Antwort: { companies: [{ id, name, ... }] }  oder direkt Array
     const list = Array.isArray(data) ? data : (data.companies || []);
-    return list.map(c => ({ id: c.id, name: c.name || '(ohne Name)' }));
+    if (list.length) return list.map(c => ({ id: c.id, name: c.name || '(ohne Name)' }));
   } catch (e) {
-    console.warn('Company-Search fehlgeschlagen:', e.message);
+    console.warn('Company-Autocomplete fehlgeschlagen:', e.message);
+  }
+  // 2) v2.46.222: Fallback über die FD-Such-API — findet bestehende Firmen zuverlässig
+  //    auch dann, wenn die Autocomplete leer zurückkommt (Ursache für „Name is not
+  //    unique"-Fehler beim Anlegen: Duplikat-Lookup fand die Firma vorher nicht).
+  try {
+    const q = '"name:\'' + String(term).replace(/['"\\]/g, '') + '\'"';
+    const data = await proxyJson(base + '/search/companies?query=' + encodeURIComponent(q));
+    const list = data?.results || data?.companies || (Array.isArray(data) ? data : []);
+    return (Array.isArray(list) ? list : []).map(c => ({ id: c.id, name: c.name || '(ohne Name)' }));
+  } catch (e) {
+    console.warn('Company-Search-API fehlgeschlagen:', e.message);
     return [];
   }
 }
@@ -5040,19 +5051,28 @@ async function searchFreshsalesContacts(accountId, term) {
 
 async function searchFreshsalesSalesAccounts(accountId, term) {
   if (!accountId || !term || term.length < 2) return [];
-  try {
-    const path = '/freshsales/' + encodeURIComponent(accountId) +
-      '/api/lookup?q=' + encodeURIComponent(term) + '&f=name&entities=sales_account';
-    const data = await proxyJson(path);
-    // Antwort: { sales_accounts: { sales_accounts: [...] } } oder { sales_accounts: [...] }
-    const list = data?.sales_accounts?.sales_accounts || data?.sales_accounts || [];
-    return (Array.isArray(list) ? list : []).map(s => ({
-      id: s.id, name: s.name || '(ohne Name)', city: s.city || '', website: s.website || ''
-    }));
-  } catch (e) {
-    console.warn('Freshsales-Sales-Account-Search fehlgeschlagen:', e.message);
-    return [];
+  const base = '/freshsales/' + encodeURIComponent(accountId);
+  // v2.46.222: mehrere Lookup-Varianten — der Freshsales-Lookup liefert je nach
+  // Konfiguration mal mit, mal ohne f=name Treffer. Ohne robusten Treffer scheiterte
+  // vorher der Duplikat-Lookup beim Anlegen („Company is not unique").
+  const paths = [
+    '/api/lookup?q=' + encodeURIComponent(term) + '&f=name&entities=sales_account',
+    '/api/lookup?q=' + encodeURIComponent(term) + '&entities=sales_account',
+  ];
+  for (const p of paths) {
+    try {
+      const data = await proxyJson(base + p);
+      // Antwort: { sales_accounts: { sales_accounts: [...] } } oder { sales_accounts: [...] }
+      const list = data?.sales_accounts?.sales_accounts || data?.sales_accounts || data?.results || [];
+      const arr = (Array.isArray(list) ? list : []).map(s => ({
+        id: s.id, name: s.name || '(ohne Name)', city: s.city || '', website: s.website || ''
+      }));
+      if (arr.length) return arr;
+    } catch (e) {
+      console.warn('Freshsales-Sales-Account-Search („' + p + '") fehlgeschlagen:', e.message);
+    }
   }
+  return [];
 }
 
 /* Entfernt null/undefined/leere Felder aus einem Objekt — Freshsales-Validation reagiert
