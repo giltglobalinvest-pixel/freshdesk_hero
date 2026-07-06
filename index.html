@@ -678,6 +678,9 @@
     <button onclick="navTo('automated'); closeMenu();" class="w-full text-left px-3 py-2 text-sm hover:bg-ink-50 flex items-center gap-2">
       <i data-lucide="bot" class="w-4 h-4 text-purple-500"></i> Automatisierte Tickets
     </button>
+    <button onclick="navTo('angebote'); closeMenu();" class="w-full text-left px-3 py-2 text-sm hover:bg-ink-50 flex items-center gap-2">
+      <i data-lucide="receipt" class="w-4 h-4 text-indigo-500"></i> Angebote
+    </button>
     <button onclick="navTo('marketing'); closeMenu();" class="w-full text-left px-3 py-2 text-sm hover:bg-ink-50 flex items-center gap-2">
       <i data-lucide="megaphone" class="w-4 h-4 text-orange-500"></i> Marketing-Emails
     </button>
@@ -781,7 +784,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.229';
+const APP_VERSION = 'v2.46.230';
 
 /* ============================================================
    GLOBAL THEME — v2.46.12
@@ -7529,6 +7532,7 @@ function navTo(page) {
   else if (page === 'tasks')     renderFn = renderTasksPage;
   else if (page === 'deals')     renderFn = renderDealsPage;
   else if (page === 'marketing') renderFn = renderMarketingPage;
+  else if (page === 'angebote')  renderFn = renderAngebotePage;
   else if (page === 'attachments') renderFn = renderAttachmentsPage;
   else if (page === 'lists')      renderFn = renderListsPage;
   else if (page === 'saved-searches') renderFn = renderSavedSearchesPage;
@@ -24182,7 +24186,7 @@ function _angIstMaengelAnfrage(ticket) {
   return /abweichung(?:en)?\s+vom\s+sollzustand/i.test(s);
 }
 
-async function openAngebotsChatModal(accountId, ticketId) {
+async function openAngebotsChatModal(accountId, ticketId, forcedRestore) {
   let host = document.getElementById('subModalHost');
   if (!host) { host = document.createElement('div'); host.id = 'subModalHost'; document.body.appendChild(host); }
   // v2.46.79: Body-Klasse für Side-Panel-Layout (Ticket-Detail bekommt right: 460px Padding)
@@ -24204,7 +24208,12 @@ async function openAngebotsChatModal(accountId, ticketId) {
     if (!ticket || !ticket.conversations) {
       try { ticket = await fetchTicketDetail(accountId, ticketId); } catch (_) {}
     }
-    if (!ticket) throw new Error('Ticket konnte nicht geladen werden');
+    // v2.46.230: Beim Öffnen aus dem Angebote-Picker darf das Ticket fehlen (z.B.
+    // gelöscht) — dann mit Minimal-Stub weiterarbeiten, damit das Angebot editierbar bleibt.
+    if (!ticket) {
+      if (forcedRestore) ticket = { id: ticketId, subject: '(Angebot ' + (forcedRestore.fromBK || '') + ')', requester: {}, conversations: [] };
+      else throw new Error('Ticket konnte nicht geladen werden');
+    }
     const anlage = _extractAnlageHybrid(ticket);
     // State initialisieren
     window._ANG_CHAT = {
@@ -24248,15 +24257,19 @@ async function openAngebotsChatModal(accountId, ticketId) {
       })(),
       stilReferenzen: null, // wird beim ersten Step gefüllt
     };
-    // v2.46.191: Zuletzt erstelltes Angebot für dieses Ticket wiederherstellen
-    let restored = null;
-    try {
-      restored = JSON.parse(localStorage.getItem('fdh_ang_state_' + accountId + '_' + ticketId) || 'null');
-    } catch (_) {}
-    // v2.46.195: Fallback — letztes VERSENDETES Angebot aus dem Berichtskonverter
-    // (greift wenn localStorage leer: anderes Gerät, Cache geleert, altes Angebot)
-    if (!restored?.collected) {
-      restored = await _angRestoreFromBK(accountId, ticketId);
+    // v2.46.230: Aus dem Angebote-Picker kommt ein konkret gewähltes Angebot mit —
+    // das hat Vorrang und überspringt die Auto-Wiederherstellung.
+    let restored = forcedRestore || null;
+    if (!restored) {
+      // v2.46.191: Zuletzt erstelltes Angebot für dieses Ticket wiederherstellen
+      try {
+        restored = JSON.parse(localStorage.getItem('fdh_ang_state_' + accountId + '_' + ticketId) || 'null');
+      } catch (_) {}
+      // v2.46.195: Fallback — letztes VERSENDETES Angebot aus dem Berichtskonverter
+      // (greift wenn localStorage leer: anderes Gerät, Cache geleert, altes Angebot)
+      if (!restored?.collected) {
+        restored = await _angRestoreFromBK(accountId, ticketId);
+      }
     }
     if (restored?.collected) {
       window._ANG_CHAT.collected = Object.assign({}, window._ANG_CHAT.collected, restored.collected);
@@ -24585,64 +24598,177 @@ async function _angRestoreFromBK(accountId, ticketId) {
     const d = await r.json();
     const f = d.records?.[0]?.fields;
     if (!f) return null;
-    let positionen = [];
-    try {
-      positionen = JSON.parse(f.positionen_json || '[]').map(p => ({
-        bezeichnung:   p.titel || p.bezeichnung || '',
-        beschreibung:  Array.isArray(p.leistungsbeschreibung) ? p.leistungsbeschreibung.join('\n') : (p.beschreibung || ''),
-        menge:         +p.menge || 1,
-        einheit:       p.einheit || 'ST',
-        einzelpreis:   +p.vp || +p.einzelpreis || 0,
-        kategorie:     'Montage',
-        preis_aufwand: !!p.preis_aufwand,
-      }));
-    } catch (_) {}
-    let stundensaetze = [];
-    try { stundensaetze = JSON.parse(f.stundensaetze_json || '[]'); } catch (_) {}
-    // Anschreiben grob in Anrede + Body zerlegen
-    const ans = String(f.anschreiben || '');
-    let anrede = '', body = ans;
-    const m = ans.match(/^(Sehr geehrte[^,\n]{0,80},)\s*\n*/);
-    if (m) { anrede = m[1]; body = ans.slice(m[0].length); }
-    return {
-      collected: {
-        abrechnung_modus:       f.abrechnung_modus || 'pauschal',
-        preisanzeige_modus:     f.preisanzeige_modus || 'einzel',
-        gesamtpreis_ausblenden: !!f.gesamtpreis_ausblenden,
-        positionen, stundensaetze,
-        mwst_satz:              +f.ust_prozent || 19,
-        pauschalpreis_netto:    +f.pauschalpreis_netto || 0,
-        anschreiben_aktiv:      !!body.trim(),
-        anschreiben_anrede:     anrede,
-        anschreiben_body:       body.trim(),
-        anschreiben_gruss:      '',
-        leistungsbeschreibung:  '',
-        erlaeuterung:           '',
-        standort:               f.anlage_adresse || '',
-        fabriknummer:           f.seriennummer || '',
-        stammdaten: {
-          vertragspartner:         f.kunde_name || '',
-          rechnungs_anschrift:     f.kunde_adresse || '',
-          ansprechpartner_vor_ort: f.kontakt_name || '',
-          email: '', tel: '',
-        },
-        konditionen: {
-          lieferzeit:      f.kond_lieferzeit || '',
-          preisstellung:   f.kond_preisbasis || '',
-          zahlungsziel:    f.kond_zahlung || '',
-          gewaehrleistung: f.kond_gewaehrleistung || '',
-          bindefrist:      '',
-        },
-      },
-      history:   [],
-      iteration: 1,
-      savedAt:   f.erstellt_am || '',
-      fromBK:    'ANG-' + (f.app_angebot_num || '?'),
-    };
+    return _angMapBkFieldsToRestore(f);
   } catch (e) {
     console.warn('[Angebot-Restore-BK]', e.message);
     return null;
   }
+}
+
+/* v2.46.230: App_Angebote-Record-Felder → Chat-Restore-Objekt. Von
+   _angRestoreFromBK (letztes Angebot pro Ticket) UND dem Angebote-Picker
+   (gezielt gewähltes Angebot) genutzt. */
+function _angMapBkFieldsToRestore(f) {
+  let positionen = [];
+  try {
+    positionen = JSON.parse(f.positionen_json || '[]').map(p => ({
+      bezeichnung:   p.titel || p.bezeichnung || '',
+      beschreibung:  Array.isArray(p.leistungsbeschreibung) ? p.leistungsbeschreibung.join('\n') : (p.beschreibung || ''),
+      menge:         +p.menge || 1,
+      einheit:       p.einheit || 'ST',
+      einzelpreis:   +p.vp || +p.einzelpreis || 0,
+      kategorie:     'Montage',
+      preis_aufwand: !!p.preis_aufwand,
+    }));
+  } catch (_) {}
+  let stundensaetze = [];
+  try { stundensaetze = JSON.parse(f.stundensaetze_json || '[]'); } catch (_) {}
+  // Anschreiben grob in Anrede + Body zerlegen
+  const ans = String(f.anschreiben || '');
+  let anrede = '', body = ans;
+  const m = ans.match(/^(Sehr geehrte[^,\n]{0,80},)\s*\n*/);
+  if (m) { anrede = m[1]; body = ans.slice(m[0].length); }
+  return {
+    collected: {
+      abrechnung_modus:       f.abrechnung_modus || 'pauschal',
+      preisanzeige_modus:     f.preisanzeige_modus || 'einzel',
+      gesamtpreis_ausblenden: !!f.gesamtpreis_ausblenden,
+      positionen, stundensaetze,
+      mwst_satz:              +f.ust_prozent || 19,
+      pauschalpreis_netto:    +f.pauschalpreis_netto || 0,
+      anschreiben_aktiv:      !!body.trim(),
+      anschreiben_anrede:     anrede,
+      anschreiben_body:       body.trim(),
+      anschreiben_gruss:      '',
+      leistungsbeschreibung:  '',
+      erlaeuterung:           '',
+      standort:               f.anlage_adresse || '',
+      fabriknummer:           f.seriennummer || '',
+      stammdaten: {
+        vertragspartner:         f.kunde_name || '',
+        rechnungs_anschrift:     f.kunde_adresse || '',
+        ansprechpartner_vor_ort: f.kontakt_name || '',
+        email: '', tel: '',
+      },
+      konditionen: {
+        lieferzeit:      f.kond_lieferzeit || '',
+        preisstellung:   f.kond_preisbasis || '',
+        zahlungsziel:    f.kond_zahlung || '',
+        gewaehrleistung: f.kond_gewaehrleistung || '',
+        bindefrist:      '',
+      },
+    },
+    history:   [],
+    iteration: 1,
+    savedAt:   f.erstellt_am || '',
+    fromBK:    'ANG-' + (f.app_angebot_num || '?'),
+  };
+}
+
+/* v2.46.230: Alle in Freshdesk Hero erstellten Angebote aus App_Angebote laden
+   (source_app=freshdesk_hero), neueste zuerst, mit Paginierung. */
+async function _angLoadAllBkAngebote() {
+  if (!APP_KEYS.bkAirtableBaseId || !APP_KEYS.airtableWriteKey) {
+    throw new Error('Berichtskonverter-Base-ID / Airtable-Key nicht konfiguriert (Admin → Einstellungen)');
+  }
+  const out = [];
+  let offset = '';
+  for (let guard = 0; guard < 40; guard++) {
+    const url = 'https://api.airtable.com/v0/' + APP_KEYS.bkAirtableBaseId + '/App_Angebote'
+      + '?filterByFormula=' + encodeURIComponent("{source_app}='freshdesk_hero'")
+      + '&sort[0][field]=app_angebot_num&sort[0][direction]=desc&pageSize=100'
+      + (offset ? '&offset=' + encodeURIComponent(offset) : '');
+    const r = await fetch(url, { headers: { 'Authorization': 'Bearer ' + APP_KEYS.airtableWriteKey } });
+    if (!r.ok) throw new Error('Airtable ' + r.status);
+    const d = await r.json();
+    (d.records || []).forEach(rec => out.push({ recordId: rec.id, f: rec.fields || {} }));
+    if (!d.offset) break;
+    offset = d.offset;
+  }
+  return out;
+}
+
+const ANGEBOTE_PAGE_STATE = { list: null, q: '' };
+
+async function renderAngebotePage() {
+  setPageTitle('Angebote', 'Alle in Freshdesk Hero erstellten Angebote — suchen & weiterbearbeiten');
+  const host = $('pageContent');
+  if (!host) return;
+  host.innerHTML = '<div class="space-y-3 max-w-3xl mx-auto">' +
+    '<div class="bg-gradient-to-br from-indigo-50 to-violet-50 border border-indigo-200 rounded-xl p-3 text-[12px] text-indigo-900">' +
+      '<p class="font-bold inline-flex items-center gap-1 mb-1"><i data-lucide="receipt" class="w-4 h-4"></i> Angebote</p>' +
+      '<p>Hier findest du alle mit Freshdesk Hero erstellten Angebote. Tippe auf ein Angebot, um es im KI-Chat zu öffnen und weiterzubearbeiten.</p>' +
+    '</div>' +
+    '<div class="bg-white rounded-xl border border-ink-200 p-2.5 flex items-center gap-2">' +
+      '<input id="angPageSearch" type="search" value="' + escapeAttr(ANGEBOTE_PAGE_STATE.q || '') + '" placeholder="Suche: Angebot-Nr, Kunde, Standort, Fabriknummer, Ticket…" oninput="ANGEBOTE_PAGE_STATE.q=this.value;_renderAngebotePageList()" class="flex-1 px-3 py-2 border border-ink-300 rounded-lg text-sm">' +
+      '<button onclick="renderAngebotePage()" class="px-2.5 py-2 bg-white border border-ink-300 hover:bg-ink-50 text-ink-700 rounded-lg text-[12px] font-bold" title="Neu laden">↻</button>' +
+    '</div>' +
+    '<div id="angPageList"><div class="text-center py-10"><span class="spinner inline-block w-6 h-6 border-[2px] text-indigo-500"></span><p class="text-sm text-ink-500 mt-2">Lade Angebote…</p></div></div>' +
+  '</div>';
+  if (window.lucide) lucide.createIcons();
+  try {
+    ANGEBOTE_PAGE_STATE.list = await _angLoadAllBkAngebote();
+  } catch (e) {
+    const l = document.getElementById('angPageList');
+    if (l) l.innerHTML = '<div class="bg-red-50 border border-red-200 rounded-xl p-4 text-sm text-red-800">Angebote konnten nicht geladen werden: ' + escapeHtml(e.message || String(e)) + '</div>';
+    return;
+  }
+  _renderAngebotePageList();
+}
+
+function _renderAngebotePageList() {
+  const host = document.getElementById('angPageList');
+  if (!host) return;
+  const all = ANGEBOTE_PAGE_STATE.list || [];
+  const q = (ANGEBOTE_PAGE_STATE.q || '').trim().toLowerCase();
+  const list = q ? all.filter(x => {
+    const f = x.f;
+    return ['app_angebot_num', 'kunde_name', 'anlage_adresse', 'kunde_adresse', 'seriennummer', 'freshdesk_ticket_id', 'erstellt_am']
+      .map(k => String(f[k] || '')).join(' ').toLowerCase().includes(q);
+  }) : all;
+  if (!all.length) {
+    host.innerHTML = '<div class="bg-white rounded-xl border border-dashed border-ink-300 p-6 text-center text-ink-500 text-sm">Noch keine Angebote in Freshdesk Hero erstellt.</div>';
+    return;
+  }
+  host.innerHTML =
+    '<p class="text-[11px] text-ink-500 mb-1.5">' + list.length + (q ? ' / ' + all.length : '') + ' Angebot(e)</p>' +
+    (list.length ? list.map(x => {
+      const f = x.f;
+      const brutto = +f.summe_brutto_vp || 0;
+      return '<div class="bg-white rounded-xl border border-ink-200 hover:border-indigo-300 p-3 mb-2 cursor-pointer" onclick="_angOpenFromPicker(\'' + escapeAttr(x.recordId) + '\')">' +
+        '<div class="flex items-start justify-between gap-2">' +
+          '<div class="min-w-0 flex-1">' +
+            '<p class="font-bold text-ink-900 text-sm">ANG-' + escapeHtml(String(f.app_angebot_num || '?')) + ' <span class="font-normal text-ink-500">· ' + escapeHtml(f.kunde_name || '(kein Kunde)') + '</span></p>' +
+            '<p class="text-[11px] text-ink-600 truncate">' + escapeHtml(f.anlage_adresse || f.kunde_adresse || '') + (f.seriennummer ? ' · Fabriknr ' + escapeHtml(f.seriennummer) : '') + '</p>' +
+            '<p class="text-[10px] text-ink-400">' + escapeHtml(f.erstellt_am || '') + (f.freshdesk_ticket_id ? ' · Ticket #' + escapeHtml(f.freshdesk_ticket_id) : '') + '</p>' +
+          '</div>' +
+          '<div class="text-right shrink-0">' +
+            '<p class="font-bold text-ink-900 text-sm">' + _formatEur(brutto) + '</p>' +
+            '<p class="text-[10px] text-indigo-600 font-semibold inline-flex items-center gap-0.5">Öffnen <i data-lucide="arrow-right" class="w-3 h-3"></i></p>' +
+          '</div>' +
+        '</div>' +
+      '</div>';
+    }).join('') : '<div class="bg-white rounded-xl border border-dashed border-ink-300 p-6 text-center text-ink-500 text-sm">Keine Treffer für „' + escapeHtml(q) + '".</div>');
+  if (window.lucide) lucide.createIcons();
+}
+
+/* Gewähltes Angebot in den KI-Chat laden (zum Weiterbearbeiten). */
+async function _angOpenFromPicker(recordId) {
+  const rec = (ANGEBOTE_PAGE_STATE.list || []).find(x => x.recordId === recordId);
+  if (!rec) return;
+  const f = rec.f;
+  let accountId = f.freshdesk_account_id || '';
+  if (!accountId && f.firma) {
+    const acc = (APP_STATE.accounts || []).find(a => _erpFirmaSlugForAccount(a) === f.firma);
+    accountId = acc?.id || '';
+  }
+  const ticketId = f.freshdesk_ticket_id || '';
+  if (!accountId || !ticketId) {
+    return toast('Zu diesem Angebot fehlt der Ticket-/Mandanten-Bezug — es kann nicht im Chat geöffnet werden.', 'warn', 7000);
+  }
+  const restore = _angMapBkFieldsToRestore(f);
+  toast('Öffne Angebot ' + (restore.fromBK || '') + ' …', 'info', 2500);
+  openAngebotsChatModal(accountId, ticketId, restore);
 }
 
 /* v2.46.191: Kompletten Angebot-Stand pro Ticket in localStorage sichern.
