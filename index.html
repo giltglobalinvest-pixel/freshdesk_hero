@@ -784,7 +784,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.231';
+const APP_VERSION = 'v2.46.232';
 
 /* ============================================================
    GLOBAL THEME — v2.46.12
@@ -1567,6 +1567,105 @@ async function erpFetch(path, opts) {
     throw err;
   }
   return data;
+}
+
+/* ===========================================================================
+   ERP HERO (FLP) — Direkt-Airtable-Connector  (v2.46.232)
+   ---------------------------------------------------------------------------
+   ERP Hero (Projekt p_1778057282571) ist eine eigene, Airtable-basierte App.
+   FDH teilt sich dessen Master-Base und liest von dort den Write-Key + die
+   Daten-Base-ID. Damit schreibt/liest FDH DIREKT in ERP Heros Airtable-Base —
+   kein Proxy, keine separate Konfiguration nötig.
+   Getrennt vom Aufzug-ERP (erpFetch/Berichtskonverter). Nur für Profil
+   `flp-ersatzteile` aktiv. Tabellen: Company, Customer, Contact, Quote,
+   QuoteItem, Article. =========================================================*/
+const ERPHERO_PROJECT_ID   = 'p_1778057282571';
+const ERPHERO_DEFAULT_BASE = 'app' + 'CuTELLYwX90OLC';   // Default-Daten-Base (nicht geheim)
+const ERPHERO = { baseId: null, writeKey: null, loaded: false };
+
+/* Liest ERP Heros Write-Key + Base-ID einmalig aus der gemeinsamen Master-Base. */
+async function erpHeroEnsureKeys() {
+  if (ERPHERO.loaded && ERPHERO.writeKey) return ERPHERO;
+  const url = 'https://api.airtable.com/v0/' + APP_CONFIG.MASTER_BASE_ID + '/Keys'
+    + '?filterByFormula=' + encodeURIComponent("{project_id}='" + ERPHERO_PROJECT_ID + "'")
+    + '&pageSize=100';
+  const r = await fetch(url, { headers: { 'Authorization': 'Bearer ' + APP_CONFIG.AIRTABLE_READ_KEY } });
+  if (!r.ok) throw new Error('ERP-Hero-Keys laden fehlgeschlagen (Master-Base HTTP ' + r.status + ')');
+  const d = await r.json();
+  const byName = {};
+  (d.records || []).forEach(rec => { const f = rec.fields || {}; if (f.key_name) byName[f.key_name] = f.key_value; });
+  ERPHERO.writeKey = byName.airtableWriteKey || null;
+  ERPHERO.baseId   = byName.airtableBaseId || ERPHERO_DEFAULT_BASE;
+  ERPHERO.loaded   = true;
+  if (!ERPHERO.writeKey) throw new Error('ERP-Hero-Write-Key nicht in der Master-Base gefunden (Projekt ' + ERPHERO_PROJECT_ID + ')');
+  return ERPHERO;
+}
+
+/* GET mit Filter/Sort/Pagination gegen ERP Heros Daten-Base. */
+async function erpHeroRead(table, opts) {
+  opts = opts || {};
+  await erpHeroEnsureKeys();
+  const params = new URLSearchParams();
+  if (opts.filter) params.set('filterByFormula', opts.filter);
+  if (opts.maxRecords) params.set('maxRecords', String(opts.maxRecords));
+  (opts.sort || []).forEach((s, i) => { params.set('sort[' + i + '][field]', s.field); params.set('sort[' + i + '][direction]', s.direction || 'asc'); });
+  params.set('pageSize', String(opts.pageSize || 100));
+  const out = [];
+  let offset = '';
+  for (let g = 0; g < 40; g++) {
+    const u = 'https://api.airtable.com/v0/' + ERPHERO.baseId + '/' + encodeURIComponent(table) + '?' + params.toString() + (offset ? '&offset=' + encodeURIComponent(offset) : '');
+    const r = await fetch(u, { headers: { 'Authorization': 'Bearer ' + ERPHERO.writeKey } });
+    if (!r.ok) throw new Error('ERP Hero read ' + table + ' HTTP ' + r.status);
+    const d = await r.json();
+    (d.records || []).forEach(rec => out.push({ id: rec.id, f: rec.fields || {} }));
+    if (!d.offset || opts.maxRecords) break;
+    offset = d.offset;
+  }
+  return out;
+}
+
+/* POST — legt einen Record in ERP Heros Daten-Base an. typecast:true für Select/Link. */
+async function erpHeroWrite(table, fields) {
+  await erpHeroEnsureKeys();
+  const r = await fetch('https://api.airtable.com/v0/' + ERPHERO.baseId + '/' + encodeURIComponent(table), {
+    method: 'POST',
+    headers: { 'Authorization': 'Bearer ' + ERPHERO.writeKey, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ fields, typecast: true }),
+  });
+  if (!r.ok) { const t = await r.text().catch(() => ''); throw new Error('ERP Hero write ' + table + ' HTTP ' + r.status + ': ' + t.slice(0, 200)); }
+  return await r.json();
+}
+
+/* PATCH — aktualisiert einen bestehenden Record. */
+async function erpHeroUpdate(table, recordId, fields) {
+  await erpHeroEnsureKeys();
+  const r = await fetch('https://api.airtable.com/v0/' + ERPHERO.baseId + '/' + encodeURIComponent(table) + '/' + recordId, {
+    method: 'PATCH',
+    headers: { 'Authorization': 'Bearer ' + ERPHERO.writeKey, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ fields, typecast: true }),
+  });
+  if (!r.ok) { const t = await r.text().catch(() => ''); throw new Error('ERP Hero update ' + table + ' HTTP ' + r.status + ': ' + t.slice(0, 200)); }
+  return await r.json();
+}
+
+/* Aktive Mandanten (Company) laden — für die Mandanten-Auswahl im FLP-Angebot. */
+async function erpHeroLoadCompanies() {
+  const recs = await erpHeroRead('Company', { filter: "{status}='aktiv'", maxRecords: 200 });
+  return recs.map(r => ({ id: r.id, name: r.f.name || '(ohne Name)' }))
+             .sort((a, b) => a.name.localeCompare(b.name, 'de'));
+}
+
+/* Verbindungstest (Settings): prüft Key-Zugriff + listet Mandanten. */
+async function erpHeroTestConnection(btn) {
+  if (btn) setBusy(btn, true, 'Teste…');
+  try {
+    const comps = await erpHeroLoadCompanies();
+    toast('ERP Hero verbunden ✓ — ' + comps.length + ' Mandant(en): ' + comps.slice(0, 5).map(c => c.name).join(', ') + (comps.length > 5 ? ' …' : ''), 'success', 8000);
+  } catch (e) {
+    toast('ERP Hero Verbindung fehlgeschlagen: ' + (e.message || e), 'error', 10000);
+  } finally {
+    if (btn) setBusy(btn, false);
+  }
 }
 
 /* Baut aus einem Anlage-Object die Anzeige-Adresse zusammen (Fallback-Kaskade). */
@@ -12533,7 +12632,7 @@ function _ticketActionBarIcons(accountId, ticketId) {
     // v2.46.70: Angebots-Button nur für Aufzug-Service-Accounts (Aufzugshandwerk/Aszendio)
     (accountHasAngebotsModul(acc) ? btn('file-text', 'indigo', 'Angebot erstellen (KI-gestützt)', `openAngebotsModal('${accIdAttr}', ${ticketId})`) : ''),
     // v2.46.152: Schnellanalyse-Icon — KI analysiert Ticket + Anhänge nach Mandanten-Prompt
-    (accountHasAngebotsModul(acc) ? btn('scan-search', 'purple', 'Schnellanalyse (KI) → interne Notiz', `runQuickAnalysis('${accIdAttr}', ${ticketId}, this)`) : ''),
+    (_angebotsProfilKey(acc) === 'aufzug-service' ? btn('scan-search', 'purple', 'Schnellanalyse (KI) → interne Notiz', `runQuickAnalysis('${accIdAttr}', ${ticketId}, this)`) : ''),
     // v2.46.147: Stellungnahme — KI-gestützter Brief auf Briefpapier (für alle Accounts)
     btn('file-check-2',   'emerald', 'Stellungnahme erstellen (KI · Briefpapier)',             `openStellungnahmeModal('${accIdAttr}', ${ticketId})`),
     btn('mail',           'orange',  'Email-Vorlage senden (Outbound)',                        `openTicketEmailModal('${accIdAttr}', ${ticketId})`),
@@ -18128,7 +18227,7 @@ function openAccountModal(account) {
                   <select id="accAngProfil" class="mt-1 w-full px-3 py-2 border border-ink-200 rounded-lg text-sm bg-white">
                     <option value="" ${!(account?.angebots_profil) ? 'selected' : ''}>(automatisch nach Account-Name)</option>
                     <option value="aufzug-service" ${account?.angebots_profil === 'aufzug-service' ? 'selected' : ''}>Aufzug-Service (Wartung/Reparatur/…)</option>
-                    <option value="flp-ersatzteile" ${account?.angebots_profil === 'flp-ersatzteile' ? 'selected' : ''}>FLP Ersatzteile (Phase 2 — kommt später)</option>
+                    <option value="flp-ersatzteile" ${account?.angebots_profil === 'flp-ersatzteile' ? 'selected' : ''}>FLP Ersatzteile (ERP Hero)</option>
                     <option value="deaktiviert" ${account?.angebots_profil === 'deaktiviert' ? 'selected' : ''}>Deaktiviert (kein Quick-Button)</option>
                   </select>
                   <p class="text-[10px] text-ink-500 mt-1">Welche Variante des Angebots-Moduls dieser Account verwendet.</p>
@@ -23825,6 +23924,58 @@ function accountHasAngebotsModul(account) {
   return /aufzugshandwerk|aszendio/.test(name);
 }
 
+/* v2.46.232: Liefert die Angebots-Weiche eines Accounts:
+   'aufzug-service' | 'flp-ersatzteile' | 'deaktiviert' | ''. */
+function _angebotsProfilKey(account) {
+  if (!account) return '';
+  const cfg = _loadAccountAngebotsConfig(account);
+  if (cfg && cfg.profil) return cfg.profil;
+  const name = String(account.name || '').toLowerCase();
+  if (/aufzugshandwerk|aszendio/.test(name)) return 'aufzug-service';
+  return '';
+}
+
+/* v2.46.232: FLP-Angebots-Flow (ERP Hero). Phase 1 — bestätigt die Verbindung
+   (Mandanten live aus ERP Hero); Kunde/Kontakt-Push + Angebots-Chat folgen. */
+async function openFlpAngebotModal(accountId, ticketId) {
+  let host = document.getElementById('subModalHost');
+  if (!host) { host = document.createElement('div'); host.id = 'subModalHost'; document.body.appendChild(host); }
+  window._FLP_ANG = { accountId, ticketId, mandant: null };
+  host.innerHTML =
+    '<div class="fixed inset-0 z-[60] flex items-end sm:items-center justify-center bg-black/50 px-4" onclick="if(event.target===this)closeFlpAngebotModal()">' +
+      '<div class="bg-white w-full max-w-md rounded-t-3xl sm:rounded-2xl shadow-2xl flex flex-col safe-bottom" style="max-height:90vh">' +
+        '<div class="px-4 py-3 border-b border-ink-200 flex items-center justify-between gap-2 shrink-0">' +
+          '<h3 class="font-bold text-ink-900 inline-flex items-center gap-2"><i data-lucide="boxes" class="w-5 h-5 text-indigo-600"></i> FLP-Angebot (ERP Hero)</h3>' +
+          '<button onclick="closeFlpAngebotModal()" class="w-9 h-9 rounded-lg hover:bg-ink-100 flex items-center justify-center"><i data-lucide="x" class="w-5 h-5 text-ink-700"></i></button>' +
+        '</div>' +
+        '<div class="flex-1 overflow-y-auto p-4 space-y-3">' +
+          '<label class="text-[11px] font-semibold text-ink-600 block">Mandant (ERP Hero)</label>' +
+          '<select id="flpMandantSel" onchange="if(window._FLP_ANG)window._FLP_ANG.mandant=this.value" class="w-full px-3 py-2 border border-ink-300 rounded-lg text-sm bg-white"><option>Lade Mandanten…</option></select>' +
+          '<div class="bg-amber-50 border border-amber-200 rounded-xl p-3 text-[12px] text-amber-900"><b>In Aufbau:</b> Der Push von Kunde/Kontakt und die KI-Angebots-Erstellung (Ersatzteile) folgen als nächster Schritt. Diese Ansicht bestätigt die Verbindung zu ERP Hero.</div>' +
+        '</div>' +
+        '<div class="px-4 py-3 border-t border-ink-200 shrink-0">' +
+          '<button onclick="closeFlpAngebotModal()" class="w-full bg-ink-100 hover:bg-ink-200 text-ink-700 rounded-xl px-3 py-3 text-sm font-bold">Schließen</button>' +
+        '</div>' +
+      '</div>' +
+    '</div>';
+  if (window.lucide) lucide.createIcons();
+  try {
+    const comps = await erpHeroLoadCompanies();
+    const sel = document.getElementById('flpMandantSel');
+    if (sel) sel.innerHTML = '<option value="">— Mandant wählen —</option>' +
+      comps.map(c => '<option value="' + escapeAttr(c.id) + '">' + escapeHtml(c.name) + '</option>').join('');
+  } catch (e) {
+    const sel = document.getElementById('flpMandantSel');
+    if (sel) sel.innerHTML = '<option value="">Verbindung fehlgeschlagen: ' + escapeHtml((e.message || String(e)).slice(0, 70)) + '</option>';
+  }
+}
+
+function closeFlpAngebotModal() {
+  const h = document.getElementById('subModalHost');
+  if (h) h.innerHTML = '';
+  delete window._FLP_ANG;
+}
+
 const ANGEBOTE_TABLE = 'Angebote';
 const ANGEBOTS_LERN_TABLE = 'Angebots_Lerntexte';
 
@@ -23929,8 +24080,11 @@ async function loadAngeboteAuftrag(accountId, max) {
   }
 }
 
-/* v2.46.72: Dispatcher. Standard ist Chat-Modus. Form bleibt als Backup im Code. */
+/* v2.46.72: Dispatcher. Standard ist Chat-Modus. Form bleibt als Backup im Code.
+   v2.46.232: FLP-Accounts (Profil flp-ersatzteile) → eigener ERP-Hero-Flow. */
 function openAngebotsModal(accountId, ticketId) {
+  const account = (APP_STATE.accounts || []).find(a => a.id === accountId);
+  if (_angebotsProfilKey(account) === 'flp-ersatzteile') return openFlpAngebotModal(accountId, ticketId);
   return openAngebotsChatModal(accountId, ticketId);
 }
 
@@ -37063,6 +37217,21 @@ async function renderSettingsPage() {
           </div>
           <button type="button" onclick="saveErpSlugMap(this)" class="mt-2 bg-emerald-600 hover:bg-emerald-700 text-white px-3 py-1.5 rounded-lg text-[11px] font-bold inline-flex items-center gap-1"><i data-lucide="save" class="w-3.5 h-3.5"></i> Slug-Zuordnung speichern</button>
         </div>
+      </div>
+
+      <!-- v2.46.232: ERP Hero (FLP) — Direkt-Airtable, für Profil flp-ersatzteile -->
+      <div class="bg-white rounded-2xl border border-ink-200 p-4">
+        <div class="flex items-center gap-3 mb-3">
+          <div class="w-10 h-10 rounded-xl bg-gradient-to-br from-indigo-500 to-violet-700 flex items-center justify-center shrink-0">
+            <i data-lucide="boxes" class="w-5 h-5 text-white"></i>
+          </div>
+          <div class="flex-1 min-w-0">
+            <h3 class="font-bold text-ink-900 text-base leading-tight">ERP Hero (FLP)</h3>
+            <p class="text-[11px] text-ink-600">Ersatzteil-ERP für Mandanten mit Profil „FLP Ersatzteile" — Angebote pushen Kunden/Kontakte/Positionen direkt hierhin</p>
+          </div>
+        </div>
+        <p class="text-[11px] text-ink-500 mb-2">Verbindet sich automatisch über die gemeinsame Master-Base — <b>keine Konfiguration nötig</b>. Test lädt die Mandanten (Company) aus ERP Hero.</p>
+        <button type="button" onclick="erpHeroTestConnection(this)" class="bg-indigo-600 hover:bg-indigo-700 text-white px-4 py-2 rounded-lg text-sm font-semibold inline-flex items-center gap-2"><i data-lucide="activity" class="w-4 h-4"></i> Verbindung testen (Mandanten laden)</button>
       </div>
 
       <!-- ============ FALLBACK: MANUELLES SETUP ============ -->
