@@ -784,7 +784,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.238';
+const APP_VERSION = 'v2.46.239';
 
 /* ============================================================
    GLOBAL THEME — v2.46.12
@@ -24125,12 +24125,15 @@ function _flpApplyCustomer(rec) {
   if (!st || !rec) return;
   st.selectedCustomer = rec;
   const f = rec.f;
+  const anschrift = [f.street, [f.zip, f.city].filter(Boolean).join(' ')].filter(Boolean).join(', ');
   const setV = (id, v) => { const e = document.getElementById(id); if (e) e.value = v || ''; };
   setV('flpKName1', f.name1);
-  setV('flpKAnschrift', [f.street, [f.zip, f.city].filter(Boolean).join(' ')].filter(Boolean).join(', '));
+  setV('flpKAnschrift', anschrift);
   setV('flpKEmail', f.email);
   setV('flpKTel', f.phone);
   setV('flpKVat', f.vat_id);
+  // Snapshot zum Erkennen unveränderter Auswahl (dann kein Rückschreiben)
+  st._custSnapshot = { name1: String(f.name1 || '').trim(), anschrift: anschrift.trim(), email: String(f.email || '').trim(), tel: String(f.phone || '').trim(), vat: String(f.vat_id || '').trim() };
   const box = document.getElementById('flpCustList');
   if (box) box.innerHTML = '<div class="bg-indigo-50 border border-indigo-200 rounded-lg px-2 py-1.5 text-[12px] text-indigo-800 flex items-center justify-between gap-2"><span>✓ Gewählt: <b>' + escapeHtml(f.name1 || '?') + '</b>' + (f.customer_no ? ' (' + escapeHtml(f.customer_no) + ')' : '') + '</span><button onclick="_flpClearSelectedCustomer()" class="text-indigo-600 underline text-[11px] shrink-0">ändern</button></div>';
   const s2 = document.getElementById('flpCustSearch'); if (s2) s2.value = '';
@@ -24161,7 +24164,7 @@ async function _flpSelectCustomer(recordId) {
 
 function _flpClearSelectedCustomer() {
   const st = window._FLP_ANG;
-  if (st) st.selectedCustomer = null;
+  if (st) { st.selectedCustomer = null; st._custSnapshot = null; }
   const box = document.getElementById('flpCustList'); if (box) box.innerHTML = '';
 }
 
@@ -24201,6 +24204,7 @@ async function _flpSelectContact(recordId) {
   const setV = (id, v) => { const e = document.getElementById(id); if (e) e.value = v || ''; };
   setV('flpCFirst', f.first_name); setV('flpCLast', f.last_name);
   setV('flpCEmail', f.email); setV('flpCTel', f.phone || f.mobile); setV('flpCRole', f.role);
+  st._contSnapshot = { first: String(f.first_name || '').trim(), last: String(f.last_name || '').trim(), email: String(f.email || '').trim(), tel: String(f.phone || f.mobile || '').trim(), role: String(f.role || '').trim() };
   const box = document.getElementById('flpContList');
   if (box) box.innerHTML = '<div class="bg-indigo-50 border border-indigo-200 rounded-lg px-2 py-1.5 text-[12px] text-indigo-800 flex items-center justify-between gap-2"><span>✓ Gewählt: <b>' + escapeHtml(f.name || [f.first_name, f.last_name].filter(Boolean).join(' ') || '?') + '</b></span><button onclick="_flpClearSelectedContact()" class="text-indigo-600 underline text-[11px] shrink-0">ändern</button></div>';
   const s2 = document.getElementById('flpContSearch'); if (s2) s2.value = '';
@@ -24213,7 +24217,7 @@ async function _flpSelectContact(recordId) {
 
 function _flpClearSelectedContact() {
   const st = window._FLP_ANG;
-  if (st) st.selectedContact = null;
+  if (st) { st.selectedContact = null; st._contSnapshot = null; }
   const box = document.getElementById('flpContList'); if (box) box.innerHTML = '';
 }
 
@@ -24243,11 +24247,17 @@ async function _flpPushKundeKontakt(btn) {
     });
     const fdCompanyId = st.ticket?.requester?.company_id || st.ticket?.company_id;
     if (fdCompanyId) custFields.freshdesk_company_id = String(fdCompanyId);
-    let custCreated = false;
-    if (customer) { await erpHeroUpdate('Customer', customer.id, custFields); }
-    else { const c = await erpHeroWrite('Customer', custFields); customer = { id: c.id, f: c.fields || custFields }; custCreated = true; }
+    // v2.46.239: unveränderte ERP-Auswahl NICHT zurückschreiben — nur übernehmen
+    const cs = st._custSnapshot;
+    const custUnchanged = !!st.selectedCustomer && !!cs &&
+      g('flpKName1') === cs.name1 && g('flpKAnschrift') === cs.anschrift &&
+      g('flpKEmail') === cs.email && g('flpKTel') === cs.tel && g('flpKVat') === cs.vat;
+    let custStatus;
+    if (customer && st.selectedCustomer && custUnchanged) { custStatus = 'übernommen'; }
+    else if (customer) { await erpHeroUpdate('Customer', customer.id, custFields); custStatus = 'aktualisiert'; }
+    else { const c = await erpHeroWrite('Customer', custFields); customer = { id: c.id, f: c.fields || custFields }; custStatus = 'angelegt'; }
     st.customer = customer;
-    // 2) Kontakt: Dedup → Update, sonst anlegen
+    // 2) Kontakt: gewählter/gefundener → nur bei Änderung schreiben, sonst anlegen
     const cEmail = g('flpCEmail') || email;
     let contact = st.selectedContact || await _flpFindContact(customer.id, cEmail);
     const contactFields = _flpStripEmpty({
@@ -24256,12 +24266,18 @@ async function _flpPushKundeKontakt(btn) {
       email: cEmail, phone: g('flpCTel'), role: g('flpCRole'),
       customer_id: [customer.id], is_primary: true, status: 'aktiv',
     });
-    let contCreated = false;
-    if (contact) { await erpHeroUpdate('Contact', contact.id, contactFields); }
-    else if (lastName || cEmail) { const ct = await erpHeroWrite('Contact', contactFields); contact = { id: ct.id }; contCreated = true; }
+    const ks = st._contSnapshot;
+    const contUnchanged = !!st.selectedContact && !!ks &&
+      g('flpCFirst') === ks.first && g('flpCLast') === ks.last &&
+      g('flpCEmail') === ks.email && g('flpCTel') === ks.tel && g('flpCRole') === ks.role &&
+      (st.selectedContact.f.customer_id || []).includes(customer.id);
+    let contStatus = null;
+    if (contact && st.selectedContact && contUnchanged) { contStatus = 'übernommen'; }
+    else if (contact) { await erpHeroUpdate('Contact', contact.id, contactFields); contStatus = 'aktualisiert'; }
+    else if (lastName || cEmail) { const ct = await erpHeroWrite('Contact', contactFields); contact = { id: ct.id, f: contactFields }; contStatus = 'angelegt'; }
     st.contact = contact;
     setBusy(btn, false);
-    toast('ERP Hero: ' + (custCreated ? 'Kunde angelegt' : 'Kunde aktualisiert') + (contact ? ' · ' + (contCreated ? 'Kontakt angelegt' : 'Kontakt aktualisiert') : '') + ' ✓', 'success', 4000);
+    toast('ERP Hero: Kunde ' + custStatus + (contStatus ? ' · Kontakt ' + contStatus : '') + ' ✓', 'success', 4000);
     // v2.46.238: direkt zum Angebots-Schritt weiter (kein Zwischen-Button mehr)
     _flpRenderPositionen();
   } catch (e) {
