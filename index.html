@@ -784,7 +784,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.233';
+const APP_VERSION = 'v2.46.234';
 
 /* ============================================================
    GLOBAL THEME — v2.46.12
@@ -23935,38 +23935,206 @@ function _angebotsProfilKey(account) {
   return '';
 }
 
-/* v2.46.232: FLP-Angebots-Flow (ERP Hero). Phase 1 — bestätigt die Verbindung
-   (Mandanten live aus ERP Hero); Kunde/Kontakt-Push + Angebots-Chat folgen. */
+/* ===========================================================================
+   FLP-Angebots-Flow (ERP Hero) — Phase 2: Kunde + Kontakt pushen (v2.46.234)
+   =========================================================================== */
+function _flpStripEmpty(o) {
+  const r = {};
+  for (const [k, v] of Object.entries(o || {})) {
+    if (v == null) continue;
+    if (typeof v === 'string' && !v.trim()) continue;
+    if (Array.isArray(v) && !v.length) continue;
+    r[k] = v;
+  }
+  return r;
+}
+/* Einzeilige Anschrift → {street, zip, city, country}. */
+function _flpParseAddress(line) {
+  const s = String(line || '').trim();
+  const out = { street: '', zip: '', city: '', country: 'Deutschland' };
+  if (!s) return out;
+  const parts = s.split(',').map(x => x.trim()).filter(Boolean);
+  if (parts.length >= 2) {
+    out.street = parts[0];
+    const zc = parts[1].match(/(\d{4,5})\s+(.+)/);
+    if (zc) { out.zip = zc[1]; out.city = zc[2].trim(); } else { out.city = parts[1]; }
+    if (parts[2] && /^[A-Za-zÄÖÜäöüß .-]{3,}$/.test(parts[2])) out.country = parts[2];
+  } else {
+    const zc = s.match(/(\d{4,5})\s+([A-Za-zÄÖÜäöüß .-]+)/);
+    if (zc) { out.zip = zc[1]; out.city = zc[2].trim(); out.street = s.slice(0, zc.index).trim().replace(/,\s*$/, ''); }
+    else out.street = s;
+  }
+  return out;
+}
+function _flpSplitName(full) {
+  const t = String(full || '').trim().replace(/\s+/g, ' ');
+  if (!t) return { first: '', last: '' };
+  const p = t.split(' ');
+  if (p.length === 1) return { first: '', last: p[0] };
+  return { first: p.slice(0, -1).join(' '), last: p[p.length - 1] };
+}
+/* Bestehenden Kunden in der gewählten Company finden (Dedup: email, sonst name1). */
+async function _flpFindCustomer(companyId, email, name1) {
+  const esc = s => String(s).toLowerCase().replace(/'/g, '');
+  let hit = null;
+  if (email) {
+    const recs = await erpHeroRead('Customer', { filter: "LOWER({email})='" + esc(email) + "'", maxRecords: 50 }).catch(() => []);
+    hit = recs.find(r => (r.f.company_id || []).includes(companyId));
+  }
+  if (!hit && name1) {
+    const recs = await erpHeroRead('Customer', { filter: "LOWER({name1})='" + esc(name1) + "'", maxRecords: 50 }).catch(() => []);
+    hit = recs.find(r => (r.f.company_id || []).includes(companyId));
+  }
+  return hit || null;
+}
+/* Bestehenden Kontakt am Kunden finden (per email). */
+async function _flpFindContact(customerId, email) {
+  if (!email) return null;
+  const esc = String(email).toLowerCase().replace(/'/g, '');
+  const recs = await erpHeroRead('Contact', { filter: "LOWER({email})='" + esc + "'", maxRecords: 50 }).catch(() => []);
+  return recs.find(r => (r.f.customer_id || []).includes(customerId)) || null;
+}
+
 async function openFlpAngebotModal(accountId, ticketId) {
   let host = document.getElementById('subModalHost');
   if (!host) { host = document.createElement('div'); host.id = 'subModalHost'; document.body.appendChild(host); }
-  window._FLP_ANG = { accountId, ticketId, mandant: null };
+  window._FLP_ANG = { accountId, ticketId, ticket: null, customer: null, contact: null };
+  const fld = (label, id, ph, val) =>
+    '<label class="block"><span class="text-[11px] font-semibold text-ink-600">' + label + '</span>' +
+    '<input id="' + id + '" value="' + escapeAttr(val || '') + '" placeholder="' + escapeAttr(ph || '') + '" class="mt-0.5 w-full px-2.5 py-1.5 border border-ink-300 rounded-lg text-sm"></label>';
   host.innerHTML =
     '<div class="fixed inset-0 z-[60] flex items-end sm:items-center justify-center bg-black/50 px-4" onclick="if(event.target===this)closeFlpAngebotModal()">' +
-      '<div class="bg-white w-full max-w-md rounded-t-3xl sm:rounded-2xl shadow-2xl flex flex-col safe-bottom" style="max-height:90vh">' +
+      '<div class="bg-white w-full max-w-md rounded-t-3xl sm:rounded-2xl shadow-2xl flex flex-col safe-bottom" style="max-height:92vh">' +
         '<div class="px-4 py-3 border-b border-ink-200 flex items-center justify-between gap-2 shrink-0">' +
           '<h3 class="font-bold text-ink-900 inline-flex items-center gap-2"><i data-lucide="boxes" class="w-5 h-5 text-indigo-600"></i> FLP-Angebot (ERP Hero)</h3>' +
           '<button onclick="closeFlpAngebotModal()" class="w-9 h-9 rounded-lg hover:bg-ink-100 flex items-center justify-center"><i data-lucide="x" class="w-5 h-5 text-ink-700"></i></button>' +
         '</div>' +
         '<div class="flex-1 overflow-y-auto p-4 space-y-3">' +
-          '<label class="text-[11px] font-semibold text-ink-600 block">Mandant (ERP Hero)</label>' +
-          '<select id="flpMandantSel" onchange="if(window._FLP_ANG)window._FLP_ANG.mandant=this.value" class="w-full px-3 py-2 border border-ink-300 rounded-lg text-sm bg-white"><option>Lade Mandanten…</option></select>' +
-          '<div class="bg-amber-50 border border-amber-200 rounded-xl p-3 text-[12px] text-amber-900"><b>In Aufbau:</b> Der Push von Kunde/Kontakt und die KI-Angebots-Erstellung (Ersatzteile) folgen als nächster Schritt. Diese Ansicht bestätigt die Verbindung zu ERP Hero.</div>' +
+          '<div><label class="text-[11px] font-semibold text-ink-600 block mb-0.5">Mandant (ERP Hero) *</label>' +
+            '<select id="flpMandantSel" class="w-full px-3 py-2 border border-ink-300 rounded-lg text-sm bg-white"><option>Lade Mandanten…</option></select></div>' +
+          '<button onclick="_flpFillFromEmail(this)" class="w-full px-2 py-1.5 bg-indigo-50 hover:bg-indigo-100 border border-indigo-200 text-indigo-700 rounded-lg text-[12px] font-bold inline-flex items-center justify-center gap-1.5"><i data-lucide="sparkles" class="w-3.5 h-3.5"></i> Kunde + Kontakt aus E-Mail laden (KI)</button>' +
+          '<div class="border border-ink-200 rounded-xl p-3 space-y-2">' +
+            '<p class="text-[11px] font-bold text-ink-700 uppercase tracking-wider inline-flex items-center gap-1"><i data-lucide="building" class="w-3.5 h-3.5"></i> Kunde</p>' +
+            fld('Firmenname *', 'flpKName1', 'z.B. Muster GmbH') +
+            fld('Anschrift (Straße Hausnr, PLZ Ort)', 'flpKAnschrift', '') +
+            '<div class="grid grid-cols-2 gap-2">' + fld('E-Mail', 'flpKEmail', '') + fld('Telefon', 'flpKTel', '') + '</div>' +
+            fld('USt-IdNr', 'flpKVat', '') +
+          '</div>' +
+          '<div class="border border-ink-200 rounded-xl p-3 space-y-2">' +
+            '<p class="text-[11px] font-bold text-ink-700 uppercase tracking-wider inline-flex items-center gap-1"><i data-lucide="user" class="w-3.5 h-3.5"></i> Ansprechpartner</p>' +
+            '<div class="grid grid-cols-2 gap-2">' + fld('Vorname', 'flpCFirst', '') + fld('Nachname', 'flpCLast', '') + '</div>' +
+            '<div class="grid grid-cols-2 gap-2">' + fld('E-Mail', 'flpCEmail', '') + fld('Telefon', 'flpCTel', '') + '</div>' +
+            fld('Position/Funktion', 'flpCRole', 'z.B. Einkauf') +
+          '</div>' +
+          '<div id="flpPushResult"></div>' +
         '</div>' +
-        '<div class="px-4 py-3 border-t border-ink-200 shrink-0">' +
-          '<button onclick="closeFlpAngebotModal()" class="w-full bg-ink-100 hover:bg-ink-200 text-ink-700 rounded-xl px-3 py-3 text-sm font-bold">Schließen</button>' +
+        '<div class="px-4 py-3 border-t border-ink-200 shrink-0 flex gap-2">' +
+          '<button onclick="closeFlpAngebotModal()" class="flex-1 bg-ink-100 hover:bg-ink-200 text-ink-700 rounded-xl px-3 py-3 text-sm font-bold">Schließen</button>' +
+          '<button onclick="_flpPushKundeKontakt(this)" class="flex-[2] bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl px-3 py-3 text-sm font-bold inline-flex items-center justify-center gap-1.5"><i data-lucide="upload-cloud" class="w-4 h-4"></i> Kunde + Kontakt in ERP Hero</button>' +
         '</div>' +
       '</div>' +
     '</div>';
   if (window.lucide) lucide.createIcons();
-  try {
-    const comps = await erpHeroLoadCompanies();
+  // Mandanten laden
+  erpHeroLoadCompanies().then(comps => {
     const sel = document.getElementById('flpMandantSel');
     if (sel) sel.innerHTML = '<option value="">— Mandant wählen —</option>' +
       comps.map(c => '<option value="' + escapeAttr(c.id) + '">' + escapeHtml(c.name) + '</option>').join('');
-  } catch (e) {
+  }).catch(e => {
     const sel = document.getElementById('flpMandantSel');
     if (sel) sel.innerHTML = '<option value="">Verbindung fehlgeschlagen: ' + escapeHtml((e.message || String(e)).slice(0, 70)) + '</option>';
+  });
+  // Ticket laden + aus Requester vorbefüllen
+  (async () => {
+    let ticket = APP_STATE.ticketCache?.get?.(accountId + '|' + ticketId);
+    if (!ticket || !ticket.conversations) { try { ticket = await fetchTicketDetail(accountId, ticketId); } catch (_) {} }
+    if (window._FLP_ANG) window._FLP_ANG.ticket = ticket || { id: ticketId, requester: {} };
+    const req = ticket?.requester || {};
+    const setV = (id, v) => { const e = document.getElementById(id); if (e && !e.value && v) e.value = v; };
+    setV('flpKName1', req.company?.name || '');
+    setV('flpKEmail', req.email || '');
+    const nm = _flpSplitName(req.name || '');
+    setV('flpCFirst', nm.first); setV('flpCLast', nm.last);
+    setV('flpCEmail', req.email || '');
+    setV('flpCTel', req.phone || req.mobile || '');
+  })();
+}
+
+async function _flpFillFromEmail(btn) {
+  const st = window._FLP_ANG;
+  if (!st) return;
+  setBusy(btn, true, 'KI liest E-Mail…');
+  try {
+    const p = await _angExtractStammdatenFromEmail({ ticket: st.ticket || {}, accountId: st.accountId, ticketId: st.ticketId });
+    const setV = (id, v) => { const e = document.getElementById(id); if (e && v) e.value = v; };
+    setV('flpKName1', p.vertragspartner);
+    setV('flpKAnschrift', p.rechnungs_anschrift);
+    setV('flpKEmail', p.email);
+    setV('flpKTel', p.tel);
+    const nm = _flpSplitName(p.ansprechpartner_vor_ort);
+    setV('flpCFirst', nm.first); setV('flpCLast', nm.last);
+    if (p.email) setV('flpCEmail', p.email);
+    if (p.tel) setV('flpCTel', p.tel);
+    toast('Aus E-Mail übernommen — bitte prüfen', 'success', 3500);
+  } catch (e) { toast('Laden aus E-Mail fehlgeschlagen: ' + (e.message || e), 'error', 7000); }
+  finally { setBusy(btn, false); }
+}
+
+async function _flpPushKundeKontakt(btn) {
+  const st = window._FLP_ANG;
+  if (!st) return;
+  const mandant = document.getElementById('flpMandantSel')?.value || '';
+  if (!mandant) return toast('Bitte einen Mandanten wählen', 'warn', 4000);
+  const g = id => (document.getElementById(id)?.value || '').trim();
+  const name1 = g('flpKName1');
+  const email = g('flpKEmail');
+  if (!name1) return toast('Firmenname (Kunde) fehlt', 'warn', 4000);
+  const lastName = g('flpCLast') || g('flpCFirst') || (email ? email.split('@')[0] : '');
+  const addr = _flpParseAddress(g('flpKAnschrift'));
+  const resEl = document.getElementById('flpPushResult');
+  setBusy(btn, true, 'Pushe…');
+  try {
+    // 1) Kunde: Dedup → Update, sonst anlegen
+    let customer = await _flpFindCustomer(mandant, email, name1);
+    const custFields = _flpStripEmpty({
+      name1, company_id: [mandant], status: 'aktiv',
+      street: addr.street, zip: addr.zip, city: addr.city, country: addr.country || 'Deutschland',
+      email, phone: g('flpKTel'), vat_id: g('flpKVat'),
+      payment_terms: '14 Tage netto', delivery_terms: 'EXW Fellbach',
+    });
+    const fdCompanyId = st.ticket?.requester?.company_id || st.ticket?.company_id;
+    if (fdCompanyId) custFields.freshdesk_company_id = String(fdCompanyId);
+    let custCreated = false;
+    if (customer) { await erpHeroUpdate('Customer', customer.id, custFields); }
+    else { const c = await erpHeroWrite('Customer', custFields); customer = { id: c.id, f: c.fields || custFields }; custCreated = true; }
+    st.customer = customer;
+    // 2) Kontakt: Dedup → Update, sonst anlegen
+    const cEmail = g('flpCEmail') || email;
+    let contact = await _flpFindContact(customer.id, cEmail);
+    const contactFields = _flpStripEmpty({
+      first_name: g('flpCFirst'), last_name: lastName,
+      name: [g('flpCFirst'), lastName].filter(Boolean).join(' '),
+      email: cEmail, phone: g('flpCTel'), role: g('flpCRole'),
+      customer_id: [customer.id], is_primary: true, status: 'aktiv',
+    });
+    let contCreated = false;
+    if (contact) { await erpHeroUpdate('Contact', contact.id, contactFields); }
+    else if (lastName || cEmail) { const ct = await erpHeroWrite('Contact', contactFields); contact = { id: ct.id }; contCreated = true; }
+    st.contact = contact;
+    setBusy(btn, false);
+    if (resEl) resEl.innerHTML =
+      '<div class="bg-emerald-50 border border-emerald-200 rounded-xl p-3 text-[12px] text-emerald-900">' +
+        '<p class="font-bold inline-flex items-center gap-1"><i data-lucide="check-circle-2" class="w-4 h-4"></i> In ERP Hero gespeichert</p>' +
+        '<p class="mt-0.5">' + (custCreated ? 'Kunde <b>angelegt</b>' : 'Kunde <b>vorhanden</b>/aktualisiert') + ': ' + escapeHtml(name1) +
+        (contact ? '<br>' + (contCreated ? 'Kontakt <b>angelegt</b>' : 'Kontakt <b>vorhanden</b>/aktualisiert') + ': ' + escapeHtml([g('flpCFirst'), lastName].filter(Boolean).join(' ')) : '') + '</p>' +
+        '<p class="text-emerald-700 mt-1">Nächster Schritt: Angebot erstellen (Phase 3 — folgt).</p>' +
+      '</div>';
+    if (window.lucide) lucide.createIcons();
+    toast('ERP Hero: Kunde + Kontakt gespeichert ✓', 'success', 5000);
+  } catch (e) {
+    setBusy(btn, false);
+    if (resEl) resEl.innerHTML = '<div class="bg-red-50 border border-red-200 rounded-xl p-3 text-[12px] text-red-800">Push fehlgeschlagen: ' + escapeHtml(e.message || String(e)) + '</div>';
+    toast('Push fehlgeschlagen: ' + (e.message || e), 'error', 9000);
   }
 }
 
