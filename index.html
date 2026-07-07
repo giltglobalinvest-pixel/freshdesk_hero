@@ -784,7 +784,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.236';
+const APP_VERSION = 'v2.46.237';
 
 /* ============================================================
    GLOBAL THEME — v2.46.12
@@ -24007,7 +24007,7 @@ async function _flpFindContact(customerId, email) {
 async function openFlpAngebotModal(accountId, ticketId) {
   let host = document.getElementById('subModalHost');
   if (!host) { host = document.createElement('div'); host.id = 'subModalHost'; document.body.appendChild(host); }
-  window._FLP_ANG = { accountId, ticketId, ticket: null, customer: null, contact: null, selectedCustomer: null, selectedContact: null, _custResults: [], _contResults: [] };
+  window._FLP_ANG = { accountId, ticketId, ticket: null, customer: null, contact: null, selectedCustomer: null, selectedContact: null, _custResults: [], _contResults: [], positionen: [], mandantId: '', mandantName: '' };
   const fld = (label, id, ph, val) =>
     '<label class="block"><span class="text-[11px] font-semibold text-ink-600">' + label + '</span>' +
     '<input id="' + id + '" value="' + escapeAttr(val || '') + '" placeholder="' + escapeAttr(ph || '') + '" class="mt-0.5 w-full px-2.5 py-1.5 border border-ink-300 rounded-lg text-sm"></label>';
@@ -24222,6 +24222,8 @@ async function _flpPushKundeKontakt(btn) {
   if (!st) return;
   const mandant = document.getElementById('flpMandantSel')?.value || '';
   if (!mandant) return toast('Bitte einen Mandanten wählen', 'warn', 4000);
+  st.mandantId = mandant;
+  st.mandantName = (document.getElementById('flpMandantSel')?.selectedOptions?.[0]?.textContent || '').trim();
   const g = id => (document.getElementById(id)?.value || '').trim();
   const name1 = g('flpKName1');
   const email = g('flpKEmail');
@@ -24264,7 +24266,7 @@ async function _flpPushKundeKontakt(btn) {
         '<p class="font-bold inline-flex items-center gap-1"><i data-lucide="check-circle-2" class="w-4 h-4"></i> In ERP Hero gespeichert</p>' +
         '<p class="mt-0.5">' + (custCreated ? 'Kunde <b>angelegt</b>' : 'Kunde <b>vorhanden</b>/aktualisiert') + ': ' + escapeHtml(name1) +
         (contact ? '<br>' + (contCreated ? 'Kontakt <b>angelegt</b>' : 'Kontakt <b>vorhanden</b>/aktualisiert') + ': ' + escapeHtml([g('flpCFirst'), lastName].filter(Boolean).join(' ')) : '') + '</p>' +
-        '<p class="text-emerald-700 mt-1">Nächster Schritt: Angebot erstellen (Phase 3 — folgt).</p>' +
+        '<button onclick="_flpRenderPositionen()" class="mt-2 w-full bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg px-3 py-2 text-[12px] font-bold inline-flex items-center justify-center gap-1.5"><i data-lucide="arrow-right" class="w-3.5 h-3.5"></i> Weiter: Positionen & Angebot</button>' +
       '</div>';
     if (window.lucide) lucide.createIcons();
     toast('ERP Hero: Kunde + Kontakt gespeichert ✓', 'success', 5000);
@@ -24279,6 +24281,242 @@ function closeFlpAngebotModal() {
   const h = document.getElementById('subModalHost');
   if (h) h.innerHTML = '';
   delete window._FLP_ANG;
+}
+
+/* ===========================================================================
+   FLP Phase 3: Ersatzteil-Positionen + Angebot (Quote+QuoteItems) → ERP Hero
+   =========================================================================== */
+function _flpCalcTotals(pos) {
+  let netto = 0, mwst = 0;
+  (pos || []).forEach(p => {
+    const line = (+p.menge || 0) * (+p.einzelpreis || 0) * (1 - (+p.rabatt_pct || 0) / 100);
+    netto += line; mwst += line * ((+p.mwst || 19) / 100);
+  });
+  return { netto, mwst, brutto: netto + mwst };
+}
+
+/* Nächste Angebotsnummer (Q-N) für den Mandanten ermitteln. */
+async function _flpNextQuoteNo(companyId, companyName) {
+  let max = 0;
+  try {
+    const filter = companyName ? "FIND('" + String(companyName).toLowerCase().replace(/'/g, '') + "',LOWER(ARRAYJOIN({company_id}&'')))>0" : '';
+    const recs = await erpHeroRead('Quote', filter ? { filter, maxRecords: 2000 } : { maxRecords: 2000 });
+    recs.forEach(r => { const m = String(r.f.quote_no || '').match(/(\d+)/); if (m) { const n = +m[1]; if (n > max) max = n; } });
+  } catch (_) {}
+  return 'Q-' + (max + 1);
+}
+
+/* Artikel im Katalog finden (article_no, sonst name1) oder automatisch anlegen. */
+async function _flpResolveArticle(companyId, art) {
+  const esc = s => String(s || '').toLowerCase().replace(/'/g, '');
+  if (art.article_no) {
+    const recs = await erpHeroRead('Article', { filter: "LOWER({article_no})='" + esc(art.article_no) + "'", maxRecords: 20 }).catch(() => []);
+    const hit = recs.find(r => (r.f.company_id || []).includes(companyId));
+    if (hit) return hit.id;
+  }
+  if (art.bezeichnung) {
+    const recs = await erpHeroRead('Article', { filter: "LOWER({name1})='" + esc(art.bezeichnung) + "'", maxRecords: 20 }).catch(() => []);
+    const hit = recs.find(r => (r.f.company_id || []).includes(companyId));
+    if (hit) return hit.id;
+  }
+  // Neu anlegen (User-Entscheidung: automatisch)
+  const artNo = art.article_no || ('FLP-' + String(art.bezeichnung || 'Artikel').toUpperCase().replace(/[^A-Z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 28) || 'FLP-ARTIKEL');
+  const c = await erpHeroWrite('Article', _flpStripEmpty({
+    article_no: artNo,
+    name1: art.bezeichnung || art.article_no || 'Artikel',
+    sales_price: +art.einzelpreis || 0,
+    vat_rate: +art.mwst || 19,
+    unit: art.unit || 'Stück',
+    company_id: [companyId], status: 'aktiv',
+  }));
+  return c.id;
+}
+
+/* Schritt 2 (Positionen) — rendert das FLP-Modal neu. */
+function _flpRenderPositionen() {
+  const st = window._FLP_ANG;
+  if (!st) return;
+  let host = document.getElementById('subModalHost');
+  if (!host) { host = document.createElement('div'); host.id = 'subModalHost'; document.body.appendChild(host); }
+  const custName = st.customer?.f?.name1 || '—';
+  host.innerHTML =
+    '<div class="fixed inset-0 z-[60] flex items-end sm:items-center justify-center bg-black/50 px-4" onclick="if(event.target===this)closeFlpAngebotModal()">' +
+      '<div class="bg-white w-full max-w-lg rounded-t-3xl sm:rounded-2xl shadow-2xl flex flex-col safe-bottom" style="max-height:92vh">' +
+        '<div class="px-4 py-3 border-b border-ink-200 flex items-center justify-between gap-2 shrink-0">' +
+          '<div class="min-w-0"><h3 class="font-bold text-ink-900 inline-flex items-center gap-2"><i data-lucide="boxes" class="w-5 h-5 text-indigo-600"></i> FLP-Angebot · Positionen</h3>' +
+            '<p class="text-[11px] text-ink-500 truncate">Kunde: ' + escapeHtml(custName) + (st.mandantName ? ' · ' + escapeHtml(st.mandantName) : '') + '</p></div>' +
+          '<button onclick="closeFlpAngebotModal()" class="w-9 h-9 rounded-lg hover:bg-ink-100 flex items-center justify-center shrink-0"><i data-lucide="x" class="w-5 h-5 text-ink-700"></i></button>' +
+        '</div>' +
+        '<div class="flex-1 overflow-y-auto p-4 space-y-3">' +
+          '<textarea id="flpPosPrompt" rows="2" placeholder="Optional: Anweisung an die KI (z.B. „nur die Teile aus dem PDF", „Menge 2 je Position")" class="w-full px-3 py-2 border border-ink-300 rounded-lg text-[12px] resize-none"></textarea>' +
+          '<button onclick="_flpGeneratePositionen(this)" class="w-full px-3 py-2 bg-gradient-to-br from-indigo-600 to-violet-600 hover:opacity-90 text-white rounded-lg text-xs font-bold inline-flex items-center justify-center gap-1.5"><i data-lucide="sparkles" class="w-3.5 h-3.5"></i> KI-Positionen aus Anfrage erstellen</button>' +
+          '<div class="flex items-center justify-between"><p class="text-[11px] font-bold text-ink-700 uppercase tracking-wider">Positionen</p>' +
+            '<button onclick="_flpAddPos()" class="text-[11px] text-indigo-600 font-semibold inline-flex items-center gap-1"><i data-lucide="plus" class="w-3.5 h-3.5"></i> Position</button></div>' +
+          '<div class="text-[9px] text-ink-400 grid grid-cols-5 gap-1 pl-6"><span>Art-Nr</span><span>Menge</span><span>E-Preis netto</span><span>Rabatt %</span><span>MwSt %</span></div>' +
+          '<div id="flpPosTable"></div>' +
+          '<div id="flpPosTotals" class="text-right text-[12px] text-ink-700 border-t border-ink-100 pt-2"></div>' +
+          '<div id="flpPosResult"></div>' +
+        '</div>' +
+        '<div class="px-4 py-3 border-t border-ink-200 shrink-0 flex gap-2">' +
+          '<button onclick="closeFlpAngebotModal()" class="flex-1 bg-ink-100 hover:bg-ink-200 text-ink-700 rounded-xl px-3 py-3 text-sm font-bold">Schließen</button>' +
+          '<button onclick="_flpPushAngebot(this)" class="flex-[2] bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl px-3 py-3 text-sm font-bold inline-flex items-center justify-center gap-1.5"><i data-lucide="upload-cloud" class="w-4 h-4"></i> Angebot in ERP Hero anlegen</button>' +
+        '</div>' +
+      '</div>' +
+    '</div>';
+  if (window.lucide) lucide.createIcons();
+  _flpRenderPosTable();
+}
+
+function _flpRenderPosTable() {
+  const host = document.getElementById('flpPosTable');
+  const st = window._FLP_ANG;
+  if (!host || !st) return;
+  const pos = st.positionen || [];
+  host.innerHTML = pos.length ? pos.map((p, i) =>
+    '<div class="border border-ink-200 rounded-lg p-2 mb-2 space-y-1.5">' +
+      '<div class="flex items-center gap-1.5">' +
+        '<span class="text-[10px] font-bold text-ink-400 w-5">' + (i + 1) + '.</span>' +
+        '<input value="' + escapeAttr(p.bezeichnung || '') + '" oninput="_flpPosEdit(' + i + ',\'bezeichnung\',this.value)" placeholder="Bezeichnung" class="flex-1 px-2 py-1 border border-ink-300 rounded text-[12px]">' +
+        '<button onclick="_flpDelPos(' + i + ')" class="text-red-500 hover:text-red-700 shrink-0"><i data-lucide="trash-2" class="w-3.5 h-3.5"></i></button>' +
+      '</div>' +
+      '<div class="grid grid-cols-5 gap-1 pl-6">' +
+        '<input value="' + escapeAttr(p.article_no || '') + '" oninput="_flpPosEdit(' + i + ',\'article_no\',this.value)" placeholder="Art-Nr" class="px-1.5 py-1 border border-ink-300 rounded text-[11px]" title="Artikelnummer">' +
+        '<input type="number" step="1" value="' + escapeAttr(String(p.menge)) + '" oninput="_flpPosEdit(' + i + ',\'menge\',this.value)" class="px-1.5 py-1 border border-ink-300 rounded text-[11px]" title="Menge">' +
+        '<input type="number" step="0.01" value="' + escapeAttr(String(p.einzelpreis)) + '" oninput="_flpPosEdit(' + i + ',\'einzelpreis\',this.value)" class="px-1.5 py-1 border border-ink-300 rounded text-[11px]" title="Einzelpreis netto">' +
+        '<input type="number" step="1" value="' + escapeAttr(String(p.rabatt_pct)) + '" oninput="_flpPosEdit(' + i + ',\'rabatt_pct\',this.value)" class="px-1.5 py-1 border border-ink-300 rounded text-[11px]" title="Rabatt %">' +
+        '<input type="number" step="1" value="' + escapeAttr(String(p.mwst)) + '" oninput="_flpPosEdit(' + i + ',\'mwst\',this.value)" class="px-1.5 py-1 border border-ink-300 rounded text-[11px]" title="MwSt %">' +
+      '</div>' +
+    '</div>'
+  ).join('') : '<p class="text-[12px] text-ink-400 italic px-1">Noch keine Positionen — „KI-Positionen erstellen" oder manuell „+ Position".</p>';
+  if (window.lucide) lucide.createIcons();
+  _flpUpdateTotals();
+}
+
+function _flpUpdateTotals() {
+  const st = window._FLP_ANG;
+  const el = document.getElementById('flpPosTotals');
+  if (!el || !st) return;
+  const t = _flpCalcTotals(st.positionen);
+  el.innerHTML = 'Netto ' + _formatEur(t.netto) + ' · zzgl. MwSt ' + _formatEur(t.mwst) + ' · <b>Brutto ' + _formatEur(t.brutto) + '</b>';
+}
+
+function _flpPosEdit(i, field, val) {
+  const st = window._FLP_ANG;
+  if (!st?.positionen?.[i]) return;
+  st.positionen[i][field] = (field === 'bezeichnung' || field === 'article_no' || field === 'unit') ? val : (+val || 0);
+  _flpUpdateTotals();
+}
+function _flpAddPos() {
+  const st = window._FLP_ANG;
+  if (!st) return;
+  st.positionen = st.positionen || [];
+  st.positionen.push({ article_no: '', bezeichnung: '', menge: 1, einzelpreis: 0, rabatt_pct: 0, mwst: 19, unit: 'Stück' });
+  _flpRenderPosTable();
+}
+function _flpDelPos(i) {
+  const st = window._FLP_ANG;
+  if (!st?.positionen) return;
+  st.positionen.splice(i, 1);
+  _flpRenderPosTable();
+}
+
+/* KI erzeugt Ersatzteil-Positionen aus Anfrage + Anhängen. */
+async function _flpGeneratePositionen(btn) {
+  const st = window._FLP_ANG;
+  if (!st) return;
+  const refine = (document.getElementById('flpPosPrompt')?.value || '').trim();
+  setBusy(btn, true, 'KI erstellt Positionen…');
+  try {
+    const t = st.ticket || {};
+    let atts = [];
+    try { atts = await _angChatCollectAttachments(st.accountId, st.ticketId, t, { maxCount: 4, maxBytes: 16 * 1024 * 1024 }); } catch (_) {}
+    const desc = htmlToText(t.description_text || t.description || '').slice(0, 4000);
+    const conv = (t.conversations || []).slice(0, 6).map(c => (c.incoming ? 'Kunde' : 'Agent') + ': ' + htmlToText(c.body_text || c.body || '').slice(0, 1200)).join('\n\n');
+    const sys = 'Du erstellst Angebots-Positionen für einen Aufzug-ERSATZTEIL-Händler (FLP Lift Parts — reiner Teilehandel, KEINE Montage/Wartung). ' +
+      'Lies Anfrage + Anhänge und liste die angefragten Ersatzteile/Produkte als Positionen. ' +
+      'Antworte NUR mit JSON-Array, ohne Markdown: [{"article_no":"","bezeichnung":"","menge":1,"einzelpreis":0,"rabatt_pct":0,"mwst":19}]. ' +
+      'Regeln: bezeichnung = klarer Artikelname. article_no NUR wenn in der Anfrage/Anhang genannt (sonst ""). menge aus der Anfrage (sonst 1). ' +
+      'einzelpreis (netto) NUR wenn genannt, sonst 0 — Preise NICHT erfinden. mwst=19. rabatt_pct=0 außer explizit genannt. ' +
+      'KEINE Montage-/Arbeits-/Anfahrts-/Versandpositionen. Leeres Array [] wenn nichts Konkretes erkennbar.';
+    const content = [{ type: 'text', text: 'ANFRAGE:\n' + desc + (conv ? '\n\nVERLAUF:\n' + conv : '') + (refine ? '\n\nZUSATZ-ANWEISUNG DES USERS (Vorrang):\n' + refine : '') + (atts.length ? '\n\nAnhänge folgen als Content-Blocks.' : '') }];
+    atts.forEach(a => {
+      if (a.mediaType === 'application/pdf') content.push({ type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: a.base64 } });
+      else if (a.mediaType.startsWith('image/')) content.push({ type: 'image', source: { type: 'base64', media_type: a.mediaType, data: a.base64 } });
+    });
+    const data = await proxyJson('/anthropic/v1/messages', { method: 'POST', body: JSON.stringify({ model: 'claude-sonnet-4-5-20250929', max_tokens: 3000, system: sys, messages: [{ role: 'user', content }] }) });
+    const raw = (data?.content?.[0]?.text || '').trim();
+    let arr = null;
+    try { const p = parseAIJson(raw); arr = Array.isArray(p) ? p : (Array.isArray(p?.positionen) ? p.positionen : null); } catch (_) {}
+    if (!Array.isArray(arr)) { const m = raw.replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/i, '').match(/\[[\s\S]*\]/); if (m) { try { arr = JSON.parse(m[0]); } catch (_) {} } }
+    if (!Array.isArray(arr)) throw new Error('KI-Antwort unlesbar (kein JSON)');
+    st.positionen = arr.map(p => ({
+      article_no: String(p.article_no || ''), bezeichnung: String(p.bezeichnung || ''),
+      menge: +p.menge || 1, einzelpreis: +p.einzelpreis || 0, rabatt_pct: +p.rabatt_pct || 0, mwst: +p.mwst || 19, unit: 'Stück',
+    }));
+    setBusy(btn, false);
+    _flpRenderPosTable();
+    toast(st.positionen.length ? st.positionen.length + ' Position(en) erstellt — bitte prüfen' : 'Keine Positionen erkannt — manuell hinzufügen', st.positionen.length ? 'success' : 'warn', 4000);
+  } catch (e) { setBusy(btn, false); toast('KI-Positionen fehlgeschlagen: ' + (e.message || e), 'error', 8000); }
+}
+
+/* Angebot (Quote + QuoteItems) in ERP Hero anlegen. */
+async function _flpPushAngebot(btn) {
+  const st = window._FLP_ANG;
+  if (!st) return;
+  if (!st.customer) return toast('Kein Kunde — erst Kunde/Kontakt anlegen', 'warn', 5000);
+  const pos = (st.positionen || []).filter(p => (p.bezeichnung || p.article_no));
+  if (!pos.length) return toast('Keine Positionen', 'warn', 4000);
+  setBusy(btn, true, 'Lege Angebot an…');
+  const resEl = document.getElementById('flpPosResult');
+  try {
+    const companyId = st.mandantId;
+    const quoteNo = await _flpNextQuoteNo(companyId, st.mandantName);
+    const totals = _flpCalcTotals(pos);
+    const today = new Date().toISOString().slice(0, 10);
+    const valid = new Date(Date.now() + 30 * 864e5).toISOString().slice(0, 10);
+    const custF = st.customer.f || {};
+    const q = await erpHeroWrite('Quote', _flpStripEmpty({
+      quote_no: quoteNo, company_id: [companyId], customer_id: [st.customer.id],
+      contact_id: st.contact ? [st.contact.id] : undefined,
+      date: today, valid_until: valid, status: 'Entwurf',
+      payment_terms: custF.payment_terms || '14 Tage netto',
+      delivery_terms: custF.delivery_terms || 'EXW Fellbach',
+      freshdesk_ticket_id: String(st.ticketId || ''),
+      description: 'Erstellt via Freshdesk Hero',
+      subtotal_net: Math.round(totals.netto * 100) / 100,
+      vat_total: Math.round(totals.mwst * 100) / 100,
+      total_gross: Math.round(totals.brutto * 100) / 100,
+    }));
+    st.quoteId = q.id; st.quoteNo = quoteNo;
+    let i = 0, failed = 0;
+    for (const p of pos) {
+      i++;
+      try {
+        const artId = await _flpResolveArticle(companyId, p);
+        const line = (+p.menge || 1) * (+p.einzelpreis || 0) * (1 - (+p.rabatt_pct || 0) / 100);
+        await erpHeroWrite('QuoteItem', _flpStripEmpty({
+          quote_id: [q.id], article_id: [artId], pos: i,
+          qty: +p.menge || 1, unit: p.unit || 'Stück',
+          unit_price_net: +p.einzelpreis || 0, discount_pct: +p.rabatt_pct || 0,
+          vat_rate: +p.mwst || 19, line_total_net: Math.round(line * 100) / 100,
+          description: p.bezeichnung || '',
+        }));
+      } catch (e) { failed++; console.warn('[FLP-QuoteItem]', e.message); }
+    }
+    setBusy(btn, false);
+    if (resEl) resEl.innerHTML =
+      '<div class="bg-emerald-50 border border-emerald-200 rounded-xl p-3 text-[12px] text-emerald-900">' +
+        '<p class="font-bold inline-flex items-center gap-1"><i data-lucide="check-circle-2" class="w-4 h-4"></i> Angebot ' + escapeHtml(quoteNo) + ' in ERP Hero angelegt</p>' +
+        '<p class="mt-0.5">' + pos.length + ' Position(en)' + (failed ? ', <span class="text-rose-700">' + failed + ' mit Fehler</span>' : '') + ' · Brutto ' + _formatEur(totals.brutto) + '</p>' +
+        '<p class="text-emerald-700 mt-1">Öffne das Angebot in ERP Hero für PDF/Versand. (PDF + Versand aus FDH folgen in Phase 4.)</p>' +
+      '</div>';
+    if (window.lucide) lucide.createIcons();
+    toast('Angebot ' + quoteNo + ' angelegt ✓' + (failed ? ' (' + failed + ' Position(en) mit Fehler)' : ''), failed ? 'warn' : 'success', 7000);
+  } catch (e) {
+    setBusy(btn, false);
+    if (resEl) resEl.innerHTML = '<div class="bg-red-50 border border-red-200 rounded-xl p-3 text-[12px] text-red-800">Angebot anlegen fehlgeschlagen: ' + escapeHtml(e.message || String(e)) + '</div>';
+    toast('Angebot anlegen fehlgeschlagen: ' + (e.message || e), 'error', 9000);
+  }
 }
 
 const ANGEBOTE_TABLE = 'Angebote';
