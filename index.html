@@ -784,7 +784,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.237';
+const APP_VERSION = 'v2.46.238';
 
 /* ============================================================
    GLOBAL THEME — v2.46.12
@@ -24045,7 +24045,7 @@ async function openFlpAngebotModal(accountId, ticketId) {
         '</div>' +
         '<div class="px-4 py-3 border-t border-ink-200 shrink-0 flex gap-2">' +
           '<button onclick="closeFlpAngebotModal()" class="flex-1 bg-ink-100 hover:bg-ink-200 text-ink-700 rounded-xl px-3 py-3 text-sm font-bold">Schließen</button>' +
-          '<button onclick="_flpPushKundeKontakt(this)" class="flex-[2] bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl px-3 py-3 text-sm font-bold inline-flex items-center justify-center gap-1.5"><i data-lucide="upload-cloud" class="w-4 h-4"></i> Kunde + Kontakt in ERP Hero</button>' +
+          '<button onclick="_flpPushKundeKontakt(this)" class="flex-[2] bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl px-3 py-3 text-sm font-bold inline-flex items-center justify-center gap-1.5" title="Kunde + Kontakt in ERP Hero speichern (neu oder aktualisieren) und weiter zum Angebot">Speichern & weiter zum Angebot <i data-lucide="arrow-right" class="w-4 h-4"></i></button>' +
         '</div>' +
       '</div>' +
     '</div>';
@@ -24261,15 +24261,9 @@ async function _flpPushKundeKontakt(btn) {
     else if (lastName || cEmail) { const ct = await erpHeroWrite('Contact', contactFields); contact = { id: ct.id }; contCreated = true; }
     st.contact = contact;
     setBusy(btn, false);
-    if (resEl) resEl.innerHTML =
-      '<div class="bg-emerald-50 border border-emerald-200 rounded-xl p-3 text-[12px] text-emerald-900">' +
-        '<p class="font-bold inline-flex items-center gap-1"><i data-lucide="check-circle-2" class="w-4 h-4"></i> In ERP Hero gespeichert</p>' +
-        '<p class="mt-0.5">' + (custCreated ? 'Kunde <b>angelegt</b>' : 'Kunde <b>vorhanden</b>/aktualisiert') + ': ' + escapeHtml(name1) +
-        (contact ? '<br>' + (contCreated ? 'Kontakt <b>angelegt</b>' : 'Kontakt <b>vorhanden</b>/aktualisiert') + ': ' + escapeHtml([g('flpCFirst'), lastName].filter(Boolean).join(' ')) : '') + '</p>' +
-        '<button onclick="_flpRenderPositionen()" class="mt-2 w-full bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg px-3 py-2 text-[12px] font-bold inline-flex items-center justify-center gap-1.5"><i data-lucide="arrow-right" class="w-3.5 h-3.5"></i> Weiter: Positionen & Angebot</button>' +
-      '</div>';
-    if (window.lucide) lucide.createIcons();
-    toast('ERP Hero: Kunde + Kontakt gespeichert ✓', 'success', 5000);
+    toast('ERP Hero: ' + (custCreated ? 'Kunde angelegt' : 'Kunde aktualisiert') + (contact ? ' · ' + (contCreated ? 'Kontakt angelegt' : 'Kontakt aktualisiert') : '') + ' ✓', 'success', 4000);
+    // v2.46.238: direkt zum Angebots-Schritt weiter (kein Zwischen-Button mehr)
+    _flpRenderPositionen();
   } catch (e) {
     setBusy(btn, false);
     if (resEl) resEl.innerHTML = '<div class="bg-red-50 border border-red-200 rounded-xl p-3 text-[12px] text-red-800">Push fehlgeschlagen: ' + escapeHtml(e.message || String(e)) + '</div>';
