@@ -784,7 +784,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.244';
+const APP_VERSION = 'v2.46.245';
 
 /* ============================================================
    GLOBAL THEME — v2.46.12
@@ -24639,16 +24639,69 @@ function _flpRenderPdfPreview() {
   iframe.srcdoc = html;
 }
 
-/* Echtes PDF erzeugen (wie ERP Hero: html2canvas + pdf-lib) und im neuen Tab öffnen. */
+/* v2.46.245: PDF-Erzeugung mit SAUBERER Seitentrennung — schneidet an Leerraum-
+   Zeilen (keine zerschnittenen Textzeilen) und lässt oben/unten Rand. Ersetzt die
+   naive Slice-Logik des portierten erpQuoteToPdfBlob. */
+function _flpEnsureLib(src) {
+  return new Promise((res, rej) => {
+    if (Array.prototype.some.call(document.scripts, s => s.src === src)) return res();
+    const sc = document.createElement('script');
+    sc.src = src; sc.onload = () => res(); sc.onerror = () => rej(new Error('Bibliothek konnte nicht geladen werden: ' + src));
+    document.head.appendChild(sc);
+  });
+}
+async function _flpQuoteToPdfBlob(data) {
+  await _flpEnsureLib('https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js');
+  await _flpEnsureLib('https://cdnjs.cloudflare.com/ajax/libs/pdf-lib/1.17.1/pdf-lib.min.js');
+  const host = document.createElement('div');
+  host.style.cssText = 'position:fixed;left:-10000px;top:0;width:794px;background:#fff;';
+  host.innerHTML = erpQuoteHtml(data);
+  document.body.appendChild(host);
+  try {
+    const canvas = await window.html2canvas(host, { scale: 2, useCORS: true, backgroundColor: '#FFFFFF', width: host.scrollWidth, height: host.scrollHeight });
+    const { PDFDocument } = window.PDFLib;
+    const pdf = await PDFDocument.create();
+    const A4W = 595.28, A4H = 841.89, MARGIN = 26;   // pt
+    const cw = canvas.width, ch = canvas.height;
+    const pxPerPt = cw / A4W;                          // Bild füllt A4-Breite (Content hat eigenes Padding)
+    const pageH_px = Math.floor((A4H - 2 * MARGIN) * pxPerPt);
+    const ctx = canvas.getContext('2d');
+    const step = Math.max(1, Math.floor(cw / 140));
+    const isBlank = (y) => {
+      const d = ctx.getImageData(0, y, cw, 1).data;
+      for (let x = 0; x < cw; x += step) { const i = x * 4; if (d[i] < 236 || d[i + 1] < 236 || d[i + 2] < 236) return false; }
+      return true;
+    };
+    let start = 0;
+    while (start < ch) {
+      let end = Math.min(start + pageH_px, ch);
+      if (end < ch) {
+        const limit = Math.max(start + Math.floor(pageH_px * 0.55), end - 180);
+        for (let y = end; y > limit; y--) { if (isBlank(y)) { end = y; break; } }
+      }
+      const sliceH = end - start;
+      const sc = document.createElement('canvas'); sc.width = cw; sc.height = sliceH;
+      sc.getContext('2d').drawImage(canvas, 0, start, cw, sliceH, 0, 0, cw, sliceH);
+      const png = await pdf.embedPng(sc.toDataURL('image/png'));
+      const page = pdf.addPage([A4W, A4H]);
+      const drawH = sliceH / pxPerPt;
+      page.drawImage(png, { x: 0, y: A4H - MARGIN - drawH, width: A4W, height: drawH });
+      start = end;
+    }
+    return new Blob([await pdf.save()], { type: 'application/pdf' });
+  } finally { document.body.removeChild(host); }
+}
+
+/* Echtes PDF erzeugen (saubere Seitentrennung) und im neuen Tab öffnen. */
 async function _flpOpenPdf(btn) {
   const st = window._FLP_ANG;
   if (!st) return;
   const pos = (st.positionen || []).filter(p => p.bezeichnung || p.article_no);
   if (!pos.length) return toast('Noch keine Positionen für das PDF', 'warn', 4000);
-  if (typeof erpQuoteToPdfBlob !== 'function') return toast('PDF-Renderer nicht geladen — App neu laden', 'error', 5000);
+  if (typeof erpQuoteHtml !== 'function') return toast('PDF-Renderer nicht geladen — App neu laden', 'error', 5000);
   if (btn) setBusy(btn, true, 'PDF…');
   try {
-    const blob = await erpQuoteToPdfBlob(_flpBuildErpData());
+    const blob = await _flpQuoteToPdfBlob(_flpBuildErpData());
     const url = URL.createObjectURL(blob);
     const w = window.open(url, '_blank');
     if (!w) { // Popup blockiert → Download-Fallback
