@@ -784,7 +784,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.232';
+const APP_VERSION = 'v2.46.233';
 
 /* ============================================================
    GLOBAL THEME — v2.46.12
@@ -24842,7 +24842,33 @@ async function _angLoadAllBkAngebote() {
   return out;
 }
 
-const ANGEBOTE_PAGE_STATE = { list: null, q: '' };
+const ANGEBOTE_PAGE_STATE = { list: null, q: '', filterAcc: '' };
+
+/* v2.46.233: Mandant (Freshdesk-Account) eines Angebots-Records auflösen. */
+function _angRecAccountId(f) {
+  if (f.freshdesk_account_id) return String(f.freshdesk_account_id);
+  if (f.firma) {
+    const acc = (APP_STATE.accounts || []).find(a => _erpFirmaSlugForAccount(a) === f.firma);
+    if (acc) return acc.id;
+  }
+  return '';
+}
+function _angAccountName(id) {
+  const acc = (APP_STATE.accounts || []).find(a => String(a.id) === String(id));
+  return acc ? (acc.name || acc.id) : (id || '(unbekannt)');
+}
+/* Befüllt das Mandanten-Dropdown aus den geladenen Angeboten (mit Anzahl). */
+function _angPageFillMandantOptions() {
+  const sel = document.getElementById('angPageMandant');
+  if (!sel) return;
+  const counts = new Map();
+  (ANGEBOTE_PAGE_STATE.list || []).forEach(x => { const id = _angRecAccountId(x.f); counts.set(id, (counts.get(id) || 0) + 1); });
+  const opts = Array.from(counts.entries())
+    .map(([id, count]) => ({ id: id || '__none__', name: id ? _angAccountName(id) : '(ohne Mandant)', count }))
+    .sort((a, b) => a.name.localeCompare(b.name, 'de'));
+  sel.innerHTML = '<option value="">Alle Mandanten (' + (ANGEBOTE_PAGE_STATE.list || []).length + ')</option>' +
+    opts.map(o => '<option value="' + escapeAttr(o.id) + '"' + (ANGEBOTE_PAGE_STATE.filterAcc === o.id ? ' selected' : '') + '>' + escapeHtml(o.name) + ' (' + o.count + ')</option>').join('');
+}
 
 async function renderAngebotePage() {
   setPageTitle('Angebote', 'Alle in Freshdesk Hero erstellten Angebote — suchen & weiterbearbeiten');
@@ -24854,8 +24880,9 @@ async function renderAngebotePage() {
       '<p>Hier findest du alle mit Freshdesk Hero erstellten Angebote. Tippe auf ein Angebot, um es im KI-Chat zu öffnen und weiterzubearbeiten.</p>' +
     '</div>' +
     '<div class="bg-white rounded-xl border border-ink-200 p-2.5 flex items-center gap-2">' +
-      '<input id="angPageSearch" type="search" value="' + escapeAttr(ANGEBOTE_PAGE_STATE.q || '') + '" placeholder="Suche: Angebot-Nr, Kunde, Standort, Fabriknummer, Ticket…" oninput="ANGEBOTE_PAGE_STATE.q=this.value;_renderAngebotePageList()" class="flex-1 px-3 py-2 border border-ink-300 rounded-lg text-sm">' +
-      '<button onclick="renderAngebotePage()" class="px-2.5 py-2 bg-white border border-ink-300 hover:bg-ink-50 text-ink-700 rounded-lg text-[12px] font-bold" title="Neu laden">↻</button>' +
+      '<input id="angPageSearch" type="search" value="' + escapeAttr(ANGEBOTE_PAGE_STATE.q || '') + '" placeholder="Suche: Angebot-Nr, Kunde, Standort, Fabriknummer, Ticket…" oninput="ANGEBOTE_PAGE_STATE.q=this.value;_renderAngebotePageList()" class="flex-1 min-w-0 px-3 py-2 border border-ink-300 rounded-lg text-sm">' +
+      '<select id="angPageMandant" onchange="ANGEBOTE_PAGE_STATE.filterAcc=this.value;_renderAngebotePageList()" class="shrink-0 max-w-[45%] px-2 py-2 border border-ink-300 rounded-lg text-[12px] bg-white"><option value="">Alle Mandanten</option></select>' +
+      '<button onclick="renderAngebotePage()" class="shrink-0 px-2.5 py-2 bg-white border border-ink-300 hover:bg-ink-50 text-ink-700 rounded-lg text-[12px] font-bold" title="Neu laden">↻</button>' +
     '</div>' +
     '<div id="angPageList"><div class="text-center py-10"><span class="spinner inline-block w-6 h-6 border-[2px] text-indigo-500"></span><p class="text-sm text-ink-500 mt-2">Lade Angebote…</p></div></div>' +
   '</div>';
@@ -24867,6 +24894,7 @@ async function renderAngebotePage() {
     if (l) l.innerHTML = '<div class="bg-red-50 border border-red-200 rounded-xl p-4 text-sm text-red-800">Angebote konnten nicht geladen werden: ' + escapeHtml(e.message || String(e)) + '</div>';
     return;
   }
+  _angPageFillMandantOptions();
   _renderAngebotePageList();
 }
 
@@ -24875,17 +24903,20 @@ function _renderAngebotePageList() {
   if (!host) return;
   const all = ANGEBOTE_PAGE_STATE.list || [];
   const q = (ANGEBOTE_PAGE_STATE.q || '').trim().toLowerCase();
-  const list = q ? all.filter(x => {
+  const fa = ANGEBOTE_PAGE_STATE.filterAcc || '';
+  // v2.46.233: erst nach Mandant filtern, dann Textsuche
+  const scoped = fa ? all.filter(x => { const id = _angRecAccountId(x.f); return fa === '__none__' ? !id : id === fa; }) : all;
+  const list = q ? scoped.filter(x => {
     const f = x.f;
     return ['app_angebot_num', 'kunde_name', 'anlage_adresse', 'kunde_adresse', 'seriennummer', 'freshdesk_ticket_id', 'erstellt_am']
       .map(k => String(f[k] || '')).join(' ').toLowerCase().includes(q);
-  }) : all;
+  }) : scoped;
   if (!all.length) {
     host.innerHTML = '<div class="bg-white rounded-xl border border-dashed border-ink-300 p-6 text-center text-ink-500 text-sm">Noch keine Angebote in Freshdesk Hero erstellt.</div>';
     return;
   }
   host.innerHTML =
-    '<p class="text-[11px] text-ink-500 mb-1.5">' + list.length + (q ? ' / ' + all.length : '') + ' Angebot(e)</p>' +
+    '<p class="text-[11px] text-ink-500 mb-1.5">' + list.length + ((q || fa) ? ' / ' + all.length : '') + ' Angebot(e)' + (fa ? ' · ' + escapeHtml(fa === '__none__' ? '(ohne Mandant)' : _angAccountName(fa)) : '') + '</p>' +
     (list.length ? list.map(x => {
       const f = x.f;
       const brutto = +f.summe_brutto_vp || 0;
@@ -24902,7 +24933,7 @@ function _renderAngebotePageList() {
           '</div>' +
         '</div>' +
       '</div>';
-    }).join('') : '<div class="bg-white rounded-xl border border-dashed border-ink-300 p-6 text-center text-ink-500 text-sm">Keine Treffer für „' + escapeHtml(q) + '".</div>');
+    }).join('') : '<div class="bg-white rounded-xl border border-dashed border-ink-300 p-6 text-center text-ink-500 text-sm">Keine Angebote' + (fa ? ' für „' + escapeHtml(fa === '__none__' ? '(ohne Mandant)' : _angAccountName(fa)) + '"' : '') + (q ? ' mit „' + escapeHtml(q) + '"' : '') + '.</div>');
   if (window.lucide) lucide.createIcons();
 }
 
