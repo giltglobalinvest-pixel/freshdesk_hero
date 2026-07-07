@@ -784,7 +784,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.243';
+const APP_VERSION = 'v2.46.244';
 
 /* ============================================================
    GLOBAL THEME — v2.46.12
@@ -24377,7 +24377,10 @@ function _flpRenderPositionen() {
           '<div class="hidden sm:flex flex-col min-h-0 bg-ink-100">' +
             '<div class="flex items-center justify-between px-3 py-1.5 border-b border-ink-200 shrink-0">' +
               '<span class="text-[10px] font-bold text-ink-500 uppercase tracking-wider">Vorschau · ERP-Layout</span>' +
-              '<button onclick="_flpOpenPreviewFullscreen()" class="text-[11px] text-indigo-600 font-semibold inline-flex items-center gap-1" title="Vorschau im Vollbild öffnen"><i data-lucide="maximize-2" class="w-3 h-3"></i> Vollbild</button>' +
+              '<div class="flex items-center gap-3">' +
+                '<button onclick="_flpOpenPdf(this)" class="text-[11px] text-indigo-600 font-semibold inline-flex items-center gap-1" title="Als echtes PDF öffnen/herunterladen"><i data-lucide="file-text" class="w-3 h-3"></i> Als PDF öffnen</button>' +
+                '<button onclick="_flpOpenPreviewFullscreen()" class="text-[11px] text-indigo-600 font-semibold inline-flex items-center gap-1" title="Vorschau im Vollbild öffnen"><i data-lucide="maximize-2" class="w-3 h-3"></i> Vollbild</button>' +
+              '</div>' +
             '</div>' +
             '<div id="flpPdfPreview" class="flex-1 min-h-0"></div>' +
           '</div>' +
@@ -24634,6 +24637,31 @@ function _flpRenderPdfPreview() {
     } catch (_) {}
   };
   iframe.srcdoc = html;
+}
+
+/* Echtes PDF erzeugen (wie ERP Hero: html2canvas + pdf-lib) und im neuen Tab öffnen. */
+async function _flpOpenPdf(btn) {
+  const st = window._FLP_ANG;
+  if (!st) return;
+  const pos = (st.positionen || []).filter(p => p.bezeichnung || p.article_no);
+  if (!pos.length) return toast('Noch keine Positionen für das PDF', 'warn', 4000);
+  if (typeof erpQuoteToPdfBlob !== 'function') return toast('PDF-Renderer nicht geladen — App neu laden', 'error', 5000);
+  if (btn) setBusy(btn, true, 'PDF…');
+  try {
+    const blob = await erpQuoteToPdfBlob(_flpBuildErpData());
+    const url = URL.createObjectURL(blob);
+    const w = window.open(url, '_blank');
+    if (!w) { // Popup blockiert → Download-Fallback
+      const a = document.createElement('a');
+      a.href = url; a.download = 'Angebot_' + (st.quoteNo || 'FLP') + '.pdf';
+      document.body.appendChild(a); a.click(); a.remove();
+    }
+    setTimeout(() => { try { URL.revokeObjectURL(url); } catch (_) {} }, 60000);
+  } catch (e) {
+    toast('PDF-Erzeugung fehlgeschlagen: ' + (e.message || e), 'error', 8000);
+  } finally {
+    if (btn) setBusy(btn, false);
+  }
 }
 
 /* Vorschau im Vollbild-Fenster (echtes A4, druckbar). */
