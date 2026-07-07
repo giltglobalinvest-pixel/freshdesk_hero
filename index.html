@@ -784,7 +784,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.239';
+const APP_VERSION = 'v2.46.240';
 
 /* ============================================================
    GLOBAL THEME — v2.46.12
@@ -24260,11 +24260,12 @@ async function _flpPushKundeKontakt(btn) {
     // 2) Kontakt: gewählter/gefundener → nur bei Änderung schreiben, sonst anlegen
     const cEmail = g('flpCEmail') || email;
     let contact = st.selectedContact || await _flpFindContact(customer.id, cEmail);
+    // v2.46.240: Contact-Tabelle hat KEIN status-Feld → weglassen (sonst 422 UNKNOWN_FIELD_NAME)
     const contactFields = _flpStripEmpty({
       first_name: g('flpCFirst'), last_name: lastName,
       name: [g('flpCFirst'), lastName].filter(Boolean).join(' '),
       email: cEmail, phone: g('flpCTel'), role: g('flpCRole'),
-      customer_id: [customer.id], is_primary: true, status: 'aktiv',
+      customer_id: [customer.id], is_primary: true,
     });
     const ks = st._contSnapshot;
     const contUnchanged = !!st.selectedContact && !!ks &&
@@ -24493,9 +24494,8 @@ async function _flpPushAngebot(btn) {
       delivery_terms: custF.delivery_terms || 'EXW Fellbach',
       freshdesk_ticket_id: String(st.ticketId || ''),
       description: 'Erstellt via Freshdesk Hero',
-      subtotal_net: Math.round(totals.netto * 100) / 100,
-      vat_total: Math.round(totals.mwst * 100) / 100,
-      total_gross: Math.round(totals.brutto * 100) / 100,
+      // v2.46.240: subtotal_net/vat_total/total_gross sind Formelfelder in ERP Hero
+      // (aus den QuoteItems berechnet) → NICHT schreiben (sonst 422).
     }));
     st.quoteId = q.id; st.quoteNo = quoteNo;
     let i = 0, failed = 0;
