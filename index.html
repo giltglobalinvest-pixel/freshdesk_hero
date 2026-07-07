@@ -784,7 +784,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.245';
+const APP_VERSION = 'v2.46.246';
 
 /* ============================================================
    GLOBAL THEME — v2.46.12
@@ -24698,10 +24698,11 @@ async function _flpOpenPdf(btn) {
   if (!st) return;
   const pos = (st.positionen || []).filter(p => p.bezeichnung || p.article_no);
   if (!pos.length) return toast('Noch keine Positionen für das PDF', 'warn', 4000);
-  if (typeof erpQuoteHtml !== 'function') return toast('PDF-Renderer nicht geladen — App neu laden', 'error', 5000);
+  if (typeof erpQuoteToPdfBlob !== 'function') return toast('PDF-Renderer nicht geladen — App neu laden', 'error', 5000);
   if (btn) setBusy(btn, true, 'PDF…');
   try {
-    const blob = await _flpQuoteToPdfBlob(_flpBuildErpData());
+    // v2.46.246: paginierter ERP-Renderer (Sheet-Modell, element-basierte Umbrüche)
+    const blob = await erpQuoteToPdfBlob(_flpBuildErpData());
     const url = URL.createObjectURL(blob);
     const w = window.open(url, '_blank');
     if (!w) { // Popup blockiert → Download-Fallback
@@ -39509,37 +39510,37 @@ if ('serviceWorker' in navigator && (location.protocol === 'https:' || location.
 }
 </script>
 
-<!-- ERPQ_RENDERER_START (portiertes ERP-Hero Angebots-Layout · v2.46.242) -->
+<!-- ERPQ_RENDERER_START (portiertes ERP-Hero Angebots-Layout + Paginierung · v2.46.246) -->
 <script>
 /* =====================================================================
  * ERP HERO — Angebots-PDF-Renderer (portiert für Freshdesk Hero)
  * ---------------------------------------------------------------------
- * EINE selbst-enthaltene Funktion `erpQuoteHtml(data)` liefert den
- * KOMPLETTEN HTML-String (inkl. inline <style>) für ein Angebot,
- * visuell identisch zum ERP-Hero-Angebots-PDF/-Preview.
+ * Selbst-enthaltene Funktionen (kein ERP-Hero-Global, kein Tailwind):
  *
- * KEINE Abhängigkeit auf ERP-Hero-Globals (getCurrentCompany, FLP_BRAND,
- * TEMPLATE_VARIABLES, Tailwind, …). Alles kommt aus `data`.
- * Alle Helfer sind mit Prefix `_erpq_` benannt → keine Namenskollisionen.
+ *   erpQuoteHtml(data)          -> EIN durchgehender HTML-String (Preview / Single-Flow)
+ *   erpQuoteRenderSheets(data)  -> Array von A4-Seiten-HTML-Strings, ELEMENT-basiert
+ *                                  paginiert (Kopf+Fuß je Seite, Logos nur Seite 1,
+ *                                  KEIN Block wird zerschnitten)
+ *   erpQuoteToPdfBlob(data,opt) -> PDF-Blob: jedes Sheet einzeln per html2canvas
+ *                                  (scale 2) -> genau eine A4-Seite in pdf-lib
+ *
+ * Alle Helfer haben Prefix `_erpq_` (keine Namenskollision in Freshdesk Hero).
+ * Alle Daten kommen aus `data` (siehe JSDoc bei erpQuoteHtml). `data` ist
+ * gegenüber der Vorversion UNVERÄNDERT.
  *
  * Quelle (ERP Hero index.html):
- *   - renderQuotePreviewHtml   ~Z.24360  (das echte PDF-Layout; Tailwind → hier inline-CSS)
- *   - renderQuotePdfHtml       ~Z.25636  (alternativer reiner Inline-CSS-Renderer)
- *   - buildQuoteFooterData     ~Z.24254
- *   - renderQuoteFooterHtml    ~Z.24286
- *   - splitDescriptionTitleAndBody ~Z.24326
- *   - substituteVariables + TEMPLATE_VARIABLES ~Z.22258/22412
- *   - calcQuoteSums / calcLineNet ~Z.22219/22245
- *   - formatPrice / formatDeDate  ~Z.19387/22252
- *   - escapeHtml / renderTemplateContent ~Z.12647/13837
- *   - flpLogoInlineSvg (SVG-Symbol ~Z.356)
+ *   renderQuotePreviewHtml ~Z.24360 | paginatePreview ~Z.24651
+ *   buildQuoteFooterData ~Z.24254 | renderQuoteFooterHtml ~Z.24286
+ *   splitDescriptionTitleAndBody ~Z.24326 | substituteVariables ~Z.22412
+ *   calcQuoteSums/calcLineNet ~Z.22219/22245 | formatPrice/formatDeDate ~Z.19387/22252
+ *   escapeHtml/renderTemplateContent ~Z.12647/13837 | flpLogoInlineSvg (Symbol ~Z.356)
+ *   buildQuotePdfBlob ~Z.25911 | exportQuoteAsPdf ~Z.25750
  *
- * PDF-Blob: das ERP macht KEIN Vektor-PDF aus diesem HTML, sondern
- * screenshottet die gerenderte Preview mit html2canvas (scale 2) und
- * bettet die PNGs seitenweise via pdf-lib in ein A4-PDF ein
- * (buildQuotePdfBlob ~Z.25911, exportQuoteAsPdf ~Z.25750).
- * Am Ende dieser Datei ist ein optionaler Helfer `erpQuoteToPdfBlob`
- * mit exakt dieser Logik (html2canvas + pdf-lib) enthalten.
+ * PAGINIERUNG: ERP Heros paginatePreview schneidet den Body per starrem
+ * transform:translateY(-i*usableH) — dadurch werden Blöcke mitten
+ * durchtrennt. Diese Portierung ersetzt das durch ECHTES element-weises
+ * gieriges Packen: ganze Body-Blöcke werden gemessen und komplett auf
+ * die nächste Seite geschoben, wenn sie nicht mehr in usableH passen.
  * ===================================================================== */
 
 /* ---------------------------------------------------------------------
@@ -39683,8 +39684,7 @@ function _erpq_addressesEqual(a, b) {
 
 /* ---------------------------------------------------------------------
  * Positions-Beschreibung splitten (Bezeichnung / Body).
- * Nutzt DOMParser statt document.createElement, damit es auch außerhalb
- * eines live DOM (z.B. in Workern) läuft; fällt auf document zurück.
+ * DOMParser-Fallback, damit es auch ohne live DOM läuft.
  * ------------------------------------------------------------------- */
 function _erpq_splitDescriptionTitleAndBody(rawDesc) {
   var out = { title: '', titleHtml: '', bodyHtml: '', bodyText: '', isHtml: false };
@@ -39724,8 +39724,7 @@ function _erpq_splitDescriptionTitleAndBody(rawDesc) {
 }
 
 /* ---------------------------------------------------------------------
- * Footer-Daten (aus buildQuoteFooterData). Speist sich aus data.company
- * (falls Felder gesetzt) mit Fallback auf data.brand (= FLP_BRAND).
+ * Footer-Daten + Footer-HTML
  * ------------------------------------------------------------------- */
 function _erpq_buildFooterData(company, brand) {
   var c = company || {};
@@ -39757,7 +39756,6 @@ function _erpq_buildFooterData(company, brand) {
   };
 }
 
-/* Footer-HTML (aus renderQuoteFooterHtml) — Tailwind → inline CSS. */
 function _erpq_renderFooterHtml(footer) {
   var cellL = 'font-size:7.5px;line-height:1.5;';
   var lbl = 'font-weight:700;';
@@ -39793,10 +39791,7 @@ function _erpq_renderFooterHtml(footer) {
 }
 
 /* ---------------------------------------------------------------------
- * Variablen-Substitution ({{angebot.nr}}, {{kontakt.anrede}}, …).
- * Portiert aus TEMPLATE_VARIABLES + substituteVariables. Nur der
- * 'Angebot'-Satz (docType wird intern auf 'Angebot' fixiert).
- * ctx = { quote, customer, contact, company, user, customFields }
+ * Variablen-Substitution ({{angebot.nr}}, {{kontakt.anrede}}, …)
  * ------------------------------------------------------------------- */
 var _ERPQ_TEMPLATE_VARS_ANGEBOT = [
   { name: 'angebot.nr', resolve: function (c) { return (c.quote && c.quote.quote_no) || ''; } },
@@ -39844,31 +39839,30 @@ function _erpq_substituteVariables(text, ctx) {
 }
 
 /* =====================================================================
- * HAUPTFUNKTION
- * =====================================================================
- * data = {
- *   quote:    { quote_no, quote_title, date, valid_until, payment_terms,
- *               delivery_terms, force_closing_new_page, custom_values? },
- *   customer: { name1, name2, customer_no, supplier_no, street, zip, city,
- *               country, vat_id, logo? },
- *   contact:  { first_name, last_name, name, gender, email },
- *   company:  { name, street, zip, city, phone, fax, email, web, vat_id,
- *               managing_director, hrb, ag, bank_name, iban, bic, blz,
- *               brand_color, logo?, secondary_logo?, sub_logo? },
- *   brand:    <FLP_BRAND-Objekt> (Fallback für Footer/Absender/Tagline),
- *   items:    [{ pos, qty, unit, unit_price_net, discount_pct, vat_rate,
- *                description, article_id?, article_name1?, article_name2?,
- *                manufacturer_no? }],
- *   intro:    '<html oder text>',
- *   closing:  '<html oder text>',
- *   invoiceAddress?:  { recipient, street, zip, city, country },
- *   deliveryAddress?: { recipient, street, zip, city, country },
- *   layout_variant?:  'standard'  (nur 'standard' unterstützt),
- *   user?:            { name }
- * }
- * Rückgabe: kompletter HTML-String inkl. <style>.
+ * SHEET-LAYOUT-KONSTANTEN (A4 @ 96dpi) — analog ERP paginatePreview
  * ===================================================================== */
-function erpQuoteHtml(data) {
+var _ERPQ_SHEET = {
+  A4_W: 794, A4_H: 1123,
+  PAD_T: 36, PAD_LR: 50, PAD_B: 24,
+  HEADER_H: 60,   // Tagline + Logo-Zeile (oben jede Seite)
+  FOOTER_H: 92,   // Footer-Band (unten jede Seite)
+  LOGOS_H: 72,    // Sub-/2.-Logo-Zeile (nur Seite 1, nur wenn vorhanden)
+  GAP: 0
+};
+function _erpq_usableH(hasLogos) {
+  var S = _ERPQ_SHEET;
+  // usableH ist KONSTANT über alle Seiten (Logos-Bereich Seite 2+ bleibt leer),
+  // exakt wie ERP: A4_H - PAD_T - HEADER_H - LOGOS_H - GAP - FOOTER_H - PAD_B.
+  return S.A4_H - S.PAD_T - S.HEADER_H - (hasLogos ? S.LOGOS_H : 0) - S.GAP - S.FOOTER_H - S.PAD_B;
+}
+function _erpq_contentWidth() { return _ERPQ_SHEET.A4_W - 2 * _ERPQ_SHEET.PAD_LR; }
+
+/* =====================================================================
+ * TEILE-BUILDER — liefert css, Kopf, Logos, ATOMARE Body-Blöcke, Fuß.
+ * Aus diesen Teilen setzt sich sowohl erpQuoteHtml (Single-Flow) als
+ * auch erpQuoteRenderSheets (paginiert) zusammen.
+ * ===================================================================== */
+function _erpq_buildParts(data) {
   data = data || {};
   var c = data.company || {};
   var cu = data.customer || {};
@@ -39876,11 +39870,10 @@ function erpQuoteHtml(data) {
   var q = data.quote || {};
   var brand = data.brand || _ERPQ_BRAND_DEFAULT;
   var items = data.items || [];
-  var articleMap = data.articleMap || {}; // optional: { articleId: {name1,name2,manufacturer_no} }
+  var articleMap = data.articleMap || {};
   var invoiceAddress = data.invoiceAddress || null;
   var deliveryAddress = data.deliveryAddress || null;
 
-  // ctx für Variablen-Substitution
   var ctx = {
     quote: q, customer: cu, contact: co, company: c,
     user: data.user || {}, customFields: data.custom_values || q.custom_values || {}
@@ -39891,7 +39884,6 @@ function erpQuoteHtml(data) {
   var closing = _erpq_substituteVariables(data.closing || '', ctx);
   var footer = _erpq_buildFooterData(c, brand);
 
-  // Empfänger-Anrede (Herrn/Frau + Name)
   var recipientSalutation = (function () {
     if (!co || (!co.first_name && !co.last_name)) return '';
     var g = co.gender;
@@ -39900,116 +39892,37 @@ function erpQuoteHtml(data) {
     return [sal, fullName].filter(Boolean).join(' ');
   })();
 
-  // Tagline: quote_title bevorzugt, sonst brand-Tagline
   var tagline = (q.quote_title && q.quote_title.trim()) ? q.quote_title : footer.taglineTop;
 
-  // Sekundär-/Sub-Logo (optional, aus company.*_logo Attachment-Arrays)
   var subLogoUrl = ((c.sub_logo || [])[0] || {}).url || '';
   var secondaryLogoUrl = ((c.secondary_logo || [])[0] || {}).url || '';
   var subLogoHtml = subLogoUrl ? '<img src="' + _erpq_escapeHtml(subLogoUrl) + '" crossorigin="anonymous" style="height:70px;width:auto;display:block;" alt="Sub-Logo">' : '';
   var secondaryLogoHtml = secondaryLogoUrl ? '<img src="' + _erpq_escapeHtml(secondaryLogoUrl) + '" crossorigin="anonymous" style="height:70px;width:auto;display:block;" alt="2. Logo">' : '';
-  var leftLogosBlock = (subLogoHtml || secondaryLogoHtml)
-    ? '<div style="margin-top:4px;margin-bottom:8px;display:flex;align-items:center;gap:12px;justify-content:flex-start;">' + subLogoHtml + secondaryLogoHtml + '</div>'
+  var logosHtml = (subLogoHtml || secondaryLogoHtml)
+    ? '<div style="display:flex;align-items:center;gap:12px;justify-content:flex-start;">' + subLogoHtml + secondaryLogoHtml + '</div>'
     : '';
 
-  // Recipient-Adressblock (invoiceAddress override, sonst customer)
+  // ---- KOPF (Tagline links, Logo rechts) ----
+  var headerHtml =
+    '<div style="position:relative;padding:0 184px 0 0;">' +
+      '<div style="font-size:12px;line-height:28px;color:#334155;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;height:28px;">' + _erpq_escapeHtml(tagline) + '</div>' +
+      '<div style="position:absolute;top:0;right:0;z-index:2;">' + _erpq_buildQuoteLogoHtml(c, 40) + '</div>' +
+    '</div>';
+
+  // ---- FUSS ----
+  var footerHtml = _erpq_renderFooterHtml(footer);
+
+  // ---- Adressblock-Vorbereitung ----
   var inv = invoiceAddress || {};
   var recStreet = inv.street || cu.street;
   var recZipCity = [inv.zip || cu.zip, inv.city || cu.city].filter(Boolean).join(' ');
   var recCountry = inv.country || cu.country;
-
   var showDelivery = deliveryAddress && !_erpq_addressesEqual(deliveryAddress, inv) &&
     (deliveryAddress.street || deliveryAddress.city);
 
-  // Positions-Zeilen
-  var rowsHtml = items.map(function (it) {
-    var f = (it && it.fields) ? it.fields : it; // akzeptiert flach ODER {fields:{}}
-    var lineNet = _erpq_calcLineNet(f.qty, f.unit_price_net, f.discount_pct);
-    var grossLine = (+(f.qty || 0)) * (+(f.unit_price_net || 0));
-    var discAbs = grossLine * ((+(f.discount_pct || 0)) / 100);
-    var rawDesc = f.description || '';
-
-    // Article-Referenz: entweder direkt via article_name1/2/manufacturer_no am Item,
-    // oder via articleMap[article_id].
-    var aId = _erpq_readIdValue(f.article_id);
-    var aRef = aId ? (articleMap[aId] || {}) : {};
-    var aName1 = ((f.article_name1 != null ? f.article_name1 : aRef.name1) || '').trim();
-    var aName2 = ((f.article_name2 != null ? f.article_name2 : aRef.name2) || '').trim();
-    var manNo = ((f.manufacturer_no != null ? f.manufacturer_no : aRef.manufacturer_no) || '').trim();
-
-    var split = _erpq_splitDescriptionTitleAndBody(rawDesc);
-    var titleText = split.title;
-    var titleHtml = (split.isHtml && split.titleHtml) ? split.titleHtml : _erpq_escapeHtml(split.title);
-    if (aName1 && aName2 && titleText) {
-      var norm = function (s) { return (s || '').toLowerCase().replace(/\s+/g, ' ').trim(); };
-      var combinedA = norm(aName1 + ' ' + aName2);
-      var combinedB = norm(aName1 + aName2);
-      var titleN = norm(titleText);
-      if (titleN === combinedA || titleN === combinedB) {
-        titleText = aName1;
-        titleHtml = _erpq_escapeHtml(aName1);
-      }
-    }
-
-    var bodyBlock = (split.isHtml && split.bodyHtml)
-      ? '<div style="font-size:9px;color:#334155;line-height:1.35;margin-top:8px;">' + split.bodyHtml + '</div>'
-      : (split.bodyText
-        ? '<div style="font-size:9px;color:#334155;line-height:1.35;margin-top:8px;white-space:pre-line;">' + _erpq_escapeHtml(split.bodyText) + '</div>'
-        : '');
-
-    var italicLines = [];
-    if (aName2) italicLines.push(_erpq_escapeHtml(aName2));
-    if (manNo) italicLines.push(_erpq_escapeHtml(manNo));
-    var italicBlock = italicLines.length
-      ? '<div style="font-size:9px;font-style:italic;font-weight:400;color:#475569;line-height:1.35;margin-top:8px;">' + italicLines.join('<br>') + '</div>'
-      : '';
-
-    var descCell =
-      '<div style="font-weight:700;">' + (titleHtml || '<span style="color:#94A3B8;font-style:italic;">— Bezeichnung —</span>') + '</div>' +
-      italicBlock + bodyBlock;
-
-    var tdBase = 'padding:6px 4px;border-bottom:1px solid #F1F5F9;vertical-align:top;';
-    var tdNum = tdBase + 'text-align:right;font-variant-numeric:tabular-nums;';
-    return '<tr>' +
-      '<td style="' + tdBase + '">' + _erpq_escapeHtml(String(f.pos || '')) + '</td>' +
-      '<td style="' + tdBase + '">' + _erpq_escapeHtml(String(f.qty || '')) + '</td>' +
-      '<td style="' + tdBase + '">' + _erpq_escapeHtml(f.unit || '') + '</td>' +
-      '<td style="' + tdBase + '">' + descCell +
-        (discAbs > 0 ? '<div style="font-size:9px;color:#B45309;margin-top:2px;">Rabatt: −' + _erpq_formatPrice(discAbs) + ' €</div>' : '') +
-      '</td>' +
-      '<td style="' + tdNum + '">' + _erpq_formatPrice(f.unit_price_net || 0) + ' €</td>' +
-      '<td style="' + tdNum + '">' + _erpq_formatPrice(lineNet) + ' €</td>' +
-    '</tr>';
-  }).join('');
-
-  var thBase = 'padding:6px 4px;text-align:left;font-weight:500;';
-  var thRight = 'padding:6px 4px;text-align:right;font-weight:500;';
-
-  var css =
-    '.erpq-root{font-family:Inter,system-ui,-apple-system,sans-serif;color:#0F172A;font-size:13px;line-height:1.5;box-sizing:border-box;}' +
-    '.erpq-root *{box-sizing:border-box;}' +
-    '.erpq-sheet{width:794px;max-width:100%;background:#fff;padding:48px 56px;margin:0 auto;}' +
-    '.erpq-cols{display:grid;grid-template-columns:1fr 1fr;gap:24px;margin-bottom:12px;}' +
-    '.erpq-table{width:100%;font-size:12px;border-collapse:collapse;margin-bottom:8px;}' +
-    '.erpq-meta-row{display:flex;justify-content:space-between;gap:16px;padding:2px 0;}' +
-    '.erpq-meta-row .l{color:#334155;}' +
-    '.erpq-sums td{padding:2px 0;}' +
-    '.erpq-tab{font-variant-numeric:tabular-nums;}';
-
-  var html =
-    '<style>' + css + '</style>' +
-    '<div class="erpq-root">' +
-    '<div class="erpq-sheet">' +
-
-    // HEADER: Tagline links, Logo rechts
-    '<div style="position:relative;margin-bottom:4px;padding:14px 184px 6px 0;min-height:56px;">' +
-      '<div style="font-size:12px;line-height:28px;color:#334155;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;height:28px;">' + _erpq_escapeHtml(tagline) + '</div>' +
-      '<div style="position:absolute;top:8px;right:0;z-index:2;">' + _erpq_buildQuoteLogoHtml(c, 40) + '</div>' +
-    '</div>' +
-    leftLogosBlock +
-
-    // 2-Spalten: Empfänger links / Titel + Meta rechts
-    '<div class="erpq-cols">' +
+  // === BLOCK 1: Empfänger + Titel/Meta (2-Spalten) ===
+  var coverBlock =
+    '<div style="display:grid;grid-template-columns:1fr 1fr;gap:24px;">' +
       '<div>' +
         '<div style="font-size:7px;color:#64748B;border-bottom:1px solid #CBD5E1;padding-bottom:2px;margin-bottom:12px;display:inline-block;line-height:1.2;">' + _erpq_escapeHtml(footer.senderAddressLine) + '</div>' +
         '<div style="font-size:13px;line-height:1.5;">' +
@@ -40034,84 +39947,319 @@ function erpQuoteHtml(data) {
         '<div style="font-weight:700;letter-spacing:-0.02em;line-height:1;text-align:right;font-size:32px;margin-bottom:14px;color:#0F172A;">Angebot</div>' +
         '<div style="font-size:10px;">' +
           '<div style="margin-left:auto;width:fit-content;max-width:100%;">' +
-            '<div class="erpq-meta-row"><span class="l">Angebots-Nr.:</span><span>' + _erpq_escapeHtml(q.quote_no || '–') + '</span></div>' +
-            '<div class="erpq-meta-row"><span class="l">Kunden-Nr.:</span><span>' + _erpq_escapeHtml(cu.customer_no || cu.supplier_no || '–') + '</span></div>' +
-            '<div class="erpq-meta-row"><span class="l">Datum:</span><span>' + _erpq_escapeHtml(_erpq_formatDeDate(q.date)) + '</span></div>' +
-            '<div class="erpq-meta-row"><span class="l">Gültigkeit:</span><span>' + (q.valid_until ? _erpq_escapeHtml(_erpq_formatDeDate(q.valid_until)) : '30 Tage') + '</span></div>' +
+            '<div style="display:flex;justify-content:space-between;gap:16px;padding:2px 0;"><span style="color:#334155;">Angebots-Nr.:</span><span>' + _erpq_escapeHtml(q.quote_no || '–') + '</span></div>' +
+            '<div style="display:flex;justify-content:space-between;gap:16px;padding:2px 0;"><span style="color:#334155;">Kunden-Nr.:</span><span>' + _erpq_escapeHtml(cu.customer_no || cu.supplier_no || '–') + '</span></div>' +
+            '<div style="display:flex;justify-content:space-between;gap:16px;padding:2px 0;"><span style="color:#334155;">Datum:</span><span>' + _erpq_escapeHtml(_erpq_formatDeDate(q.date)) + '</span></div>' +
+            '<div style="display:flex;justify-content:space-between;gap:16px;padding:2px 0;"><span style="color:#334155;">Gültigkeit:</span><span>' + (q.valid_until ? _erpq_escapeHtml(_erpq_formatDeDate(q.valid_until)) : '30 Tage') + '</span></div>' +
             '<div style="height:8px;"></div>' +
-            '<div style="padding:2px 0;"><span class="l" style="color:#334155;">Kontakt:</span></div>' +
-            '<div class="erpq-meta-row"><span class="l">Telefon:</span><span>' + _erpq_escapeHtml(footer.tel) + '</span></div>' +
-            '<div class="erpq-meta-row"><span class="l">Fax:</span><span>' + _erpq_escapeHtml(footer.fax) + '</span></div>' +
-            '<div class="erpq-meta-row"><span class="l">E-Mail:</span><span>' + _erpq_escapeHtml(footer.email) + '</span></div>' +
+            '<div style="padding:2px 0;"><span style="color:#334155;">Kontakt:</span></div>' +
+            '<div style="display:flex;justify-content:space-between;gap:16px;padding:2px 0;"><span style="color:#334155;">Telefon:</span><span>' + _erpq_escapeHtml(footer.tel) + '</span></div>' +
+            '<div style="display:flex;justify-content:space-between;gap:16px;padding:2px 0;"><span style="color:#334155;">Fax:</span><span>' + _erpq_escapeHtml(footer.fax) + '</span></div>' +
+            '<div style="display:flex;justify-content:space-between;gap:16px;padding:2px 0;"><span style="color:#334155;">E-Mail:</span><span>' + _erpq_escapeHtml(footer.email) + '</span></div>' +
           '</div>' +
         '</div>' +
       '</div>' +
-    '</div>' +
+    '</div>';
 
-    // INTRO
-    (intro
-      ? '<div style="font-size:13px;margin-bottom:16px;line-height:1.6;">' + _erpq_renderTemplateContent(intro) + '</div>'
-      : '<p style="font-size:13px;color:#94A3B8;font-style:italic;margin-bottom:16px;">— Einleitung —</p>') +
+  // === BLOCK 2: Intro ===
+  var introBlock = intro
+    ? '<div style="font-size:13px;line-height:1.6;">' + _erpq_renderTemplateContent(intro) + '</div>'
+    : '<div style="font-size:13px;color:#94A3B8;font-style:italic;">— Einleitung —</div>';
 
-    // POSITIONEN
-    (items.length
-      ? '<table class="erpq-table">' +
-          '<thead><tr style="border-bottom:1px solid #CBD5E1;color:#334155;">' +
-            '<th style="' + thBase + '">Pos.</th>' +
-            '<th style="' + thBase + '">Anzahl</th>' +
-            '<th style="' + thBase + '">Einheit</th>' +
-            '<th style="' + thBase + '">Bezeichnung</th>' +
-            '<th style="' + thRight + '">Einzelpreis</th>' +
-            '<th style="' + thRight + '">Gesamtpreis</th>' +
-          '</tr></thead>' +
-          '<tbody>' + rowsHtml + '</tbody>' +
-        '</table>'
-      : '<p style="font-size:12px;color:#94A3B8;font-style:italic;margin-bottom:12px;">— noch keine Positionen —</p>') +
+  // === BLOCK 3: Positionstabelle (die einzelnen Zeilen wären theoretisch
+  //     splittbar; wir behandeln die Tabelle als 1 Block wie ERP-Body, weil
+  //     ERP den kompletten Body als eine Einheit maß. Zeilenweises Splitten
+  //     würde Tabellenkopf-Wiederholung erfordern — bewusst ausgelassen). ===
+  var thBase = 'padding:6px 4px;text-align:left;font-weight:500;';
+  var thRight = 'padding:6px 4px;text-align:right;font-weight:500;';
+  var rowsHtml = items.map(function (it) {
+    var f = (it && it.fields) ? it.fields : it;
+    var lineNet = _erpq_calcLineNet(f.qty, f.unit_price_net, f.discount_pct);
+    var grossLine = (+(f.qty || 0)) * (+(f.unit_price_net || 0));
+    var discAbs = grossLine * ((+(f.discount_pct || 0)) / 100);
+    var rawDesc = f.description || '';
+    var aId = _erpq_readIdValue(f.article_id);
+    var aRef = aId ? (articleMap[aId] || {}) : {};
+    var aName1 = ((f.article_name1 != null ? f.article_name1 : aRef.name1) || '').trim();
+    var aName2 = ((f.article_name2 != null ? f.article_name2 : aRef.name2) || '').trim();
+    var manNo = ((f.manufacturer_no != null ? f.manufacturer_no : aRef.manufacturer_no) || '').trim();
+    var split = _erpq_splitDescriptionTitleAndBody(rawDesc);
+    var titleText = split.title;
+    var titleHtml = (split.isHtml && split.titleHtml) ? split.titleHtml : _erpq_escapeHtml(split.title);
+    if (aName1 && aName2 && titleText) {
+      var norm = function (s) { return (s || '').toLowerCase().replace(/\s+/g, ' ').trim(); };
+      var titleN = norm(titleText);
+      if (titleN === norm(aName1 + ' ' + aName2) || titleN === norm(aName1 + aName2)) {
+        titleText = aName1; titleHtml = _erpq_escapeHtml(aName1);
+      }
+    }
+    var bodyBlock = (split.isHtml && split.bodyHtml)
+      ? '<div style="font-size:9px;color:#334155;line-height:1.35;margin-top:8px;">' + split.bodyHtml + '</div>'
+      : (split.bodyText
+        ? '<div style="font-size:9px;color:#334155;line-height:1.35;margin-top:8px;white-space:pre-line;">' + _erpq_escapeHtml(split.bodyText) + '</div>'
+        : '');
+    var italicLines = [];
+    if (aName2) italicLines.push(_erpq_escapeHtml(aName2));
+    if (manNo) italicLines.push(_erpq_escapeHtml(manNo));
+    var italicBlock = italicLines.length
+      ? '<div style="font-size:9px;font-style:italic;font-weight:400;color:#475569;line-height:1.35;margin-top:8px;">' + italicLines.join('<br>') + '</div>'
+      : '';
+    var descCell =
+      '<div style="font-weight:700;">' + (titleHtml || '<span style="color:#94A3B8;font-style:italic;">— Bezeichnung —</span>') + '</div>' +
+      italicBlock + bodyBlock;
+    var tdBase = 'padding:6px 4px;border-bottom:1px solid #F1F5F9;vertical-align:top;';
+    var tdNum = tdBase + 'text-align:right;font-variant-numeric:tabular-nums;';
+    return '<tr>' +
+      '<td style="' + tdBase + '">' + _erpq_escapeHtml(String(f.pos || '')) + '</td>' +
+      '<td style="' + tdBase + '">' + _erpq_escapeHtml(String(f.qty || '')) + '</td>' +
+      '<td style="' + tdBase + '">' + _erpq_escapeHtml(f.unit || '') + '</td>' +
+      '<td style="' + tdBase + '">' + descCell +
+        (discAbs > 0 ? '<div style="font-size:9px;color:#B45309;margin-top:2px;">Rabatt: −' + _erpq_formatPrice(discAbs) + ' €</div>' : '') +
+      '</td>' +
+      '<td style="' + tdNum + '">' + _erpq_formatPrice(f.unit_price_net || 0) + ' €</td>' +
+      '<td style="' + tdNum + '">' + _erpq_formatPrice(lineNet) + ' €</td>' +
+    '</tr>';
+  }).join('');
+  var positionsBlock = items.length
+    ? '<table style="width:100%;font-size:12px;border-collapse:collapse;">' +
+        '<thead><tr style="border-bottom:1px solid #CBD5E1;color:#334155;">' +
+          '<th style="' + thBase + '">Pos.</th><th style="' + thBase + '">Anzahl</th>' +
+          '<th style="' + thBase + '">Einheit</th><th style="' + thBase + '">Bezeichnung</th>' +
+          '<th style="' + thRight + '">Einzelpreis</th><th style="' + thRight + '">Gesamtpreis</th>' +
+        '</tr></thead><tbody>' + rowsHtml + '</tbody></table>'
+    : '<div style="font-size:12px;color:#94A3B8;font-style:italic;">— noch keine Positionen —</div>';
 
-    // SUMMEN
-    '<div style="margin-top:12px;margin-bottom:16px;">' +
-      '<table class="erpq-sums" style="margin-left:auto;min-width:62%;font-size:13px;">' +
-        '<tbody>' +
-          '<tr><td>Summe</td><td style="text-align:right;" class="erpq-tab">' + _erpq_formatPrice(sums.subtotal_net) + ' €</td></tr>' +
-          '<tr><td>Mehrwertsteuer 19% auf ' + _erpq_formatPrice(sums.subtotal_net) + ' € netto</td><td style="text-align:right;" class="erpq-tab">' + _erpq_formatPrice(sums.vat_total) + ' €</td></tr>' +
-          '<tr style="font-weight:700;"><td style="padding-top:4px;border-top:1px solid #CBD5E1;">Gesamtbetrag</td><td style="text-align:right;padding-top:4px;border-top:1px solid #CBD5E1;" class="erpq-tab">' + _erpq_formatPrice(sums.total_gross) + ' €</td></tr>' +
-        '</tbody>' +
-      '</table>' +
-    '</div>' +
+  // === BLOCK 4: Summen ===
+  var sumsBlock =
+    '<table style="margin-left:auto;min-width:62%;font-size:13px;border-collapse:collapse;">' +
+      '<tbody>' +
+        '<tr><td style="padding:2px 0;">Summe</td><td style="padding:2px 0;text-align:right;font-variant-numeric:tabular-nums;">' + _erpq_formatPrice(sums.subtotal_net) + ' €</td></tr>' +
+        '<tr><td style="padding:2px 0;">Mehrwertsteuer 19% auf ' + _erpq_formatPrice(sums.subtotal_net) + ' € netto</td><td style="padding:2px 0;text-align:right;font-variant-numeric:tabular-nums;">' + _erpq_formatPrice(sums.vat_total) + ' €</td></tr>' +
+        '<tr style="font-weight:700;"><td style="padding:4px 0 2px;border-top:1px solid #CBD5E1;">Gesamtbetrag</td><td style="padding:4px 0 2px;text-align:right;border-top:1px solid #CBD5E1;font-variant-numeric:tabular-nums;">' + _erpq_formatPrice(sums.total_gross) + ' €</td></tr>' +
+      '</tbody>' +
+    '</table>';
 
-    // LIEFERUNG / ZAHLUNG
-    '<div style="font-size:12px;margin-top:12px;">' +
-      '<div style="margin-bottom:8px;">' + _erpq_escapeHtml(q.delivery_terms || 'Die Lieferung erfolgt frei Haus.') + '</div>' +
-      (q.payment_terms
-        ? '<div><div style="color:#334155;">Zahlungsbedingungen:</div><div>' + _erpq_escapeHtml(q.payment_terms) + '</div></div>'
-        : '') +
-    '</div>' +
+  // === BLOCK 5: KONDITIONEN (Lieferung / Zahlung / Gewährleistung) ===
+  // Gruppierung: JEDE Kondition = EIN unteilbarer <div>, in dem Label UND
+  // Wert zusammenhängen (padding-top:2px verhindert, dass beim Messen die
+  // Zeilen auseinanderfallen). Das ganze Konditionen-Set ist EIN Body-Block,
+  // damit "Zahlungsbedingungen:" nie vom Wert getrennt wird.
+  var condRows = [];
+  // Lieferung (immer; Default frei Haus wie im ERP-Preview)
+  condRows.push(
+    '<div style="margin-bottom:8px;">' + _erpq_escapeHtml(q.delivery_terms || 'Die Lieferung erfolgt frei Haus.') + '</div>'
+  );
+  // Zahlungsbedingungen (Label + Wert als EIN Block)
+  if (q.payment_terms) {
+    condRows.push(
+      '<div style="margin-bottom:8px;">' +
+        '<div style="color:#334155;">Zahlungsbedingungen:</div>' +
+        '<div>' + _erpq_escapeHtml(q.payment_terms) + '</div>' +
+      '</div>'
+    );
+  }
+  // Gewährleistung (optional, Label + Wert als EIN Block) — data.quote.warranty_terms
+  if (q.warranty_terms) {
+    condRows.push(
+      '<div style="margin-bottom:8px;">' +
+        '<div style="color:#334155;">Gewährleistung:</div>' +
+        '<div>' + _erpq_escapeHtml(q.warranty_terms) + '</div>' +
+      '</div>'
+    );
+  }
+  var conditionsBlock = '<div style="font-size:12px;">' + condRows.join('') + '</div>';
 
-    // CLOSING
-    (closing && !q.force_closing_new_page
-      ? '<div style="font-size:12px;margin-top:16px;line-height:1.6;">' + _erpq_renderTemplateContent(closing) + '</div>'
-      : '') +
+  // === BLOCK 6: Closing (inline, wenn nicht auf eigene Seite gezwungen) ===
+  var closingInlineBlock = (closing && !q.force_closing_new_page)
+    ? '<div style="font-size:12px;line-height:1.6;">' + _erpq_renderTemplateContent(closing) + '</div>'
+    : '';
 
-    // FOOTER-BAND
-    '<div style="margin-top:32px;">' + _erpq_renderFooterHtml(footer) + '</div>' +
+  // Erzwungenes Closing auf eigener Seite
+  var forcedClosingHtml = (closing && q.force_closing_new_page)
+    ? '<div style="font-size:12px;line-height:1.6;">' + _erpq_renderTemplateContent(closing) + '</div>'
+    : '';
 
-    // erzwungener Closing-Block auf eigener "Seite"
-    (closing && q.force_closing_new_page
-      ? '<div style="page-break-before:always;font-size:12px;margin-top:32px;line-height:1.6;">' + _erpq_renderTemplateContent(closing) + '</div>'
-      : '') +
+  // Atomare Body-Blöcke in Reihenfolge. `mt` = Abstand VOR dem Block (im
+  // Single-Flow als margin-top; in der Paginierung als Höhen-Aufschlag).
+  var blocks = [];
+  blocks.push({ key: 'cover', html: coverBlock, mt: 0 });
+  blocks.push({ key: 'intro', html: introBlock, mt: 16 });
+  blocks.push({ key: 'positions', html: positionsBlock, mt: 16 });
+  blocks.push({ key: 'sums', html: sumsBlock, mt: 12 });
+  blocks.push({ key: 'conditions', html: conditionsBlock, mt: 12 });
+  if (closingInlineBlock) blocks.push({ key: 'closing', html: closingInlineBlock, mt: 16 });
 
-    '</div>' + // erpq-sheet
-    '</div>';  // erpq-root
+  return {
+    css: '.erpq-root{font-family:Inter,system-ui,-apple-system,sans-serif;color:#0F172A;font-size:13px;line-height:1.5;box-sizing:border-box;}.erpq-root *{box-sizing:border-box;}',
+    headerHtml: headerHtml,
+    logosHtml: logosHtml,
+    footerHtml: footerHtml,
+    blocks: blocks,
+    hasForcedClosing: !!forcedClosingHtml,
+    forcedClosingHtml: forcedClosingHtml
+  };
+}
 
-  return html;
+/* =====================================================================
+ * erpQuoteHtml(data) — EIN durchgehender HTML-String (Preview / Single-Flow).
+ * Rückgabe visuell identisch zur bisherigen Version.
+ * ===================================================================== */
+function erpQuoteHtml(data) {
+  var p = _erpq_buildParts(data);
+  var body = p.blocks.map(function (b) {
+    return '<div style="margin-top:' + b.mt + 'px;">' + b.html + '</div>';
+  }).join('');
+  var forced = p.hasForcedClosing
+    ? '<div style="page-break-before:always;margin-top:32px;">' + p.forcedClosingHtml + '</div>'
+    : '';
+  return '<style>' + p.css + '</style>' +
+    '<div class="erpq-root">' +
+      '<div style="width:794px;max-width:100%;background:#fff;padding:36px 50px 24px;margin:0 auto;">' +
+        '<div style="margin-bottom:4px;">' + p.headerHtml + '</div>' +
+        (p.logosHtml ? '<div style="margin-top:4px;margin-bottom:8px;">' + p.logosHtml + '</div>' : '') +
+        body +
+        '<div style="margin-top:32px;">' + p.footerHtml + '</div>' +
+        forced +
+      '</div>' +
+    '</div>';
+}
+
+/* =====================================================================
+ * Höhenmessung eines Block-HTML bei Content-Breite. Nutzt einen off-screen
+ * Messcontainer (benötigt live DOM). Ohne DOM → grobe Fallback-Schätzung.
+ * ===================================================================== */
+function _erpq_makeMeasurer() {
+  if (typeof document === 'undefined' || !document.body) return null;
+  var host = document.createElement('div');
+  host.className = 'erpq-root';
+  host.style.cssText = 'position:fixed;left:-99999px;top:0;width:' + _erpq_contentWidth() +
+    'px;visibility:hidden;font-family:Inter,system-ui,sans-serif;color:#0F172A;font-size:13px;line-height:1.5;';
+  document.body.appendChild(host);
+  return {
+    height: function (html) {
+      host.innerHTML = '<div>' + html + '</div>';
+      var h = host.firstChild ? host.firstChild.scrollHeight : host.scrollHeight;
+      return h;
+    },
+    destroy: function () { if (host.parentNode) host.parentNode.removeChild(host); }
+  };
+}
+// Fallback-Höhenschätzung (nur wenn kein DOM): grob nach Textlänge/Zeilen.
+function _erpq_estimateHeight(block) {
+  var text = String(block.html || '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+  if (block.key === 'cover') return 210;
+  if (block.key === 'positions') {
+    var rows = (block.html.match(/<tr\b/gi) || []).length; // inkl. thead
+    return 24 + rows * 34;
+  }
+  if (block.key === 'sums') return 70;
+  var lines = Math.max(1, Math.ceil(text.length / 90));
+  return 20 + lines * 20;
+}
+
+/* =====================================================================
+ * erpQuoteRenderSheets(data) — ELEMENT-basierte Paginierung.
+ * -> Array vollständiger A4-Sheet-HTML-Strings.
+ * Greedy: ganze Blöcke packen bis usableH voll; passt ein Block nicht mehr,
+ * wandert er komplett auf die nächste Seite. KEIN Block wird zerschnitten.
+ * Ein Block größer als usableH überläuft allein auf seiner Seite (Ausnahme).
+ * Kopf auf jeder Seite; Logos nur Seite 1; Fuß auf jeder Seite.
+ * ===================================================================== */
+function erpQuoteRenderSheets(data) {
+  var p = _erpq_buildParts(data);
+  var hasLogos = !!p.logosHtml;
+  var usableH = _erpq_usableH(hasLogos);
+  var usableH_noLogos = _erpq_usableH(false);
+
+  var measurer = _erpq_makeMeasurer();
+  var measure = function (html) {
+    return measurer ? measurer.height(html) : null;
+  };
+
+  // Höhen der Blöcke (inkl. mt-Abstand) messen.
+  var measured = p.blocks.map(function (b) {
+    var h = measure(b.html);
+    if (h == null) h = _erpq_estimateHeight(b);
+    return { key: b.key, html: b.html, mt: b.mt, h: h };
+  });
+  if (measurer) measurer.destroy();
+
+  // Greedy-Packen in Seiten. Seite 1 hat weniger Platz (Logos), Folgeseiten mehr.
+  var pages = [];      // Array<Array<block>>
+  var cur = [];
+  var curH = 0;
+  var pageCap = function () { return pages.length === 0 ? usableH : usableH_noLogos; };
+
+  for (var i = 0; i < measured.length; i++) {
+    var blk = measured[i];
+    var addH = (cur.length === 0 ? 0 : blk.mt) + blk.h; // erster Block einer Seite ohne mt
+    if (cur.length > 0 && (curH + addH) > pageCap()) {
+      // passt nicht mehr → Seite abschließen, Block auf neue Seite
+      pages.push(cur);
+      cur = [];
+      curH = 0;
+      addH = blk.h; // neuer Seitenanfang: kein mt
+    }
+    cur.push(blk);
+    curH += addH;
+  }
+  if (cur.length) pages.push(cur);
+  if (pages.length === 0) pages.push([]);
+
+  // Erzwungenes Closing = eigene Seite am Ende.
+  var totalPages = pages.length + (p.hasForcedClosing ? 1 : 0);
+
+  var sheets = [];
+  for (var pi = 0; pi < pages.length; pi++) {
+    var isFirst = pi === 0;
+    var bodyHtml = pages[pi].map(function (b, idx) {
+      var mt = idx === 0 ? 0 : b.mt;
+      return '<div style="margin-top:' + mt + 'px;">' + b.html + '</div>';
+    }).join('');
+    sheets.push(_erpq_composeSheet({
+      css: p.css, headerHtml: p.headerHtml,
+      logosHtml: isFirst ? p.logosHtml : '',
+      footerHtml: p.footerHtml, bodyHtml: bodyHtml,
+      pageIndex: pi, totalPages: totalPages, overflow: false
+    }));
+  }
+  if (p.hasForcedClosing) {
+    sheets.push(_erpq_composeSheet({
+      css: p.css, headerHtml: p.headerHtml, logosHtml: '',
+      footerHtml: p.footerHtml, bodyHtml: p.forcedClosingHtml,
+      pageIndex: pages.length, totalPages: totalPages, overflow: false
+    }));
+  }
+  return sheets;
+}
+
+/* Setzt EIN vollständiges A4-Sheet zusammen (absolute Positionierung wie ERP). */
+function _erpq_composeSheet(o) {
+  var S = _ERPQ_SHEET;
+  var hasLogos = !!(o.logosHtml && o.logosHtml.trim());
+  var contentTop = S.PAD_T + S.HEADER_H + (hasLogos ? S.LOGOS_H : 0) + S.GAP;
+  var contentH = S.A4_H - contentTop - S.FOOTER_H - S.PAD_B;
+  var pageLabel = o.totalPages > 1
+    ? '<div style="position:absolute;top:6px;right:' + S.PAD_LR + 'px;font-size:9px;color:#94A3B8;z-index:5;background:#FFFFFF;padding:2px 4px;">Seite ' + (o.pageIndex + 1) + ' von ' + o.totalPages + '</div>'
+    : '';
+  return '<style>' + o.css + '</style>' +
+    '<div class="erpq-root">' +
+      '<div class="erpq-sheet" style="position:relative;width:' + S.A4_W + 'px;height:' + S.A4_H + 'px;background:#FFFFFF;overflow:hidden;">' +
+        // Kopf (jede Seite)
+        '<div style="position:absolute;top:' + S.PAD_T + 'px;left:' + S.PAD_LR + 'px;right:' + S.PAD_LR + 'px;height:' + S.HEADER_H + 'px;">' + o.headerHtml + '</div>' +
+        // Logos (nur Seite 1)
+        (hasLogos ? '<div style="position:absolute;top:' + (S.PAD_T + S.HEADER_H) + 'px;left:' + S.PAD_LR + 'px;right:' + S.PAD_LR + 'px;height:' + S.LOGOS_H + 'px;">' + o.logosHtml + '</div>' : '') +
+        // Body-Slice (element-weise komplette Blöcke; overflow hidden als Sicherheitsnetz)
+        '<div style="position:absolute;top:' + contentTop + 'px;left:' + S.PAD_LR + 'px;right:' + S.PAD_LR + 'px;height:' + contentH + 'px;overflow:hidden;">' + o.bodyHtml + '</div>' +
+        // Fuß (jede Seite)
+        '<div style="position:absolute;bottom:' + S.PAD_B + 'px;left:' + S.PAD_LR + 'px;right:' + S.PAD_LR + 'px;">' + o.footerHtml + '</div>' +
+        pageLabel +
+      '</div>' +
+    '</div>';
 }
 
 /* ---------------------------------------------------------------------
- * OPTIONAL: HTML → PDF-Blob (identische Technik wie ERP Hero).
- * Rendert das HTML off-screen, screenshottet mit html2canvas (scale 2)
- * und bettet das PNG als A4-Seite via pdf-lib ein.
- * html2canvas + pdf-lib müssen im Browser verfügbar sein
- * (window.html2canvas, window.PDFLib) — sonst werden sie per CDN geladen.
+ * Script-Loader für optionale Libs
  * ------------------------------------------------------------------- */
 function _erpq_loadScriptOnce(src) {
   return new Promise(function (resolve, reject) {
@@ -40123,46 +40271,60 @@ function _erpq_loadScriptOnce(src) {
   });
 }
 
+/* =====================================================================
+ * erpQuoteToPdfBlob(data, opts) — jedes Sheet EINZELN per html2canvas
+ * (scale 2) rendern -> genau EINE A4-Seite je Sheet ins pdf-lib-Dokument.
+ * Ränder kommen aus dem Sheet-Layout (kein nachträglicher Zuschnitt).
+ * Benötigt window.html2canvas + window.PDFLib (werden bei Bedarf geladen).
+ * opts: { html2canvasUrl, pdfLibUrl, scale }
+ * ===================================================================== */
 async function erpQuoteToPdfBlob(data, opts) {
   opts = opts || {};
+  var scale = opts.scale || 2;
   await _erpq_loadScriptOnce(opts.html2canvasUrl || 'https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js');
   await _erpq_loadScriptOnce(opts.pdfLibUrl || 'https://cdnjs.cloudflare.com/ajax/libs/pdf-lib/1.17.1/pdf-lib.min.js');
 
-  var host = document.createElement('div');
-  host.style.cssText = 'position:fixed;left:-10000px;top:0;width:794px;background:#fff;';
-  host.innerHTML = erpQuoteHtml(data);
-  document.body.appendChild(host);
-  try {
-    var canvas = await window.html2canvas(host.firstChild.nextSibling || host, {
-      scale: 2, useCORS: true, allowTaint: true, backgroundColor: '#FFFFFF',
-      width: host.scrollWidth, height: host.scrollHeight
-    });
-    var PDFDocument = window.PDFLib.PDFDocument;
-    var pdfDoc = await PDFDocument.create();
-    var A4_W = 595.28, A4_H = 841.89;
-    var png = await pdfDoc.embedPng(canvas.toDataURL('image/png'));
-    // Seitenverhältnis erhalten: Höhe skalieren, ggf. mehrere Seiten
-    var imgW = A4_W;
-    var imgH = (canvas.height / canvas.width) * A4_W;
-    var y = 0;
-    while (y < imgH) {
+  var sheets = erpQuoteRenderSheets(data);
+  var PDFDocument = window.PDFLib.PDFDocument;
+  var pdfDoc = await PDFDocument.create();
+  var A4_W = 595.28, A4_H = 841.89; // A4 in PDF-Punkten
+
+  for (var i = 0; i < sheets.length; i++) {
+    var host = document.createElement('div');
+    host.style.cssText = 'position:fixed;left:-99999px;top:0;width:' + _ERPQ_SHEET.A4_W + 'px;background:#FFFFFF;';
+    host.innerHTML = sheets[i];
+    document.body.appendChild(host);
+    try {
+      var sheetEl = host.querySelector('.erpq-sheet') || host;
+      var canvas = await window.html2canvas(sheetEl, {
+        scale: scale, useCORS: true, allowTaint: true, backgroundColor: '#FFFFFF',
+        width: _ERPQ_SHEET.A4_W, height: _ERPQ_SHEET.A4_H,
+        windowWidth: _ERPQ_SHEET.A4_W, windowHeight: _ERPQ_SHEET.A4_H
+      });
+      var png = await pdfDoc.embedPng(canvas.toDataURL('image/png'));
       var page = pdfDoc.addPage([A4_W, A4_H]);
-      page.drawImage(png, { x: 0, y: A4_H - imgH + y, width: imgW, height: imgH });
-      y += A4_H;
+      // 1 Sheet == 1 A4-Seite: das Sheet HAT bereits A4-Seitenverhältnis (794×1123),
+      // daher exakt füllend zeichnen — keine Verzerrung, keine Zuschnitte.
+      page.drawImage(png, { x: 0, y: 0, width: A4_W, height: A4_H });
+    } finally {
+      document.body.removeChild(host);
     }
-    var bytes = await pdfDoc.save();
-    return new Blob([bytes], { type: 'application/pdf' });
-  } finally {
-    document.body.removeChild(host);
   }
+  var bytes = await pdfDoc.save();
+  return new Blob([bytes], { type: 'application/pdf' });
 }
 
 /* Export (Browser-global + CommonJS falls vorhanden) */
 if (typeof module !== 'undefined' && module.exports) {
-  module.exports = { erpQuoteHtml: erpQuoteHtml, erpQuoteToPdfBlob: erpQuoteToPdfBlob };
+  module.exports = {
+    erpQuoteHtml: erpQuoteHtml,
+    erpQuoteRenderSheets: erpQuoteRenderSheets,
+    erpQuoteToPdfBlob: erpQuoteToPdfBlob
+  };
 }
 if (typeof window !== 'undefined') {
   window.erpQuoteHtml = erpQuoteHtml;
+  window.erpQuoteRenderSheets = erpQuoteRenderSheets;
   window.erpQuoteToPdfBlob = erpQuoteToPdfBlob;
 }
 
