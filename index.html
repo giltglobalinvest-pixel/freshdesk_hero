@@ -784,7 +784,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.235';
+const APP_VERSION = 'v2.46.236';
 
 /* ============================================================
    GLOBAL THEME — v2.46.12
@@ -1646,6 +1646,15 @@ async function erpHeroUpdate(table, recordId, fields) {
   });
   if (!r.ok) { const t = await r.text().catch(() => ''); throw new Error('ERP Hero update ' + table + ' HTTP ' + r.status + ': ' + t.slice(0, 200)); }
   return await r.json();
+}
+
+/* GET eines einzelnen Records per ID. */
+async function erpHeroGet(table, id) {
+  await erpHeroEnsureKeys();
+  const r = await fetch('https://api.airtable.com/v0/' + ERPHERO.baseId + '/' + encodeURIComponent(table) + '/' + id, { headers: { 'Authorization': 'Bearer ' + ERPHERO.writeKey } });
+  if (!r.ok) throw new Error('ERP Hero get ' + table + ' HTTP ' + r.status);
+  const d = await r.json();
+  return { id: d.id, f: d.fields || {} };
 }
 
 /* Aktive Mandanten (Company) laden — für die Mandanten-Auswahl im FLP-Angebot. */
@@ -23998,7 +24007,7 @@ async function _flpFindContact(customerId, email) {
 async function openFlpAngebotModal(accountId, ticketId) {
   let host = document.getElementById('subModalHost');
   if (!host) { host = document.createElement('div'); host.id = 'subModalHost'; document.body.appendChild(host); }
-  window._FLP_ANG = { accountId, ticketId, ticket: null, customer: null, contact: null, selectedCustomer: null, _custResults: [] };
+  window._FLP_ANG = { accountId, ticketId, ticket: null, customer: null, contact: null, selectedCustomer: null, selectedContact: null, _custResults: [], _contResults: [] };
   const fld = (label, id, ph, val) =>
     '<label class="block"><span class="text-[11px] font-semibold text-ink-600">' + label + '</span>' +
     '<input id="' + id + '" value="' + escapeAttr(val || '') + '" placeholder="' + escapeAttr(ph || '') + '" class="mt-0.5 w-full px-2.5 py-1.5 border border-ink-300 rounded-lg text-sm"></label>';
@@ -24011,7 +24020,7 @@ async function openFlpAngebotModal(accountId, ticketId) {
         '</div>' +
         '<div class="flex-1 overflow-y-auto p-4 space-y-3">' +
           '<div><label class="text-[11px] font-semibold text-ink-600 block mb-0.5">Mandant (ERP Hero) *</label>' +
-            '<select id="flpMandantSel" onchange="_flpClearSelectedCustomer()" class="w-full px-3 py-2 border border-ink-300 rounded-lg text-sm bg-white"><option>Lade Mandanten…</option></select></div>' +
+            '<select id="flpMandantSel" onchange="_flpClearSelectedCustomer();_flpClearSelectedContact()" class="w-full px-3 py-2 border border-ink-300 rounded-lg text-sm bg-white"><option>Lade Mandanten…</option></select></div>' +
           '<button onclick="_flpFillFromEmail(this)" class="w-full px-2 py-1.5 bg-indigo-50 hover:bg-indigo-100 border border-indigo-200 text-indigo-700 rounded-lg text-[12px] font-bold inline-flex items-center justify-center gap-1.5"><i data-lucide="sparkles" class="w-3.5 h-3.5"></i> Kunde + Kontakt aus E-Mail laden (KI)</button>' +
           '<div class="border border-ink-200 rounded-xl p-3 space-y-2">' +
             '<p class="text-[11px] font-bold text-ink-700 uppercase tracking-wider inline-flex items-center gap-1"><i data-lucide="building" class="w-3.5 h-3.5"></i> Kunde</p>' +
@@ -24025,6 +24034,9 @@ async function openFlpAngebotModal(accountId, ticketId) {
           '</div>' +
           '<div class="border border-ink-200 rounded-xl p-3 space-y-2">' +
             '<p class="text-[11px] font-bold text-ink-700 uppercase tracking-wider inline-flex items-center gap-1"><i data-lucide="user" class="w-3.5 h-3.5"></i> Ansprechpartner</p>' +
+            '<div class="flex items-center gap-1.5"><i data-lucide="search" class="w-3.5 h-3.5 text-ink-400 shrink-0"></i>' +
+              '<input id="flpContSearch" type="search" placeholder="Bestehenden Kontakt aus ERP suchen…" oninput="_flpSearchContacts()" class="flex-1 px-2.5 py-1.5 border border-ink-300 rounded-lg text-[12px]"></div>' +
+            '<div id="flpContList" class="space-y-1"></div>' +
             '<div class="grid grid-cols-2 gap-2">' + fld('Vorname', 'flpCFirst', '') + fld('Nachname', 'flpCLast', '') + '</div>' +
             '<div class="grid grid-cols-2 gap-2">' + fld('E-Mail', 'flpCEmail', '') + fld('Telefon', 'flpCTel', '') + '</div>' +
             fld('Position/Funktion', 'flpCRole', 'z.B. Einkauf') +
@@ -24107,12 +24119,10 @@ async function _flpSearchCustomers() {
   } catch (e) { box.innerHTML = '<p class="text-[11px] text-red-600 px-1">Suche fehlgeschlagen: ' + escapeHtml((e.message || String(e)).slice(0, 70)) + '</p>'; }
 }
 
-/* Gewählten ERP-Kunden übernehmen: Felder + Primär-Kontakt vorbefüllen. */
-async function _flpSelectCustomer(recordId) {
+/* Kunden-Record in die Felder übernehmen + „gewählt"-Indikator (ohne Kontakt-Load). */
+function _flpApplyCustomer(rec) {
   const st = window._FLP_ANG;
-  if (!st) return;
-  const rec = (st._custResults || []).find(r => r.id === recordId);
-  if (!rec) return;
+  if (!st || !rec) return;
   st.selectedCustomer = rec;
   const f = rec.f;
   const setV = (id, v) => { const e = document.getElementById(id); if (e) e.value = v || ''; };
@@ -24124,6 +24134,17 @@ async function _flpSelectCustomer(recordId) {
   const box = document.getElementById('flpCustList');
   if (box) box.innerHTML = '<div class="bg-indigo-50 border border-indigo-200 rounded-lg px-2 py-1.5 text-[12px] text-indigo-800 flex items-center justify-between gap-2"><span>✓ Gewählt: <b>' + escapeHtml(f.name1 || '?') + '</b>' + (f.customer_no ? ' (' + escapeHtml(f.customer_no) + ')' : '') + '</span><button onclick="_flpClearSelectedCustomer()" class="text-indigo-600 underline text-[11px] shrink-0">ändern</button></div>';
   const s2 = document.getElementById('flpCustSearch'); if (s2) s2.value = '';
+}
+
+/* Gewählten ERP-Kunden übernehmen: Felder + Primär-Kontakt vorbefüllen. */
+async function _flpSelectCustomer(recordId) {
+  const st = window._FLP_ANG;
+  if (!st) return;
+  const rec = (st._custResults || []).find(r => r.id === recordId);
+  if (!rec) return;
+  _flpApplyCustomer(rec);
+  const f = rec.f;
+  const setV = (id, v) => { const e = document.getElementById(id); if (e) e.value = v || ''; };
   // Primär-Kontakt des Kunden vorbefüllen (falls vorhanden)
   try {
     const cf = "FIND('" + String(f.name1 || '').toLowerCase().replace(/'/g, '') + "',LOWER(ARRAYJOIN({customer_id}&'')))>0";
@@ -24142,6 +24163,58 @@ function _flpClearSelectedCustomer() {
   const st = window._FLP_ANG;
   if (st) st.selectedCustomer = null;
   const box = document.getElementById('flpCustList'); if (box) box.innerHTML = '';
+}
+
+/* v2.46.236: Bestehende Kontakte suchen — bei gewähltem Kunden auf dessen
+   Kontakte eingegrenzt, sonst global (Name/E-Mail). */
+async function _flpSearchContacts() {
+  const st = window._FLP_ANG;
+  const box = document.getElementById('flpContList');
+  if (!st || !box) return;
+  const q = (document.getElementById('flpContSearch')?.value || '').trim();
+  if (q.length < 2) { box.innerHTML = ''; return; }
+  box.innerHTML = '<p class="text-[11px] text-ink-400 px-1"><span class="spinner inline-block w-3 h-3 mr-1"></span>Suche…</p>';
+  const esc = q.toLowerCase().replace(/'/g, '');
+  const filter = "OR(FIND('" + esc + "',LOWER({name}&''))>0,FIND('" + esc + "',LOWER({first_name}&''))>0,FIND('" + esc + "',LOWER({last_name}&''))>0,FIND('" + esc + "',LOWER({email}&''))>0)";
+  try {
+    let recs = await erpHeroRead('Contact', { filter, maxRecords: 50 });
+    if (st.selectedCustomer) recs = recs.filter(r => (r.f.customer_id || []).includes(st.selectedCustomer.id));
+    const hits = recs.slice(0, 25);
+    st._contResults = hits;
+    box.innerHTML = hits.length
+      ? hits.map(r => '<button onclick="_flpSelectContact(\'' + escapeAttr(r.id) + '\')" class="w-full text-left px-2 py-1.5 rounded-md text-[12px] bg-ink-50 hover:bg-indigo-50 border border-transparent hover:border-indigo-300">' +
+          '<b>' + escapeHtml(r.f.name || [r.f.first_name, r.f.last_name].filter(Boolean).join(' ') || '?') + '</b>' +
+          (r.f.role ? ' <span class="text-ink-400">· ' + escapeHtml(r.f.role) + '</span>' : '') +
+          (r.f.email ? ' <span class="text-ink-400">· ' + escapeHtml(r.f.email) + '</span>' : '') + '</button>').join('')
+      : '<p class="text-[11px] text-ink-500 px-1">Kein Kontakt gefunden — sonst neu anlegen (Felder unten).</p>';
+  } catch (e) { box.innerHTML = '<p class="text-[11px] text-red-600 px-1">Suche fehlgeschlagen: ' + escapeHtml((e.message || String(e)).slice(0, 70)) + '</p>'; }
+}
+
+/* Gewählten Kontakt übernehmen; zugehörigen Kunden mitziehen wenn noch keiner gewählt. */
+async function _flpSelectContact(recordId) {
+  const st = window._FLP_ANG;
+  if (!st) return;
+  const rec = (st._contResults || []).find(r => r.id === recordId);
+  if (!rec) return;
+  st.selectedContact = rec;
+  const f = rec.f;
+  const setV = (id, v) => { const e = document.getElementById(id); if (e) e.value = v || ''; };
+  setV('flpCFirst', f.first_name); setV('flpCLast', f.last_name);
+  setV('flpCEmail', f.email); setV('flpCTel', f.phone || f.mobile); setV('flpCRole', f.role);
+  const box = document.getElementById('flpContList');
+  if (box) box.innerHTML = '<div class="bg-indigo-50 border border-indigo-200 rounded-lg px-2 py-1.5 text-[12px] text-indigo-800 flex items-center justify-between gap-2"><span>✓ Gewählt: <b>' + escapeHtml(f.name || [f.first_name, f.last_name].filter(Boolean).join(' ') || '?') + '</b></span><button onclick="_flpClearSelectedContact()" class="text-indigo-600 underline text-[11px] shrink-0">ändern</button></div>';
+  const s2 = document.getElementById('flpContSearch'); if (s2) s2.value = '';
+  // Zugehörigen Kunden mitziehen, wenn noch keiner gewählt
+  const custId = (f.customer_id || [])[0];
+  if (custId && !st.selectedCustomer) {
+    try { const c = await erpHeroGet('Customer', custId); _flpApplyCustomer(c); } catch (_) {}
+  }
+}
+
+function _flpClearSelectedContact() {
+  const st = window._FLP_ANG;
+  if (st) st.selectedContact = null;
+  const box = document.getElementById('flpContList'); if (box) box.innerHTML = '';
 }
 
 async function _flpPushKundeKontakt(btn) {
@@ -24174,7 +24247,7 @@ async function _flpPushKundeKontakt(btn) {
     st.customer = customer;
     // 2) Kontakt: Dedup → Update, sonst anlegen
     const cEmail = g('flpCEmail') || email;
-    let contact = await _flpFindContact(customer.id, cEmail);
+    let contact = st.selectedContact || await _flpFindContact(customer.id, cEmail);
     const contactFields = _flpStripEmpty({
       first_name: g('flpCFirst'), last_name: lastName,
       name: [g('flpCFirst'), lastName].filter(Boolean).join(' '),
