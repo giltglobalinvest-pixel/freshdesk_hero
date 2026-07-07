@@ -784,7 +784,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.241';
+const APP_VERSION = 'v2.46.242';
 
 /* ============================================================
    GLOBAL THEME — v2.46.12
@@ -24516,19 +24516,20 @@ function _flpSubVars(txt) {
   return String(txt || '').replace(/\{\{\s*([a-zA-Z_.]+)\s*\}\}/g, (m, key) => (key.toLowerCase() in map) ? map[key.toLowerCase()] : '');
 }
 
-/* Bundle → Einleitung/Schluss auflösen (aus Textemplate.content). */
+/* Bundle → Einleitung/Schluss auflösen. Roh-HTML (introRaw/closingRaw) für den
+   ERP-Renderer + stripped Fallback. */
 async function _flpResolveBundle(bundle) {
-  if (!bundle) return { intro: '', closing: '', layout_variant: '' };
+  if (!bundle) return { intro: '', closing: '', introRaw: '', closingRaw: '', layout_variant: '' };
   const f = bundle.f;
-  let intro = '', closing = '';
-  const strip = h => String(h || '').replace(/<br\s*\/?>/gi, '\n').replace(/<\/(p|div|li)>/gi, '\n').replace(/<[^>]+>/g, '').replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&').replace(/\n{3,}/g, '\n\n').trim();
+  let introRaw = '', closingRaw = '';
   if (f.intro_template_id || f.closing_template_id) {
     const tpls = await erpHeroRead('Textemplate', { maxRecords: 500 }).catch(() => []);
     const byId = new Map(tpls.map(t => [t.id, t.f]));
-    if (f.intro_template_id && byId.get(f.intro_template_id)) intro = _flpSubVars(strip(byId.get(f.intro_template_id).content));
-    if (f.closing_template_id && byId.get(f.closing_template_id)) closing = _flpSubVars(strip(byId.get(f.closing_template_id).content));
+    if (f.intro_template_id && byId.get(f.intro_template_id)) introRaw = String(byId.get(f.intro_template_id).content || '');
+    if (f.closing_template_id && byId.get(f.closing_template_id)) closingRaw = String(byId.get(f.closing_template_id).content || '');
   }
-  return { intro, closing, layout_variant: f.layout_variant || '' };
+  const strip = h => String(h || '').replace(/<br\s*\/?>/gi, '\n').replace(/<\/(p|div|li)>/gi, '\n').replace(/<[^>]+>/g, '').replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&').replace(/\n{3,}/g, '\n\n').trim();
+  return { intro: _flpSubVars(strip(introRaw)), closing: _flpSubVars(strip(closingRaw)), introRaw, closingRaw, layout_variant: f.layout_variant || '' };
 }
 
 async function _flpOnBundleChange(bundleId) {
@@ -24540,61 +24541,70 @@ async function _flpOnBundleChange(bundleId) {
   _flpRenderPdfPreview();
 }
 
-/* FLP-Positionen + Bundle → BK-PDF-Record für _buildAngebotPdf. */
-function _flpBuildRec() {
+/* v2.46.242: FLP-Briefkopf (identisch zu ERP Heros FLP_BRAND) für den portierten
+   ERP-Renderer erpQuoteHtml(data). */
+const _ERP_FLP_BRAND = {
+  taglineTop: 'Zertifizierte Generalüberholung von Frequenzumrichter und Elektronik',
+  companyName: 'FLP Lift Parts GmbH',
+  managingDirector: 'Geschäftsführer Patrizio Fontanarosa',
+  street: 'Erich-Herion-Straße 16',
+  cityLine: 'D - 70734 Fellbach',
+  ustId: 'USt.Id.-Nr.: DE 313 059 811',
+  email: 'info@flp-shop.com', web: 'www.flp-shop.com',
+  tel: '+49 711 219 59 764', fax: '+49 711 219 59 740',
+  hrb: '761229', ag: 'Stuttgart',
+  bankName: 'Volksbank Stuttgart eG', iban: 'DE38 6009 0100 0500 3610 02', bic: 'VOBADESS', blz: '600 901 00',
+  senderAddressLine: 'FLP Lift Parts GmbH · Erich-Herion-Str. 16 · 70734 Fellbach · DE',
+};
+
+/* FLP-Chat-State → data-Objekt für den portierten ERP-Renderer. */
+function _flpBuildErpData() {
   const st = window._FLP_ANG || {};
   const pos = (st.positionen || []).filter(p => p.bezeichnung || p.article_no);
-  const bkPos = pos.map((p, i) => ({
-    nr: i + 1, titel: p.bezeichnung || p.article_no || 'Position',
-    leistungsbeschreibung: p.article_no ? ['Art-Nr: ' + p.article_no] : [],
-    vp: +p.einzelpreis || 0, menge: +p.menge || 1, einheit: p.unit || 'Stück', preis_aufwand: false,
-  }));
-  const totals = _flpCalcTotals(pos);
   const c = st.customer?.f || {};
-  const kundeAdr = [c.street, [c.zip, c.city].filter(Boolean).join(' '), (c.country && c.country !== 'Deutschland') ? c.country : ''].filter(Boolean).join('\n');
-  const kont = st.contact?.f || {};
+  const k = st.contact?.f || {};
   const br = st.bundleResolved || {};
+  const today = new Date().toISOString().slice(0, 10);
+  const valid = new Date(Date.now() + 30 * 864e5).toISOString().slice(0, 10);
   return {
-    firma: 'flp',
-    app_angebot_num: (st.quoteNo || 'FLP-' + (st.ticketId || '?')).replace(/^ANG-/, ''),
-    angebot_typ: 'sonstiges',
-    kunde_name: c.name1 || '',
-    kunde_adresse: kundeAdr,
-    kontakt_name: kont.name || [kont.first_name, kont.last_name].filter(Boolean).join(' ') || '',
-    anlage_adresse: '', seriennummer: '',
-    anschreiben: br.intro || '',
-    abrechnung_modus: 'pauschal', preisanzeige_modus: 'einzel', pauschalpreis_netto: 0,
-    positionen_json: JSON.stringify(bkPos),
-    stundensaetze_json: '[]',
-    ust_prozent: +(pos[0]?.mwst) || 19,
-    summe_netto_vp: totals.netto, summe_brutto_vp: totals.brutto,
-    kond_lieferzeit: '', kond_preisbasis: '', kond_zahlung: c.payment_terms || '14 Tage netto',
-    kond_gewaehrleistung: '', kond_hinweise: br.closing || '',
-    erstellt_am: new Date().toISOString().slice(0, 10),
-    gesamtpreis_ausblenden: false,
+    quote: {
+      quote_no: st.quoteNo || '(Entwurf)',
+      date: today, valid_until: valid,
+      payment_terms: c.payment_terms || '14 Tage netto',
+      delivery_terms: c.delivery_terms || '',
+      quote_title: '', custom_values: {},
+    },
+    customer: c,
+    contact: k,
+    company: { name: st.mandantName || 'FLP Lift Parts GmbH' },
+    brand: _ERP_FLP_BRAND,
+    user: { name: (APP_KEYS.user && APP_KEYS.user.name) || '' },
+    items: pos.map((p, i) => ({
+      pos: i + 1, article_no: p.article_no || '', name: p.bezeichnung || '',
+      description: (p.bezeichnung || '') + (p.article_no ? '\nArt-Nr: ' + p.article_no : ''),
+      qty: +p.menge || 1, unit: p.unit || 'Stück',
+      unit_price_net: +p.einzelpreis || 0, discount_pct: +p.rabatt_pct || 0, vat_rate: +p.mwst || 19,
+    })),
+    intro: br.introRaw || '', closing: br.closingRaw || '',
+    layout_variant: 'standard',
   };
 }
 
-let _FLP_PDF_SEQ = 0;
-async function _flpRenderPdfPreview() {
+/* Live-Vorschau im EXAKTEN ERP-Hero-Layout (portierter Renderer, HTML→iframe). */
+function _flpRenderPdfPreview() {
   const wrap = document.getElementById('flpPdfPreview');
   const st = window._FLP_ANG;
   if (!wrap || !st) return;
   const pos = (st.positionen || []).filter(p => p.bezeichnung || p.article_no);
-  if (!pos.length) { wrap.innerHTML = '<div class="h-full flex items-center justify-center text-center text-ink-400 text-[12px] p-4">Die PDF-Vorschau erscheint, sobald Positionen da sind.<br>Beschreib links die Ersatzteile.</div>'; return; }
-  const seq = ++_FLP_PDF_SEQ;
+  if (!pos.length) { wrap.innerHTML = '<div class="h-full flex items-center justify-center text-center text-ink-400 text-[12px] p-4">Die Vorschau (ERP-Hero-Layout) erscheint, sobald Positionen da sind.<br>Beschreib links die Ersatzteile.</div>'; return; }
   try {
-    if (typeof _ensurePdfLibs === 'function') await _ensurePdfLibs();
-    const rec = _flpBuildRec();
-    const blob = await _buildAngebotPdf(rec);
-    if (seq !== _FLP_PDF_SEQ) return;
-    const url = URL.createObjectURL(blob);
-    if (st._flpPdfUrl) { try { URL.revokeObjectURL(st._flpPdfUrl); } catch (_) {} }
-    st._flpPdfUrl = url;
-    wrap.innerHTML = '<iframe src="' + url + '#toolbar=0&navpanes=0" class="w-full h-full rounded-lg border border-ink-200 bg-white" style="min-height:420px"></iframe>';
+    if (typeof erpQuoteHtml !== 'function') { wrap.innerHTML = '<div class="text-[11px] text-red-600 p-3">Renderer nicht geladen — bitte App neu laden.</div>'; return; }
+    const html = erpQuoteHtml(_flpBuildErpData());
+    let iframe = wrap.querySelector('iframe');
+    if (!iframe) { wrap.innerHTML = '<iframe class="w-full h-full rounded-lg border border-ink-200 bg-white" style="min-height:420px"></iframe>'; iframe = wrap.querySelector('iframe'); }
+    iframe.srcdoc = html;
   } catch (e) {
-    if (seq !== _FLP_PDF_SEQ) return;
-    wrap.innerHTML = '<div class="text-[11px] text-red-600 p-3">PDF-Vorschau fehlgeschlagen: ' + escapeHtml((e.message || String(e)).slice(0, 120)) + '</div>';
+    wrap.innerHTML = '<div class="text-[11px] text-red-600 p-3">Vorschau fehlgeschlagen: ' + escapeHtml((e.message || String(e)).slice(0, 160)) + '</div>';
   }
 }
 
@@ -39377,5 +39387,665 @@ if ('serviceWorker' in navigator && (location.protocol === 'https:' || location.
   });
 }
 </script>
+
+<!-- ERPQ_RENDERER_START (portiertes ERP-Hero Angebots-Layout · v2.46.242) -->
+<script>
+/* =====================================================================
+ * ERP HERO — Angebots-PDF-Renderer (portiert für Freshdesk Hero)
+ * ---------------------------------------------------------------------
+ * EINE selbst-enthaltene Funktion `erpQuoteHtml(data)` liefert den
+ * KOMPLETTEN HTML-String (inkl. inline <style>) für ein Angebot,
+ * visuell identisch zum ERP-Hero-Angebots-PDF/-Preview.
+ *
+ * KEINE Abhängigkeit auf ERP-Hero-Globals (getCurrentCompany, FLP_BRAND,
+ * TEMPLATE_VARIABLES, Tailwind, …). Alles kommt aus `data`.
+ * Alle Helfer sind mit Prefix `_erpq_` benannt → keine Namenskollisionen.
+ *
+ * Quelle (ERP Hero index.html):
+ *   - renderQuotePreviewHtml   ~Z.24360  (das echte PDF-Layout; Tailwind → hier inline-CSS)
+ *   - renderQuotePdfHtml       ~Z.25636  (alternativer reiner Inline-CSS-Renderer)
+ *   - buildQuoteFooterData     ~Z.24254
+ *   - renderQuoteFooterHtml    ~Z.24286
+ *   - splitDescriptionTitleAndBody ~Z.24326
+ *   - substituteVariables + TEMPLATE_VARIABLES ~Z.22258/22412
+ *   - calcQuoteSums / calcLineNet ~Z.22219/22245
+ *   - formatPrice / formatDeDate  ~Z.19387/22252
+ *   - escapeHtml / renderTemplateContent ~Z.12647/13837
+ *   - flpLogoInlineSvg (SVG-Symbol ~Z.356)
+ *
+ * PDF-Blob: das ERP macht KEIN Vektor-PDF aus diesem HTML, sondern
+ * screenshottet die gerenderte Preview mit html2canvas (scale 2) und
+ * bettet die PNGs seitenweise via pdf-lib in ein A4-PDF ein
+ * (buildQuotePdfBlob ~Z.25911, exportQuoteAsPdf ~Z.25750).
+ * Am Ende dieser Datei ist ein optionaler Helfer `erpQuoteToPdfBlob`
+ * mit exakt dieser Logik (html2canvas + pdf-lib) enthalten.
+ * ===================================================================== */
+
+/* ---------------------------------------------------------------------
+ * FLP_BRAND Default (nur Fallback; wird von data.brand überschrieben)
+ * ------------------------------------------------------------------- */
+var _ERPQ_BRAND_DEFAULT = {
+  taglineTop: 'Zertifizierte Generalüberholung von Frequenzumrichter und Elektronik',
+  companyName: 'FLP Lift Parts GmbH',
+  managingDirector: 'Geschäftsführer Patrizio Fontanarosa',
+  street: 'Erich-Herion-Straße 16',
+  cityLine: 'D - 70734 Fellbach',
+  ustId: 'USt.Id.-Nr.: DE 313 059 811',
+  email: 'info@flp-shop.com',
+  web: 'www.flp-shop.com',
+  tel: '+49 711 219 59 764',
+  fax: '+49 711 219 59 740',
+  hrb: '761229',
+  ag: 'Stuttgart',
+  bankName: 'Volksbank Stuttgart eG',
+  iban: 'DE38 6009 0100 0500 3610 02',
+  bic: 'VOBADESS',
+  blz: '600 901 00',
+  senderAddressLine: 'FLP Lift Parts GmbH · Erich-Herion-Str. 16 · 70734 Fellbach · DE'
+};
+
+/* Inline-SVG des FLP-Logos (aus <symbol id="flp-logo">, komplett selbst-tragend). */
+function _erpq_flpLogoInlineSvg(heightPx) {
+  var viewBox = '50.2 112.3 319.9 73.5';
+  var inner =
+    '<path fill="#007EAC" d="M298,113.8h70.6v70.6H298V113.8z M296.6,185.8h73.5v-73.5h-73.5V185.8z"/>' +
+    '<polygon fill="#575756" points="91.7,112.3 50.2,112.3 50.2,185.8 123.7,185.8 123.7,138.2 123.7,112.3 "/>' +
+    '<polygon fill="#007EAC" points="173.8,112.3 132.3,112.3 132.3,185.8 205.8,185.8 205.8,138.2 205.8,112.3 "/>' +
+    '<polygon fill="#007EAC" points="256,112.3 214.5,112.3 214.5,185.8 287.9,185.8 287.9,138.2 287.9,112.3 "/>' +
+    '<path fill="#F6F6F6" d="M69,131.6v-5.1h32.2v5.1H75.5 M75.5,146.4h24.4v5.1H75.5v20.2H69v-25.3"/>' +
+    '<polygon fill="#F6F6F6" points="157.7,126.6 164.2,126.6 164.2,166.5 190.1,166.5 190.1,171.6 157.7,171.6 "/>' +
+    '<path fill="#F6F6F6" d="M231.8,127.3h20.7c13.5,0,18,4,18,12.1c0,7.8-5.2,13.1-16.1,13.1h-16.2v19.7h-6.5V127.3z M252.9,147.4 c7.5,0,10.8-2.6,10.8-8c0-4.9-2.8-7-11.3-7h-14.1v15H252.9z"/>' +
+    '<path fill="#007EAC" d="M348.7,163H347v3.1h-3.1V163h-1.7v7.8h1.7v-3.4h3.1v3.4h1.7V163z M334.3,167.5c0.9,0,1.4,0.3,1.4,1 c0,0.4-0.1,0.6-0.3,0.8c-0.2,0.2-0.6,0.3-1,0.3h-1.1v-2H334.3z M333.3,164.4h0.9c0.5,0,0.8,0.1,1,0.2c0.2,0.1,0.3,0.3,0.3,0.6 c0,0.3-0.1,0.6-0.3,0.7c-0.2,0.1-0.5,0.2-1,0.2h-1V164.4z M331.6,170.9h2.9c0.9,0,1.6-0.2,2.1-0.6c0.5-0.4,0.8-1,0.8-1.7 c0-0.5-0.1-0.9-0.3-1.2s-0.6-0.5-1.1-0.6v-0.1c0.4-0.1,0.7-0.2,0.9-0.5c0.2-0.3,0.3-0.7,0.3-1.2c0-0.7-0.3-1.2-0.8-1.5 c-0.5-0.3-1.3-0.5-2.4-0.5h-2.4V170.9z M322.8,170.9l2-6.1h0c0,1-0.1,1.6-0.1,1.8c0,0.2,0,0.4,0,0.6v3.7h1.6V163h-2.3l-2,6h0 l-1.9-6h-2.3v7.8h1.5v-3.6c0-0.4,0-1.3-0.1-2.5h0l1.9,6.2H322.8z M309.7,167.8h1.5v1.6c-0.4,0.1-0.7,0.1-1.1,0.1 c-0.7,0-1.2-0.2-1.5-0.7c-0.3-0.4-0.5-1.1-0.5-1.9c0-0.8,0.2-1.5,0.6-1.9c0.4-0.5,1-0.7,1.7-0.7c0.6,0,1.2,0.1,1.8,0.4l0.6-1.3 c-0.7-0.3-1.5-0.5-2.3-0.5c-1.3,0-2.3,0.4-3,1.1c-0.7,0.7-1.1,1.7-1.1,3c0,1.3,0.3,2.3,0.9,3c0.6,0.7,1.5,1,2.7,1 c0.5,0,0.9,0,1.4-0.1c0.4-0.1,0.9-0.2,1.4-0.3v-4.1h-3.1V167.8z"/>' +
+    '<path fill="#007EAC" d="M352.2,149.5c-0.3-0.4-0.8-0.7-1.5-1.1c-0.6-0.3-0.9-0.4-1.1-0.6c-0.1-0.1-0.3-0.2-0.3-0.3s-0.1-0.2-0.1-0.4 c0-0.2,0.1-0.4,0.3-0.6c0.2-0.1,0.4-0.2,0.7-0.2c0.3,0,0.5,0,0.8,0.1c0.3,0.1,0.6,0.2,1,0.4l0.5-1.3c-0.4-0.2-0.8-0.3-1.2-0.4 c-0.4-0.1-0.8-0.1-1.2-0.1c-0.8,0-1.5,0.2-2,0.6c-0.5,0.4-0.7,0.9-0.7,1.6c0,0.4,0.1,0.7,0.2,1c0.1,0.3,0.3,0.5,0.6,0.7 c0.2,0.2,0.6,0.4,1.1,0.6c0.5,0.2,0.9,0.4,1,0.5c0.2,0.1,0.3,0.2,0.4,0.3c0.1,0.1,0.1,0.3,0.1,0.4c0,0.3-0.1,0.5-0.3,0.6 c-0.2,0.1-0.5,0.2-0.8,0.2c-0.3,0-0.6,0-1-0.1c-0.4-0.1-0.8-0.3-1.3-0.5v1.5c0.6,0.3,1.4,0.5,2.2,0.5c0.9,0,1.6-0.2,2.1-0.6 c0.5-0.4,0.8-1,0.8-1.7C352.6,150.3,352.5,149.8,352.2,149.5 M341.3,146.5h2.1v-1.4h-5.9v1.4h2.1v6.5h1.7V146.5z M330.3,149.9 l1.9,3h1.8c-0.4-0.5-1.1-1.7-2.3-3.4c0.5-0.2,0.8-0.5,1.1-0.8c0.3-0.4,0.4-0.8,0.4-1.2c0-0.8-0.3-1.4-0.8-1.8 c-0.5-0.4-1.3-0.6-2.4-0.6h-2.3v7.8h1.7v-3H330.3z M329.4,146.5h0.5c0.5,0,0.9,0.1,1.2,0.2c0.3,0.2,0.4,0.4,0.4,0.8 c0,0.4-0.1,0.7-0.4,0.8c-0.2,0.2-0.6,0.3-1.2,0.3h-0.5V146.5z M318.7,149.7c0.6-1.8,0.9-2.9,1-3.4c0,0.1,0.1,0.3,0.1,0.5 c0.1,0.2,0.4,1.2,0.9,2.9H318.7z M323.5,153l-2.8-7.9h-2l-2.8,7.9h1.8l0.6-1.9h2.9l0.6,1.9H323.5z M311.4,145.7 c-0.5-0.4-1.2-0.6-2.2-0.6h-2.5v7.8h1.7v-2.8h0.7c1,0,1.7-0.2,2.3-0.7c0.5-0.4,0.8-1.1,0.8-1.9 C312.1,146.7,311.9,146.1,311.4,145.7 M308.3,146.5h0.8c0.5,0,0.8,0.1,1,0.3c0.2,0.2,0.3,0.5,0.3,0.9c0,0.4-0.1,0.7-0.4,0.9 c-0.3,0.2-0.6,0.3-1.1,0.3h-0.5V146.5z"/>' +
+    '<path fill="#007EAC" d="M335.5,128.6h2.1v-1.4h-5.9v1.4h2.1v6.5h1.7V128.6z M324.8,131.9h2.7v-1.4h-2.7v-2h2.9v-1.4h-4.5v7.8h1.6V131.9 z M317.9,127.2h-1.7v7.8h1.7V127.2z M311.5,135v-1.4h-3.2v-6.5h-1.7v7.8H311.5z"/>';
+  var styleBlock = '<style>.st0{fill:#007EAC;}.st1{fill:#575756;}.st2{fill:#F6F6F6;}</style>';
+  return '<svg xmlns="http://www.w3.org/2000/svg" viewBox="' + viewBox +
+    '" style="height:' + heightPx + 'px;width:auto;display:block;margin-left:auto;">' +
+    styleBlock + inner + '</svg>';
+}
+
+/* Logo-HTML für Quote-Header. Company.logo (Attachment mit .url) bevorzugt, sonst FLP-SVG. */
+function _erpq_buildQuoteLogoHtml(company, heightPx) {
+  var logo = ((company && company.logo) || [])[0];
+  if (logo && logo.url) {
+    return '<img src="' + _erpq_escapeHtml(logo.url) + '" crossorigin="anonymous" style="height:' +
+      heightPx + 'px;width:auto;display:block;margin-left:auto;" alt="Logo">';
+  }
+  return _erpq_flpLogoInlineSvg(heightPx);
+}
+
+/* ---------------------------------------------------------------------
+ * Basis-Helfer
+ * ------------------------------------------------------------------- */
+function _erpq_escapeHtml(s) {
+  return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) {
+    return ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c];
+  });
+}
+
+function _erpq_formatPrice(n) {
+  if (n === null || n === undefined || n === '') return '';
+  return new Intl.NumberFormat('de-DE', { minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(n);
+}
+
+function _erpq_formatDeDate(iso) {
+  if (!iso) return '';
+  var m = String(iso).match(/^(\d{4})-(\d{2})-(\d{2})/);
+  return m ? (m[3] + '.' + m[2] + '.' + m[1]) : iso;
+}
+
+function _erpq_calcLineNet(qty, price, disc) {
+  return Math.round((((qty || 0) * (price || 0) * (1 - (disc || 0) / 100))) * 100) / 100;
+}
+
+function _erpq_calcQuoteSums(items) {
+  var subtotal_net = 0, vat_total = 0, ek_total = 0;
+  (items || []).forEach(function (it) {
+    var f = it.fields || it;
+    var qty = +(f.qty || 0);
+    var price = +(f.unit_price_net || 0);
+    var disc = +(f.discount_pct || 0);
+    var vat = +(f.vat_rate || 0);
+    var ek = +(f.purchase_price || 0);
+    var lineNet = qty * price * (1 - disc / 100);
+    var lineVat = lineNet * vat / 100;
+    subtotal_net += lineNet;
+    vat_total += lineVat;
+    ek_total += qty * ek;
+  });
+  var margin = subtotal_net - ek_total;
+  return {
+    subtotal_net: Math.round(subtotal_net * 100) / 100,
+    vat_total: Math.round(vat_total * 100) / 100,
+    total_gross: Math.round((subtotal_net + vat_total) * 100) / 100,
+    ek_total: Math.round(ek_total * 100) / 100,
+    margin: Math.round(margin * 100) / 100,
+    margin_pct: subtotal_net > 0 ? Math.round((margin / subtotal_net) * 1000) / 10 : 0
+  };
+}
+
+/* Reiner Text/HTML-Renderer für Intro/Closing: HTML durchreichen, sonst \n → <br>. */
+function _erpq_renderTemplateContent(s) {
+  var txt = String(s == null ? '' : s);
+  if (!txt) return '';
+  if (/<(p|br|strong|em|b|i|u|ol|ul|li|h[1-6]|span|div)\b/i.test(txt)) return txt;
+  return _erpq_escapeHtml(txt).replace(/\n/g, '<br>');
+}
+
+function _erpq_readIdValue(val) {
+  if (Array.isArray(val)) return val[0] || '';
+  if (typeof val === 'string' && val) return val;
+  return '';
+}
+
+function _erpq_contactSalutation(f) {
+  f = f || {};
+  if (f.gender === 'männlich') return 'Herr';
+  if (f.gender === 'weiblich') return 'Frau';
+  return '';
+}
+
+function _erpq_contactDisplayName(f) {
+  f = f || {};
+  var full = [f.first_name, f.last_name].filter(Boolean).join(' ');
+  return full || f.name || '–';
+}
+
+function _erpq_addressesEqual(a, b) {
+  if (!a || !b) return false;
+  return (a.street || '') === (b.street || '')
+    && (a.zip || '') === (b.zip || '')
+    && (a.city || '') === (b.city || '')
+    && (a.country || '') === (b.country || '')
+    && (a.recipient || '') === (b.recipient || '');
+}
+
+/* ---------------------------------------------------------------------
+ * Positions-Beschreibung splitten (Bezeichnung / Body).
+ * Nutzt DOMParser statt document.createElement, damit es auch außerhalb
+ * eines live DOM (z.B. in Workern) läuft; fällt auf document zurück.
+ * ------------------------------------------------------------------- */
+function _erpq_splitDescriptionTitleAndBody(rawDesc) {
+  var out = { title: '', titleHtml: '', bodyHtml: '', bodyText: '', isHtml: false };
+  if (!rawDesc) return out;
+  var isHtml = /<(p|br|strong|em|b|i|u|ol|ul|li|h[1-6]|span|div)\b/i.test(rawDesc);
+  out.isHtml = isHtml;
+  if (isHtml) {
+    var tmp;
+    if (typeof document !== 'undefined' && document.createElement) {
+      tmp = document.createElement('div');
+      tmp.innerHTML = rawDesc;
+    } else {
+      var doc = new DOMParser().parseFromString('<div id="_r">' + rawDesc + '</div>', 'text/html');
+      tmp = doc.getElementById('_r');
+    }
+    var titleEl = null;
+    var kids = Array.prototype.slice.call(tmp.children);
+    for (var i = 0; i < kids.length; i++) {
+      var t = (kids[i].textContent || '').trim();
+      if (t) { titleEl = kids[i]; out.title = t; out.titleHtml = kids[i].innerHTML; break; }
+    }
+    if (titleEl) titleEl.remove();
+    while (tmp.firstElementChild && !(tmp.firstElementChild.textContent || '').trim()) {
+      tmp.firstElementChild.remove();
+    }
+    out.bodyHtml = (tmp.innerHTML || '').trim();
+    out.bodyText = (tmp.textContent || '').trim();
+    if (!out.title) out.title = (rawDesc.replace(/<[^>]+>/g, '') || '').trim();
+  } else {
+    var lines = String(rawDesc).split('\n').map(function (l) { return l.trim(); }).filter(Boolean);
+    out.title = lines[0] || '';
+    out.titleHtml = '';
+    out.bodyHtml = '';
+    out.bodyText = lines.slice(1).join('\n');
+  }
+  return out;
+}
+
+/* ---------------------------------------------------------------------
+ * Footer-Daten (aus buildQuoteFooterData). Speist sich aus data.company
+ * (falls Felder gesetzt) mit Fallback auf data.brand (= FLP_BRAND).
+ * ------------------------------------------------------------------- */
+function _erpq_buildFooterData(company, brand) {
+  var c = company || {};
+  var b = brand || _ERPQ_BRAND_DEFAULT;
+  var cityLine = (c.zip && c.city) ? ('D - ' + c.zip + ' ' + c.city) : (c.city ? ('D - ' + c.city) : b.cityLine);
+  var senderParts = [c.name || b.companyName, c.street || b.street, [c.zip, c.city].filter(Boolean).join(' '), 'DE'].filter(Boolean);
+  var brandColor = (c.brand_color || '').trim();
+  if (brandColor && brandColor.charAt(0) !== '#') brandColor = '#' + brandColor;
+  if (!/^#[0-9A-Fa-f]{3,8}$/.test(brandColor)) brandColor = '#1FA8D6';
+  return {
+    taglineTop: b.taglineTop,
+    companyName: c.name || b.companyName,
+    managingDirector: c.managing_director ? ('Geschäftsführer ' + c.managing_director) : b.managingDirector,
+    street: c.street || b.street,
+    cityLine: cityLine,
+    ustId: c.vat_id ? ('USt.Id.-Nr.: ' + c.vat_id) : b.ustId,
+    email: c.email || b.email,
+    web: c.web || b.web,
+    tel: c.phone || b.tel,
+    fax: c.fax || b.fax,
+    hrb: c.hrb || b.hrb,
+    ag: c.ag || b.ag,
+    bankName: c.bank_name || b.bankName,
+    iban: c.iban || b.iban,
+    bic: c.bic || b.bic,
+    blz: c.blz || b.blz,
+    senderAddressLine: (b.senderAddressLine && !c.name) ? b.senderAddressLine : senderParts.join(' · '),
+    brandColor: brandColor
+  };
+}
+
+/* Footer-HTML (aus renderQuoteFooterHtml) — Tailwind → inline CSS. */
+function _erpq_renderFooterHtml(footer) {
+  var cellL = 'font-size:7.5px;line-height:1.5;';
+  var lbl = 'font-weight:700;';
+  function pair(l, v) {
+    return '<div style="' + lbl + '">' + _erpq_escapeHtml(l) + '</div><div>' + _erpq_escapeHtml(v) + '</div>';
+  }
+  return '' +
+    '<div style="display:grid;grid-template-columns:1.4fr 1fr auto 1.2fr;gap:12px;align-items:start;">' +
+      '<div style="' + cellL + '">' +
+        '<div style="font-weight:700;color:#0F172A;font-size:8.5px;margin-bottom:2px;">' + _erpq_escapeHtml(footer.companyName) + '</div>' +
+        '<div style="color:#334155;">' + _erpq_escapeHtml(footer.managingDirector) + '</div>' +
+        '<div style="color:#334155;">' + _erpq_escapeHtml(footer.street) + '</div>' +
+        '<div style="color:#334155;">' + _erpq_escapeHtml(footer.cityLine) + '</div>' +
+        '<div style="color:#334155;">' + _erpq_escapeHtml(footer.ustId) + '</div>' +
+      '</div>' +
+      '<div style="' + cellL + '">' +
+        '<div style="display:grid;grid-template-columns:auto 1fr;column-gap:8px;row-gap:2px;">' +
+          pair('E-Mail', footer.email) + pair('Web', footer.web) + pair('Tel.', footer.tel) + pair('Fax.', footer.fax) +
+        '</div>' +
+      '</div>' +
+      '<div style="' + cellL + '">' +
+        '<div style="display:grid;grid-template-columns:auto 1fr;column-gap:8px;row-gap:2px;">' +
+          pair('HRB', footer.hrb) + pair('AG', footer.ag) +
+        '</div>' +
+      '</div>' +
+      '<div style="' + cellL + '">' +
+        '<div style="display:grid;grid-template-columns:auto 1fr;column-gap:8px;row-gap:2px;">' +
+          pair('Bank', footer.bankName) + pair('IBAN', footer.iban) + pair('BIC', footer.bic) + pair('BLZ', footer.blz) +
+        '</div>' +
+      '</div>' +
+    '</div>' +
+    '<div style="margin-top:8px;height:6px;background:' + _erpq_escapeHtml(footer.brandColor || '#1FA8D6') + ';"></div>';
+}
+
+/* ---------------------------------------------------------------------
+ * Variablen-Substitution ({{angebot.nr}}, {{kontakt.anrede}}, …).
+ * Portiert aus TEMPLATE_VARIABLES + substituteVariables. Nur der
+ * 'Angebot'-Satz (docType wird intern auf 'Angebot' fixiert).
+ * ctx = { quote, customer, contact, company, user, customFields }
+ * ------------------------------------------------------------------- */
+var _ERPQ_TEMPLATE_VARS_ANGEBOT = [
+  { name: 'angebot.nr', resolve: function (c) { return (c.quote && c.quote.quote_no) || ''; } },
+  { name: 'angebot.datum', resolve: function (c) { return _erpq_formatDeDate(c.quote && c.quote.date); } },
+  { name: 'angebot.gueltig_bis', resolve: function (c) { return _erpq_formatDeDate(c.quote && c.quote.valid_until); } },
+  { name: 'angebot.zahlungsziel', resolve: function (c) { return (c.quote && c.quote.payment_terms) || ''; } },
+  { name: 'angebot.lieferung', resolve: function (c) { return (c.quote && c.quote.delivery_terms) || ''; } },
+  { name: 'kunde.firma', resolve: function (c) { return (c.customer && c.customer.name1) || ''; } },
+  { name: 'kunde.firma2', resolve: function (c) { return (c.customer && c.customer.name2) || ''; } },
+  { name: 'kunde.kundennr', resolve: function (c) { return (c.customer && c.customer.customer_no) || ''; } },
+  { name: 'kunde.adresse', resolve: function (c) { var cu = c.customer || {}; return [cu.street, [cu.zip, cu.city].filter(Boolean).join(' ')].filter(Boolean).join(', '); } },
+  { name: 'kunde.ustid', resolve: function (c) { return (c.customer && c.customer.vat_id) || ''; } },
+  { name: 'kontakt.anrede', resolve: function (c) { var g = c.contact && c.contact.gender; if (g === 'männlich') return 'Sehr geehrter Herr'; if (g === 'weiblich') return 'Sehr geehrte Frau'; return 'Sehr geehrte Damen und Herren'; } },
+  { name: 'kontakt.anrede_kurz', resolve: function (c) { return _erpq_contactSalutation(c.contact || {}); } },
+  { name: 'kontakt.vorname', resolve: function (c) { return (c.contact && c.contact.first_name) || ''; } },
+  { name: 'kontakt.nachname', resolve: function (c) { return (c.contact && c.contact.last_name) || ''; } },
+  { name: 'kontakt.name', resolve: function (c) { return _erpq_contactDisplayName(c.contact || {}); } },
+  { name: 'kontakt.email', resolve: function (c) { return (c.contact && c.contact.email) || ''; } },
+  { name: 'firma.name', resolve: function (c) { return (c.company && c.company.name) || ''; } },
+  { name: 'firma.adresse', resolve: function (c) { var co = c.company || {}; return [co.street, [co.zip, co.city].filter(Boolean).join(' ')].filter(Boolean).join(', '); } },
+  { name: 'firma.telefon', resolve: function (c) { return (c.company && c.company.phone) || ''; } },
+  { name: 'firma.email', resolve: function (c) { return (c.company && c.company.email) || ''; } },
+  { name: 'firma.ustid', resolve: function (c) { return (c.company && c.company.vat_id) || ''; } },
+  { name: 'user.name', resolve: function (c) { return (c.user && c.user.name) || ''; } },
+  { name: 'datum.heute', resolve: function () { return _erpq_formatDeDate(new Date().toISOString().slice(0, 10)); } }
+];
+
+function _erpq_substituteVariables(text, ctx) {
+  if (!text) return '';
+  var out = String(text);
+  _ERPQ_TEMPLATE_VARS_ANGEBOT.forEach(function (v) {
+    var ph = '{{' + v.name + '}}';
+    if (out.indexOf(ph) !== -1) {
+      try { out = out.split(ph).join(String(v.resolve(ctx) == null ? '' : v.resolve(ctx))); } catch (e) {}
+    }
+  });
+  var cf = (ctx && ctx.customFields) || {};
+  Object.keys(cf).forEach(function (k) {
+    var ph = '{{' + k + '}}';
+    if (out.indexOf(ph) !== -1) out = out.split(ph).join(String(cf[k] == null ? '' : cf[k]));
+  });
+  out = out.replace(/Sehr\s+(Sehr\s+geehrt[ea]?r?\s+)/gi, '$1');
+  out = out.replace(/(Sehr\s+geehrte\s+Damen\s+und\s+Herren)\s+\S+\s*,/gi, '$1,');
+  return out;
+}
+
+/* =====================================================================
+ * HAUPTFUNKTION
+ * =====================================================================
+ * data = {
+ *   quote:    { quote_no, quote_title, date, valid_until, payment_terms,
+ *               delivery_terms, force_closing_new_page, custom_values? },
+ *   customer: { name1, name2, customer_no, supplier_no, street, zip, city,
+ *               country, vat_id, logo? },
+ *   contact:  { first_name, last_name, name, gender, email },
+ *   company:  { name, street, zip, city, phone, fax, email, web, vat_id,
+ *               managing_director, hrb, ag, bank_name, iban, bic, blz,
+ *               brand_color, logo?, secondary_logo?, sub_logo? },
+ *   brand:    <FLP_BRAND-Objekt> (Fallback für Footer/Absender/Tagline),
+ *   items:    [{ pos, qty, unit, unit_price_net, discount_pct, vat_rate,
+ *                description, article_id?, article_name1?, article_name2?,
+ *                manufacturer_no? }],
+ *   intro:    '<html oder text>',
+ *   closing:  '<html oder text>',
+ *   invoiceAddress?:  { recipient, street, zip, city, country },
+ *   deliveryAddress?: { recipient, street, zip, city, country },
+ *   layout_variant?:  'standard'  (nur 'standard' unterstützt),
+ *   user?:            { name }
+ * }
+ * Rückgabe: kompletter HTML-String inkl. <style>.
+ * ===================================================================== */
+function erpQuoteHtml(data) {
+  data = data || {};
+  var c = data.company || {};
+  var cu = data.customer || {};
+  var co = data.contact || {};
+  var q = data.quote || {};
+  var brand = data.brand || _ERPQ_BRAND_DEFAULT;
+  var items = data.items || [];
+  var articleMap = data.articleMap || {}; // optional: { articleId: {name1,name2,manufacturer_no} }
+  var invoiceAddress = data.invoiceAddress || null;
+  var deliveryAddress = data.deliveryAddress || null;
+
+  // ctx für Variablen-Substitution
+  var ctx = {
+    quote: q, customer: cu, contact: co, company: c,
+    user: data.user || {}, customFields: data.custom_values || q.custom_values || {}
+  };
+
+  var sums = _erpq_calcQuoteSums(items);
+  var intro = _erpq_substituteVariables(data.intro || '', ctx);
+  var closing = _erpq_substituteVariables(data.closing || '', ctx);
+  var footer = _erpq_buildFooterData(c, brand);
+
+  // Empfänger-Anrede (Herrn/Frau + Name)
+  var recipientSalutation = (function () {
+    if (!co || (!co.first_name && !co.last_name)) return '';
+    var g = co.gender;
+    var sal = g === 'männlich' ? 'Herrn' : g === 'weiblich' ? 'Frau' : '';
+    var fullName = [co.first_name, co.last_name].filter(Boolean).join(' ');
+    return [sal, fullName].filter(Boolean).join(' ');
+  })();
+
+  // Tagline: quote_title bevorzugt, sonst brand-Tagline
+  var tagline = (q.quote_title && q.quote_title.trim()) ? q.quote_title : footer.taglineTop;
+
+  // Sekundär-/Sub-Logo (optional, aus company.*_logo Attachment-Arrays)
+  var subLogoUrl = ((c.sub_logo || [])[0] || {}).url || '';
+  var secondaryLogoUrl = ((c.secondary_logo || [])[0] || {}).url || '';
+  var subLogoHtml = subLogoUrl ? '<img src="' + _erpq_escapeHtml(subLogoUrl) + '" crossorigin="anonymous" style="height:70px;width:auto;display:block;" alt="Sub-Logo">' : '';
+  var secondaryLogoHtml = secondaryLogoUrl ? '<img src="' + _erpq_escapeHtml(secondaryLogoUrl) + '" crossorigin="anonymous" style="height:70px;width:auto;display:block;" alt="2. Logo">' : '';
+  var leftLogosBlock = (subLogoHtml || secondaryLogoHtml)
+    ? '<div style="margin-top:4px;margin-bottom:8px;display:flex;align-items:center;gap:12px;justify-content:flex-start;">' + subLogoHtml + secondaryLogoHtml + '</div>'
+    : '';
+
+  // Recipient-Adressblock (invoiceAddress override, sonst customer)
+  var inv = invoiceAddress || {};
+  var recStreet = inv.street || cu.street;
+  var recZipCity = [inv.zip || cu.zip, inv.city || cu.city].filter(Boolean).join(' ');
+  var recCountry = inv.country || cu.country;
+
+  var showDelivery = deliveryAddress && !_erpq_addressesEqual(deliveryAddress, inv) &&
+    (deliveryAddress.street || deliveryAddress.city);
+
+  // Positions-Zeilen
+  var rowsHtml = items.map(function (it) {
+    var f = (it && it.fields) ? it.fields : it; // akzeptiert flach ODER {fields:{}}
+    var lineNet = _erpq_calcLineNet(f.qty, f.unit_price_net, f.discount_pct);
+    var grossLine = (+(f.qty || 0)) * (+(f.unit_price_net || 0));
+    var discAbs = grossLine * ((+(f.discount_pct || 0)) / 100);
+    var rawDesc = f.description || '';
+
+    // Article-Referenz: entweder direkt via article_name1/2/manufacturer_no am Item,
+    // oder via articleMap[article_id].
+    var aId = _erpq_readIdValue(f.article_id);
+    var aRef = aId ? (articleMap[aId] || {}) : {};
+    var aName1 = ((f.article_name1 != null ? f.article_name1 : aRef.name1) || '').trim();
+    var aName2 = ((f.article_name2 != null ? f.article_name2 : aRef.name2) || '').trim();
+    var manNo = ((f.manufacturer_no != null ? f.manufacturer_no : aRef.manufacturer_no) || '').trim();
+
+    var split = _erpq_splitDescriptionTitleAndBody(rawDesc);
+    var titleText = split.title;
+    var titleHtml = (split.isHtml && split.titleHtml) ? split.titleHtml : _erpq_escapeHtml(split.title);
+    if (aName1 && aName2 && titleText) {
+      var norm = function (s) { return (s || '').toLowerCase().replace(/\s+/g, ' ').trim(); };
+      var combinedA = norm(aName1 + ' ' + aName2);
+      var combinedB = norm(aName1 + aName2);
+      var titleN = norm(titleText);
+      if (titleN === combinedA || titleN === combinedB) {
+        titleText = aName1;
+        titleHtml = _erpq_escapeHtml(aName1);
+      }
+    }
+
+    var bodyBlock = (split.isHtml && split.bodyHtml)
+      ? '<div style="font-size:9px;color:#334155;line-height:1.35;margin-top:8px;">' + split.bodyHtml + '</div>'
+      : (split.bodyText
+        ? '<div style="font-size:9px;color:#334155;line-height:1.35;margin-top:8px;white-space:pre-line;">' + _erpq_escapeHtml(split.bodyText) + '</div>'
+        : '');
+
+    var italicLines = [];
+    if (aName2) italicLines.push(_erpq_escapeHtml(aName2));
+    if (manNo) italicLines.push(_erpq_escapeHtml(manNo));
+    var italicBlock = italicLines.length
+      ? '<div style="font-size:9px;font-style:italic;font-weight:400;color:#475569;line-height:1.35;margin-top:8px;">' + italicLines.join('<br>') + '</div>'
+      : '';
+
+    var descCell =
+      '<div style="font-weight:700;">' + (titleHtml || '<span style="color:#94A3B8;font-style:italic;">— Bezeichnung —</span>') + '</div>' +
+      italicBlock + bodyBlock;
+
+    var tdBase = 'padding:6px 4px;border-bottom:1px solid #F1F5F9;vertical-align:top;';
+    var tdNum = tdBase + 'text-align:right;font-variant-numeric:tabular-nums;';
+    return '<tr>' +
+      '<td style="' + tdBase + '">' + _erpq_escapeHtml(String(f.pos || '')) + '</td>' +
+      '<td style="' + tdBase + '">' + _erpq_escapeHtml(String(f.qty || '')) + '</td>' +
+      '<td style="' + tdBase + '">' + _erpq_escapeHtml(f.unit || '') + '</td>' +
+      '<td style="' + tdBase + '">' + descCell +
+        (discAbs > 0 ? '<div style="font-size:9px;color:#B45309;margin-top:2px;">Rabatt: −' + _erpq_formatPrice(discAbs) + ' €</div>' : '') +
+      '</td>' +
+      '<td style="' + tdNum + '">' + _erpq_formatPrice(f.unit_price_net || 0) + ' €</td>' +
+      '<td style="' + tdNum + '">' + _erpq_formatPrice(lineNet) + ' €</td>' +
+    '</tr>';
+  }).join('');
+
+  var thBase = 'padding:6px 4px;text-align:left;font-weight:500;';
+  var thRight = 'padding:6px 4px;text-align:right;font-weight:500;';
+
+  var css =
+    '.erpq-root{font-family:Inter,system-ui,-apple-system,sans-serif;color:#0F172A;font-size:13px;line-height:1.5;box-sizing:border-box;}' +
+    '.erpq-root *{box-sizing:border-box;}' +
+    '.erpq-sheet{width:794px;max-width:100%;background:#fff;padding:48px 56px;margin:0 auto;}' +
+    '.erpq-cols{display:grid;grid-template-columns:1fr 1fr;gap:24px;margin-bottom:12px;}' +
+    '.erpq-table{width:100%;font-size:12px;border-collapse:collapse;margin-bottom:8px;}' +
+    '.erpq-meta-row{display:flex;justify-content:space-between;gap:16px;padding:2px 0;}' +
+    '.erpq-meta-row .l{color:#334155;}' +
+    '.erpq-sums td{padding:2px 0;}' +
+    '.erpq-tab{font-variant-numeric:tabular-nums;}';
+
+  var html =
+    '<style>' + css + '</style>' +
+    '<div class="erpq-root">' +
+    '<div class="erpq-sheet">' +
+
+    // HEADER: Tagline links, Logo rechts
+    '<div style="position:relative;margin-bottom:4px;padding:14px 184px 6px 0;min-height:56px;">' +
+      '<div style="font-size:12px;line-height:28px;color:#334155;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;height:28px;">' + _erpq_escapeHtml(tagline) + '</div>' +
+      '<div style="position:absolute;top:8px;right:0;z-index:2;">' + _erpq_buildQuoteLogoHtml(c, 40) + '</div>' +
+    '</div>' +
+    leftLogosBlock +
+
+    // 2-Spalten: Empfänger links / Titel + Meta rechts
+    '<div class="erpq-cols">' +
+      '<div>' +
+        '<div style="font-size:7px;color:#64748B;border-bottom:1px solid #CBD5E1;padding-bottom:2px;margin-bottom:12px;display:inline-block;line-height:1.2;">' + _erpq_escapeHtml(footer.senderAddressLine) + '</div>' +
+        '<div style="font-size:13px;line-height:1.5;">' +
+          (cu.name1 ? '<div>' + _erpq_escapeHtml(cu.name1) + '</div>' : '<div style="color:#94A3B8;font-style:italic;">— Empfänger —</div>') +
+          (cu.name2 ? '<div>' + _erpq_escapeHtml(cu.name2) + '</div>' : '') +
+          (recipientSalutation ? '<div>' + _erpq_escapeHtml(recipientSalutation) + '</div>' : '') +
+          ((inv.recipient) ? '<div>' + _erpq_escapeHtml(inv.recipient) + '</div>' : '') +
+          (recStreet ? '<div>' + _erpq_escapeHtml(recStreet) + '</div>' : '') +
+          (recZipCity ? '<div>' + _erpq_escapeHtml(recZipCity) + '</div>' : '') +
+          (recCountry ? '<div>' + _erpq_escapeHtml(recCountry) + '</div>' : '') +
+        '</div>' +
+        (showDelivery ?
+          '<div style="font-size:10px;line-height:1.5;margin-top:12px;padding-top:8px;border-top:1px solid #E2E8F0;">' +
+            '<div style="font-weight:600;color:#334155;">Lieferadresse:</div>' +
+            (deliveryAddress.recipient ? '<div>' + _erpq_escapeHtml(deliveryAddress.recipient) + '</div>' : '') +
+            (deliveryAddress.street ? '<div>' + _erpq_escapeHtml(deliveryAddress.street) + '</div>' : '') +
+            ((deliveryAddress.zip || deliveryAddress.city) ? '<div>' + _erpq_escapeHtml([deliveryAddress.zip, deliveryAddress.city].filter(Boolean).join(' ')) + '</div>' : '') +
+            (deliveryAddress.country ? '<div>' + _erpq_escapeHtml(deliveryAddress.country) + '</div>' : '') +
+          '</div>' : '') +
+      '</div>' +
+      '<div>' +
+        '<div style="font-weight:700;letter-spacing:-0.02em;line-height:1;text-align:right;font-size:32px;margin-bottom:14px;color:#0F172A;">Angebot</div>' +
+        '<div style="font-size:10px;">' +
+          '<div style="margin-left:auto;width:fit-content;max-width:100%;">' +
+            '<div class="erpq-meta-row"><span class="l">Angebots-Nr.:</span><span>' + _erpq_escapeHtml(q.quote_no || '–') + '</span></div>' +
+            '<div class="erpq-meta-row"><span class="l">Kunden-Nr.:</span><span>' + _erpq_escapeHtml(cu.customer_no || cu.supplier_no || '–') + '</span></div>' +
+            '<div class="erpq-meta-row"><span class="l">Datum:</span><span>' + _erpq_escapeHtml(_erpq_formatDeDate(q.date)) + '</span></div>' +
+            '<div class="erpq-meta-row"><span class="l">Gültigkeit:</span><span>' + (q.valid_until ? _erpq_escapeHtml(_erpq_formatDeDate(q.valid_until)) : '30 Tage') + '</span></div>' +
+            '<div style="height:8px;"></div>' +
+            '<div style="padding:2px 0;"><span class="l" style="color:#334155;">Kontakt:</span></div>' +
+            '<div class="erpq-meta-row"><span class="l">Telefon:</span><span>' + _erpq_escapeHtml(footer.tel) + '</span></div>' +
+            '<div class="erpq-meta-row"><span class="l">Fax:</span><span>' + _erpq_escapeHtml(footer.fax) + '</span></div>' +
+            '<div class="erpq-meta-row"><span class="l">E-Mail:</span><span>' + _erpq_escapeHtml(footer.email) + '</span></div>' +
+          '</div>' +
+        '</div>' +
+      '</div>' +
+    '</div>' +
+
+    // INTRO
+    (intro
+      ? '<div style="font-size:13px;margin-bottom:16px;line-height:1.6;">' + _erpq_renderTemplateContent(intro) + '</div>'
+      : '<p style="font-size:13px;color:#94A3B8;font-style:italic;margin-bottom:16px;">— Einleitung —</p>') +
+
+    // POSITIONEN
+    (items.length
+      ? '<table class="erpq-table">' +
+          '<thead><tr style="border-bottom:1px solid #CBD5E1;color:#334155;">' +
+            '<th style="' + thBase + '">Pos.</th>' +
+            '<th style="' + thBase + '">Anzahl</th>' +
+            '<th style="' + thBase + '">Einheit</th>' +
+            '<th style="' + thBase + '">Bezeichnung</th>' +
+            '<th style="' + thRight + '">Einzelpreis</th>' +
+            '<th style="' + thRight + '">Gesamtpreis</th>' +
+          '</tr></thead>' +
+          '<tbody>' + rowsHtml + '</tbody>' +
+        '</table>'
+      : '<p style="font-size:12px;color:#94A3B8;font-style:italic;margin-bottom:12px;">— noch keine Positionen —</p>') +
+
+    // SUMMEN
+    '<div style="margin-top:12px;margin-bottom:16px;">' +
+      '<table class="erpq-sums" style="margin-left:auto;min-width:62%;font-size:13px;">' +
+        '<tbody>' +
+          '<tr><td>Summe</td><td style="text-align:right;" class="erpq-tab">' + _erpq_formatPrice(sums.subtotal_net) + ' €</td></tr>' +
+          '<tr><td>Mehrwertsteuer 19% auf ' + _erpq_formatPrice(sums.subtotal_net) + ' € netto</td><td style="text-align:right;" class="erpq-tab">' + _erpq_formatPrice(sums.vat_total) + ' €</td></tr>' +
+          '<tr style="font-weight:700;"><td style="padding-top:4px;border-top:1px solid #CBD5E1;">Gesamtbetrag</td><td style="text-align:right;padding-top:4px;border-top:1px solid #CBD5E1;" class="erpq-tab">' + _erpq_formatPrice(sums.total_gross) + ' €</td></tr>' +
+        '</tbody>' +
+      '</table>' +
+    '</div>' +
+
+    // LIEFERUNG / ZAHLUNG
+    '<div style="font-size:12px;margin-top:12px;">' +
+      '<div style="margin-bottom:8px;">' + _erpq_escapeHtml(q.delivery_terms || 'Die Lieferung erfolgt frei Haus.') + '</div>' +
+      (q.payment_terms
+        ? '<div><div style="color:#334155;">Zahlungsbedingungen:</div><div>' + _erpq_escapeHtml(q.payment_terms) + '</div></div>'
+        : '') +
+    '</div>' +
+
+    // CLOSING
+    (closing && !q.force_closing_new_page
+      ? '<div style="font-size:12px;margin-top:16px;line-height:1.6;">' + _erpq_renderTemplateContent(closing) + '</div>'
+      : '') +
+
+    // FOOTER-BAND
+    '<div style="margin-top:32px;">' + _erpq_renderFooterHtml(footer) + '</div>' +
+
+    // erzwungener Closing-Block auf eigener "Seite"
+    (closing && q.force_closing_new_page
+      ? '<div style="page-break-before:always;font-size:12px;margin-top:32px;line-height:1.6;">' + _erpq_renderTemplateContent(closing) + '</div>'
+      : '') +
+
+    '</div>' + // erpq-sheet
+    '</div>';  // erpq-root
+
+  return html;
+}
+
+/* ---------------------------------------------------------------------
+ * OPTIONAL: HTML → PDF-Blob (identische Technik wie ERP Hero).
+ * Rendert das HTML off-screen, screenshottet mit html2canvas (scale 2)
+ * und bettet das PNG als A4-Seite via pdf-lib ein.
+ * html2canvas + pdf-lib müssen im Browser verfügbar sein
+ * (window.html2canvas, window.PDFLib) — sonst werden sie per CDN geladen.
+ * ------------------------------------------------------------------- */
+function _erpq_loadScriptOnce(src) {
+  return new Promise(function (resolve, reject) {
+    if (Array.prototype.some.call(document.scripts, function (s) { return s.src === src; })) return resolve();
+    var sc = document.createElement('script');
+    sc.src = src; sc.onload = function () { resolve(); };
+    sc.onerror = function () { reject(new Error('Script konnte nicht geladen werden: ' + src)); };
+    document.head.appendChild(sc);
+  });
+}
+
+async function erpQuoteToPdfBlob(data, opts) {
+  opts = opts || {};
+  await _erpq_loadScriptOnce(opts.html2canvasUrl || 'https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js');
+  await _erpq_loadScriptOnce(opts.pdfLibUrl || 'https://cdnjs.cloudflare.com/ajax/libs/pdf-lib/1.17.1/pdf-lib.min.js');
+
+  var host = document.createElement('div');
+  host.style.cssText = 'position:fixed;left:-10000px;top:0;width:794px;background:#fff;';
+  host.innerHTML = erpQuoteHtml(data);
+  document.body.appendChild(host);
+  try {
+    var canvas = await window.html2canvas(host.firstChild.nextSibling || host, {
+      scale: 2, useCORS: true, allowTaint: true, backgroundColor: '#FFFFFF',
+      width: host.scrollWidth, height: host.scrollHeight
+    });
+    var PDFDocument = window.PDFLib.PDFDocument;
+    var pdfDoc = await PDFDocument.create();
+    var A4_W = 595.28, A4_H = 841.89;
+    var png = await pdfDoc.embedPng(canvas.toDataURL('image/png'));
+    // Seitenverhältnis erhalten: Höhe skalieren, ggf. mehrere Seiten
+    var imgW = A4_W;
+    var imgH = (canvas.height / canvas.width) * A4_W;
+    var y = 0;
+    while (y < imgH) {
+      var page = pdfDoc.addPage([A4_W, A4_H]);
+      page.drawImage(png, { x: 0, y: A4_H - imgH + y, width: imgW, height: imgH });
+      y += A4_H;
+    }
+    var bytes = await pdfDoc.save();
+    return new Blob([bytes], { type: 'application/pdf' });
+  } finally {
+    document.body.removeChild(host);
+  }
+}
+
+/* Export (Browser-global + CommonJS falls vorhanden) */
+if (typeof module !== 'undefined' && module.exports) {
+  module.exports = { erpQuoteHtml: erpQuoteHtml, erpQuoteToPdfBlob: erpQuoteToPdfBlob };
+}
+if (typeof window !== 'undefined') {
+  window.erpQuoteHtml = erpQuoteHtml;
+  window.erpQuoteToPdfBlob = erpQuoteToPdfBlob;
+}
+
+</script>
+<!-- ERPQ_RENDERER_END -->
 </body>
 </html>
