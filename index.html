@@ -784,7 +784,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.259';
+const APP_VERSION = 'v2.46.260';
 
 /* ============================================================
    GLOBAL THEME — v2.46.12
@@ -24583,11 +24583,24 @@ function _flpRenderPositionen() {
             '</div>' +
           '</div>' +
           '<div class="hidden sm:flex flex-col min-h-0 bg-ink-100">' +
-            '<div class="flex items-center justify-between px-3 py-1.5 border-b border-ink-200 shrink-0">' +
-              '<span class="text-[10px] font-bold text-ink-500 uppercase tracking-wider">Vorschau · ERP-Layout</span>' +
-              '<div class="flex items-center gap-3">' +
-                '<button onclick="_flpOpenPdf(this)" class="text-[11px] text-indigo-600 font-semibold inline-flex items-center gap-1" title="Als echtes PDF öffnen/herunterladen"><i data-lucide="file-text" class="w-3 h-3"></i> Als PDF öffnen</button>' +
-                '<button onclick="_flpOpenPreviewFullscreen()" class="text-[11px] text-indigo-600 font-semibold inline-flex items-center gap-1" title="Vorschau im Vollbild öffnen"><i data-lucide="maximize-2" class="w-3 h-3"></i> Vollbild</button>' +
+            '<div class="flex items-center justify-between px-3 py-1.5 border-b border-ink-200 shrink-0 gap-2">' +
+              '<span class="text-[10px] font-bold text-ink-500 uppercase tracking-wider shrink-0">Vorschau · ERP-Layout</span>' +
+              '<div class="flex items-center gap-3 min-w-0">' +
+                // v2.46.260: PDF-Sprache — übersetzt NUR die Vorschau/PDF; ERP bleibt deutsch
+                '<span class="inline-flex items-center gap-1 shrink-0" title="PDF-Sprache — übersetzt nur das PDF; im ERP wird das Angebot deutsch gepusht">' +
+                  '<i data-lucide="languages" class="w-3.5 h-3.5 text-ink-500"></i>' +
+                  '<select id="flpPdfLangSel" onchange="_flpSetPdfLang(this.value)" class="text-[11px] border border-ink-300 rounded px-1.5 py-1 bg-white max-w-[130px]">' +
+                    (function () {
+                      const cur = st.pdfLang || '';
+                      const presets = ['', 'English', 'Français', 'Italiano', 'Español', 'Nederlands', 'Polski', 'Türkçe', 'Portugues', 'Čeština'];
+                      let o = presets.map(v => '<option value="' + escapeAttr(v) + '"' + (v === cur ? ' selected' : '') + '>' + escapeHtml(v === '' ? 'Deutsch' : v) + '</option>').join('');
+                      if (cur && presets.indexOf(cur) < 0) o += '<option value="' + escapeAttr(cur) + '" selected>' + escapeHtml(cur) + '</option>';
+                      return o + '<option value="__custom__">Andere…</option>';
+                    })() +
+                  '</select>' +
+                '</span>' +
+                '<button onclick="_flpOpenPdf(this)" class="text-[11px] text-indigo-600 font-semibold inline-flex items-center gap-1 shrink-0" title="Als echtes PDF öffnen/herunterladen"><i data-lucide="file-text" class="w-3 h-3"></i> Als PDF öffnen</button>' +
+                '<button onclick="_flpOpenPreviewFullscreen()" class="text-[11px] text-indigo-600 font-semibold inline-flex items-center gap-1 shrink-0" title="Vorschau im Vollbild öffnen"><i data-lucide="maximize-2" class="w-3 h-3"></i> Vollbild</button>' +
               '</div>' +
             '</div>' +
             '<div id="flpPdfPreview" class="flex-1 min-h-0"></div>' +
@@ -24674,7 +24687,7 @@ function _flpPosEdit(i, field, val) {
   _flpUpdateTotals();
   // PDF-Vorschau + Entwurf debounced aktualisieren (nicht pro Tastendruck)
   clearTimeout(window._flpPdfTimer);
-  window._flpPdfTimer = setTimeout(() => { _flpRenderPdfPreview(); _flpSaveDraft(); }, 600);
+  window._flpPdfTimer = setTimeout(() => { _flpRenderPdfPreview(); _flpSaveDraft(); if (st.pdfLang) _flpSetPdfLang(st.pdfLang); }, 600);
 }
 function _flpAddPos() {
   const st = window._FLP_ANG;
@@ -24760,6 +24773,7 @@ async function _flpOnBundleChange(bundleId) {
   st.bundleResolved = bundle ? await _flpResolveBundle(bundle) : { intro: '', closing: '', layout_variant: '' };
   _flpRenderPdfPreview();
   _flpSaveDraft();
+  if (st.pdfLang) _flpSetPdfLang(st.pdfLang); // v2.46.260: Übersetzung auffrischen (Intro/Schluss geändert)
 }
 
 /* v2.46.242: FLP-Briefkopf (identisch zu ERP Heros FLP_BRAND) für den portierten
@@ -24787,28 +24801,123 @@ function _flpBuildErpData() {
   const br = st.bundleResolved || {};
   const today = new Date().toISOString().slice(0, 10);
   const valid = new Date(Date.now() + 30 * 864e5).toISOString().slice(0, 10);
-  return {
+  // v2.46.260: aktive PDF-Übersetzung (nur Vorschau/PDF; ERP-Push bleibt deutsch)
+  const tr = (st.pdfLang && st.pdfTrans && st.pdfTrans.lang === st.pdfLang) ? st.pdfTrans : null;
+  const artnrPfx = (tr && tr.i18n && tr.i18n.artnr_prefix) || 'Art-Nr:';
+  const itemName = (p, i) => (tr && Array.isArray(tr.items) && tr.items.length === pos.length && tr.items[i] && tr.items[i].name) ? tr.items[i].name : (p.bezeichnung || '');
+  const data = {
     quote: {
       quote_no: st.quoteNo || '(Entwurf)',
       date: today, valid_until: valid,
-      payment_terms: c.payment_terms || '14 Tage netto',
-      delivery_terms: c.delivery_terms || '',
-      quote_title: '', custom_values: {},
+      payment_terms: (tr && tr.payment_terms) || c.payment_terms || '14 Tage netto',
+      delivery_terms: (tr && tr.delivery_terms) || c.delivery_terms || '',
+      quote_title: (tr && tr.tagline) || '', custom_values: {},
     },
     customer: c,
     contact: k,
     company: { name: st.mandantName || 'FLP Lift Parts GmbH' },
     brand: _ERP_FLP_BRAND,
     user: { name: (APP_KEYS.user && APP_KEYS.user.name) || '' },
-    items: pos.map((p, i) => ({
-      pos: i + 1, article_no: p.article_no || '', name: p.bezeichnung || '',
-      description: (p.bezeichnung || '') + (p.article_no ? '\nArt-Nr: ' + p.article_no : ''),
-      qty: +p.menge || 1, unit: p.unit || 'Stück',
-      unit_price_net: +p.einzelpreis || 0, discount_pct: +p.rabatt_pct || 0, vat_rate: +p.mwst || 19,
-    })),
-    intro: br.introRaw || '', closing: br.closingRaw || '',
+    items: pos.map((p, i) => {
+      const nm = itemName(p, i);
+      return {
+        pos: i + 1, article_no: p.article_no || '', name: nm,
+        description: nm + (p.article_no ? '\n' + artnrPfx + ' ' + p.article_no : ''),
+        qty: +p.menge || 1, unit: p.unit || 'Stück',
+        unit_price_net: +p.einzelpreis || 0, discount_pct: +p.rabatt_pct || 0, vat_rate: +p.mwst || 19,
+      };
+    }),
+    intro: (tr && tr.intro) || br.introRaw || '', closing: (tr && tr.closing) || br.closingRaw || '',
     layout_variant: 'standard',
   };
+  if (tr && tr.i18n) data.i18n = tr.i18n;
+  return data;
+}
+
+/* v2.46.260: PDF-Übersetzung — nur für Vorschau/PDF; ERP-Push nutzt deutsche
+   Originaldaten (st.positionen). Labels + Inhalte werden per KI übersetzt und
+   pro Sprache/Inhalt gecacht. */
+const _FLP_PDF_LABELS_DE = {
+  quote_title: 'Angebot', quote_no: 'Angebots-Nr.:', customer_no: 'Kunden-Nr.:', date: 'Datum:', valid_until: 'Gültigkeit:',
+  contact: 'Kontakt:', phone: 'Telefon:', fax: 'Fax:', email: 'E-Mail:', delivery_address: 'Lieferadresse:', days30: '30 Tage',
+  col_pos: 'Pos.', col_qty: 'Anzahl', col_unit: 'Einheit', col_desc: 'Bezeichnung', col_unit_price: 'Einzelpreis', col_total_price: 'Gesamtpreis',
+  discount: 'Rabatt:', artnr_prefix: 'Art-Nr:', sum_net: 'Summe', vat_line: 'Mehrwertsteuer {pct}% auf {base} € netto', total_gross: 'Gesamtbetrag',
+  delivery_default: 'Die Lieferung erfolgt frei Haus.', payment_terms: 'Zahlungsbedingungen:', warranty: 'Gewährleistung:',
+  herrn: 'Herrn', frau: 'Frau', recipient: 'Empfänger', intro_ph: 'Einleitung', no_positions: 'noch keine Positionen', page_x_of_y: 'Seite {n} von {total}',
+};
+function _flpTransSourceHash(st) {
+  const br = st.bundleResolved || {};
+  const pos = (st.positionen || []).filter(p => p.bezeichnung || p.article_no).map(p => (p.bezeichnung || '') + '|' + (p.article_no || ''));
+  const cf = st.customer?.f || {};
+  return JSON.stringify([pos, br.introRaw || '', br.closingRaw || '', cf.payment_terms || '', cf.delivery_terms || '']);
+}
+async function _flpSetPdfLang(langLabel) {
+  const st = window._FLP_ANG;
+  if (!st) return;
+  langLabel = String(langLabel || '').trim();
+  if (langLabel === '__custom__') {
+    const custom = (prompt('In welche Sprache soll das PDF übersetzt werden?') || '').trim();
+    const sel = document.getElementById('flpPdfLangSel');
+    if (!custom) { if (sel) sel.value = st.pdfLang || ''; return; }
+    langLabel = custom;
+  }
+  if (!langLabel || /^deutsch$|^german$/i.test(langLabel)) {
+    st.pdfLang = ''; st.pdfTrans = null; st.pdfTransBusy = false;
+    _flpRenderPdfPreview();
+    return;
+  }
+  st.pdfLang = langLabel;
+  const src = _flpTransSourceHash(st);
+  if (st.pdfTrans && st.pdfTrans.lang === langLabel && st.pdfTrans.src === src) { _flpRenderPdfPreview(); return; }
+  await _flpTranslateForPdf(langLabel, src);
+}
+async function _flpTranslateForPdf(langLabel, src) {
+  const st = window._FLP_ANG;
+  if (!st) return;
+  st.pdfTransBusy = true;
+  _flpRenderPdfPreview();
+  try {
+    const pos = (st.positionen || []).filter(p => p.bezeichnung || p.article_no);
+    const payload = {
+      labels: _FLP_PDF_LABELS_DE,
+      tagline: _ERP_FLP_BRAND.taglineTop,
+      intro: (st.bundleResolved && st.bundleResolved.introRaw) || '',
+      closing: (st.bundleResolved && st.bundleResolved.closingRaw) || '',
+      payment_terms: (st.customer?.f?.payment_terms) || '14 Tage netto',
+      delivery_terms: (st.customer?.f?.delivery_terms) || 'EXW Fellbach',
+      items: pos.map(p => ({ name: p.bezeichnung || '' })),
+    };
+    const sys = 'Du bist ein professioneller Fachübersetzer für kaufmännische Angebots-PDFs (Aufzug-/Ersatzteilbranche). ' +
+      'Übersetze ALLE deutschen Texte im folgenden JSON originalgetreu und fachlich korrekt nach: ' + langLabel + '. ' +
+      'REGELN: (1) Die JSON-Struktur/Schlüssel EXAKT beibehalten, NUR die Werte übersetzen. ' +
+      '(2) Platzhalter in geschweiften Klammern ({pct}, {base}, {n}, {total}) UNVERÄNDERT im Text belassen. ' +
+      '(3) Eigennamen, Marken, Typ-/Modellbezeichnungen und Artikelnummern (z.B. „Loher Dynavert 2L2A-03400-040", „V3F16L") NICHT übersetzen. ' +
+      '(4) Zahlen, Preise und Datumsangaben NICHT verändern. ' +
+      '(5) Etwaige HTML-Tags in intro/closing beibehalten, nur den Textinhalt übersetzen. ' +
+      'Antworte AUSSCHLIESSLICH mit dem übersetzten JSON in identischer Struktur, ohne Markdown-Fences.';
+    const data = await proxyJson('/anthropic/v1/messages', {
+      method: 'POST',
+      body: JSON.stringify({ model: 'claude-sonnet-4-5-20250929', max_tokens: 3500, system: sys, messages: [{ role: 'user', content: JSON.stringify(payload) }] }),
+    });
+    if (window._FLP_ANG !== st || st.pdfLang !== langLabel) return; // Sprache/Modal zwischenzeitlich gewechselt
+    const raw = (data?.content?.[0]?.text || '').trim();
+    const trg = (typeof parseAIJson === 'function') ? parseAIJson(raw) : JSON.parse(raw);
+    st.pdfTrans = {
+      lang: langLabel, src: src,
+      i18n: Object.assign({}, _FLP_PDF_LABELS_DE, trg.labels || {}),
+      tagline: trg.tagline || '', intro: trg.intro || '', closing: trg.closing || '',
+      payment_terms: trg.payment_terms || '', delivery_terms: trg.delivery_terms || '',
+      items: Array.isArray(trg.items) ? trg.items : [],
+    };
+    st.pdfTransBusy = false;
+    _flpRenderPdfPreview();
+    toast('PDF-Vorschau auf ' + langLabel + ' übersetzt (ERP bleibt deutsch)', 'success', 3500);
+  } catch (e) {
+    st.pdfTransBusy = false; st.pdfLang = ''; st.pdfTrans = null;
+    const sel = document.getElementById('flpPdfLangSel'); if (sel) sel.value = '';
+    _flpRenderPdfPreview();
+    toast('Übersetzung fehlgeschlagen: ' + (e.message || e), 'error', 8000);
+  }
 }
 
 /* Live-Vorschau im EXAKTEN ERP-Hero-Layout. A4 wird bei fester Breite (800px)
@@ -24819,6 +24928,10 @@ function _flpRenderPdfPreview() {
   const wrap = document.getElementById('flpPdfPreview');
   const st = window._FLP_ANG;
   if (!wrap || !st) return;
+  if (st.pdfTransBusy) {
+    wrap.innerHTML = '<div class="h-full flex flex-col items-center justify-center text-center text-ink-500 text-[12px] p-4 gap-2"><span class="spinner inline-block w-6 h-6 border-[3px]"></span>Übersetze PDF-Vorschau nach ' + escapeHtml(st.pdfLang || '') + '…<br><span class="text-[10px] text-ink-400">Das ERP-Angebot bleibt deutsch.</span></div>';
+    return;
+  }
   const pos = (st.positionen || []).filter(p => p.bezeichnung || p.article_no);
   if (!pos.length) { wrap.innerHTML = '<div class="h-full flex items-center justify-center text-center text-ink-400 text-[12px] p-4">Die Vorschau (ERP-Hero-Layout) erscheint, sobald Positionen da sind.<br>Beschreib links die Ersatzteile.</div>'; return; }
   if (typeof erpQuoteHtml !== 'function') { wrap.innerHTML = '<div class="text-[11px] text-red-600 p-3">Renderer nicht geladen — bitte App neu laden.</div>'; return; }
@@ -24980,6 +25093,8 @@ async function _flpChatSend(inputEl) {
     _flpRenderPosTable();
     _flpRenderPdfPreview();
     _flpSaveDraft();
+    // v2.46.260: aktive PDF-Übersetzung nach Positions-Änderung auffrischen
+    if (st.pdfLang) _flpSetPdfLang(st.pdfLang);
   } catch (e) {
     if (thinkBubble) thinkBubble.remove();
     st.chat = (st.chat || []).filter(m => m.content !== '…');
@@ -40512,6 +40627,10 @@ function _erpq_contentWidth() { return _ERPQ_SHEET.A4_W - 2 * _ERPQ_SHEET.PAD_LR
  * ===================================================================== */
 function _erpq_buildParts(data) {
   data = data || {};
+  // v2.46.260: i18n — Labels aus data.i18n (Fallback = deutscher Default, d.h. ohne
+  // i18n bleibt der Output 1:1 wie bisher). Nur fürs PDF; ERP-Daten bleiben deutsch.
+  var _i18n = data.i18n || {};
+  var t = function (key, def) { var v = _i18n[key]; return (v != null && String(v) !== '') ? String(v) : def; };
   var c = data.company || {};
   var cu = data.customer || {};
   var co = data.contact || {};
@@ -40535,7 +40654,7 @@ function _erpq_buildParts(data) {
   var recipientSalutation = (function () {
     if (!co || (!co.first_name && !co.last_name)) return '';
     var g = co.gender;
-    var sal = g === 'männlich' ? 'Herrn' : g === 'weiblich' ? 'Frau' : '';
+    var sal = g === 'männlich' ? t('herrn', 'Herrn') : g === 'weiblich' ? t('frau', 'Frau') : '';
     var fullName = [co.first_name, co.last_name].filter(Boolean).join(' ');
     return [sal, fullName].filter(Boolean).join(' ');
   })();
@@ -40574,7 +40693,7 @@ function _erpq_buildParts(data) {
       '<div>' +
         '<div style="font-size:7px;color:#64748B;border-bottom:1px solid #CBD5E1;padding-bottom:2px;margin-bottom:12px;display:inline-block;line-height:1.2;">' + _erpq_escapeHtml(footer.senderAddressLine) + '</div>' +
         '<div style="font-size:13px;line-height:1.5;">' +
-          (cu.name1 ? '<div>' + _erpq_escapeHtml(cu.name1) + '</div>' : '<div style="color:#94A3B8;font-style:italic;">— Empfänger —</div>') +
+          (cu.name1 ? '<div>' + _erpq_escapeHtml(cu.name1) + '</div>' : '<div style="color:#94A3B8;font-style:italic;">— ' + _erpq_escapeHtml(t('recipient', 'Empfänger')) + ' —</div>') +
           (cu.name2 ? '<div>' + _erpq_escapeHtml(cu.name2) + '</div>' : '') +
           (recipientSalutation ? '<div>' + _erpq_escapeHtml(recipientSalutation) + '</div>' : '') +
           ((inv.recipient) ? '<div>' + _erpq_escapeHtml(inv.recipient) + '</div>' : '') +
@@ -40584,7 +40703,7 @@ function _erpq_buildParts(data) {
         '</div>' +
         (showDelivery ?
           '<div style="font-size:10px;line-height:1.5;margin-top:12px;padding-top:8px;border-top:1px solid #E2E8F0;">' +
-            '<div style="font-weight:600;color:#334155;">Lieferadresse:</div>' +
+            '<div style="font-weight:600;color:#334155;">' + _erpq_escapeHtml(t('delivery_address', 'Lieferadresse:')) + '</div>' +
             (deliveryAddress.recipient ? '<div>' + _erpq_escapeHtml(deliveryAddress.recipient) + '</div>' : '') +
             (deliveryAddress.street ? '<div>' + _erpq_escapeHtml(deliveryAddress.street) + '</div>' : '') +
             ((deliveryAddress.zip || deliveryAddress.city) ? '<div>' + _erpq_escapeHtml([deliveryAddress.zip, deliveryAddress.city].filter(Boolean).join(' ')) + '</div>' : '') +
@@ -40592,18 +40711,18 @@ function _erpq_buildParts(data) {
           '</div>' : '') +
       '</div>' +
       '<div>' +
-        '<div style="font-weight:700;letter-spacing:-0.02em;line-height:1;text-align:right;font-size:32px;margin-bottom:14px;color:#0F172A;">Angebot</div>' +
+        '<div style="font-weight:700;letter-spacing:-0.02em;line-height:1;text-align:right;font-size:32px;margin-bottom:14px;color:#0F172A;">' + _erpq_escapeHtml(t('quote_title', 'Angebot')) + '</div>' +
         '<div style="font-size:10px;">' +
           '<div style="margin-left:auto;width:fit-content;max-width:100%;">' +
-            '<div style="display:flex;justify-content:space-between;gap:16px;padding:2px 0;"><span style="color:#334155;">Angebots-Nr.:</span><span>' + _erpq_escapeHtml(q.quote_no || '–') + '</span></div>' +
-            '<div style="display:flex;justify-content:space-between;gap:16px;padding:2px 0;"><span style="color:#334155;">Kunden-Nr.:</span><span>' + _erpq_escapeHtml(cu.customer_no || cu.supplier_no || '–') + '</span></div>' +
-            '<div style="display:flex;justify-content:space-between;gap:16px;padding:2px 0;"><span style="color:#334155;">Datum:</span><span>' + _erpq_escapeHtml(_erpq_formatDeDate(q.date)) + '</span></div>' +
-            '<div style="display:flex;justify-content:space-between;gap:16px;padding:2px 0;"><span style="color:#334155;">Gültigkeit:</span><span>' + (q.valid_until ? _erpq_escapeHtml(_erpq_formatDeDate(q.valid_until)) : '30 Tage') + '</span></div>' +
+            '<div style="display:flex;justify-content:space-between;gap:16px;padding:2px 0;"><span style="color:#334155;">' + _erpq_escapeHtml(t('quote_no', 'Angebots-Nr.:')) + '</span><span>' + _erpq_escapeHtml(q.quote_no || '–') + '</span></div>' +
+            '<div style="display:flex;justify-content:space-between;gap:16px;padding:2px 0;"><span style="color:#334155;">' + _erpq_escapeHtml(t('customer_no', 'Kunden-Nr.:')) + '</span><span>' + _erpq_escapeHtml(cu.customer_no || cu.supplier_no || '–') + '</span></div>' +
+            '<div style="display:flex;justify-content:space-between;gap:16px;padding:2px 0;"><span style="color:#334155;">' + _erpq_escapeHtml(t('date', 'Datum:')) + '</span><span>' + _erpq_escapeHtml(_erpq_formatDeDate(q.date)) + '</span></div>' +
+            '<div style="display:flex;justify-content:space-between;gap:16px;padding:2px 0;"><span style="color:#334155;">' + _erpq_escapeHtml(t('valid_until', 'Gültigkeit:')) + '</span><span>' + (q.valid_until ? _erpq_escapeHtml(_erpq_formatDeDate(q.valid_until)) : _erpq_escapeHtml(t('days30', '30 Tage'))) + '</span></div>' +
             '<div style="height:8px;"></div>' +
-            '<div style="padding:2px 0;"><span style="color:#334155;">Kontakt:</span></div>' +
-            '<div style="display:flex;justify-content:space-between;gap:16px;padding:2px 0;"><span style="color:#334155;">Telefon:</span><span>' + _erpq_escapeHtml(footer.tel) + '</span></div>' +
-            '<div style="display:flex;justify-content:space-between;gap:16px;padding:2px 0;"><span style="color:#334155;">Fax:</span><span>' + _erpq_escapeHtml(footer.fax) + '</span></div>' +
-            '<div style="display:flex;justify-content:space-between;gap:16px;padding:2px 0;"><span style="color:#334155;">E-Mail:</span><span>' + _erpq_escapeHtml(footer.email) + '</span></div>' +
+            '<div style="padding:2px 0;"><span style="color:#334155;">' + _erpq_escapeHtml(t('contact', 'Kontakt:')) + '</span></div>' +
+            '<div style="display:flex;justify-content:space-between;gap:16px;padding:2px 0;"><span style="color:#334155;">' + _erpq_escapeHtml(t('phone', 'Telefon:')) + '</span><span>' + _erpq_escapeHtml(footer.tel) + '</span></div>' +
+            '<div style="display:flex;justify-content:space-between;gap:16px;padding:2px 0;"><span style="color:#334155;">' + _erpq_escapeHtml(t('fax', 'Fax:')) + '</span><span>' + _erpq_escapeHtml(footer.fax) + '</span></div>' +
+            '<div style="display:flex;justify-content:space-between;gap:16px;padding:2px 0;"><span style="color:#334155;">' + _erpq_escapeHtml(t('email', 'E-Mail:')) + '</span><span>' + _erpq_escapeHtml(footer.email) + '</span></div>' +
           '</div>' +
         '</div>' +
       '</div>' +
@@ -40612,7 +40731,7 @@ function _erpq_buildParts(data) {
   // === BLOCK 2: Intro ===
   var introBlock = intro
     ? '<div style="font-size:13px;line-height:1.6;">' + _erpq_renderTemplateContent(intro) + '</div>'
-    : '<div style="font-size:13px;color:#94A3B8;font-style:italic;">— Einleitung —</div>';
+    : '<div style="font-size:13px;color:#94A3B8;font-style:italic;">— ' + _erpq_escapeHtml(t('intro_ph', 'Einleitung')) + ' —</div>';
 
   // === BLOCK 3: Positionstabelle (die einzelnen Zeilen wären theoretisch
   //     splittbar; wir behandeln die Tabelle als 1 Block wie ERP-Body, weil
@@ -40653,7 +40772,7 @@ function _erpq_buildParts(data) {
       ? '<div style="font-size:9px;font-style:italic;font-weight:400;color:#475569;line-height:1.35;margin-top:8px;">' + italicLines.join('<br>') + '</div>'
       : '';
     var descCell =
-      '<div style="font-weight:700;">' + (titleHtml || '<span style="color:#94A3B8;font-style:italic;">— Bezeichnung —</span>') + '</div>' +
+      '<div style="font-weight:700;">' + (titleHtml || '<span style="color:#94A3B8;font-style:italic;">— ' + _erpq_escapeHtml(t('col_desc', 'Bezeichnung')) + ' —</span>') + '</div>' +
       italicBlock + bodyBlock;
     var tdBase = 'padding:6px 4px;border-bottom:1px solid #F1F5F9;vertical-align:top;';
     var tdNum = tdBase + 'text-align:right;font-variant-numeric:tabular-nums;';
@@ -40662,7 +40781,7 @@ function _erpq_buildParts(data) {
       '<td style="' + tdBase + '">' + _erpq_escapeHtml(String(f.qty || '')) + '</td>' +
       '<td style="' + tdBase + '">' + _erpq_escapeHtml(f.unit || '') + '</td>' +
       '<td style="' + tdBase + '">' + descCell +
-        (discAbs > 0 ? '<div style="font-size:9px;color:#B45309;margin-top:2px;">Rabatt: −' + _erpq_formatPrice(discAbs) + ' €</div>' : '') +
+        (discAbs > 0 ? '<div style="font-size:9px;color:#B45309;margin-top:2px;">' + _erpq_escapeHtml(t('discount', 'Rabatt:')) + ' −' + _erpq_formatPrice(discAbs) + ' €</div>' : '') +
       '</td>' +
       '<td style="' + tdNum + '">' + _erpq_formatPrice(f.unit_price_net || 0) + ' €</td>' +
       '<td style="' + tdNum + '">' + _erpq_formatPrice(lineNet) + ' €</td>' +
@@ -40671,19 +40790,19 @@ function _erpq_buildParts(data) {
   var positionsBlock = items.length
     ? '<table style="width:100%;font-size:12px;border-collapse:collapse;">' +
         '<thead><tr style="border-bottom:1px solid #CBD5E1;color:#334155;">' +
-          '<th style="' + thBase + '">Pos.</th><th style="' + thBase + '">Anzahl</th>' +
-          '<th style="' + thBase + '">Einheit</th><th style="' + thBase + '">Bezeichnung</th>' +
-          '<th style="' + thRight + '">Einzelpreis</th><th style="' + thRight + '">Gesamtpreis</th>' +
+          '<th style="' + thBase + '">' + _erpq_escapeHtml(t('col_pos', 'Pos.')) + '</th><th style="' + thBase + '">' + _erpq_escapeHtml(t('col_qty', 'Anzahl')) + '</th>' +
+          '<th style="' + thBase + '">' + _erpq_escapeHtml(t('col_unit', 'Einheit')) + '</th><th style="' + thBase + '">' + _erpq_escapeHtml(t('col_desc', 'Bezeichnung')) + '</th>' +
+          '<th style="' + thRight + '">' + _erpq_escapeHtml(t('col_unit_price', 'Einzelpreis')) + '</th><th style="' + thRight + '">' + _erpq_escapeHtml(t('col_total_price', 'Gesamtpreis')) + '</th>' +
         '</tr></thead><tbody>' + rowsHtml + '</tbody></table>'
-    : '<div style="font-size:12px;color:#94A3B8;font-style:italic;">— noch keine Positionen —</div>';
+    : '<div style="font-size:12px;color:#94A3B8;font-style:italic;">— ' + _erpq_escapeHtml(t('no_positions', 'noch keine Positionen')) + ' —</div>';
 
   // === BLOCK 4: Summen ===
   var sumsBlock =
     '<table style="margin-left:auto;min-width:62%;font-size:13px;border-collapse:collapse;">' +
       '<tbody>' +
-        '<tr><td style="padding:2px 0;">Summe</td><td style="padding:2px 0;text-align:right;font-variant-numeric:tabular-nums;">' + _erpq_formatPrice(sums.subtotal_net) + ' €</td></tr>' +
-        '<tr><td style="padding:2px 0;">Mehrwertsteuer 19% auf ' + _erpq_formatPrice(sums.subtotal_net) + ' € netto</td><td style="padding:2px 0;text-align:right;font-variant-numeric:tabular-nums;">' + _erpq_formatPrice(sums.vat_total) + ' €</td></tr>' +
-        '<tr style="font-weight:700;"><td style="padding:4px 0 2px;border-top:1px solid #CBD5E1;">Gesamtbetrag</td><td style="padding:4px 0 2px;text-align:right;border-top:1px solid #CBD5E1;font-variant-numeric:tabular-nums;">' + _erpq_formatPrice(sums.total_gross) + ' €</td></tr>' +
+        '<tr><td style="padding:2px 0;">' + _erpq_escapeHtml(t('sum_net', 'Summe')) + '</td><td style="padding:2px 0;text-align:right;font-variant-numeric:tabular-nums;">' + _erpq_formatPrice(sums.subtotal_net) + ' €</td></tr>' +
+        '<tr><td style="padding:2px 0;">' + _erpq_escapeHtml(t('vat_line', 'Mehrwertsteuer {pct}% auf {base} € netto').replace('{pct}', '19').replace('{base}', _erpq_formatPrice(sums.subtotal_net))) + '</td><td style="padding:2px 0;text-align:right;font-variant-numeric:tabular-nums;">' + _erpq_formatPrice(sums.vat_total) + ' €</td></tr>' +
+        '<tr style="font-weight:700;"><td style="padding:4px 0 2px;border-top:1px solid #CBD5E1;">' + _erpq_escapeHtml(t('total_gross', 'Gesamtbetrag')) + '</td><td style="padding:4px 0 2px;text-align:right;border-top:1px solid #CBD5E1;font-variant-numeric:tabular-nums;">' + _erpq_formatPrice(sums.total_gross) + ' €</td></tr>' +
       '</tbody>' +
     '</table>';
 
@@ -40695,13 +40814,13 @@ function _erpq_buildParts(data) {
   var condRows = [];
   // Lieferung (immer; Default frei Haus wie im ERP-Preview)
   condRows.push(
-    '<div style="margin-bottom:8px;">' + _erpq_escapeHtml(q.delivery_terms || 'Die Lieferung erfolgt frei Haus.') + '</div>'
+    '<div style="margin-bottom:8px;">' + _erpq_escapeHtml(q.delivery_terms || t('delivery_default', 'Die Lieferung erfolgt frei Haus.')) + '</div>'
   );
   // Zahlungsbedingungen (Label + Wert als EIN Block)
   if (q.payment_terms) {
     condRows.push(
       '<div style="margin-bottom:8px;">' +
-        '<div style="color:#334155;">Zahlungsbedingungen:</div>' +
+        '<div style="color:#334155;">' + _erpq_escapeHtml(t('payment_terms', 'Zahlungsbedingungen:')) + '</div>' +
         '<div>' + _erpq_escapeHtml(q.payment_terms) + '</div>' +
       '</div>'
     );
@@ -40710,7 +40829,7 @@ function _erpq_buildParts(data) {
   if (q.warranty_terms) {
     condRows.push(
       '<div style="margin-bottom:8px;">' +
-        '<div style="color:#334155;">Gewährleistung:</div>' +
+        '<div style="color:#334155;">' + _erpq_escapeHtml(t('warranty', 'Gewährleistung:')) + '</div>' +
         '<div>' + _erpq_escapeHtml(q.warranty_terms) + '</div>' +
       '</div>'
     );
@@ -40815,6 +40934,7 @@ function _erpq_estimateHeight(block) {
  * ===================================================================== */
 function erpQuoteRenderSheets(data) {
   var p = _erpq_buildParts(data);
+  var _pageTpl = (data && data.i18n && data.i18n.page_x_of_y) || 'Seite {n} von {total}'; // v2.46.260
   var hasLogos = !!p.logosHtml;
   var usableH = _erpq_usableH(hasLogos);
   var usableH_noLogos = _erpq_usableH(false);
@@ -40868,14 +40988,14 @@ function erpQuoteRenderSheets(data) {
       css: p.css, headerHtml: p.headerHtml,
       logosHtml: isFirst ? p.logosHtml : '',
       footerHtml: p.footerHtml, bodyHtml: bodyHtml,
-      pageIndex: pi, totalPages: totalPages, overflow: false
+      pageIndex: pi, totalPages: totalPages, overflow: false, pageLabelTpl: _pageTpl
     }));
   }
   if (p.hasForcedClosing) {
     sheets.push(_erpq_composeSheet({
       css: p.css, headerHtml: p.headerHtml, logosHtml: '',
       footerHtml: p.footerHtml, bodyHtml: p.forcedClosingHtml,
-      pageIndex: pages.length, totalPages: totalPages, overflow: false
+      pageIndex: pages.length, totalPages: totalPages, overflow: false, pageLabelTpl: _pageTpl
     }));
   }
   return sheets;
@@ -40887,8 +41007,9 @@ function _erpq_composeSheet(o) {
   var hasLogos = !!(o.logosHtml && o.logosHtml.trim());
   var contentTop = S.PAD_T + S.HEADER_H + (hasLogos ? S.LOGOS_H : 0) + S.GAP;
   var contentH = S.A4_H - contentTop - S.FOOTER_H - S.PAD_B;
+  var _pageTpl = o.pageLabelTpl || 'Seite {n} von {total}';
   var pageLabel = o.totalPages > 1
-    ? '<div style="position:absolute;top:6px;right:' + S.PAD_LR + 'px;font-size:9px;color:#94A3B8;z-index:5;background:#FFFFFF;padding:2px 4px;">Seite ' + (o.pageIndex + 1) + ' von ' + o.totalPages + '</div>'
+    ? '<div style="position:absolute;top:6px;right:' + S.PAD_LR + 'px;font-size:9px;color:#94A3B8;z-index:5;background:#FFFFFF;padding:2px 4px;">' + _erpq_escapeHtml(_pageTpl.replace('{n}', (o.pageIndex + 1)).replace('{total}', o.totalPages)) + '</div>'
     : '';
   return '<style>' + o.css + '</style>' +
     '<div class="erpq-root">' +
