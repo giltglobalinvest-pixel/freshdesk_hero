@@ -784,7 +784,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.253';
+const APP_VERSION = 'v2.46.254';
 
 /* ============================================================
    GLOBAL THEME — v2.46.12
@@ -26137,6 +26137,10 @@ function saveAngStammdaten(btn) {
   s.collected.stammdaten.ansprechpartner_vor_ort= ($('sdAnsprech')?.value || '').trim();
   s.collected.standort     = ($('sdStandort')?.value || '').trim();
   s.collected.fabriknummer = ($('sdFabrik')?.value || '').trim();
+  // v2.46.254: Brief-Anrede an den gewählten ERP-Kontakt angleichen (Geschlecht +
+  // Nachname aus dem ERP) — überschreibt eine ggf. falsch geratene KI-Anrede.
+  const _detA = _angDeriveAnredeFromErp(s);
+  if (_detA) s.collected.anschreiben_anrede = _detA;
   // v2.46.172: In localStorage persistieren damit Stammdaten Modal-Reopen überleben
   try {
     localStorage.setItem('fdh_ang_stamm_' + s.accountId + '_' + s.ticketId, JSON.stringify({
@@ -26161,6 +26165,7 @@ function _angPickErpKontakt(idx) {
   const s = window._ANG_CHAT;
   const k = s?._erpKontakte?.[+idx];
   if (!k) return;
+  s._erpEmpfaengerKontakt = k; // v2.46.254: für deterministische Anrede merken
   const nm = _erpKontaktName(k);
   const em = $('sdAnsprech'); if (em) em.value = nm;
   const ee = $('sdEmail');    if (ee && k.email) ee.value = k.email;
@@ -26208,9 +26213,12 @@ async function _angCreateErpKontakt(btn) {
     // aktuelle Eingaben sichern + neuen Kontakt als Empfänger vorbelegen, dann Editor neu rendern
     _angSyncStammInputs(s);
     if (nu) {
+      s._erpEmpfaengerKontakt = nu; // v2.46.254
       s.collected.stammdaten.ansprechpartner_vor_ort = _erpKontaktName(nu);
       if (nu.email) s.collected.stammdaten.email = nu.email;
       const tel = nu.telefon || nu.mobile; if (tel) s.collected.stammdaten.tel = tel;
+      const detA = _angDeriveAnredeFromErp(s);
+      if (detA) s.collected.anschreiben_anrede = detA;
     }
     setBusy(btn, false);
     toast('Kontakt im ERP angelegt ✓' + (nu ? ' — als Empfänger übernommen' : ''), 'success', 4000);
@@ -26365,6 +26373,48 @@ function _erpKontaktName(k) {
   return [k.vorname, k.nachname].filter(Boolean).join(' ').trim() || k.name || k.anzeigename || '';
 }
 
+/* v2.46.254: Anrede-Wort (Herr/Frau) aus dem ERP-Kontakt robust bestimmen. */
+function _angKontaktAnredeWort(k) {
+  if (!k) return '';
+  const a = String(k.anrede || k.salutation || k.titel || '').toLowerCase();
+  if (a.includes('frau')) return 'Frau';
+  if (a.includes('herr')) return 'Herr';
+  const g = String(k.geschlecht || k.gender || k.sex || '').toLowerCase();
+  if (/^(w|f|weiblich|female)/.test(g)) return 'Frau';
+  if (/^(m|male|m[aä]nnlich)/.test(g)) return 'Herr';
+  return '';
+}
+function _angKontaktNachname(k) {
+  if (!k) return '';
+  if (k.nachname) return String(k.nachname).trim();
+  const parts = _erpKontaktName(k).trim().split(/\s+/).filter(Boolean);
+  return parts.length ? parts[parts.length - 1] : '';
+}
+/* Findet den aktuell als Empfänger gewählten ERP-Kontakt: bevorzugt das direkt
+   gemerkte Objekt, sonst Match per Name/Email gegen die geladenen Kontakte. */
+function _angSelectedErpKontakt(s) {
+  if (!s) return null;
+  const list = Array.isArray(s._erpKontakte) ? s._erpKontakte : [];
+  const cand = s._erpEmpfaengerKontakt || null;
+  const wantName = String(s.collected?.stammdaten?.ansprechpartner_vor_ort || '').trim().toLowerCase();
+  const wantMail = String(s.collected?.stammdaten?.email || '').trim().toLowerCase();
+  if (cand && (!wantName || _erpKontaktName(cand).trim().toLowerCase() === wantName)) return cand;
+  if (wantName) { const m = list.find(k => _erpKontaktName(k).trim().toLowerCase() === wantName); if (m) return m; }
+  if (wantMail) { const m = list.find(k => String(k.email || '').trim().toLowerCase() === wantMail); if (m) return m; }
+  return null; // kein sicherer Treffer → Geschlecht nicht raten
+}
+/* Deterministische Brief-Anrede aus dem gewählten ERP-Kontakt.
+   "" wenn kein Kontakt/kein bekanntes Geschlecht (dann bleibt es der KI/Fallback
+   überlassen — lieber neutral als falsches Geschlecht). */
+function _angDeriveAnredeFromErp(s) {
+  const k = _angSelectedErpKontakt(s);
+  if (!k) return '';
+  const wort = _angKontaktAnredeWort(k);
+  const nn = _angKontaktNachname(k);
+  if (!nn || !wort) return '';
+  return (wort === 'Frau' ? 'Sehr geehrte Frau ' : 'Sehr geehrter Herr ') + nn + ',';
+}
+
 /* v2.46.209: Kern — übernimmt eine ERP-Anlage KOMPLETT in den Angebot-State
    (nicht nur DOM-Inputs). Lädt ALLE Kunden-Kontakte, wählt einen Default und
    merkt sie für das Empfänger-Dropdown. Wird von Picker UND Auto-Load genutzt.
@@ -26395,11 +26445,15 @@ async function _angApplyErpAnlage(s, anlage, firmaSlug) {
   if (kunde.firmenname)    s.collected.stammdaten.vertragspartner = kunde.firmenname;
   if (kundeAdresse)        s.collected.stammdaten.rechnungs_anschrift = kundeAdresse;
   if (kontakt) {
+    s._erpEmpfaengerKontakt = kontakt; // v2.46.254
     const vollname = _erpKontaktName(kontakt);
     if (vollname)        s.collected.stammdaten.ansprechpartner_vor_ort = vollname;
     if (kontakt.email)   s.collected.stammdaten.email = kontakt.email;
     const tel = kontakt.telefon || kontakt.mobile || '';
     if (tel)             s.collected.stammdaten.tel = tel;
+    // Brief-Anrede deterministisch aus dem ERP-Kontakt (Geschlecht + Nachname)
+    const detA = _angDeriveAnredeFromErp(s);
+    if (detA) s.collected.anschreiben_anrede = detA;
   }
   const label = (anlage.fabriknummer ? anlage.fabriknummer + ' · ' : '') + (kunde.firmenname || standort || 'Anlage');
   // v2.46.210: Status-Marker — was kam nachweislich aus dem ERP?
@@ -27265,6 +27319,7 @@ async function _angChatGenerateOffer(s, userText) {
     '- Setze IMMER anschreiben_aktiv=true und generiere eine KURZE Einleitung (2-4 Sätze): Bezug auf die Anfrage, was angeboten wird. Sachlich, keine Floskeln-Kaskade. NICHT nachfragen ob ein Anschreiben gewünscht ist.\n' +
     '- Nur wenn der User EXPLIZIT sagt, er will keine Einleitung → anschreiben_aktiv=false.\n' +
     '- anschreiben_anrede: NUR die Anrede-Zeile. Quelle in dieser Reihenfolge: (1) Ansprechpartner aus dem ERP — steht im übergebenen Angebot unter stammdaten.ansprechpartner_vor_ort → "Sehr geehrter Herr <Nachname>," / "Sehr geehrte Frau <Nachname>,". (2) Name des Ticket-Anfragenden. (3) Sonst "Sehr geehrte Damen und Herren,". Keine Titel erfinden, bei unklarem Geschlecht neutral bleiben.\n' +
+    '- WICHTIG: Der EMPFÄNGER ist AUSSCHLIESSLICH der unter stammdaten.ansprechpartner_vor_ort genannte Ansprechpartner. Verwende NIEMALS den Namen des Ticket-Anfragenden, wenn dieser vom ansprechpartner_vor_ort abweicht — weder in der Anrede noch im Body. (Hinweis: Die Anrede-Zeile wird nach der Generierung ohnehin automatisch an den gewählten ERP-Kontakt angeglichen.)\n' +
     '- Der anschreiben_body beginnt NICHT mit der Anrede — er startet direkt mit dem ersten Satz. Zwischen Anrede und Body kommt automatisch eine Leerzeile.\n\n' +
     'PREISE:\n' +
     '- Wenn User Preise nennt → übernimm EXAKT\n' +
@@ -27410,6 +27465,11 @@ async function _angChatGenerateOffer(s, userText) {
     }
   }
   if (!parsed.plan) throw new Error('KI lieferte kein Plan-Feld');
+  // v2.46.254: Wenn ein ERP-Kontakt als Empfänger gewählt ist, hat dessen
+  // Anrede (Geschlecht + Nachname) IMMER Vorrang vor der von der KI geratenen —
+  // behebt "Sehr geehrter Herr <Ticket-Absender>" bei weiblichem ERP-Kontakt.
+  const _detAnrede = _angDeriveAnredeFromErp(s);
+  if (_detAnrede) parsed.plan.anschreiben_anrede = _detAnrede;
   return parsed;
 }
 
