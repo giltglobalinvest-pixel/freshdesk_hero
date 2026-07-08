@@ -784,7 +784,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.246';
+const APP_VERSION = 'v2.46.247';
 
 /* ============================================================
    GLOBAL THEME — v2.46.12
@@ -24004,10 +24004,62 @@ async function _flpFindContact(customerId, email) {
   return recs.find(r => (r.f.customer_id || []).includes(customerId)) || null;
 }
 
+/* v2.46.247: FLP-Angebots-Entwurf pro Ticket (localStorage) — auto-gespeichert,
+   beim Wieder-Öffnen des Angebots im selben Ticket wiederhergestellt. */
+function _flpDraftKey(accId, tId) { return 'fdh_flp_draft_' + String(accId || '') + '_' + String(tId || ''); }
+function _flpLoadDraft(accId, tId) { try { return JSON.parse(localStorage.getItem(_flpDraftKey(accId, tId)) || 'null'); } catch (_) { return null; } }
+function _flpSaveDraft() {
+  const st = window._FLP_ANG;
+  if (!st) return;
+  const key = _flpDraftKey(st.accountId, st.ticketId);
+  const hasContent = (st.positionen && st.positionen.length) || st.customer;
+  if (!hasContent) { try { localStorage.removeItem(key); } catch (_) {} return; }
+  try {
+    localStorage.setItem(key, JSON.stringify({
+      mandantId: st.mandantId || '', mandantName: st.mandantName || '',
+      customer: st.customer || null, contact: st.contact || null,
+      positionen: st.positionen || [], chat: (st.chat || []).slice(-40),
+      bundleId: st.bundleId || '', bundleResolved: st.bundleResolved || null,
+      quoteId: st.quoteId || '', quoteNo: st.quoteNo || '',
+      savedAt: new Date().toISOString(),
+    }));
+  } catch (e) { console.warn('[FLP-Draft]', e.message); }
+}
+function _flpDiscardDraft() {
+  const st = window._FLP_ANG;
+  if (!st) return;
+  if (!confirm('Diesen Angebots-Entwurf verwerfen und neu beginnen?')) return;
+  try { localStorage.removeItem(_flpDraftKey(st.accountId, st.ticketId)); } catch (_) {}
+  const acc = st.accountId, t = st.ticketId;
+  closeFlpAngebotModal();
+  openFlpAngebotModal(acc, t);
+  toast('Entwurf verworfen', 'info', 2500);
+}
+
 async function openFlpAngebotModal(accountId, ticketId) {
   let host = document.getElementById('subModalHost');
   if (!host) { host = document.createElement('div'); host.id = 'subModalHost'; document.body.appendChild(host); }
-  window._FLP_ANG = { accountId, ticketId, ticket: null, customer: null, contact: null, selectedCustomer: null, selectedContact: null, _custResults: [], _contResults: [], positionen: [], mandantId: '', mandantName: '' };
+  window._FLP_ANG = { accountId, ticketId, ticket: null, customer: null, contact: null, selectedCustomer: null, selectedContact: null, _custResults: [], _contResults: [], positionen: [], mandantId: '', mandantName: '', chat: [] };
+  // v2.46.247: Gespeicherten Entwurf für dieses Ticket wiederherstellen → direkt zum Angebot
+  const _draft = _flpLoadDraft(accountId, ticketId);
+  if (_draft && (_draft.customer || (_draft.positionen && _draft.positionen.length))) {
+    Object.assign(window._FLP_ANG, {
+      mandantId: _draft.mandantId || '', mandantName: _draft.mandantName || '',
+      customer: _draft.customer || null, contact: _draft.contact || null,
+      positionen: _draft.positionen || [], chat: _draft.chat || [],
+      bundleId: _draft.bundleId || '', bundleResolved: _draft.bundleResolved || null,
+      quoteId: _draft.quoteId || '', quoteNo: _draft.quoteNo || '',
+    });
+    (async () => {
+      let t = APP_STATE.ticketCache?.get?.(accountId + '|' + ticketId);
+      if (!t || !t.conversations) { try { t = await fetchTicketDetail(accountId, ticketId); } catch (_) {} }
+      if (window._FLP_ANG) window._FLP_ANG.ticket = t || { id: ticketId, requester: {} };
+      _flpLoadArticles(window._FLP_ANG.mandantName).then(a => { if (window._FLP_ANG) window._FLP_ANG.catalog = a; }).catch(() => {});
+    })();
+    _flpRenderPositionen();
+    toast('Entwurf wiederhergestellt (vom ' + (_draft.savedAt ? new Date(_draft.savedAt).toLocaleString('de-DE') : '?') + ')', 'info', 4500);
+    return;
+  }
   const fld = (label, id, ph, val) =>
     '<label class="block"><span class="text-[11px] font-semibold text-ink-600">' + label + '</span>' +
     '<input id="' + id + '" value="' + escapeAttr(val || '') + '" placeholder="' + escapeAttr(ph || '') + '" class="mt-0.5 w-full px-2.5 py-1.5 border border-ink-300 rounded-lg text-sm"></label>';
@@ -24279,6 +24331,7 @@ async function _flpPushKundeKontakt(btn) {
     st.contact = contact;
     setBusy(btn, false);
     toast('ERP Hero: Kunde ' + custStatus + (contStatus ? ' · Kontakt ' + contStatus : '') + ' ✓', 'success', 4000);
+    _flpSaveDraft();
     // v2.46.238: direkt zum Angebots-Schritt weiter (kein Zwischen-Button mehr)
     _flpRenderPositionen();
   } catch (e) {
@@ -24387,6 +24440,7 @@ function _flpRenderPositionen() {
         '</div>' +
         '<div class="px-4 py-2.5 border-t border-ink-200 shrink-0 flex gap-2 items-center">' +
           '<div id="flpPosResult" class="flex-1 min-w-0 text-[11px]"></div>' +
+          '<button onclick="_flpDiscardDraft()" class="text-[11px] text-ink-500 hover:text-red-600 underline shrink-0" title="Entwurf verwerfen und neu beginnen">Verwerfen</button>' +
           '<button onclick="closeFlpAngebotModal()" class="bg-ink-100 hover:bg-ink-200 text-ink-700 rounded-xl px-3 py-2.5 text-sm font-bold shrink-0">Schließen</button>' +
           '<button onclick="_flpPushAngebot(this)" class="bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl px-3 py-2.5 text-sm font-bold inline-flex items-center gap-1.5 shrink-0"><i data-lucide="upload-cloud" class="w-4 h-4"></i> Angebot anlegen</button>' +
         '</div>' +
@@ -24463,9 +24517,9 @@ function _flpPosEdit(i, field, val) {
   if (!st?.positionen?.[i]) return;
   st.positionen[i][field] = (field === 'bezeichnung' || field === 'article_no' || field === 'unit') ? val : (+val || 0);
   _flpUpdateTotals();
-  // PDF-Vorschau debounced aktualisieren (nicht pro Tastendruck)
+  // PDF-Vorschau + Entwurf debounced aktualisieren (nicht pro Tastendruck)
   clearTimeout(window._flpPdfTimer);
-  window._flpPdfTimer = setTimeout(() => _flpRenderPdfPreview(), 600);
+  window._flpPdfTimer = setTimeout(() => { _flpRenderPdfPreview(); _flpSaveDraft(); }, 600);
 }
 function _flpAddPos() {
   const st = window._FLP_ANG;
@@ -24474,6 +24528,7 @@ function _flpAddPos() {
   st.positionen.push({ article_no: '', bezeichnung: '', menge: 1, einzelpreis: 0, rabatt_pct: 0, mwst: 19, unit: 'Stück' });
   _flpRenderPosTable();
   _flpRenderPdfPreview();
+  _flpSaveDraft();
 }
 function _flpDelPos(i) {
   const st = window._FLP_ANG;
@@ -24481,6 +24536,7 @@ function _flpDelPos(i) {
   st.positionen.splice(i, 1);
   _flpRenderPosTable();
   _flpRenderPdfPreview();
+  _flpSaveDraft();
 }
 
 /* Artikelkatalog des Mandanten laden (für KI-Awareness + Preis-Reconcile). */
@@ -24548,6 +24604,7 @@ async function _flpOnBundleChange(bundleId) {
   const bundle = (st.bundles || []).find(b => b.id === bundleId);
   st.bundleResolved = bundle ? await _flpResolveBundle(bundle) : { intro: '', closing: '', layout_variant: '' };
   _flpRenderPdfPreview();
+  _flpSaveDraft();
 }
 
 /* v2.46.242: FLP-Briefkopf (identisch zu ERP Heros FLP_BRAND) für den portierten
@@ -24767,6 +24824,7 @@ async function _flpChatSend(inputEl) {
     _flpChatAppend('assistant', obj.message || 'Positionen aktualisiert.');
     _flpRenderPosTable();
     _flpRenderPdfPreview();
+    _flpSaveDraft();
   } catch (e) {
     if (thinkBubble) thinkBubble.remove();
     st.chat = (st.chat || []).filter(m => m.content !== '…');
@@ -24804,6 +24862,7 @@ async function _flpPushAngebot(btn) {
       // subtotal_net/vat_total/total_gross sind Formelfelder in ERP Hero → NICHT schreiben (422).
     }));
     st.quoteId = q.id; st.quoteNo = quoteNo;
+    _flpSaveDraft();
     let i = 0, failed = 0;
     for (const p of pos) {
       i++;
