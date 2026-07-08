@@ -784,7 +784,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.256';
+const APP_VERSION = 'v2.46.257';
 
 /* ============================================================
    GLOBAL THEME — v2.46.12
@@ -25428,13 +25428,12 @@ async function openAngebotsChatModal(accountId, ticketId, forcedRestore) {
     // v2.46.209: Stammdaten SOFORT aus dem ERP laden (per Fabriknummer) — ohne
     // dass der User den ERP-Button drücken muss. Bei Fehler: Hinweis-Bubble,
     // manueller Weg bleibt. Nicht wenn schon ein gespeicherter Stand da ist.
-    // v2.46.253: Danach automatisch die noch leeren Felder per KI aus Email +
-    // Anhängen ergänzen (Hintergrund) — der User muss den KI-Button nicht mehr
-    // manuell drücken. ERP läuft zuerst (autoritativ), KI füllt nur die Lücken.
-    if (!restored?.collected) {
-      Promise.resolve(_angAutoLoadErp(window._ANG_CHAT)).catch(() => {})
-        .then(() => _angAutoExtractStammdaten(window._ANG_CHAT));
-    }
+    // v2.46.253/257: Danach automatisch die noch leeren Felder per KI aus Email +
+    // Anhängen ergänzen und die ERP-Anlage per Fabriknummer laden (Hintergrund).
+    // Reihenfolge: KI-Extract ZUERST (findet die Fabriknummer im Ticket), dann
+    // ERP-Load — so wird der Aufzug automatisch geladen und der passende Kontakt
+    // gewählt, ohne dass der User es manuell anstoßen muss.
+    if (!restored?.collected) _angAutoErpAndExtract(window._ANG_CHAT);
     // Hintergrund-Analyse starten — wenn fertig wird sie ins State geschrieben
     window._ANG_CHAT.ticket_summary = '';
     window._ANG_CHAT.bgAnalysisPromise = _angChatInitialAnalysis(accountId, ticketId, ticket, profile)
@@ -26083,7 +26082,10 @@ function openAngStammdatenEditor() {
                   ? '<select id="sdKontaktPick" onchange="_angPickErpKontakt(this.value)" class="w-full mt-1 px-2 py-1.5 border border-emerald-300 rounded-lg text-sm bg-white">' +
                       s._erpKontakte.map((k, i) => {
                         const nm = _erpKontaktName(k);
-                        const cur = (sd.email && k.email && sd.email.toLowerCase() === String(k.email).toLowerCase());
+                        // v2.46.257: markierter Empfänger — gemerktes Objekt, sonst Email- oder Namensgleichheit
+                        const cur = (s._erpEmpfaengerKontakt === k)
+                          || (sd.email && k.email && sd.email.toLowerCase() === String(k.email).toLowerCase())
+                          || (!!nm && sd.ansprechpartner_vor_ort && nm.toLowerCase() === String(sd.ansprechpartner_vor_ort).toLowerCase());
                         return '<option value="' + i + '"' + (cur ? ' selected' : '') + '>' + escapeHtml(nm || k.email || ('Kontakt ' + (i + 1))) + (k.email ? ' · ' + escapeHtml(k.email) : '') + (k.funktion || k.position ? ' · ' + escapeHtml(k.funktion || k.position) : '') + '</option>';
                       }).join('') +
                     '</select>' +
@@ -26429,6 +26431,54 @@ function _angDeriveAnredeFromErp(s) {
   return (wort === 'Frau' ? 'Sehr geehrte Frau ' : 'Sehr geehrter Herr ') + nn + ',';
 }
 
+/* v2.46.257: Aus mehreren ERP-Kontakten den zum TICKET-KONTEXT passenden wählen.
+   Signale (gewichtet): exakte Email-Gleichheit mit Requester / KI-Ansprechpartner,
+   gleiche Email-Domain, Namensgleichheit, Nachname/Email kommt im Ticket-Text vor.
+   Ohne echtes Signal: erster Kontakt mit Email (bisheriges Verhalten). */
+function _angPickBestKontakt(s, kontakte) {
+  if (!Array.isArray(kontakte) || !kontakte.length) return null;
+  if (kontakte.length === 1) return kontakte[0];
+  const t = (s && s.ticket) || {};
+  const req = t.requester || {};
+  const hint = (s && s._kiStammHint) || {};
+  const norm = x => String(x || '').trim().toLowerCase();
+  const dom = m => { const i = m.indexOf('@'); return i >= 0 ? m.slice(i + 1) : ''; };
+  const reqMail = norm(req.email), reqName = norm(req.name);
+  const hintMail = norm(hint.email), hintName = norm(hint.ansprechpartner_vor_ort);
+  let ticketText = '';
+  try { ticketText = norm([t.subject, htmlToText(t.description_text || t.description || '')].join(' ')).slice(0, 4000); } catch (_) {}
+  let best = null, bestScore = -1;
+  kontakte.forEach(k => {
+    const km = norm(k.email), kn = norm(_erpKontaktName(k)), knach = norm(k.nachname);
+    let sc = 0;
+    if (km && (km === hintMail || km === reqMail)) sc += 100;
+    else if (km && dom(km) && (dom(km) === dom(hintMail) || dom(km) === dom(reqMail))) sc += 25;
+    if (kn && (kn === hintName || kn === reqName)) sc += 60;
+    if (knach && knach.length >= 3) {
+      if (hintName && hintName.includes(knach)) sc += 40;
+      if (reqName && reqName.includes(knach)) sc += 35;
+      if (ticketText && ticketText.includes(knach)) sc += 30;
+    }
+    if (km && ticketText && ticketText.includes(km)) sc += 30;
+    if (km) sc += 3; // Tiebreaker: hat Email
+    if (sc > bestScore) { bestScore = sc; best = k; }
+  });
+  if (bestScore < 5) return kontakte.find(k => k.email && String(k.email).includes('@')) || kontakte[0];
+  return best;
+}
+
+/* v2.46.257: Orchestriert Auto-Load beim Öffnen des Angebots-Chats.
+   Reihenfolge: ERST KI-Extract (liefert Fabriknummer + Ansprechpartner-Hinweis
+   aus dem Ticket), DANN ERP-Load per Fabriknummer (überschreibt seine Felder
+   autoritativ, wählt den zum Ticket passenden Kontakt). So greift der ERP-Load
+   auch dann, wenn die Fabriknummer erst durch die KI aus dem Ticket kommt. */
+async function _angAutoErpAndExtract(s) {
+  if (!s) return;
+  await _angAutoExtractStammdaten(s).catch(() => {});
+  if (window._ANG_CHAT !== s) return;
+  await Promise.resolve(_angAutoLoadErp(s)).catch(() => {});
+}
+
 /* v2.46.209: Kern — übernimmt eine ERP-Anlage KOMPLETT in den Angebot-State
    (nicht nur DOM-Inputs). Lädt ALLE Kunden-Kontakte, wählt einen Default und
    merkt sie für das Empfänger-Dropdown. Wird von Picker UND Auto-Load genutzt.
@@ -26442,7 +26492,10 @@ async function _angApplyErpAnlage(s, anlage, firmaSlug) {
   let kontakte = [];
   if (kundennr) { try { kontakte = await erpLoadKundenKontakte(firmaSlug, kundennr); } catch (_) {} }
   s._erpKontakte = Array.isArray(kontakte) ? kontakte : [];
-  const kontakt = s._erpKontakte.find(k => k.email && String(k.email).includes('@')) || s._erpKontakte[0] || null;
+  // v2.46.257: den zum Ticket-Kontext passenden Kontakt wählen (Requester-Email/
+  // Name, KI-Ansprechpartner-Hinweis, Vorkommen im Ticket-Text) statt einfach den
+  // ersten mit Email.
+  const kontakt = _angPickBestKontakt(s, s._erpKontakte);
   // Adressen (mit Google-Places-Resolver-Fallback)
   let standort = _erpBuildAnlageAdresse(anlage);
   let kundeAdresse = _erpBuildKundeAdresse(kunde);
@@ -26485,7 +26538,7 @@ async function _angApplyErpAnlage(s, anlage, firmaSlug) {
    Kontakte. Erfolg → Info-Bubble; Fehler/kein Treffer → Hinweis-Bubble mit
    Verweis auf den manuellen ERP-Button (nie blockierend). */
 async function _angAutoLoadErp(s) {
-  if (!s) return;
+  if (!s || s._erpLoaded) return;  // v2.46.257: idempotent — nicht doppelt laden
   const firmaSlug = _erpFirmaSlugForAccount(s.account);
   const fabrik = (s.collected?.fabriknummer || '').trim();
   if (!APP_KEYS.erpProxyUrl || !firmaSlug || !fabrik) return;  // nichts zu tun
@@ -26497,6 +26550,9 @@ async function _angAutoLoadErp(s) {
       return;
     }
     const res = await _angApplyErpAnlage(s, anlage, firmaSlug);
+    // v2.46.257: Falls der Stammdaten-Editor schon offen ist → neu rendern, damit
+    // das ERP-Kontakte-Dropdown + der automatisch gewählte Empfänger erscheinen.
+    if (document.getElementById('subModalHost2')?.innerHTML.trim()) openAngStammdatenEditor();
     try { _angChatRenderPreview(); } catch (_) {}
     const kd = s.collected?.stammdaten || {};
     _angChatAppendBubble('assistant', '🗄 Stammdaten automatisch aus dem ERP geladen: **' + (kd.vertragspartner || res.label) + '**' +
@@ -26907,6 +26963,10 @@ async function _angAutoExtractStammdaten(s) {
   try {
     const p = await _angExtractStammdatenFromEmail(s);
     if (!s || window._ANG_CHAT !== s) return; // Modal zwischenzeitlich geschlossen/gewechselt
+    // v2.46.257: rohes KI-Ergebnis merken — dient der ERP-Kontaktauswahl als Hinweis
+    // (Ansprechpartner-Name/Email aus dem Ticket), auch wenn die Felder wegen
+    // "nur-leere-Felder" nicht in collected übernommen werden.
+    s._kiStammHint = p;
     s.collected = s.collected || {};
     s.collected.stammdaten = s.collected.stammdaten || {};
     const gefuellt = [];
@@ -26934,8 +26994,10 @@ async function _angAutoExtractStammdaten(s) {
       upd('sdFabrik', s.collected.fabriknummer);
     }
     try { _angChatRenderPreview(); } catch (_) {}
-    // Dezente Rückmeldung nur, wenn nicht ohnehin schon ERP-Daten geladen wurden
-    if (!s._erpLoaded) {
+    // Dezente Rückmeldung nur, wenn KEINE ERP-Daten geladen wurden UND auch kein
+    // ERP-Load mehr folgt (sonst zeigt der ERP-Zweig seine eigene Bubble).
+    const _erpNachladbar = APP_KEYS.erpProxyUrl && _erpFirmaSlugForAccount(s.account) && (s.collected?.fabriknummer || '').trim();
+    if (!s._erpLoaded && !_erpNachladbar) {
       _angChatAppendBubble('assistant', '📝 Stammdaten automatisch aus Email/Anhängen ergänzt (' + gefuellt.length + ' Feld' + (gefuellt.length > 1 ? 'er' : '') + '). Unter „✎ Stammdaten" prüfen/überschreiben.');
     }
   } catch (e) {
