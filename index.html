@@ -784,7 +784,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.261';
+const APP_VERSION = 'v2.46.262';
 
 /* ============================================================
    GLOBAL THEME — v2.46.12
@@ -1660,7 +1660,8 @@ async function erpHeroGet(table, id) {
 /* Aktive Mandanten (Company) laden — für die Mandanten-Auswahl im FLP-Angebot. */
 async function erpHeroLoadCompanies() {
   const recs = await erpHeroRead('Company', { filter: "{status}='aktiv'", maxRecords: 200 });
-  return recs.map(r => ({ id: r.id, name: r.f.name || '(ohne Name)' }))
+  // v2.46.262: Logo-Felder mitgeben (Header-Logo + Sub-/2.-Logo TÜV/6+ links im Angebot)
+  return recs.map(r => ({ id: r.id, name: r.f.name || '(ohne Name)', logo: r.f.logo || null, sub_logo: r.f.sub_logo || null, secondary_logo: r.f.secondary_logo || null }))
              .sort((a, b) => a.name.localeCompare(b.name, 'de'));
 }
 
@@ -24261,6 +24262,7 @@ async function openFlpAngebotModal(accountId, ticketId) {
   if (window.lucide) lucide.createIcons();
   // Mandanten laden
   erpHeroLoadCompanies().then(comps => {
+    window._FLP_MANDANTEN = comps; // v2.46.262: mit Logos cachen (für _flpBuildErpData)
     const sel = document.getElementById('flpMandantSel');
     if (sel) sel.innerHTML = '<option value="">— Mandant wählen —</option>' +
       comps.map(c => '<option value="' + escapeAttr(c.id) + '">' + escapeHtml(c.name) + '</option>').join('');
@@ -24624,6 +24626,7 @@ function _flpRenderPositionen() {
   }
   _flpRenderPosTable();
   _flpRenderPdfPreview();
+  _flpEnsureMandantLogos(st); // v2.46.262: Mandanten-Logos (TÜV/6+) laden → Vorschau neu rendern
   _flpLoadBundles(st.mandantId, st.mandantName).then(bundles => {
     st.bundles = bundles;
     const sel = document.getElementById('flpBundleSel');
@@ -24817,7 +24820,15 @@ function _flpBuildErpData() {
     },
     customer: Object.assign({}, c, st.vatId ? { vat_id: st.vatId } : {}),
     contact: k,
-    company: { name: st.mandantName || 'FLP Lift Parts GmbH' },
+    // v2.46.262: Mandanten-Logos (Header + Sub-/2.-Logo TÜV/6+) aus ERP Hero mitgeben
+    company: Object.assign({ name: st.mandantName || 'FLP Lift Parts GmbH' }, (function () {
+      const L = st.mandantLogos || {};
+      const o = {};
+      if (L.logo) o.logo = L.logo;
+      if (L.sub_logo) o.sub_logo = L.sub_logo;
+      if (L.secondary_logo) o.secondary_logo = L.secondary_logo;
+      return o;
+    })()),
     brand: _ERP_FLP_BRAND,
     user: { name: (APP_KEYS.user && APP_KEYS.user.name) || '' },
     items: pos.map((p, i) => {
@@ -24924,10 +24935,27 @@ async function _flpTranslateForPdf(langLabel, src) {
   }
 }
 
-/* Live-Vorschau im EXAKTEN ERP-Hero-Layout. A4 wird bei fester Breite (800px)
-   gerendert und per Transform auf die Panel-Breite skaliert (fit-to-width, kein
-   Umbruch). */
-const _FLP_A4_W = 800;
+/* v2.46.262: Mandanten-Logos (Header + Sub-/2.-Logo) aus ERP Hero laden + cachen.
+   Async, fire-and-forget; nach dem Laden wird die Vorschau neu gerendert. */
+async function _flpEnsureMandantLogos(st) {
+  if (!st || !st.mandantId) return;
+  if (st.mandantLogos && st.mandantLogos._id === st.mandantId) return; // schon geladen
+  // Erst aus dem Mandanten-Cache (enthält Logos), sonst Einzel-Record laden
+  const cached = (window._FLP_MANDANTEN || []).find(c => c.id === st.mandantId);
+  const apply = (f) => {
+    st.mandantLogos = { _id: st.mandantId, logo: f.logo || null, sub_logo: f.sub_logo || null, secondary_logo: f.secondary_logo || null };
+    _flpRenderPdfPreview();
+  };
+  if (cached && ('logo' in cached || 'sub_logo' in cached || 'secondary_logo' in cached)) { apply(cached); return; }
+  try { const rec = await erpHeroGet('Company', st.mandantId); apply(rec.f || {}); }
+  catch (e) { console.warn('[FLP] Mandant-Logos:', e.message); }
+}
+
+/* Live-Vorschau im EXAKTEN ERP-Hero-Layout. v2.46.262: rendert jetzt die GLEICHEN
+   A4-Sheets wie das echte PDF (erpQuoteRenderSheets), damit die Vorschau 1:1 dem
+   PDF entspricht (Header/Logo-Position identisch). Fixe A4-Breite (794px = A4_W),
+   per Transform auf die Panel-Breite skaliert. */
+const _FLP_A4_W = 794;
 function _flpRenderPdfPreview() {
   const wrap = document.getElementById('flpPdfPreview');
   const st = window._FLP_ANG;
@@ -24938,9 +24966,14 @@ function _flpRenderPdfPreview() {
   }
   const pos = (st.positionen || []).filter(p => p.bezeichnung || p.article_no);
   if (!pos.length) { wrap.innerHTML = '<div class="h-full flex items-center justify-center text-center text-ink-400 text-[12px] p-4">Die Vorschau (ERP-Hero-Layout) erscheint, sobald Positionen da sind.<br>Beschreib links die Ersatzteile.</div>'; return; }
-  if (typeof erpQuoteHtml !== 'function') { wrap.innerHTML = '<div class="text-[11px] text-red-600 p-3">Renderer nicht geladen — bitte App neu laden.</div>'; return; }
+  if (typeof erpQuoteRenderSheets !== 'function') { wrap.innerHTML = '<div class="text-[11px] text-red-600 p-3">Renderer nicht geladen — bitte App neu laden.</div>'; return; }
   let html;
-  try { html = erpQuoteHtml(_flpBuildErpData()); }
+  try {
+    const sheets = erpQuoteRenderSheets(_flpBuildErpData());
+    html = '<!doctype html><html><head><meta charset="utf-8"><style>html,body{margin:0;padding:0;background:#e5e7eb;}.flp-pv-sheet{width:' + _FLP_A4_W + 'px;margin:0 auto 10px;background:#fff;box-shadow:0 1px 6px rgba(0,0,0,.18);}</style></head><body>' +
+      sheets.map(s => '<div class="flp-pv-sheet">' + s + '</div>').join('') +
+      '</body></html>';
+  }
   catch (e) { wrap.innerHTML = '<div class="text-[11px] text-red-600 p-3">Vorschau fehlgeschlagen: ' + escapeHtml((e.message || String(e)).slice(0, 160)) + '</div>'; return; }
   // Scroll-Host + Skalier-Box + Iframe (bei erster Render aufbauen)
   if (!wrap.querySelector('#flpPdfFrame')) {
@@ -25052,7 +25085,10 @@ function _flpOpenPreviewFullscreen() {
   const st = window._FLP_ANG;
   if (!st) return;
   try {
-    const html = erpQuoteHtml(_flpBuildErpData());
+    // v2.46.262: gleiche A4-Sheets wie das PDF (1:1)
+    const sheets = erpQuoteRenderSheets(_flpBuildErpData());
+    const html = '<!doctype html><html><head><meta charset="utf-8"><title>Angebots-Vorschau</title><style>html,body{margin:0;padding:16px 0;background:#e5e7eb;}.flp-pv-sheet{width:794px;margin:0 auto 14px;background:#fff;box-shadow:0 2px 12px rgba(0,0,0,.2);}</style></head><body>' +
+      sheets.map(s => '<div class="flp-pv-sheet">' + s + '</div>').join('') + '</body></html>';
     const w = window.open('', '_blank');
     if (w) { w.document.open(); w.document.write(html); w.document.close(); }
     else toast('Popup blockiert — bitte Popups für diese Seite erlauben.', 'warn', 6000);
