@@ -784,7 +784,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.250';
+const APP_VERSION = 'v2.46.251';
 
 /* ============================================================
    GLOBAL THEME — v2.46.12
@@ -4281,19 +4281,51 @@ function parseAIJson(rawText) {
   }
 
   // 4. Abgeschnittenes JSON (max_tokens erreicht): String wahrscheinlich mitten
-  // im body-Feld abgebrochen. Versuche fehlende Klammern/Quotes zu ergänzen.
+  // in einem Feld/Array abgebrochen. State-Machine schließt offene Strukturen
+  // (v2.46.251: auch Arrays [ ] + abschließende Kommas/Doppelpunkte behandelt).
   if (firstBrace >= 0) {
-    let repair = s.slice(firstBrace);
-    // schließende ``` und folgender Text raus
-    repair = repair.replace(/```[\s\S]*$/, '').trim();
-    // Wenn ungerade Anzahl an unescaped Quotes → letztes " ergänzen
-    const unescapedQuotes = (repair.match(/(?<!\\)"/g) || []).length;
-    if (unescapedQuotes % 2 === 1) repair += '"';
-    // Offene Klammern zählen und schließen
-    const opens  = (repair.match(/\{/g) || []).length;
-    const closes = (repair.match(/\}/g) || []).length;
-    if (opens > closes) repair += '}'.repeat(opens - closes);
-    try { return JSON.parse(repair); } catch (_) {}
+    let src = s.slice(firstBrace).replace(/```[\s\S]*$/, '');
+    // Struktur-Zustand am Abbruch-Punkt ermitteln
+    let inStr = false, esc = false;
+    const stack = []; // '{' oder '['
+    for (let i = 0; i < src.length; i++) {
+      const c = src[i];
+      if (esc) { esc = false; continue; }
+      if (c === '\\') { esc = true; continue; }
+      if (c === '"') { inStr = !inStr; continue; }
+      if (inStr) continue;
+      if (c === '{' || c === '[') stack.push(c);
+      else if (c === '}' || c === ']') stack.pop();
+    }
+    const closeAll = (str, wasInStr, stk) => {
+      let r = str;
+      if (wasInStr) r += '"';                 // offenen String schließen
+      r = r.replace(/(\d)[.eE+\-]\s*$/, '$1'); // halbe Zahl (z.B. "19." / "5e") → Ziffer
+      r = r.replace(/,\s*$/, '');              // abschließendes Komma weg
+      r = r.replace(/:\s*$/, ':null');         // "key": ohne Wert → null
+      for (let i = stk.length - 1; i >= 0; i--) r += stk[i] === '{' ? '}' : ']';
+      return r;
+    };
+    try { return JSON.parse(closeAll(src, inStr, stack)); } catch (_) {}
+    // Zweiter Versuch: unvollständiges letztes Feld/Element abschneiden
+    // (bis zum letzten vollständig geschlossenen " , { oder [) und neu schließen.
+    try {
+      let cut = src.replace(/,\s*"[^"\\]*$/, '')       // ,"halberKey
+                    .replace(/,\s*\{[^}]*$/, '')       // ,{ halbes Objekt
+                    .replace(/,\s*$/, '');
+      // erneut Zustand berechnen
+      inStr = false; esc = false; const st2 = [];
+      for (let i = 0; i < cut.length; i++) {
+        const c = cut[i];
+        if (esc) { esc = false; continue; }
+        if (c === '\\') { esc = true; continue; }
+        if (c === '"') { inStr = !inStr; continue; }
+        if (inStr) continue;
+        if (c === '{' || c === '[') st2.push(c);
+        else if (c === '}' || c === ']') st2.pop();
+      }
+      return JSON.parse(closeAll(cut, inStr, st2));
+    } catch (_) {}
   }
 
   // 5. Aufgeben — präzise Fehlermeldung
@@ -27267,19 +27299,38 @@ async function _angChatGenerateOffer(s, userText) {
     lastContent[0].text += '\n\n[Der User hat ' + s._pendingImages.length + ' Screenshot(s) direkt an diese Nachricht angehängt — deren Inhalt für die Anweisung berücksichtigen.]';
   }
   messages.push({ role: 'user', content: lastContent });
-  const data = await proxyJson('/anthropic/v1/messages', {
+  // v2.46.251: 16000 statt 8000 — Sonnet 4.5 kann bis 64k Output-Tokens; bei
+  // Angeboten mit vielen Positionen + langen Beschreibungen + Anschreiben wurde
+  // das JSON bei 8000 abgeschnitten (unvollständig → nicht parsbar).
+  const _callModel = async (maxTok) => proxyJson('/anthropic/v1/messages', {
     method: 'POST',
     body: JSON.stringify({
       model: 'claude-sonnet-4-5-20250929',
-      // v2.46.214: 8000 statt 4000 — bei Angeboten mit vielen Positionen +
-      // Beschreibungen + Anschreiben wurde das JSON bei 4000 abgeschnitten
-      // (unvollständig → nicht parsbar). Sonnet 4.5 kann bis 8192 Output-Tokens.
-      max_tokens: 8000,
+      max_tokens: maxTok,
       system: sysPrompt,
       messages: messages,
     }),
   });
+  let data = await _callModel(16000);
+  // v2.46.251: Bei echtem Token-Limit (stop_reason=max_tokens) EINMAL automatisch
+  // mit höherem Budget + Kürzungs-Hinweis nachfassen, statt den User „Nochmal
+  // versuchen" klicken zu lassen.
+  if (data?.stop_reason === 'max_tokens') {
+    console.warn('[Angebot-KI] Antwort bei max_tokens abgeschnitten — Auto-Retry mit 24000 + Kürzungs-Hinweis.');
+    const retryMsgs = messages.slice();
+    retryMsgs[retryMsgs.length - 1] = {
+      role: 'user',
+      content: [{ type: 'text', text: lastText + '\n\n[WICHTIG: Die vorige Antwort wurde abgeschnitten. Fasse dich KNAPP — Beschreibungen max. 3-4 Stichpunkte, Anschreiben kurz — und antworte mit VOLLSTÄNDIGEM, gültigem JSON.]' }].concat(lastContent.slice(1)),
+    };
+    try {
+      data = await proxyJson('/anthropic/v1/messages', {
+        method: 'POST',
+        body: JSON.stringify({ model: 'claude-sonnet-4-5-20250929', max_tokens: 24000, system: sysPrompt, messages: retryMsgs }),
+      });
+    } catch (_) {}
+  }
   const raw = (data?.content?.[0]?.text || '').trim();
+  const truncated = data?.stop_reason === 'max_tokens';
   // v2.46.211: robuster Parser (parseAIJson) — repariert unescapte Quotes/Newlines
   // in String-Werten (z.B. Anschreiben mit Zitaten), abgeschnittene Antworten etc.
   let parsed;
@@ -27293,7 +27344,10 @@ async function _angChatGenerateOffer(s, userText) {
       const m = json.match(/\{[\s\S]*\}/);
       if (m) { try { parsed = JSON.parse(m[0]); } catch (_2) {} }
     }
-    if (!parsed) throw new Error('KI-Antwort kein gültiges JSON (' + (e1.message || '').slice(0, 60) + ')');
+    if (!parsed) {
+      if (truncated) throw new Error('Angebot zu umfangreich — die KI-Antwort wurde trotz Retry abgeschnitten. Bitte in kleineren Schritten arbeiten (z.B. Positionen nacheinander) oder kürzere Beschreibungen anweisen.');
+      throw new Error('KI-Antwort kein gültiges JSON (' + (e1.message || '').slice(0, 60) + ')');
+    }
   }
   if (!parsed.plan) throw new Error('KI lieferte kein Plan-Feld');
   return parsed;
