@@ -784,7 +784,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.254';
+const APP_VERSION = 'v2.46.255';
 
 /* ============================================================
    GLOBAL THEME — v2.46.12
@@ -26089,6 +26089,10 @@ function openAngStammdatenEditor() {
                   : '<p class="text-[10px] text-emerald-700 mt-1">Noch keine Kontakte beim Kunden hinterlegt — lege einen an.</p>') +
                 // Inline-Formular für neuen Kontakt (versteckt bis „Neuer Kontakt")
                 '<div id="sdNeuKontakt" class="hidden mt-2 space-y-1.5 border-t border-emerald-200 pt-2">' +
+                  '<div class="flex items-center justify-between gap-2">' +
+                    '<p id="sdNKStatus" class="text-[10px] text-emerald-700 min-h-[14px] flex-1"></p>' +
+                    '<button type="button" onclick="_angFillNeuKontaktFromKI(true)" class="shrink-0 text-[10px] text-emerald-700 font-semibold underline inline-flex items-center gap-0.5" title="Kontaktdaten erneut per KI aus dem Ticket ziehen"><i data-lucide="sparkles" class="w-3 h-3"></i> Aus Ticket (KI)</button>' +
+                  '</div>' +
                   '<div class="grid grid-cols-3 gap-1.5">' +
                     '<select id="sdNKAnrede" class="px-2 py-1.5 border border-ink-300 rounded text-[12px] bg-white"><option>Herr</option><option>Frau</option></select>' +
                     '<input id="sdNKVorname" placeholder="Vorname" class="px-2 py-1.5 border border-ink-300 rounded text-[12px]">' +
@@ -26175,7 +26179,15 @@ function _angPickErpKontakt(idx) {
 
 /* v2.46.249: aktuelle Kundennummer aus der geladenen ERP-Anlage. */
 function _angErpKundennr(s) { const k = s?._erpAnlage?.kunde || {}; return k.kundennummer || k.id || ''; }
-function _angToggleNeuKontakt() { const f = document.getElementById('sdNeuKontakt'); if (f) f.classList.toggle('hidden'); }
+function _angToggleNeuKontakt() {
+  const f = document.getElementById('sdNeuKontakt');
+  if (!f) return;
+  const opening = f.classList.contains('hidden');
+  f.classList.toggle('hidden');
+  // v2.46.255: Beim Aufklappen automatisch die Kontaktdaten per KI aus dem Ticket
+  // ziehen und einfügen (nur einmal / nur leere Felder — force via Button).
+  if (opening) _angFillNeuKontaktFromKI(false);
+}
 /* Aktuelle Editor-Inputs → State (damit ein Re-Render sie nicht verliert). */
 function _angSyncStammInputs(s) {
   s.collected = s.collected || {}; s.collected.stammdaten = s.collected.stammdaten || {};
@@ -26795,6 +26807,84 @@ async function reExtractAngStammdaten(btn) {
   } catch (e) {
     setBusy(btn, false);
     toast('KI-Extract fehlgeschlagen: ' + (e.message || e), 'error', 8000);
+  }
+}
+
+/* v2.46.255: KI-Extract der KONTAKTPERSON (Ansprechpartner) aus Ticket + Email +
+   Anhängen — für das „Neuer Kontakt"-Formular. Liefert {anrede, vorname, nachname,
+   email, tel, rolle}. */
+async function _angExtractKontaktFromTicket(s) {
+  const t = s.ticket || {};
+  const req = t.requester || {};
+  let attachments = [];
+  try { attachments = await _angChatCollectAttachments(s.accountId, s.ticketId, t, { maxCount: 3, maxBytes: 16 * 1024 * 1024 }); } catch (_) {}
+  const subj = t.subject || '';
+  const desc = htmlToText(t.description_text || t.description || '').slice(0, 5000);
+  const conv = (t.conversations || []).slice(0, 6).map(c =>
+    (c.incoming ? 'Kunde' : 'Agent') + ': ' + htmlToText(c.body_text || c.body || '').slice(0, 1200)
+  ).join('\n\n---\n\n');
+  const sysPrompt =
+    'Du extrahierst die KONTAKTPERSON (Ansprechpartner) aus einem Support-Ticket inkl. Email + Anhängen. ' +
+    'Antworte NUR mit einem JSON-Objekt in genau dieser Form, KEINE Erklärung, KEINE Codeblock-Fences:\n' +
+    '{"anrede":"","vorname":"","nachname":"","email":"","tel":"","rolle":""}\n\n' +
+    'Regeln:\n' +
+    '- Gemeint ist die Person, die die Anfrage stellt bzw. als Ansprechpartner auftritt (Absender, Email-Signatur, "Sehr geehrte..."-Zeile).\n' +
+    '- anrede = "Herr" oder "Frau". Ableiten aus expliziter Anrede/Signatur ("Herr Müller", "Frau Boye") ODER aus einem eindeutig geschlechtstypischen Vornamen. Bei echter Unsicherheit leer lassen ("").\n' +
+    '- vorname / nachname getrennt. Liegt nur ein voller Name vor, sinnvoll aufteilen (letztes Wort = Nachname).\n' +
+    '- email = persönliche Email der Kontaktperson (Signatur/Absender).\n' +
+    '- tel = Telefon-/Mobilnummer der Kontaktperson (Signatur).\n' +
+    '- rolle = Funktion/Rolle, falls genannt (z.B. "Hausverwaltung", "Facility Management", "Geschäftsführung", "Technik") — sonst leer.\n' +
+    'Wenn ein Wert nicht erkennbar ist: leerer String "". NIEMALS raten (Ausnahme: Geschlecht aus einem klaren Vornamen).';
+  const userContent = [{ type: 'text', text:
+    'TICKET:\nBetreff: ' + subj + '\n' +
+    'Requester (aus Freshdesk): ' + (req.name || '?') + (req.email ? ' <' + req.email + '>' : '') + (req.phone ? ' · Tel ' + req.phone : '') + (req.mobile ? ' · Mobil ' + req.mobile : '') + '\n\n' +
+    'BESCHREIBUNG:\n' + desc + (conv ? '\n\nVERLAUF:\n' + conv : '') +
+    (attachments.length ? '\n\nANHÄNGE folgen als separate Content-Blocks (' + attachments.length + ').' : '')
+  }];
+  attachments.forEach(a => {
+    if (a.mediaType === 'application/pdf') userContent.push({ type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: a.base64 } });
+    else if (a.mediaType.startsWith('image/')) userContent.push({ type: 'image', source: { type: 'base64', media_type: a.mediaType, data: a.base64 } });
+  });
+  const callFn = (typeof _callAnthropicWithRetry === 'function') ? _callAnthropicWithRetry : (body) => proxyJson('/anthropic/v1/messages', { method: 'POST', body: JSON.stringify(body) });
+  const data = await callFn({ model: 'claude-sonnet-4-5-20250929', max_tokens: 500, system: sysPrompt, messages: [{ role: 'user', content: userContent }] });
+  const raw = (data?.content?.[0]?.text || '').trim();
+  const p = (typeof parseAIJson === 'function') ? parseAIJson(raw) : JSON.parse(raw);
+  return { anrede: p.anrede || '', vorname: p.vorname || '', nachname: p.nachname || '', email: p.email || '', tel: p.tel || '', rolle: p.rolle || '' };
+}
+
+/* v2.46.255: Füllt das „Neuer Kontakt"-Formular per KI aus dem Ticket. Läuft beim
+   Öffnen automatisch (nur einmal / nur leere Felder); force=true erzwingt Neu-
+   Extraktion und überschreibt. Deterministischer Fallback auf den FD-Requester. */
+async function _angFillNeuKontaktFromKI(force) {
+  const s = window._ANG_CHAT;
+  if (!s) return;
+  if (!force && s._nkKITried) return;
+  s._nkKITried = true;
+  const status = document.getElementById('sdNKStatus');
+  const setSt = html => { if (status) status.innerHTML = html; };
+  setSt('<span class="spinner inline-block w-3 h-3 mr-1"></span>KI liest Ticket…');
+  try {
+    const k = await _angExtractKontaktFromTicket(s);
+    // Fallback: FD-Requester ergänzen, falls die KI Lücken lässt
+    const req = (s.ticket || {}).requester || {};
+    if (!k.email && req.email) k.email = req.email;
+    if (!k.tel && (req.phone || req.mobile)) k.tel = req.phone || req.mobile;
+    if (!k.vorname && !k.nachname && req.name) { const parts = String(req.name).trim().split(/\s+/); k.nachname = parts.pop() || ''; k.vorname = parts.join(' '); }
+    const setVal = (id, v) => { const el = document.getElementById(id); if (el && v && (force || !el.value.trim())) el.value = v; };
+    if (k.anrede && /^(herr|frau)$/i.test(k.anrede)) { const sel = document.getElementById('sdNKAnrede'); if (sel && (force || !sel.value)) sel.value = /frau/i.test(k.anrede) ? 'Frau' : 'Herr'; }
+    setVal('sdNKVorname', k.vorname);
+    setVal('sdNKNachname', k.nachname);
+    setVal('sdNKEmail', k.email);
+    setVal('sdNKTel', k.tel);
+    setVal('sdNKRolle', k.rolle);
+    const got = [k.vorname, k.nachname, k.email, k.tel].filter(Boolean).length;
+    setSt(got
+      ? '<span class="text-emerald-700"><i data-lucide="sparkles" class="w-3 h-3 inline"></i> KI-Vorschlag aus Ticket eingefügt — bitte prüfen.</span>'
+      : '<span class="text-amber-600">Kein Kontakt im Ticket erkennbar — bitte manuell ausfüllen.</span>');
+    try { if (window.lucide) lucide.createIcons(); } catch (_) {}
+  } catch (e) {
+    setSt('<span class="text-amber-600">KI-Extract fehlgeschlagen — bitte manuell ausfüllen.</span>');
+    console.warn('[NeuKontakt-KI]', e.message || e);
   }
 }
 
