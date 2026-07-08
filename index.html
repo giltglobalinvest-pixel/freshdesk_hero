@@ -784,7 +784,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.263';
+const APP_VERSION = 'v2.46.264';
 
 /* ============================================================
    GLOBAL THEME — v2.46.12
@@ -24614,6 +24614,7 @@ function _flpRenderPositionen() {
           '<div id="flpPosResult" class="flex-1 min-w-0 text-[11px]"></div>' +
           '<button onclick="_flpDiscardDraft()" class="text-[11px] text-ink-500 hover:text-red-600 underline shrink-0" title="Entwurf verwerfen und neu beginnen">Verwerfen</button>' +
           '<button onclick="closeFlpAngebotModal()" class="bg-ink-100 hover:bg-ink-200 text-ink-700 rounded-xl px-3 py-2.5 text-sm font-bold shrink-0">Schließen</button>' +
+          '<button onclick="_flpSendAngebot(this)" class="bg-orange-600 hover:bg-orange-700 text-white rounded-xl px-3 py-2.5 text-sm font-bold inline-flex items-center gap-1.5 shrink-0" title="Angebot als PDF an den Kunden senden (als Antwort im Ticket, in der gewählten Sprache)"><i data-lucide="send" class="w-4 h-4"></i> An Kunden senden</button>' +
           '<button onclick="_flpPushAngebot(this)" class="bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl px-3 py-2.5 text-sm font-bold inline-flex items-center gap-1.5 shrink-0"><i data-lucide="upload-cloud" class="w-4 h-4"></i> Angebot anlegen</button>' +
         '</div>' +
       '</div>' +
@@ -24859,6 +24860,7 @@ const _FLP_PDF_LABELS_DE = {
   reverse_charge_note: 'Steuerfreie innergemeinschaftliche Lieferung – Steuerschuldnerschaft des Leistungsempfängers (Reverse Charge).', vat_id_label: 'USt-IdNr. Empfänger:',
   herrn: 'Herrn', frau: 'Frau', recipient: 'Empfänger', intro_ph: 'Einleitung', no_positions: 'noch keine Positionen', page_x_of_y: 'Seite {n} von {total}',
   salut_m: 'Sehr geehrter Herr', salut_f: 'Sehr geehrte Frau', salut_n: 'Sehr geehrte Damen und Herren',
+  email_body: 'anbei erhalten Sie unser Angebot als PDF-Datei. Für Rückfragen stehen wir Ihnen gerne zur Verfügung.', regards: 'Mit freundlichen Grüßen',
 };
 function _flpTransSourceHash(st) {
   const br = st.bundleResolved || {};
@@ -25078,6 +25080,65 @@ async function _flpOpenPdf(btn) {
     toast('PDF-Erzeugung fehlgeschlagen: ' + (e.message || e), 'error', 8000);
   } finally {
     if (btn) setBusy(btn, false);
+  }
+}
+
+/* v2.46.264: effektive Label-/Übersetzungs-Map (übersetzt wenn PDF-Sprache aktiv,
+   sonst deutsche Defaults). */
+function _flpEffectiveI18n(st) {
+  return (st && st.pdfLang && st.pdfTrans && st.pdfTrans.i18n) ? st.pdfTrans.i18n : _FLP_PDF_LABELS_DE;
+}
+/* Anschreiben (Betreff + HTML-Body) in der aktuell gewählten PDF-Sprache. */
+function _flpBuildCover(st) {
+  const L = _flpEffectiveI18n(st);
+  const k = (st.contact && st.contact.f) || {};
+  const g = k.gender;
+  const nn = k.last_name || '';
+  const salut = (g === 'männlich') ? ((L.salut_m || 'Sehr geehrter Herr') + (nn ? ' ' + nn : ''))
+    : (g === 'weiblich') ? ((L.salut_f || 'Sehr geehrte Frau') + (nn ? ' ' + nn : ''))
+    : (L.salut_n || 'Sehr geehrte Damen und Herren');
+  const company = st.mandantName || 'FLP Lift Parts GmbH';
+  const qno = (st.quoteNo && st.quoteNo !== '(Entwurf)') ? st.quoteNo : '';
+  const subject = (L.quote_title || 'Angebot') + (qno ? ' ' + qno : '') + ' – ' + company;
+  const bodyTxt = L.email_body || 'anbei erhalten Sie unser Angebot als PDF-Datei. Für Rückfragen stehen wir Ihnen gerne zur Verfügung.';
+  const regards = L.regards || 'Mit freundlichen Grüßen';
+  const userName = (APP_KEYS.user && APP_KEYS.user.name) || '';
+  const bodyHtml =
+    '<p>' + escapeHtml(salut) + ',</p>' +
+    '<p>' + escapeHtml(bodyTxt) + '</p>' +
+    '<p>' + escapeHtml(regards) + '<br>' + escapeHtml(company) + (userName ? '<br>' + escapeHtml(userName) : '') + '</p>';
+  return { subject, bodyHtml };
+}
+/* v2.46.264: FLP-Angebot als PDF an den Kunden senden — als ANTWORT im Ticket
+   (Freshdesk reply + PDF-Anhang). Anschreiben-Text in der gewählten PDF-Sprache. */
+async function _flpSendAngebot(btn) {
+  const st = window._FLP_ANG;
+  if (!st) return;
+  const pos = (st.positionen || []).filter(p => p.bezeichnung || p.article_no);
+  if (!pos.length) return toast('Keine Positionen zum Versenden', 'warn', 4000);
+  if (!st.ticketId) return toast('Kein Ticket-Bezug — Versand als Ticket-Antwort nicht möglich', 'warn', 6000);
+  if (typeof erpQuoteToPdfBlob !== 'function') return toast('PDF-Renderer nicht geladen — App neu laden', 'error', 5000);
+  const reqEmail = (st.ticket && (st.ticket.requester?.email || st.ticket.email)) || '';
+  const langNote = st.pdfLang ? ' (Sprache: ' + st.pdfLang + ')' : '';
+  if (!confirm('Angebot als PDF an den Kunden senden' + langNote + '?\n\n' +
+    'Empfänger: ' + (reqEmail || 'Ticket-Anfragender') + '\n' +
+    'Geht als Antwort in Ticket #' + st.ticketId + ' raus (im Verlauf sichtbar).')) return;
+  setBusy(btn, true, 'Erzeuge PDF + sende…');
+  try {
+    const blob = await erpQuoteToPdfBlob(_flpBuildErpData());
+    const cover = _flpBuildCover(st);
+    const fname = 'Angebot' + ((st.quoteNo && st.quoteNo !== '(Entwurf)') ? '_' + String(st.quoteNo).replace(/[^\w.-]/g, '') : '') + '.pdf';
+    await _fdPostMultipart(st.accountId, 'tickets/' + encodeURIComponent(st.ticketId) + '/reply',
+      { body: cover.bodyHtml },
+      [{ name: fname, type: 'application/pdf', blob: blob }]);
+    setBusy(btn, false);
+    const resEl = document.getElementById('flpPosResult');
+    if (resEl) resEl.innerHTML = '<div class="bg-emerald-50 border border-emerald-200 rounded-xl p-3 text-[12px] text-emerald-900"><p class="font-bold inline-flex items-center gap-1"><i data-lucide="check-circle-2" class="w-4 h-4"></i> Angebot als PDF an den Kunden gesendet (Ticket #' + escapeHtml(String(st.ticketId)) + ')</p></div>';
+    if (window.lucide) lucide.createIcons();
+    toast('Angebot versendet ✓ (als Antwort in Ticket #' + st.ticketId + ')', 'success', 6000);
+  } catch (e) {
+    setBusy(btn, false);
+    toast('Versand fehlgeschlagen: ' + (e.message || e), 'error', 9000);
   }
 }
 
