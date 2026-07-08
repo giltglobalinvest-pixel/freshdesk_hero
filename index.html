@@ -784,7 +784,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.258';
+const APP_VERSION = 'v2.46.259';
 
 /* ============================================================
    GLOBAL THEME — v2.46.12
@@ -23386,11 +23386,13 @@ function closeRestructureTitleModal() {
 
 let NEW_EMAIL_REC = null;
 let NEW_EMAIL_PLAN = null;
+let NEW_EMAIL_FILES = [];  // v2.46.259: lokale Anhänge/Screenshots [{name,type,size,blob}]
 
 async function openNewEmailAiModal() {
   let host = document.getElementById('modalHost');
   if (!host) { host = document.createElement('div'); host.id = 'modalHost'; document.body.appendChild(host); }
   NEW_EMAIL_PLAN = null;
+  NEW_EMAIL_FILES = [];  // v2.46.259: frische Anhang-Liste bei jedem Öffnen
   const accounts = APP_STATE.accounts || [];
   if (!accounts.length) { toast('Keine Accounts verfügbar', 'warn'); return; }
   let preselect = (APP_STATE.currentAccount && APP_STATE.currentAccount !== 'all' && accounts.find(a => a.id === APP_STATE.currentAccount))
@@ -23419,12 +23421,22 @@ async function openNewEmailAiModal() {
           '</button>' : '<p class="text-[11px] text-ink-500 italic">Sprach-Eingabe nicht verfügbar — nutze das Textfeld.</p>') +
           '<textarea id="newEmailCmd" rows="5" placeholder="z.B. „Schreibe Max Müller von Firma X wegen Angebot 4711, dass wir bis Freitag liefern können" — oder direkt mit Email: „Email an max@firma.de mit Betreff Bestellung Liefertermin"' +
             ' class="w-full px-3 py-3 border border-orange-200 bg-orange-50/30 rounded-xl text-sm focus:ring-2 focus:ring-orange-500/30 focus:border-orange-500 resize-y"></textarea>' +
+          // v2.46.259: Anhänge / Screenshots — KI liest sie mit, Datei wird ans Ticket gehängt
+          '<div>' +
+            '<div class="flex items-center justify-between mb-1">' +
+              '<label class="text-xs font-bold text-ink-700 uppercase tracking-wider">Anhänge / Screenshots (optional)</label>' +
+              '<button type="button" onclick="document.getElementById(\'newEmailFileInput\').click()" class="text-[11px] font-semibold text-orange-600 inline-flex items-center gap-1"><i data-lucide="paperclip" class="w-3.5 h-3.5"></i> Hinzufügen</button>' +
+            '</div>' +
+            '<input id="newEmailFileInput" type="file" accept="image/*,application/pdf" multiple class="hidden" onchange="_neAddFiles(this)">' +
+            '<div id="newEmailAttachList" class="space-y-1">' + _neAttachListHtml() + '</div>' +
+            '<p class="text-[10px] text-ink-400 mt-1">Screenshot einfügen: ins Textfeld klicken und Cmd/Strg+V. Die KI wertet Anhänge mit aus; die Datei wird ans Ticket angehängt.</p>' +
+          '</div>' +
           '<div class="bg-white border border-ink-200 rounded-xl p-3">' +
             '<p class="text-[10px] font-semibold text-ink-500 uppercase tracking-wider mb-1.5">Was die KI macht</p>' +
             '<div class="space-y-1 text-[11px] text-ink-700 leading-relaxed">' +
               '<p>1. Empfänger erkennen (Name + Firma oder direkt Email)</p>' +
               '<p>2. <b>Freshdesk-Kontakte durchsuchen</b> und Treffer vorschlagen</p>' +
-              '<p>3. Betreff + Email-Text als Entwurf formulieren</p>' +
+              '<p>3. Betreff + Email-Text als Entwurf formulieren — <b>auch aus Anhängen/Screenshots</b></p>' +
               '<p>Du prüfst alles im nächsten Schritt — und kannst optional eine Vorlage drüberlegen.</p>' +
             '</div>' +
           '</div>' +
@@ -23439,7 +23451,57 @@ async function openNewEmailAiModal() {
     '</div>';
   if (window.lucide) lucide.createIcons();
   document.body.style.overflow = 'hidden';
-  setTimeout(function () { $('newEmailCmd')?.focus(); }, 80);
+  setTimeout(function () {
+    const ta = $('newEmailCmd');
+    if (ta) { ta.focus(); ta.addEventListener('paste', _neHandlePaste); }
+  }, 80);
+}
+
+/* v2.46.259: Anhang-Handling für „Neue Email schreiben". */
+function _neAttachListHtml() {
+  if (!NEW_EMAIL_FILES.length) return '<p class="text-[11px] text-ink-400 italic">Keine Anhänge</p>';
+  return NEW_EMAIL_FILES.map(function (f, i) {
+    const isImg = String(f.type || '').startsWith('image/');
+    return '<div class="flex items-center gap-2 bg-ink-50 border border-ink-200 rounded-lg px-2 py-1.5">' +
+      '<i data-lucide="' + (isImg ? 'image' : 'file-text') + '" class="w-4 h-4 text-ink-500 shrink-0"></i>' +
+      '<span class="flex-1 min-w-0 truncate text-[12px] text-ink-700">' + escapeHtml(f.name || 'Anhang') + '</span>' +
+      '<span class="text-[10px] text-ink-400 shrink-0">' + Math.max(1, Math.round((f.size || 0) / 1024)) + ' KB</span>' +
+      '<button type="button" onclick="_neRemoveFile(' + i + ')" class="w-6 h-6 rounded hover:bg-ink-200 flex items-center justify-center shrink-0" title="Entfernen"><i data-lucide="x" class="w-3.5 h-3.5 text-ink-500"></i></button>' +
+    '</div>';
+  }).join('');
+}
+function _neRenderAttachList() {
+  const host = document.getElementById('newEmailAttachList');
+  if (host) { host.innerHTML = _neAttachListHtml(); if (window.lucide) lucide.createIcons(); }
+}
+function _neAddFiles(inputEl) {
+  const files = Array.from((inputEl && inputEl.files) || []);
+  const MAX = 20 * 1024 * 1024;
+  for (const f of files) {
+    if (f.size > MAX) { toast('„' + f.name + '" ist zu groß (' + Math.round(f.size / 1024 / 1024) + ' MB) — max 20 MB', 'warn', 6000); continue; }
+    NEW_EMAIL_FILES.push({ name: f.name || ('anhang-' + (NEW_EMAIL_FILES.length + 1)), type: f.type || 'application/octet-stream', size: f.size, blob: f });
+  }
+  if (inputEl) inputEl.value = '';
+  _neRenderAttachList();
+}
+function _neRemoveFile(idx) {
+  NEW_EMAIL_FILES.splice(idx, 1);
+  _neRenderAttachList();
+}
+function _neHandlePaste(e) {
+  const items = (e.clipboardData && e.clipboardData.items) || [];
+  let added = 0;
+  for (const it of items) {
+    if (it.kind === 'file' && String(it.type || '').startsWith('image/')) {
+      const blob = it.getAsFile();
+      if (blob) {
+        const ext = (String(it.type).split('/')[1] || 'png').split('+')[0];
+        NEW_EMAIL_FILES.push({ name: 'screenshot-' + (NEW_EMAIL_FILES.length + 1) + '.' + ext, type: it.type, size: blob.size, blob: blob });
+        added++;
+      }
+    }
+  }
+  if (added) { _neRenderAttachList(); toast(added + ' Screenshot' + (added > 1 ? 's' : '') + ' angehängt', 'success', 2500); }
 }
 
 function toggleNewEmailVoice() {
@@ -23479,40 +23541,59 @@ function _updateNewEmailMicUI(isOn) {
 async function processNewEmailAi(btn) {
   if (NEW_EMAIL_REC) { try { NEW_EMAIL_REC.stop(); } catch (_) {} NEW_EMAIL_REC = null; }
   const cmd = ($('newEmailCmd')?.value || '').trim();
-  if (!cmd) return toast('Bitte etwas eintippen oder sprechen', 'warn');
+  const hasAtt = NEW_EMAIL_FILES.length > 0;
+  if (!cmd && !hasAtt) return toast('Bitte etwas eintippen, sprechen oder einen Anhang hinzufügen', 'warn');
   const accountId = $('newEmailAccount')?.value;
   if (!accountId) return toast('Account fehlt', 'warn');
-  setBusy(btn, true, 'KI denkt…');
+  setBusy(btn, true, hasAtt ? 'KI liest Anhänge…' : 'KI denkt…');
   try {
-    const sysPrompt = 'Du extrahierst aus einer Beschreibung die Felder einer neuen Email auf Deutsch. ' +
+    const sysPrompt = 'Du extrahierst aus einer Beschreibung (und ggf. beigefügten Anhängen/Screenshots) die Felder einer neuen Email auf Deutsch. ' +
       'Antworte AUSSCHLIESSLICH mit gültigem JSON, ohne Markdown-Codeblock. ' +
       'Schema:\n' +
       '{\n' +
       '  "recipient_name": string|null (Vor- und Nachname falls genannt),\n' +
-      '  "recipient_email": string|null (nur wenn explizit eine Email-Adresse genannt wurde),\n' +
+      '  "recipient_email": string|null (nur wenn explizit eine Email-Adresse genannt wurde bzw. im Anhang steht),\n' +
       '  "company_name": string|null (Firma falls genannt),\n' +
       '  "subject": string (max 80 Zeichen, prägnant),\n' +
       '  "body": string (vollständige Email-Text als HTML — höflicher Anschreiben-Stil mit Anrede, ein paar Absätze, Grußformel; <br> für Zeilenumbrüche, <p> für Absätze),\n' +
       '  "priority": 1|2|3|4 (Default 1=Niedrig)\n' +
       '}\n' +
+      'Wenn ANHÄNGE/SCREENSHOTS beiliegen (Bilder/PDF): lies sie VOLLSTÄNDIG und nutze ihren Inhalt, um Empfänger, Betreff und Email-Text abzuleiten (z.B. eine abfotografierte/gescannte Anfrage, ein Beleg, ein Schriftwechsel, ein Formular). Fehlt eine Text-Beschreibung, formuliere den Email-Entwurf sinngemäß aus den Anhängen. ' +
       'Wenn der User selbst der Absender ist, verwende für die Grußformel passende Standard-Floskeln (z.B. „Mit freundlichen Grüßen").';
+    // v2.46.259: Anhänge als Content-Blocks mitgeben; mit Anhang das stärkere Modell nutzen.
+    let userContent = cmd;
+    if (hasAtt) {
+      const blocks = [{ type: 'text', text: cmd || '(Kein Freitext — Empfänger, Betreff und Email-Text bitte aus den beigefügten Anhängen/Screenshots ableiten.)' }];
+      for (const f of NEW_EMAIL_FILES) {
+        try {
+          const b64 = await _fileToBase64(f.blob);
+          if (f.type === 'application/pdf') blocks.push({ type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: b64 } });
+          else if (String(f.type).startsWith('image/')) blocks.push({ type: 'image', source: { type: 'base64', media_type: f.type, data: b64 } });
+        } catch (e) { console.warn('[NeueEmail] Anhang-Encode:', f.name, e.message); }
+      }
+      userContent = blocks;
+    }
     const data = await proxyJson('/anthropic/v1/messages', {
       method: 'POST',
       body: JSON.stringify({
-        model: 'claude-haiku-4-5-20251001',
-        max_tokens: 1200,
+        model: hasAtt ? 'claude-sonnet-4-5-20250929' : 'claude-haiku-4-5-20251001',
+        max_tokens: 1500,
         system: sysPrompt,
-        messages: [{ role: 'user', content: cmd }]
+        messages: [{ role: 'user', content: userContent }]
       })
     });
     const raw = (data?.content?.[0]?.text || '').trim();
-    let json = raw.replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/i, '').trim();
     let plan;
-    try { plan = JSON.parse(json); }
-    catch (_) {
-      const m = json.match(/\{[\s\S]*\}/);
-      if (m) { try { plan = JSON.parse(m[0]); } catch (e2) { throw new Error('KI-Antwort ist kein gültiges JSON'); } }
-      else throw new Error('KI-Antwort ist kein gültiges JSON');
+    try {
+      plan = (typeof parseAIJson === 'function') ? parseAIJson(raw) : JSON.parse(raw);
+    } catch (e1) {
+      let json = raw.replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/i, '').trim();
+      try { plan = JSON.parse(json); }
+      catch (_) {
+        const m = json.match(/\{[\s\S]*\}/);
+        if (m) { try { plan = JSON.parse(m[0]); } catch (e2) { throw new Error('KI-Antwort ist kein gültiges JSON'); } }
+        else throw new Error('KI-Antwort ist kein gültiges JSON');
+      }
     }
     NEW_EMAIL_PLAN = { accountId, plan, originalCmd: cmd, contacts: null, selectedContact: null };
     // Wenn die KI eine Email direkt erkannt hat → kein Search nötig
@@ -23625,6 +23706,7 @@ function _neManualEmail() {
 function _neBackToPrompt() {
   const original = NEW_EMAIL_PLAN?.originalCmd || '';
   const accountId = NEW_EMAIL_PLAN?.accountId;
+  const keepFiles = NEW_EMAIL_FILES.slice();  // v2.46.259: Anhänge über „Zurück" erhalten
   NEW_EMAIL_PLAN = null;
   closeNewEmailAiModal();
   setTimeout(function () {
@@ -23634,6 +23716,8 @@ function _neBackToPrompt() {
       if (ta && original) ta.value = original;
       const sel = $('newEmailAccount');
       if (sel && accountId) sel.value = accountId;
+      NEW_EMAIL_FILES = keepFiles;
+      _neRenderAttachList();
     }, 80);
   }, 30);
 }
@@ -23682,6 +23766,9 @@ async function _renderNewEmailPreview() {
       '<i data-lucide="check-circle" class="w-4 h-4 text-emerald-600 shrink-0"></i>' +
       '<p class="text-emerald-800">KI-Entwurf bereit — bitte prüfen und ggf. anpassen.</p>' +
     '</div>' +
+    (NEW_EMAIL_FILES.length
+      ? '<div class="bg-ink-50 border border-ink-200 rounded-xl p-2.5 text-[11px] text-ink-600 flex items-center gap-2"><i data-lucide="paperclip" class="w-3.5 h-3.5 shrink-0"></i> <span>' + NEW_EMAIL_FILES.length + ' Anhang/Anhänge werden ans Ticket angehängt: ' + escapeHtml(NEW_EMAIL_FILES.map(function (f) { return f.name; }).join(', ')) + '</span></div>'
+      : '') +
     '<label class="text-xs font-bold text-ink-700 uppercase tracking-wider block">Vorlage (optional)</label>' +
     '<select id="neTemplate" onchange="_neApplyTemplate()" class="w-full px-3 py-2.5 border border-ink-300 rounded-xl text-sm bg-white">' + tplOpts + '</select>' +
     '<label class="text-xs font-bold text-ink-700 uppercase tracking-wider block">Von</label>' +
@@ -23773,23 +23860,38 @@ async function processSendNewEmail(btn) {
   if (!body)      return setErr('Email-Text fehlt');
   if (!fromIdStr) return setErr('Absender (Von) fehlt');
   const fromId = parseInt(fromIdStr, 10);
-  setBusy(btn, true, 'Sende…');
+  const files = NEW_EMAIL_FILES.slice();
+  setBusy(btn, true, files.length ? 'Sende + hänge Anhänge an…' : 'Sende…');
   try {
-    const payload = {
-      subject: subject,
-      description: body,
-      email: to,
-      email_config_id: fromId,
-      priority: ref.plan?.priority || 1,
-      status: 5,
-    };
-    const created = await proxyJson('/freshdesk/' + encodeURIComponent(ref.accountId) + '/api/v2/tickets/outbound_email', {
-      method: 'POST',
-      body: JSON.stringify(payload)
-    });
+    let created;
+    if (files.length) {
+      // v2.46.259: mit Anhängen → multipart/form-data (outbound_email akzeptiert attachments[])
+      const fields = {
+        subject: subject,
+        description: body,
+        email: to,
+        email_config_id: String(fromId),
+        priority: String(ref.plan?.priority || 1),
+        status: '5',
+      };
+      created = await _fdPostMultipart(ref.accountId, 'tickets/outbound_email', fields, files.map(function (f) { return { name: f.name, type: f.type, blob: f.blob }; }));
+    } else {
+      const payload = {
+        subject: subject,
+        description: body,
+        email: to,
+        email_config_id: fromId,
+        priority: ref.plan?.priority || 1,
+        status: 5,
+      };
+      created = await proxyJson('/freshdesk/' + encodeURIComponent(ref.accountId) + '/api/v2/tickets/outbound_email', {
+        method: 'POST',
+        body: JSON.stringify(payload)
+      });
+    }
     if (!created?.id) throw new Error('Versand fehlgeschlagen');
     closeNewEmailAiModal();
-    toast('Email gesendet — Ticket #' + created.id + ' erstellt', 'success', 5000);
+    toast('Email gesendet — Ticket #' + created.id + ' erstellt' + (files.length ? ' (' + files.length + ' Anhang/Anhänge)' : ''), 'success', 5000);
   } catch (e) {
     setBusy(btn, false);
     setErr(e.message || String(e));
@@ -23799,6 +23901,7 @@ async function processSendNewEmail(btn) {
 function closeNewEmailAiModal() {
   if (NEW_EMAIL_REC) { try { NEW_EMAIL_REC.stop(); } catch (_) {} NEW_EMAIL_REC = null; }
   NEW_EMAIL_PLAN = null;
+  NEW_EMAIL_FILES = [];  // v2.46.259
   const host = document.getElementById('modalHost');
   if (host) host.innerHTML = '';
   document.body.style.overflow = '';
