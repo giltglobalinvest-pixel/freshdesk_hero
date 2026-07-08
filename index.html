@@ -784,7 +784,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.252';
+const APP_VERSION = 'v2.46.253';
 
 /* ============================================================
    GLOBAL THEME — v2.46.12
@@ -25426,7 +25426,13 @@ async function openAngebotsChatModal(accountId, ticketId, forcedRestore) {
     // v2.46.209: Stammdaten SOFORT aus dem ERP laden (per Fabriknummer) — ohne
     // dass der User den ERP-Button drücken muss. Bei Fehler: Hinweis-Bubble,
     // manueller Weg bleibt. Nicht wenn schon ein gespeicherter Stand da ist.
-    if (!restored?.collected) _angAutoLoadErp(window._ANG_CHAT);
+    // v2.46.253: Danach automatisch die noch leeren Felder per KI aus Email +
+    // Anhängen ergänzen (Hintergrund) — der User muss den KI-Button nicht mehr
+    // manuell drücken. ERP läuft zuerst (autoritativ), KI füllt nur die Lücken.
+    if (!restored?.collected) {
+      Promise.resolve(_angAutoLoadErp(window._ANG_CHAT)).catch(() => {})
+        .then(() => _angAutoExtractStammdaten(window._ANG_CHAT));
+    }
     // Hintergrund-Analyse starten — wenn fertig wird sie ins State geschrieben
     window._ANG_CHAT.ticket_summary = '';
     window._ANG_CHAT.bgAnalysisPromise = _angChatInitialAnalysis(accountId, ticketId, ticket, profile)
@@ -26735,6 +26741,60 @@ async function reExtractAngStammdaten(btn) {
   } catch (e) {
     setBusy(btn, false);
     toast('KI-Extract fehlgeschlagen: ' + (e.message || e), 'error', 8000);
+  }
+}
+
+/* v2.46.253: Automatischer Stammdaten-Extract aus Email + Anhängen im Hintergrund.
+   Läuft beim Öffnen des Angebots-Chats (NACH dem ERP-Auto-Load, damit ERP-Daten
+   Vorrang behalten). Füllt AUSSCHLIESSLICH noch leere Felder — überschreibt nie
+   ERP-, wiederhergestellte oder manuell eingetragene Werte. Guard gegen Doppellauf. */
+async function _angAutoExtractStammdaten(s) {
+  if (!s || s._stammKITried) return;
+  s._stammKITried = true;
+  const sd = (s.collected && s.collected.stammdaten) || {};
+  const leer = v => !String(v || '').trim();
+  // Nur starten, wenn überhaupt ein relevantes Feld leer ist
+  const brauchtExtract = leer(sd.vertragspartner) || leer(sd.rechnungs_anschrift) ||
+    leer(sd.email) || leer(sd.tel) || leer(sd.ansprechpartner_vor_ort) ||
+    leer(s.collected?.standort) || leer(s.collected?.fabriknummer);
+  if (!brauchtExtract) return;
+  try {
+    const p = await _angExtractStammdatenFromEmail(s);
+    if (!s || window._ANG_CHAT !== s) return; // Modal zwischenzeitlich geschlossen/gewechselt
+    s.collected = s.collected || {};
+    s.collected.stammdaten = s.collected.stammdaten || {};
+    const gefuellt = [];
+    const setSd = (k, v) => { if (v && leer(s.collected.stammdaten[k])) { s.collected.stammdaten[k] = String(v).trim(); gefuellt.push(k); } };
+    const setTop = (k, v) => { if (v && leer(s.collected[k])) { s.collected[k] = String(v).trim(); gefuellt.push(k); } };
+    setSd('vertragspartner', p.vertragspartner);
+    setSd('rechnungs_anschrift', p.rechnungs_anschrift);
+    setSd('email', p.email);
+    setSd('tel', p.tel);
+    setSd('ansprechpartner_vor_ort', p.ansprechpartner_vor_ort);
+    setTop('standort', p.standort);
+    setTop('fabriknummer', p.fabriknummer);
+    if (!gefuellt.length) return;
+    // localStorage-Persist (gleicher Key wie beim Speichern)
+    try { localStorage.setItem('fdh_ang_stamm_' + s.accountId + '_' + s.ticketId, JSON.stringify({ standort: s.collected.standort, fabriknummer: s.collected.fabriknummer, stammdaten: s.collected.stammdaten })); } catch (_) {}
+    // Wenn der Stammdaten-Editor gerade offen ist: leere Eingabefelder nachziehen
+    if (document.getElementById('subModalHost2')?.innerHTML.trim()) {
+      const upd = (id, v) => { const el = document.getElementById(id); if (el && !el.value.trim() && v) el.value = v; };
+      upd('sdVertragspartner', s.collected.stammdaten.vertragspartner);
+      upd('sdAnschrift', s.collected.stammdaten.rechnungs_anschrift);
+      upd('sdEmail', s.collected.stammdaten.email);
+      upd('sdTel', s.collected.stammdaten.tel);
+      upd('sdAnsprech', s.collected.stammdaten.ansprechpartner_vor_ort);
+      upd('sdStandort', s.collected.standort);
+      upd('sdFabrik', s.collected.fabriknummer);
+    }
+    try { _angChatRenderPreview(); } catch (_) {}
+    // Dezente Rückmeldung nur, wenn nicht ohnehin schon ERP-Daten geladen wurden
+    if (!s._erpLoaded) {
+      _angChatAppendBubble('assistant', '📝 Stammdaten automatisch aus Email/Anhängen ergänzt (' + gefuellt.length + ' Feld' + (gefuellt.length > 1 ? 'er' : '') + '). Unter „✎ Stammdaten" prüfen/überschreiben.');
+    }
+  } catch (e) {
+    console.warn('[Auto-Stammdaten-KI]', e.message || e);
+    // still & unblockierend — der manuelle Button bleibt als Fallback
   }
 }
 
