@@ -784,7 +784,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.255';
+const APP_VERSION = 'v2.46.256';
 
 /* ============================================================
    GLOBAL THEME — v2.46.12
@@ -1856,21 +1856,23 @@ async function erpLoadKundenKontakte(firmaSlug, kundennummer) {
   } catch (_) { return []; }
 }
 
-/* v2.46.249: Neuen Kunden-Kontakt (CRM) im Aufzug-ERP anlegen. Payload analog
-   Berichtskonverter: POST /api/kontakte mit kunde.kundennummer. */
+/* v2.46.249: Neuen Kunden-Kontakt (CRM) im Aufzug-ERP anlegen.
+   v2.46.256: Payload 1:1 wie der funktionierende Berichtskonverter-Flow
+   (_submitCreateKontakt): FLACHES Feld `kundenId` (Number) statt verschachtelt
+   `kunde.kundennummer`, und telefon/mobile/rolle NUR wenn befüllt (kein fax,
+   keine leeren Strings) — sonst wirft das ERP HTTP 400. */
 async function erpCreateKundenKontakt(firmaSlug, kundennummer, data) {
   if (!firmaSlug || !kundennummer) throw new Error('Kein ERP-Kunde (Kundennummer fehlt)');
   const payload = {
-    kunde:    { kundennummer: +kundennummer },
-    rolle:    (data.rolle || 'Ansprechpartner'),
+    kundenId: +kundennummer,
     anrede:   data.anrede || 'Herr',
     vorname:  data.vorname || '',
     nachname: data.nachname || data.vorname || 'Kontakt',
     email:    data.email || '',
-    telefon:  data.telefon || '',
-    mobile:   data.mobile || '',
-    fax:      '',
   };
+  if (data.telefon) payload.telefon = data.telefon;
+  if (data.mobile)  payload.mobile  = data.mobile;
+  if (data.rolle)   payload.rolle   = data.rolle;
   return await erpFetch('/aufzug/' + encodeURIComponent(firmaSlug) + '/api/kontakte', { method: 'POST', body: payload });
 }
 
