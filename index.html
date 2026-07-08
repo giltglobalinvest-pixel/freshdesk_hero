@@ -784,7 +784,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.264';
+const APP_VERSION = 'v2.46.265';
 
 /* ============================================================
    GLOBAL THEME — v2.46.12
@@ -10587,6 +10587,11 @@ function _renderMarketingFromContactModal(accountId, recipientEmail, recipientNa
               '<button onclick="_mfcDeletePromptTpl(this)" title="Aktuell gewählte Vorlage löschen" class="px-2 py-1.5 bg-white border border-red-300 hover:bg-red-50 text-red-600 rounded-lg text-[11px] inline-flex items-center"><i data-lucide="trash-2" class="w-3.5 h-3.5"></i></button>' +
             '</div>' +
             '<textarea id="mfcAiPrompt" oninput="_mfcSaveDraft()" rows="2" placeholder="z.B. „Hinweis dass wir ein neues Produkt haben"" class="w-full px-3 py-2 border border-purple-300 rounded-lg text-[12px] resize-none"></textarea>' +
+            // v2.46.265: Sprache der generierten Email wählbar
+            '<div class="flex items-center gap-1.5">' +
+              '<label class="text-[10px] font-semibold text-purple-700 shrink-0 inline-flex items-center gap-1"><i data-lucide="languages" class="w-3 h-3"></i> Sprache</label>' +
+              '<select id="mfcAiLang" class="flex-1 px-2 py-1.5 border border-purple-300 rounded-lg text-[11px] bg-white">' + _mailLangOptions('') + '</select>' +
+            '</div>' +
             '<button onclick="_mfcAiGenerate(this)" class="w-full px-3 py-2 bg-gradient-to-br from-purple-600 to-brand-600 hover:opacity-90 text-white rounded-lg text-xs font-bold inline-flex items-center justify-center gap-1"><i data-lucide="wand-2" class="w-3.5 h-3.5"></i> Betreff + Body generieren</button>' +
           '</div>' +
           '<label class="text-xs font-bold text-ink-700 uppercase tracking-wider block">Von</label>' +
@@ -10979,16 +10984,38 @@ function _mfcClearDraft() {
   try { localStorage.removeItem(_mfcDraftKey(ctx.accountId, ctx.recipientEmail)); } catch (_) {}
 }
 
+/* v2.46.265: Sprachauswahl für KI-Email-Generatoren (Marketing etc.). */
+const _MAIL_LANGS = ['', 'English', 'Français', 'Italiano', 'Español', 'Nederlands', 'Polski', 'Türkçe', 'Português', 'Čeština'];
+function _mailLangOptions(cur) {
+  cur = cur || '';
+  let o = _MAIL_LANGS.map(v => '<option value="' + escapeAttr(v) + '"' + (v === cur ? ' selected' : '') + '>' + escapeHtml(v === '' ? 'Deutsch' : v) + '</option>').join('');
+  if (cur && _MAIL_LANGS.indexOf(cur) < 0) o += '<option value="' + escapeAttr(cur) + '" selected>' + escapeHtml(cur) + '</option>';
+  return o + '<option value="__custom__">Andere…</option>';
+}
+/* Liest den gewählten Sprach-Wert aus einem <select> (behandelt „Andere…" per prompt)
+   und liefert die System-Prompt-Zeile. Rückgabe {lang, line}. */
+function _mailLangInstruction(selectId) {
+  let lang = (document.getElementById(selectId)?.value || '').trim();
+  if (lang === '__custom__') {
+    lang = (prompt('In welcher Sprache soll die Email geschrieben werden?') || '').trim();
+    const sel = document.getElementById(selectId); if (sel) sel.value = _MAIL_LANGS.indexOf(lang) >= 0 ? lang : (lang ? lang : '');
+  }
+  if (!lang || /^deutsch$|^german$/i.test(lang)) return { lang: '', line: 'Schreibe die Email auf Deutsch.' };
+  return { lang, line: 'Schreibe die GESAMTE Email (Betreff UND Body) AUSSCHLIESSLICH in dieser Sprache: ' + lang + '. Verwende die in dieser Sprache geschäftsübliche Anrede und Grußformel. Eigennamen, Marken, Produkt-/Typbezeichnungen, URLs und E-Mail-Adressen NICHT übersetzen.' };
+}
+
 async function _mfcAiGenerate(btn) {
   const ctx = window._MFC_CTX;
   if (!ctx) return;
   const promptTxt = (document.getElementById('mfcAiPrompt')?.value || '').trim();
   if (!promptTxt) { toast('Bitte beschreib was die Email aussagen soll.', 'warn', 4000); return; }
-  setBusy(btn, true, 'KI schreibt…');
+  const _lang = _mailLangInstruction('mfcAiLang'); // v2.46.265
+  setBusy(btn, true, _lang.lang ? ('KI schreibt (' + _lang.lang + ')…') : 'KI schreibt…');
   try {
     const acc = (APP_STATE.accounts || []).find(a => a.id === ctx.accountId);
     const me = APP_KEYS.user || {};
-    const sys = 'Du schreibst Sales-/Marketing-Emails auf Deutsch im Geschäftskontext.\n' +
+    const sys = 'Du schreibst Sales-/Marketing-Emails im Geschäftskontext.\n' +
+      _lang.line + '\n' +
       'Antworte AUSSCHLIESSLICH mit JSON: {"subject":"…","body":"…"}\n' +
       'Regeln für body:\n' +
       '- Plain-Text mit Zeilenumbrüchen (\\n), KEIN HTML, KEIN Markdown\n' +
@@ -33468,6 +33495,11 @@ function _renderPhoneCallModal() {
               '<p class="text-[11px] font-bold text-orange-800 inline-flex items-center gap-1"><i data-lucide="mail" class="w-3.5 h-3.5"></i> Follow-up Email per KI</p>' +
             '</div>' +
             '<textarea id="pcMailPrompt" rows="2" placeholder="z.B. „Bedanken für das Gespräch + Angebot für Wartungspaket beilegen"" class="w-full px-3 py-2 border border-orange-300 rounded-lg text-[12px] bg-white resize-none mb-1.5"></textarea>' +
+            // v2.46.265: Sprache der generierten Email wählbar
+            '<div class="flex items-center gap-1.5 mb-1.5">' +
+              '<label class="text-[10px] font-semibold text-orange-700 shrink-0 inline-flex items-center gap-1"><i data-lucide="languages" class="w-3 h-3"></i> Sprache</label>' +
+              '<select id="pcMailLang" class="flex-1 px-2 py-1.5 border border-orange-300 rounded-lg text-[11px] bg-white">' + _mailLangOptions('') + '</select>' +
+            '</div>' +
             '<div class="flex gap-1.5 flex-wrap mb-1.5">' +
               '<button onclick="_pcGenerateMail(this)" class="flex-1 min-w-[120px] px-3 py-2 bg-gradient-to-br from-purple-600 to-brand-600 hover:opacity-90 text-white rounded-lg text-xs font-bold inline-flex items-center justify-center gap-1"><i data-lucide="wand-2" class="w-3.5 h-3.5"></i> Betreff + Body generieren</button>' +
               '<button onclick="_pcPickAttachments()" class="px-3 py-2 bg-white hover:bg-orange-100 border border-orange-300 text-orange-700 rounded-lg text-xs font-bold inline-flex items-center gap-1"><i data-lucide="paperclip" class="w-3.5 h-3.5"></i> Anhang</button>' +
@@ -33539,10 +33571,12 @@ async function _pcGenerateMail(btn) {
   const c = ctx.contact;
   const me = APP_KEYS.user || {};
   const acc = (APP_STATE.accounts || []).find(a => a.id === c._accountId);
-  setBusy(btn, true, 'KI schreibt…');
+  const _lang = _mailLangInstruction('pcMailLang'); // v2.46.265
+  setBusy(btn, true, _lang.lang ? ('KI schreibt (' + _lang.lang + ')…') : 'KI schreibt…');
   try {
     const lastNote = ctx.voiceNotes?.[ctx.voiceNotes.length - 1]?.text || '';
-    const sys = 'Du schreibst Follow-up-Emails nach einem Sales-Call auf Deutsch.\n' +
+    const sys = 'Du schreibst Follow-up-Emails nach einem Sales-Call.\n' +
+      _lang.line + '\n' +
       'Antworte AUSSCHLIESSLICH mit JSON: {"subject":"…","body":"…"}\n' +
       'body: Plain-Text mit Zeilenumbruechen, KEIN HTML, KEIN Markdown.\n' +
       'Maximal 150 Worte, sachlich, kurz, Bezug auf das Gespraech wenn moeglich.\n' +
@@ -36586,6 +36620,11 @@ function _renderBulkMarketingModal() {
               '<button onclick="_bulkDeletePromptTpl(this)" title="Aktuell gewählte Vorlage löschen" class="px-2 py-1.5 bg-white border border-red-300 hover:bg-red-50 text-red-600 rounded-lg text-[11px] inline-flex items-center"><i data-lucide="trash-2" class="w-3.5 h-3.5"></i></button>' +
             '</div>' +
             '<textarea id="bulkAiPrompt" rows="2" placeholder="z.B. „Hinweis dass wir ein neues Produkt im Sortiment haben und einladen wollen es kennenzulernen"" class="w-full px-3 py-2 border border-purple-300 rounded-lg text-[12px] resize-none">' + escapeHtml(window._BULK_CTX?.aiPrompt || '') + '</textarea>' +
+            // v2.46.265: Sprache der generierten Email wählbar
+            '<div class="flex items-center gap-1.5">' +
+              '<label class="text-[10px] font-semibold text-purple-700 shrink-0 inline-flex items-center gap-1"><i data-lucide="languages" class="w-3 h-3"></i> Sprache</label>' +
+              '<select id="bulkAiLang" class="flex-1 px-2 py-1.5 border border-purple-300 rounded-lg text-[11px] bg-white">' + _mailLangOptions('') + '</select>' +
+            '</div>' +
             '<button onclick="_bulkAiGenerate(this)" class="w-full px-3 py-2 bg-gradient-to-br from-purple-600 to-brand-600 hover:opacity-90 text-white rounded-lg text-xs font-bold inline-flex items-center justify-center gap-1"><i data-lucide="wand-2" class="w-3.5 h-3.5"></i> Betreff + Body generieren</button>' +
           '</div>' +
           '<label class="text-xs font-bold text-ink-700 uppercase tracking-wider block">Von</label>' +
@@ -36786,13 +36825,15 @@ async function _bulkAiGenerate(btn) {
   const prompt = (document.getElementById('bulkAiPrompt')?.value || '').trim();
   if (!prompt) { toast('Bitte beschreib was die Email aussagen soll.', 'warn', 4000); return; }
   ctx.aiPrompt = prompt;
-  setBusy(btn, true, 'KI schreibt…');
+  const _lang = _mailLangInstruction('bulkAiLang'); // v2.46.265
+  setBusy(btn, true, _lang.lang ? ('KI schreibt (' + _lang.lang + ')…') : 'KI schreibt…');
   try {
     const acc = (APP_STATE.accounts || []).find(a => a.id === ctx.accountId);
     const me = APP_KEYS.user || {};
     const sampleNames = ctx.contacts.slice(0, 3).map(c => c.name || c.email).join(', ');
     const sampleCompanies = Array.from(new Set(ctx.contacts.map(c => c.company_name).filter(Boolean))).slice(0, 5).join(', ');
-    const sys = 'Du schreibst Sales-/Marketing-Emails auf Deutsch im Geschäftskontext.\n' +
+    const sys = 'Du schreibst Sales-/Marketing-Emails im Geschäftskontext.\n' +
+      _lang.line + '\n' +
       'Antworte AUSSCHLIESSLICH mit JSON: {"subject":"…","body":"…"}\n' +
       'Regeln für body:\n' +
       '- Plain-Text mit Zeilenumbrüchen (\\n), KEIN HTML, KEIN Markdown\n' +
