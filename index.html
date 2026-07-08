@@ -784,7 +784,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.247';
+const APP_VERSION = 'v2.46.248';
 
 /* ============================================================
    GLOBAL THEME — v2.46.12
@@ -25542,6 +25542,8 @@ function _angNormLeistung(s) {
     .replace(/\b(inkl|inklusive|incl|zzgl|netto|brutto|pauschal|stück|stk|st|pro|je|nach|und|der|die|das|für|mit|ca|ggf|neue?r?)\b/g, ' ')
     .replace(/\s+/g, ' ').trim();
 }
+/* v2.46.248: Leistungsbeschreibung normalisieren (für Umfang-Vergleich). */
+function _angNormBeschr(s) { return String(s || '').toLowerCase().replace(/[•*\-–]/g, ' ').replace(/\s+/g, ' ').trim(); }
 
 async function _angLoadKundenPreishistorie(kundeName, exclTicketId) {
   const out = { byLeistung: new Map(), angebote: 0 };
@@ -25570,7 +25572,8 @@ async function _angLoadKundenPreishistorie(kundeName, exclTicketId) {
         if (!key || key.length < 4) continue;
         // neueste (erstes App_Angebote-Ergebnis, da desc sortiert) gewinnt
         if (!out.byLeistung.has(key)) {
-          out.byLeistung.set(key, { preis, label: (p.titel || p.bezeichnung || ''), angNr, datum });
+          const beschr = Array.isArray(p.leistungsbeschreibung) ? p.leistungsbeschreibung.filter(Boolean).join('\n') : (p.beschreibung || '');
+          out.byLeistung.set(key, { preis, label: (p.titel || p.bezeichnung || ''), angNr, datum, beschreibung: beschr });
         }
       }
     }
@@ -25601,7 +25604,9 @@ function _angFindPreisabweichungen(s) {
     const diff = Math.abs(preis - ref.preis);
     const pct = ref.preis ? (diff / ref.preis) : 0;
     if (diff >= 1 && pct >= 0.03) {  // >= 3% und >= 1 € Unterschied
-      abw.push({ bezeichnung: p.bezeichnung || '', neu: preis, alt: ref.preis, angNr: ref.angNr, pct: Math.round(pct * 100) });
+      const curBeschr = p.beschreibung || '';
+      const beschrAbw = !!ref.beschreibung && _angNormBeschr(curBeschr) !== _angNormBeschr(ref.beschreibung);
+      abw.push({ bezeichnung: p.bezeichnung || '', neu: preis, alt: ref.preis, angNr: ref.angNr, pct: Math.round(pct * 100), altBeschr: ref.beschreibung || '', beschrAbw });
     }
   });
   return abw;
@@ -25622,9 +25627,14 @@ function _angRenderPreiswarnung(s) {
   div.innerHTML =
     '<div class="max-w-[90%] bg-amber-50 border-2 border-amber-300 rounded-2xl px-3 py-2 text-[12px] text-amber-900">' +
       '<p class="font-bold inline-flex items-center gap-1 mb-1"><i data-lucide="alert-triangle" class="w-4 h-4"></i> Preisabweichung zu früheren Angeboten an diesen Kunden</p>' +
-      abw.map(a => '<div class="mt-0.5">• <b>' + escapeHtml(a.bezeichnung) + '</b>: jetzt <b>' + _formatEur(a.neu) + '</b> — früher ' + _formatEur(a.alt) + ' (' + a.angNr + ', ' + (a.neu > a.alt ? '+' : '−') + a.pct + '%)</div>').join('') +
-      '<div class="mt-2 flex gap-2">' +
-        '<button onclick="_angApplyHistPreise(this)" class="px-2.5 py-1 bg-amber-600 hover:bg-amber-700 text-white rounded-lg text-[11px] font-bold">Frühere Preise übernehmen</button>' +
+      abw.map(a => '<div class="mt-0.5">• <b>' + escapeHtml(a.bezeichnung) + '</b>: jetzt <b>' + _formatEur(a.neu) + '</b> — früher ' + _formatEur(a.alt) + ' (' + a.angNr + ', ' + (a.neu > a.alt ? '+' : '−') + a.pct + '%)' +
+        (a.altBeschr
+          ? '<details class="mt-0.5"' + (a.beschrAbw ? ' open' : '') + '><summary class="cursor-pointer text-[11px] ' + (a.beschrAbw ? 'text-amber-800 font-semibold' : 'text-amber-600') + '">' + (a.beschrAbw ? '⚠ Auch der Leistungsumfang weicht ab — früherer Umfang' : 'Früherer Leistungsumfang') + '</summary>' +
+            '<pre class="whitespace-pre-wrap font-sans text-[11px] mt-0.5 bg-white/70 rounded p-1.5 border border-amber-200 text-ink-700">' + escapeHtml(a.altBeschr) + '</pre></details>'
+          : '') + '</div>').join('') +
+      '<div class="mt-2 flex gap-2 flex-wrap">' +
+        '<button onclick="_angApplyHistPreise(this, false)" class="px-2.5 py-1 bg-amber-600 hover:bg-amber-700 text-white rounded-lg text-[11px] font-bold">Nur Preise übernehmen</button>' +
+        (abw.some(a => a.altBeschr) ? '<button onclick="_angApplyHistPreise(this, true)" class="px-2.5 py-1 bg-amber-700 hover:bg-amber-800 text-white rounded-lg text-[11px] font-bold">Preise + Leistungsumfang</button>' : '') +
         '<button onclick="_angIgnorePreiswarnung()" class="px-2.5 py-1 bg-white border border-amber-300 text-amber-800 rounded-lg text-[11px] font-bold">Ignorieren</button>' +
       '</div>' +
     '</div>';
@@ -25641,18 +25651,23 @@ function _angIgnorePreiswarnung() {
   toast('Preisabweichung ignoriert — Angebot bleibt wie es ist', 'info', 3000);
 }
 
-/* Setzt die Positions-Preise auf die historischen Referenzwerte. */
-function _angApplyHistPreise(btn) {
+/* Setzt Positions-Preise (und optional den Leistungsumfang) auf die historischen
+   Referenzwerte. withBeschr=true übernimmt auch die frühere Leistungsbeschreibung. */
+function _angApplyHistPreise(btn, withBeschr) {
   const s = window._ANG_CHAT;
   if (!s?._preishist) return;
-  let changed = 0;
+  let changed = 0, changedBeschr = 0;
   (s.collected?.positionen || []).forEach(p => {
     const ref = s._preishist.byLeistung.get(_angNormLeistung(p.bezeichnung || ''));
-    if (ref && +p.einzelpreis !== ref.preis) { p.einzelpreis = ref.preis; changed++; }
+    if (!ref) return;
+    if (+p.einzelpreis !== ref.preis) { p.einzelpreis = ref.preis; changed++; }
+    if (withBeschr && ref.beschreibung && _angNormBeschr(p.beschreibung || '') !== _angNormBeschr(ref.beschreibung)) {
+      p.beschreibung = ref.beschreibung; changedBeschr++;
+    }
   });
-  if (changed) {
+  if (changed || changedBeschr) {
     _angChatRenderPreview();
-    _angChatAppendBubble('assistant', '✓ ' + changed + ' Position(en) auf die früheren Kundenpreise gesetzt.');
+    _angChatAppendBubble('assistant', '✓ ' + changed + ' Preis(e)' + (changedBeschr ? ' + ' + changedBeschr + ' Leistungsumfang/-umfänge' : '') + ' auf die früheren Kundenwerte gesetzt.');
   }
   const old = document.getElementById('angPreisWarn');
   if (old) old.remove();
