@@ -784,7 +784,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.262';
+const APP_VERSION = 'v2.46.263';
 
 /* ============================================================
    GLOBAL THEME — v2.46.12
@@ -24858,6 +24858,7 @@ const _FLP_PDF_LABELS_DE = {
   delivery_default: 'Die Lieferung erfolgt frei Haus.', payment_terms: 'Zahlungsbedingungen:', warranty: 'Gewährleistung:',
   reverse_charge_note: 'Steuerfreie innergemeinschaftliche Lieferung – Steuerschuldnerschaft des Leistungsempfängers (Reverse Charge).', vat_id_label: 'USt-IdNr. Empfänger:',
   herrn: 'Herrn', frau: 'Frau', recipient: 'Empfänger', intro_ph: 'Einleitung', no_positions: 'noch keine Positionen', page_x_of_y: 'Seite {n} von {total}',
+  salut_m: 'Sehr geehrter Herr', salut_f: 'Sehr geehrte Frau', salut_n: 'Sehr geehrte Damen und Herren',
 };
 function _flpTransSourceHash(st) {
   const br = st.bundleResolved || {};
@@ -24905,7 +24906,7 @@ async function _flpTranslateForPdf(langLabel, src) {
     const sys = 'Du bist ein professioneller Fachübersetzer für kaufmännische Angebots-PDFs (Aufzug-/Ersatzteilbranche). ' +
       'Übersetze ALLE deutschen Texte im folgenden JSON originalgetreu und fachlich korrekt nach: ' + langLabel + '. ' +
       'REGELN: (1) Die JSON-Struktur/Schlüssel EXAKT beibehalten, NUR die Werte übersetzen. ' +
-      '(2) Platzhalter in geschweiften Klammern ({pct}, {base}, {n}, {total}) UNVERÄNDERT im Text belassen. ' +
+      '(2) Platzhalter in geschweiften Klammern ({pct}, {base}, {n}, {total}) UNVERÄNDERT im Text belassen. Auch Doppel-Klammer-Platzhalter wie {{kontakt.anrede}}, {{kontakt.nachname}} etc. EXAKT unverändert (Schreibweise + Klammern) beibehalten — NICHT übersetzen. ' +
       '(3) Eigennamen, Marken, Typ-/Modellbezeichnungen und Artikelnummern (z.B. „Loher Dynavert 2L2A-03400-040", „V3F16L") NICHT übersetzen. ' +
       '(4) Zahlen, Preise und Datumsangaben NICHT verändern. ' +
       '(5) Etwaige HTML-Tags in intro/closing beibehalten, nur den Textinhalt übersetzen. ' +
@@ -40642,7 +40643,7 @@ var _ERPQ_TEMPLATE_VARS_ANGEBOT = [
   { name: 'kunde.kundennr', resolve: function (c) { return (c.customer && c.customer.customer_no) || ''; } },
   { name: 'kunde.adresse', resolve: function (c) { var cu = c.customer || {}; return [cu.street, [cu.zip, cu.city].filter(Boolean).join(' ')].filter(Boolean).join(', '); } },
   { name: 'kunde.ustid', resolve: function (c) { return (c.customer && c.customer.vat_id) || ''; } },
-  { name: 'kontakt.anrede', resolve: function (c) { var g = c.contact && c.contact.gender; if (g === 'männlich') return 'Sehr geehrter Herr'; if (g === 'weiblich') return 'Sehr geehrte Frau'; return 'Sehr geehrte Damen und Herren'; } },
+  { name: 'kontakt.anrede', resolve: function (c) { var L = (c && c.i18n) || {}; var g = c.contact && c.contact.gender; if (g === 'männlich') return L.salut_m || 'Sehr geehrter Herr'; if (g === 'weiblich') return L.salut_f || 'Sehr geehrte Frau'; return L.salut_n || 'Sehr geehrte Damen und Herren'; } },
   { name: 'kontakt.anrede_kurz', resolve: function (c) { return _erpq_contactSalutation(c.contact || {}); } },
   { name: 'kontakt.vorname', resolve: function (c) { return (c.contact && c.contact.first_name) || ''; } },
   { name: 'kontakt.nachname', resolve: function (c) { return (c.contact && c.contact.last_name) || ''; } },
@@ -40718,7 +40719,8 @@ function _erpq_buildParts(data) {
 
   var ctx = {
     quote: q, customer: cu, contact: co, company: c,
-    user: data.user || {}, customFields: data.custom_values || q.custom_values || {}
+    user: data.user || {}, customFields: data.custom_values || q.custom_values || {},
+    i18n: _i18n // v2.46.263: sprach-abhängige Anrede ({{kontakt.anrede}})
   };
 
   var sums = _erpq_calcQuoteSums(items);
