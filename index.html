@@ -784,7 +784,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.260';
+const APP_VERSION = 'v2.46.261';
 
 /* ============================================================
    GLOBAL THEME — v2.46.12
@@ -24176,6 +24176,7 @@ function _flpSaveDraft() {
       positionen: st.positionen || [], chat: (st.chat || []).slice(-40),
       bundleId: st.bundleId || '', bundleResolved: st.bundleResolved || null,
       quoteId: st.quoteId || '', quoteNo: st.quoteNo || '',
+      paymentTerms: st.paymentTerms || '', deliveryTerms: st.deliveryTerms || '', vatId: st.vatId || '',
       savedAt: new Date().toISOString(),
     }));
   } catch (e) { console.warn('[FLP-Draft]', e.message); }
@@ -24204,6 +24205,7 @@ async function openFlpAngebotModal(accountId, ticketId) {
       positionen: _draft.positionen || [], chat: _draft.chat || [],
       bundleId: _draft.bundleId || '', bundleResolved: _draft.bundleResolved || null,
       quoteId: _draft.quoteId || '', quoteNo: _draft.quoteNo || '',
+      paymentTerms: _draft.paymentTerms || '', deliveryTerms: _draft.deliveryTerms || '', vatId: _draft.vatId || '',
     });
     (async () => {
       let t = APP_STATE.ticketCache?.get?.(accountId + '|' + ticketId);
@@ -24809,11 +24811,11 @@ function _flpBuildErpData() {
     quote: {
       quote_no: st.quoteNo || '(Entwurf)',
       date: today, valid_until: valid,
-      payment_terms: (tr && tr.payment_terms) || c.payment_terms || '14 Tage netto',
-      delivery_terms: (tr && tr.delivery_terms) || c.delivery_terms || '',
+      payment_terms: (tr && tr.payment_terms) || st.paymentTerms || c.payment_terms || '14 Tage netto',
+      delivery_terms: (tr && tr.delivery_terms) || st.deliveryTerms || c.delivery_terms || '',
       quote_title: (tr && tr.tagline) || '', custom_values: {},
     },
-    customer: c,
+    customer: Object.assign({}, c, st.vatId ? { vat_id: st.vatId } : {}),
     contact: k,
     company: { name: st.mandantName || 'FLP Lift Parts GmbH' },
     brand: _ERP_FLP_BRAND,
@@ -24843,13 +24845,15 @@ const _FLP_PDF_LABELS_DE = {
   col_pos: 'Pos.', col_qty: 'Anzahl', col_unit: 'Einheit', col_desc: 'Bezeichnung', col_unit_price: 'Einzelpreis', col_total_price: 'Gesamtpreis',
   discount: 'Rabatt:', artnr_prefix: 'Art-Nr:', sum_net: 'Summe', vat_line: 'Mehrwertsteuer {pct}% auf {base} € netto', total_gross: 'Gesamtbetrag',
   delivery_default: 'Die Lieferung erfolgt frei Haus.', payment_terms: 'Zahlungsbedingungen:', warranty: 'Gewährleistung:',
+  reverse_charge_note: 'Steuerfreie innergemeinschaftliche Lieferung – Steuerschuldnerschaft des Leistungsempfängers (Reverse Charge).', vat_id_label: 'USt-IdNr. Empfänger:',
   herrn: 'Herrn', frau: 'Frau', recipient: 'Empfänger', intro_ph: 'Einleitung', no_positions: 'noch keine Positionen', page_x_of_y: 'Seite {n} von {total}',
 };
 function _flpTransSourceHash(st) {
   const br = st.bundleResolved || {};
   const pos = (st.positionen || []).filter(p => p.bezeichnung || p.article_no).map(p => (p.bezeichnung || '') + '|' + (p.article_no || ''));
   const cf = st.customer?.f || {};
-  return JSON.stringify([pos, br.introRaw || '', br.closingRaw || '', cf.payment_terms || '', cf.delivery_terms || '']);
+  return JSON.stringify([pos, br.introRaw || '', br.closingRaw || '',
+    st.paymentTerms || cf.payment_terms || '', st.deliveryTerms || cf.delivery_terms || '']);
 }
 async function _flpSetPdfLang(langLabel) {
   const st = window._FLP_ANG;
@@ -24883,8 +24887,8 @@ async function _flpTranslateForPdf(langLabel, src) {
       tagline: _ERP_FLP_BRAND.taglineTop,
       intro: (st.bundleResolved && st.bundleResolved.introRaw) || '',
       closing: (st.bundleResolved && st.bundleResolved.closingRaw) || '',
-      payment_terms: (st.customer?.f?.payment_terms) || '14 Tage netto',
-      delivery_terms: (st.customer?.f?.delivery_terms) || 'EXW Fellbach',
+      payment_terms: st.paymentTerms || (st.customer?.f?.payment_terms) || '14 Tage netto',
+      delivery_terms: st.deliveryTerms || (st.customer?.f?.delivery_terms) || 'EXW Fellbach',
       items: pos.map(p => ({ name: p.bezeichnung || '' })),
     };
     const sys = 'Du bist ein professioneller Fachübersetzer für kaufmännische Angebots-PDFs (Aufzug-/Ersatzteilbranche). ' +
@@ -25070,12 +25074,27 @@ async function _flpChatSend(inputEl) {
     const t = st.ticket || {};
     const desc = htmlToText(t.description_text || t.description || '').slice(0, 3000);
     const catalog = (st.catalog || []).slice(0, 200).map(a => ({ nr: a.article_no, name: a.name1, preis: a.sales_price }));
+    const custF = st.customer?.f || {};
+    const curMwst = (st.positionen || []).map(p => +p.mwst || 19)[0];
+    const curPayment = st.paymentTerms || custF.payment_terms || '14 Tage netto';
+    const curDelivery = st.deliveryTerms || custF.delivery_terms || 'EXW Fellbach';
+    const curVatId = st.vatId || custF.vat_id || '';
     const sys = 'Du bist der Angebots-Assistent für FLP Lift Parts (Aufzug-ERSATZTEIL-Handel, KEINE Montage/Wartung/Anfahrt). ' +
-      'Baue im Dialog die Angebots-Positionen. Du bekommst den vorhandenen ARTIKEL-KATALOG: existiert ein gewünschtes Teil dort (nr oder name), verwende dessen "nr" als article_no und "preis" als einzelpreis. Sonst neue Position (article_no="" wenn keine Nummer bekannt; einzelpreis nur wenn genannt, sonst 0 — NICHT erfinden). ' +
-      'Antworte NUR mit JSON: {"message":"kurze Antwort an den User, max 2 Sätze","positionen":[{"article_no":"","bezeichnung":"","menge":1,"einzelpreis":0,"rabatt_pct":0,"mwst":19}]}. ' +
-      'positionen = der VOLLSTÄNDIGE aktuelle Stand (inkl. bestehender, nicht nur Änderungen). Keine Montage-/Anfahrts-/Versandpositionen.';
+      'Du baust die Positionen UND passt auf Wunsch Steuersatz, Zahlungsziel, Lieferbedingungen und USt-IdNr an. ' +
+      'Artikel-Katalog: existiert ein gewünschtes Teil dort (nr oder name), verwende dessen "nr" als article_no und "preis" als einzelpreis. Sonst neue Position (article_no="" wenn keine Nummer bekannt; einzelpreis nur wenn genannt, sonst 0 — NICHT erfinden). ' +
+      'Antworte NUR mit JSON: {"message":"kurze Antwort, max 2 Sätze","positionen":[{"article_no":"","bezeichnung":"","menge":1,"einzelpreis":0,"rabatt_pct":0,"mwst":19}],"vat_rate":null,"payment_terms":null,"delivery_terms":null,"vat_id":null}. ' +
+      'REGELN: ' +
+      '- positionen = VOLLSTÄNDIGER aktueller Stand (inkl. bestehender). Keine Montage-/Anfahrts-/Versandpositionen. ' +
+      '- vat_rate (number|null): NUR setzen, wenn der User den Steuersatz ändern will (z.B. „USt entfernen", „MwSt auf 0", „0% da EU", „19%"). Gilt für ALLE Positionen. Bei innergemeinschaftlicher EU-Lieferung an ein Unternehmen mit gültiger USt-IdNr ist 0 korrekt (Reverse Charge / steuerfreie innergemeinschaftliche Lieferung). Sonst null. ' +
+      '- vat_id (string|null): NUR wenn der User eine USt-IdNr/VAT-Nummer nennt, diese hier zurückgeben. Sonst null. ' +
+      '- payment_terms (string|null): NUR wenn der User das Zahlungsziel ändert (z.B. „Vorkasse", „30 Tage netto", „14 Tage 2% Skonto"). Kurzer Standard-Wortlaut. Sonst null. ' +
+      '- delivery_terms (string|null): NUR wenn der User die Lieferbedingungen ändert (z.B. „EXW Fellbach", „DDP frei Haus", „Abholung"). Sonst null. ' +
+      '- Ändere IMMER nur, was der User verlangt; alle unveränderten Felder = null (nicht neu erfinden).';
     const userMsg = 'ANFRAGE (Ticket):\n' + desc + '\n\nARTIKEL-KATALOG (vorhanden in ERP Hero):\n' + JSON.stringify(catalog) +
       '\n\nAKTUELLE POSITIONEN:\n' + JSON.stringify((st.positionen || []).map(p => ({ article_no: p.article_no, bezeichnung: p.bezeichnung, menge: p.menge, einzelpreis: p.einzelpreis, rabatt_pct: p.rabatt_pct, mwst: p.mwst }))) +
+      '\n\nAKTUELLER STEUERSATZ: ' + (curMwst != null ? curMwst + '%' : '19%') +
+      '\nAKTUELLE KONDITIONEN: Zahlungsziel="' + curPayment + '", Lieferbedingungen="' + curDelivery + '"' +
+      '\nKUNDE: Land="' + (custF.country || '') + '", USt-IdNr="' + (curVatId || '(nicht hinterlegt)') + '"' +
       '\n\nUSER:\n' + text;
     const data = await proxyJson('/anthropic/v1/messages', { method: 'POST', body: JSON.stringify({ model: 'claude-sonnet-4-5-20250929', max_tokens: 3000, system: sys, messages: [{ role: 'user', content: userMsg }] }) });
     const raw = (data?.content?.[0]?.text || '').trim();
@@ -25087,9 +25106,24 @@ async function _flpChatSend(inputEl) {
       st.positionen = obj.positionen.map(p => ({ article_no: String(p.article_no || ''), bezeichnung: String(p.bezeichnung || ''), menge: +p.menge || 1, einzelpreis: +p.einzelpreis || 0, rabatt_pct: +p.rabatt_pct || 0, mwst: +p.mwst || 19, unit: 'Stück' }));
       _flpReconcileCatalog();
     }
+    // v2.46.261: Steuersatz / Konditionen / USt-IdNr aus dem Chat übernehmen
+    let extraMsg = '';
+    if (obj.vat_id != null && String(obj.vat_id).trim()) st.vatId = String(obj.vat_id).trim();
+    if (obj.vat_rate != null && obj.vat_rate !== '' && !isNaN(+obj.vat_rate)) {
+      const vr = +obj.vat_rate;
+      (st.positionen || []).forEach(p => { p.mwst = vr; });
+      if (vr === 0) {
+        const vid = st.vatId || custF.vat_id || '';
+        extraMsg += vid
+          ? ' USt auf 0% gesetzt (steuerfreie EU-Lieferung, USt-IdNr: ' + vid + ').'
+          : ' ⚠ USt auf 0% gesetzt — es ist aber KEINE USt-IdNr des Kunden hinterlegt. Für die steuerfreie innergemeinschaftliche Lieferung ist eine gültige VAT-Nummer erforderlich; bitte im Chat nennen (z.B. „VAT-Nr. CHE-123.456.789") oder im ERP hinterlegen.';
+      }
+    }
+    if (obj.payment_terms != null && String(obj.payment_terms).trim()) { st.paymentTerms = String(obj.payment_terms).trim(); }
+    if (obj.delivery_terms != null && String(obj.delivery_terms).trim()) { st.deliveryTerms = String(obj.delivery_terms).trim(); }
     if (thinkBubble) thinkBubble.remove();
     st.chat = (st.chat || []).filter(m => m.content !== '…');
-    _flpChatAppend('assistant', obj.message || 'Positionen aktualisiert.');
+    _flpChatAppend('assistant', (obj.message || 'Aktualisiert.') + extraMsg);
     _flpRenderPosTable();
     _flpRenderPdfPreview();
     _flpSaveDraft();
@@ -25118,12 +25152,17 @@ async function _flpPushAngebot(btn) {
     const today = new Date().toISOString().slice(0, 10);
     const valid = new Date(Date.now() + 30 * 864e5).toISOString().slice(0, 10);
     const custF = st.customer.f || {};
+    // v2.46.261: USt-IdNr aus dem Chat am Customer nachtragen (für steuerfreie EU-Lieferung)
+    if (st.vatId && st.vatId !== (custF.vat_id || '')) {
+      try { await erpHeroUpdate('Customer', st.customer.id, { vat_id: st.vatId }); custF.vat_id = st.vatId; }
+      catch (e) { console.warn('[FLP] vat_id-Update:', e.message); }
+    }
     const q = await erpHeroWrite('Quote', _flpStripEmpty({
       quote_no: quoteNo, company_id: [companyId], customer_id: [st.customer.id],
       contact_id: st.contact ? [st.contact.id] : undefined,
       date: today, valid_until: valid, status: 'Entwurf',
-      payment_terms: custF.payment_terms || '14 Tage netto',
-      delivery_terms: custF.delivery_terms || 'EXW Fellbach',
+      payment_terms: st.paymentTerms || custF.payment_terms || '14 Tage netto',
+      delivery_terms: st.deliveryTerms || custF.delivery_terms || 'EXW Fellbach',
       freshdesk_ticket_id: String(st.ticketId || ''),
       description: 'Erstellt via Freshdesk Hero',
       // v2.46.241: Bundle (Einleitung/Schluss + Layout) mitgeben — ERP Hero rendert damit
@@ -40797,11 +40836,15 @@ function _erpq_buildParts(data) {
     : '<div style="font-size:12px;color:#94A3B8;font-style:italic;">— ' + _erpq_escapeHtml(t('no_positions', 'noch keine Positionen')) + ' —</div>';
 
   // === BLOCK 4: Summen ===
+  // v2.46.261: echten USt-Satz aus den Positionen ableiten (statt hart 19%) —
+  // sonst zeigt eine 0%-EU-Lieferung fälschlich „Mehrwertsteuer 19%".
+  var _firstVat = items.length ? (+(((items[0] && items[0].fields) ? items[0].fields : items[0]).vat_rate)) : 19;
+  var vatPct = sums.subtotal_net ? Math.round((sums.vat_total / sums.subtotal_net) * 100) : (isNaN(_firstVat) ? 19 : _firstVat);
   var sumsBlock =
     '<table style="margin-left:auto;min-width:62%;font-size:13px;border-collapse:collapse;">' +
       '<tbody>' +
         '<tr><td style="padding:2px 0;">' + _erpq_escapeHtml(t('sum_net', 'Summe')) + '</td><td style="padding:2px 0;text-align:right;font-variant-numeric:tabular-nums;">' + _erpq_formatPrice(sums.subtotal_net) + ' €</td></tr>' +
-        '<tr><td style="padding:2px 0;">' + _erpq_escapeHtml(t('vat_line', 'Mehrwertsteuer {pct}% auf {base} € netto').replace('{pct}', '19').replace('{base}', _erpq_formatPrice(sums.subtotal_net))) + '</td><td style="padding:2px 0;text-align:right;font-variant-numeric:tabular-nums;">' + _erpq_formatPrice(sums.vat_total) + ' €</td></tr>' +
+        '<tr><td style="padding:2px 0;">' + _erpq_escapeHtml(t('vat_line', 'Mehrwertsteuer {pct}% auf {base} € netto').replace('{pct}', String(vatPct)).replace('{base}', _erpq_formatPrice(sums.subtotal_net))) + '</td><td style="padding:2px 0;text-align:right;font-variant-numeric:tabular-nums;">' + _erpq_formatPrice(sums.vat_total) + ' €</td></tr>' +
         '<tr style="font-weight:700;"><td style="padding:4px 0 2px;border-top:1px solid #CBD5E1;">' + _erpq_escapeHtml(t('total_gross', 'Gesamtbetrag')) + '</td><td style="padding:4px 0 2px;text-align:right;border-top:1px solid #CBD5E1;font-variant-numeric:tabular-nums;">' + _erpq_formatPrice(sums.total_gross) + ' €</td></tr>' +
       '</tbody>' +
     '</table>';
@@ -40816,6 +40859,15 @@ function _erpq_buildParts(data) {
   condRows.push(
     '<div style="margin-bottom:8px;">' + _erpq_escapeHtml(q.delivery_terms || t('delivery_default', 'Die Lieferung erfolgt frei Haus.')) + '</div>'
   );
+  // v2.46.261: 0% USt → Reverse-Charge-Hinweis + USt-IdNr (für steuerfreie EU-Lieferung erforderlich)
+  if (vatPct === 0) {
+    condRows.push(
+      '<div style="margin-bottom:8px;">' +
+        '<div style="color:#334155;">' + _erpq_escapeHtml(t('reverse_charge_note', 'Steuerfreie innergemeinschaftliche Lieferung – Steuerschuldnerschaft des Leistungsempfängers (Reverse Charge).')) + '</div>' +
+        (cu.vat_id ? '<div>' + _erpq_escapeHtml(t('vat_id_label', 'USt-IdNr. Empfänger:') + ' ' + cu.vat_id) + '</div>' : '') +
+      '</div>'
+    );
+  }
   // Zahlungsbedingungen (Label + Wert als EIN Block)
   if (q.payment_terms) {
     condRows.push(
