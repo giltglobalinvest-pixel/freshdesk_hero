@@ -784,7 +784,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.249';
+const APP_VERSION = 'v2.46.250';
 
 /* ============================================================
    GLOBAL THEME — v2.46.12
@@ -26064,7 +26064,14 @@ function openAngStammdatenEditor() {
                   '<button type="button" onclick="_angCreateErpKontakt(this)" class="w-full px-2 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded text-[12px] font-bold inline-flex items-center justify-center gap-1"><i data-lucide="user-plus" class="w-3.5 h-3.5"></i> Im ERP anlegen & als Empfänger übernehmen</button>' +
                 '</div>' +
               '</div>'
-            : '') +
+            : (APP_KEYS.erpProxyUrl && _erpFirmaSlugForAccount(s.account)
+              ? '<div class="bg-emerald-50 border border-emerald-200 rounded-lg p-2.5">' +
+                  '<label class="text-[11px] font-bold text-emerald-800 uppercase tracking-wider inline-flex items-center gap-1"><i data-lucide="users" class="w-3.5 h-3.5"></i> Kontakte</label>' +
+                  '<p class="text-[10px] text-emerald-700 mb-1">Kein ERP-Kunde geladen. Suche den Kunden im ERP, um Kontakte zu wählen oder neue anzulegen.</p>' +
+                  '<button type="button" onclick="_angFindErpKundeForStamm(this)" class="w-full px-2 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded text-[12px] font-bold inline-flex items-center justify-center gap-1"><i data-lucide="search" class="w-3.5 h-3.5"></i> Kunde im ERP suchen (für Kontakte)</button>' +
+                  '<div id="sdErpKundeHits" class="mt-1.5"></div>' +
+                '</div>'
+              : '')) +
         '</div>' +
         '<div class="px-4 py-3 border-t border-ink-200 flex gap-2">' +
           '<button onclick="closeAngStammdatenEditor()" class="flex-1 px-3 py-2 bg-ink-100 hover:bg-ink-200 text-ink-700 rounded-lg text-sm font-bold">Abbrechen</button>' +
@@ -26174,6 +26181,44 @@ async function _angCreateErpKontakt(btn) {
     setBusy(btn, false);
     toast('Kontakt anlegen fehlgeschlagen: ' + (e.message || e), 'error', 9000);
   }
+}
+
+/* v2.46.250: Kein ERP-Anlagen-Treffer, aber Kontakte verwalten — Kunde per Name
+   im ERP suchen, übernehmen, dann Kontakte wählen/anlegen. */
+async function _angFindErpKundeForStamm(btn) {
+  const s = window._ANG_CHAT;
+  if (!s) return;
+  const firmaSlug = _erpFirmaSlugForAccount(s.account);
+  if (!firmaSlug || !APP_KEYS.erpProxyUrl) return toast('ERP nicht konfiguriert (Admin → Einstellungen)', 'warn', 6000);
+  const name = ($('sdVertragspartner')?.value || '').trim();
+  if (name.length < 2) return toast('Erst Vertragspartner/Firmenname eintragen', 'warn', 4000);
+  setBusy(btn, true, 'Suche Kunde…');
+  try {
+    const all = await erpLoadKunden(firmaSlug).catch(() => []);
+    const q = name.toLowerCase();
+    let hits = all.filter(k => String(k.firmenname || '').toLowerCase().includes(q));
+    if (!hits.length) { const w = q.split(/\s+/).find(x => x.length >= 4); if (w) hits = all.filter(k => String(k.firmenname || '').toLowerCase().includes(w)); }
+    hits = hits.slice(0, 25);
+    setBusy(btn, false);
+    if (!hits.length) return toast('Kein ERP-Kunde „' + name + '" gefunden — ohne ERP-Kunde kann kein Kontakt angelegt werden.', 'warn', 9000);
+    if (hits.length === 1) { _angUseErpKunde(s, hits[0]); return; }
+    window._angKundeHits = hits;
+    const box = document.getElementById('sdErpKundeHits');
+    if (box) box.innerHTML = '<p class="text-[10px] text-emerald-700 mb-1">' + hits.length + ' Treffer — wählen:</p>' +
+      hits.map((k, i) => '<button type="button" onclick="_angUseErpKundeIdx(' + i + ')" class="w-full text-left px-2 py-1.5 rounded bg-white hover:bg-emerald-50 border border-emerald-200 text-[12px] mb-1"><b>' + escapeHtml(k.firmenname || '?') + '</b>' + (k.kundennummer ? ' <span class="text-ink-400">· Kd-Nr. ' + escapeHtml(String(k.kundennummer)) + '</span>' : '') + '</button>').join('');
+  } catch (e) { setBusy(btn, false); toast('Kunden-Suche fehlgeschlagen: ' + (e.message || e), 'error', 8000); }
+}
+function _angUseErpKundeIdx(i) { const s = window._ANG_CHAT; const k = (window._angKundeHits || [])[i]; if (s && k) _angUseErpKunde(s, k); }
+async function _angUseErpKunde(s, kunde) {
+  const firmaSlug = _erpFirmaSlugForAccount(s.account);
+  const kundennr = kunde.kundennummer || kunde.id;
+  s._erpAnlage = Object.assign({}, s._erpAnlage || {}, { kunde });
+  const kontakte = await erpLoadKundenKontakte(firmaSlug, kundennr).catch(() => []);
+  s._erpKontakte = Array.isArray(kontakte) ? kontakte : [];
+  _angSyncStammInputs(s);
+  if (kunde.firmenname) { s.collected = s.collected || {}; s.collected.stammdaten = s.collected.stammdaten || {}; s.collected.stammdaten.vertragspartner = kunde.firmenname; }
+  openAngStammdatenEditor();
+  toast('ERP-Kunde übernommen: ' + (kunde.firmenname || kundennr) + ' · ' + s._erpKontakte.length + ' Kontakt(e)', 'success', 4500);
 }
 
 /* v2.46.165: Öffnet einen Anlage-Picker: Suche + Liste + Klick zum Auswählen.
