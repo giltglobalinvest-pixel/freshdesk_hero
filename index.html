@@ -784,7 +784,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.269';
+const APP_VERSION = 'v2.46.270';
 
 /* ============================================================
    GLOBAL THEME — v2.46.12
@@ -28488,13 +28488,16 @@ async function angChatExecuteFinal(btn) {
           '</div>' +
           ticketAttsHtml +
           libAttsHtml +
-          // v2.46.203: Eigene Dateien vom Rechner anhängen
-          '<div><label class="text-[11px] font-bold text-ink-700 uppercase tracking-wider">Eigene Dateien anhängen (optional)</label>' +
+          // v2.46.203: Eigene Dateien vom Rechner + v2.46.269: Marketing-Bibliothek
+          '<div><label class="text-[11px] font-bold text-ink-700 uppercase tracking-wider">Weitere Anhänge (optional)</label>' +
             '<div id="angSendLocalList" class="mt-1 space-y-1"></div>' +
-            '<label class="mt-1 inline-flex items-center gap-1.5 px-3 py-1.5 bg-white border border-indigo-300 text-indigo-700 rounded-lg text-[12px] font-semibold cursor-pointer hover:bg-indigo-50">' +
-              '<i data-lucide="upload" class="w-3.5 h-3.5"></i> Datei wählen…' +
-              '<input type="file" multiple class="hidden" onchange="_angSendAddLocalFiles(this)">' +
-            '</label>' +
+            '<div class="mt-1 flex items-center gap-2 flex-wrap">' +
+              '<label class="inline-flex items-center gap-1.5 px-3 py-1.5 bg-white border border-indigo-300 text-indigo-700 rounded-lg text-[12px] font-semibold cursor-pointer hover:bg-indigo-50">' +
+                '<i data-lucide="upload" class="w-3.5 h-3.5"></i> Datei wählen…' +
+                '<input type="file" multiple class="hidden" onchange="_angSendAddLocalFiles(this)">' +
+              '</label>' +
+              '<button type="button" onclick="_angSendPickLibrary()" class="inline-flex items-center gap-1.5 px-3 py-1.5 bg-white border border-emerald-300 text-emerald-700 rounded-lg text-[12px] font-semibold hover:bg-emerald-50"><i data-lucide="library" class="w-3.5 h-3.5"></i> Aus Bibliothek (Marketing)</button>' +
+            '</div>' +
           '</div>' +
           '<label class="inline-flex items-center gap-2 text-sm cursor-pointer">' +
             '<input id="angSendWithSig" type="checkbox" checked class="w-4 h-4 accent-indigo-600">' +
@@ -28553,6 +28556,30 @@ function _angSendRemoveLocalFile(i) {
   if (!s?._sendLocalFiles) return;
   s._sendLocalFiles.splice(i, 1);
   _angSendRenderLocalFiles();
+}
+
+/* v2.46.269: Anhänge aus der Marketing-Bibliothek per Picker (Browse/Suche/Upload)
+   auswählen und als Datei zu den „Weiteren Anhängen" hinzufügen. */
+async function _angSendPickLibrary() {
+  const s = window._ANG_CHAT;
+  if (!s) return;
+  if (typeof _openAttachmentPicker !== 'function' || typeof fetchLibraryAttachmentBlob !== 'function') return toast('Bibliothek nicht verfügbar', 'warn', 4000);
+  s._sendLocalFiles = s._sendLocalFiles || [];
+  await _openAttachmentPicker(s.accountId, [], async (recs) => {
+    let added = 0;
+    for (const r of recs) {
+      try {
+        const f = await fetchLibraryAttachmentBlob(r);
+        const file = (typeof File === 'function') ? new File([f.blob], f.name, { type: f.type || f.blob.type || 'application/octet-stream' }) : Object.assign(f.blob, { name: f.name });
+        if (file.size > 19 * 1024 * 1024) { toast('„' + file.name + '" zu groß (max 19 MB)', 'warn', 5000); continue; }
+        if (s._sendLocalFiles.some(x => x.name === file.name && x.size === file.size)) continue; // Dedup
+        s._sendLocalFiles.push(file);
+        added++;
+      } catch (e) { toast('„' + (r.name || '?') + '" konnte nicht geladen werden: ' + (e.message || e), 'warn', 5000); }
+    }
+    _angSendRenderLocalFiles();
+    if (added) toast(added + ' Bibliotheks-Anhang' + (added > 1 ? '/Anhänge' : '') + ' hinzugefügt', 'success', 3000);
+  });
 }
 
 /* v2.46.181: Tatsächlicher Versand — PDF als multipart-Anhang, Text als Body,
