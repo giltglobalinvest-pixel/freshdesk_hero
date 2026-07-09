@@ -784,7 +784,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.265';
+const APP_VERSION = 'v2.46.266';
 
 /* ============================================================
    GLOBAL THEME — v2.46.12
@@ -25115,7 +25115,7 @@ async function _flpOpenPdf(btn) {
 function _flpEffectiveI18n(st) {
   return (st && st.pdfLang && st.pdfTrans && st.pdfTrans.i18n) ? st.pdfTrans.i18n : _FLP_PDF_LABELS_DE;
 }
-/* Anschreiben (Betreff + HTML-Body) in der aktuell gewählten PDF-Sprache. */
+/* Anschreiben (Betreff + Plain-Text-Body) in der aktuell gewählten PDF-Sprache. */
 function _flpBuildCover(st) {
   const L = _flpEffectiveI18n(st);
   const k = (st.contact && st.contact.f) || {};
@@ -25130,14 +25130,19 @@ function _flpBuildCover(st) {
   const bodyTxt = L.email_body || 'anbei erhalten Sie unser Angebot als PDF-Datei. Für Rückfragen stehen wir Ihnen gerne zur Verfügung.';
   const regards = L.regards || 'Mit freundlichen Grüßen';
   const userName = (APP_KEYS.user && APP_KEYS.user.name) || '';
-  const bodyHtml =
-    '<p>' + escapeHtml(salut) + ',</p>' +
-    '<p>' + escapeHtml(bodyTxt) + '</p>' +
-    '<p>' + escapeHtml(regards) + '<br>' + escapeHtml(company) + (userName ? '<br>' + escapeHtml(userName) : '') + '</p>';
-  return { subject, bodyHtml };
+  const bodyText = salut + ',\n\n' + bodyTxt + '\n\n' + regards + '\n' + company + (userName ? '\n' + userName : '');
+  return { subject, bodyText };
 }
-/* v2.46.264: FLP-Angebot als PDF an den Kunden senden — als ANTWORT im Ticket
-   (Freshdesk reply + PDF-Anhang). Anschreiben-Text in der gewählten PDF-Sprache. */
+/* Plain-Text → HTML (Absätze bei Leerzeile, \n → <br>). */
+function _flpTextToHtml(text) {
+  return String(text || '').trim().split(/\n{2,}/).map(function (para) {
+    return '<p>' + escapeHtml(para).replace(/\n/g, '<br>') + '</p>';
+  }).join('');
+}
+
+/* v2.46.266: Compose-Modal VOR dem Versand — Empfänger sichtbar, Betreff + Text
+   editierbar (KI-Vorschlag), Anhänge aus der Marketing-Bibliothek + lokale Dateien.
+   Versand als Antwort im Ticket (Freshdesk reply) mit Angebots-PDF + Anhängen. */
 async function _flpSendAngebot(btn) {
   const st = window._FLP_ANG;
   if (!st) return;
@@ -25145,24 +25150,128 @@ async function _flpSendAngebot(btn) {
   if (!pos.length) return toast('Keine Positionen zum Versenden', 'warn', 4000);
   if (!st.ticketId) return toast('Kein Ticket-Bezug — Versand als Ticket-Antwort nicht möglich', 'warn', 6000);
   if (typeof erpQuoteToPdfBlob !== 'function') return toast('PDF-Renderer nicht geladen — App neu laden', 'error', 5000);
+  const cover = _flpBuildCover(st);
+  st._send = { subject: cover.subject, bodyText: cover.bodyText, atts: [] };
+  _flpRenderSendModal();
+}
+function _flpCloseSendModal() { const h = document.getElementById('flpSendHost'); if (h) h.innerHTML = ''; }
+function _flpSendAttListHtml() {
+  const st = window._FLP_ANG; const atts = (st && st._send && st._send.atts) || [];
+  const pdfRow = '<div class="flex items-center gap-2 bg-indigo-50 border border-indigo-200 rounded-lg px-2 py-1.5">' +
+    '<i data-lucide="file-text" class="w-4 h-4 text-indigo-500 shrink-0"></i>' +
+    '<span class="flex-1 min-w-0 truncate text-[12px] text-ink-800 font-semibold">Angebot (PDF) — wird automatisch erzeugt' + (st && st.pdfLang ? ' · ' + escapeHtml(st.pdfLang) : '') + '</span></div>';
+  const rows = atts.map(function (f, i) {
+    const isImg = String(f.type || '').startsWith('image/');
+    return '<div class="flex items-center gap-2 bg-ink-50 border border-ink-200 rounded-lg px-2 py-1.5">' +
+      '<i data-lucide="' + (isImg ? 'image' : (f._libRecordId ? 'book-open' : 'file')) + '" class="w-4 h-4 text-ink-500 shrink-0"></i>' +
+      '<span class="flex-1 min-w-0 truncate text-[12px] text-ink-700">' + escapeHtml(f.name || 'Anhang') + '</span>' +
+      (f.size ? '<span class="text-[10px] text-ink-400 shrink-0">' + Math.max(1, Math.round(f.size / 1024)) + ' KB</span>' : '') +
+      '<button type="button" onclick="_flpSendRemoveAtt(' + i + ')" class="w-6 h-6 rounded hover:bg-ink-200 flex items-center justify-center shrink-0" title="Entfernen"><i data-lucide="x" class="w-3.5 h-3.5 text-ink-500"></i></button>' +
+    '</div>';
+  }).join('');
+  return pdfRow + rows;
+}
+function _flpRenderSendAtt() { const h = document.getElementById('flpSendAttList'); if (h) { h.innerHTML = _flpSendAttListHtml(); if (window.lucide) lucide.createIcons(); } }
+function _flpRenderSendModal() {
+  const st = window._FLP_ANG; if (!st || !st._send) return;
+  let host = document.getElementById('flpSendHost');
+  if (!host) { host = document.createElement('div'); host.id = 'flpSendHost'; document.body.appendChild(host); }
   const reqEmail = (st.ticket && (st.ticket.requester?.email || st.ticket.email)) || '';
-  const langNote = st.pdfLang ? ' (Sprache: ' + st.pdfLang + ')' : '';
-  if (!confirm('Angebot als PDF an den Kunden senden' + langNote + '?\n\n' +
-    'Empfänger: ' + (reqEmail || 'Ticket-Anfragender') + '\n' +
-    'Geht als Antwort in Ticket #' + st.ticketId + ' raus (im Verlauf sichtbar).')) return;
+  const contactEmail = st.contact?.f?.email || '';
+  const contactNote = (contactEmail && contactEmail.toLowerCase() !== String(reqEmail).toLowerCase())
+    ? '<p class="text-[10px] text-amber-600 mt-1">Hinweis: ERP-Kontakt hat ' + escapeHtml(contactEmail) + ' — die Antwort geht an den Ticket-Anfragenden oben.</p>' : '';
+  host.innerHTML =
+    '<div class="fixed inset-0 z-[70] flex items-end sm:items-center justify-center bg-black/50 px-3" onclick="if(event.target===this)_flpCloseSendModal()">' +
+      '<div class="bg-white w-full max-w-lg rounded-t-2xl sm:rounded-2xl shadow-2xl flex flex-col safe-bottom" style="max-height:92vh">' +
+        '<div class="px-4 py-3 border-b border-ink-200 flex items-center justify-between gap-2 shrink-0">' +
+          '<h3 class="font-bold text-ink-900 inline-flex items-center gap-2"><i data-lucide="send" class="w-5 h-5 text-orange-600"></i> Angebot an Kunden senden</h3>' +
+          '<button onclick="_flpCloseSendModal()" class="w-9 h-9 rounded-lg hover:bg-ink-100 flex items-center justify-center"><i data-lucide="x" class="w-5 h-5 text-ink-700"></i></button>' +
+        '</div>' +
+        '<div class="flex-1 overflow-y-auto p-4 space-y-3">' +
+          '<div class="bg-ink-50 border border-ink-200 rounded-xl p-2.5 text-[12px]">' +
+            '<p class="text-[10px] font-bold text-ink-500 uppercase tracking-wider">Empfänger (Antwort in Ticket #' + escapeHtml(String(st.ticketId)) + ')</p>' +
+            '<p class="text-ink-900 font-semibold mt-0.5">' + escapeHtml(reqEmail || 'Ticket-Anfragender') + '</p>' +
+            contactNote +
+          '</div>' +
+          '<div><label class="text-[11px] font-bold text-ink-700 uppercase tracking-wider">Betreff <span class="text-ink-400 normal-case font-normal">(erscheint als Überschrift in der Nachricht — die Mail läuft als Antwort unter dem Ticket-Betreff)</span></label>' +
+            '<input id="flpSendSubject" type="text" value="' + escapeAttr(st._send.subject) + '" class="w-full mt-0.5 px-3 py-2 border border-ink-300 rounded-lg text-sm"></div>' +
+          '<div><label class="text-[11px] font-bold text-ink-700 uppercase tracking-wider">Nachricht (KI-Vorschlag — editierbar)</label>' +
+            '<textarea id="flpSendBody" rows="9" class="w-full mt-0.5 px-3 py-2 border border-ink-300 rounded-lg text-[13px] leading-relaxed resize-y">' + escapeHtml(st._send.bodyText) + '</textarea></div>' +
+          '<div>' +
+            '<div class="flex items-center justify-between mb-1">' +
+              '<label class="text-[11px] font-bold text-ink-700 uppercase tracking-wider">Anhänge</label>' +
+              '<div class="flex items-center gap-2">' +
+                '<button type="button" onclick="_flpSendPickLib()" class="text-[11px] text-orange-600 font-semibold inline-flex items-center gap-1"><i data-lucide="book-open" class="w-3.5 h-3.5"></i> Aus Bibliothek</button>' +
+                '<button type="button" onclick="document.getElementById(\'flpSendFileInput\').click()" class="text-[11px] text-ink-600 font-semibold inline-flex items-center gap-1"><i data-lucide="paperclip" class="w-3.5 h-3.5"></i> Dateien</button>' +
+              '</div>' +
+            '</div>' +
+            '<input id="flpSendFileInput" type="file" multiple class="hidden" onchange="_flpSendAddFiles(this)">' +
+            '<div id="flpSendAttList" class="space-y-1">' + _flpSendAttListHtml() + '</div>' +
+          '</div>' +
+        '</div>' +
+        '<div class="px-4 py-3 border-t border-ink-200 shrink-0 flex gap-2">' +
+          '<button onclick="_flpCloseSendModal()" class="flex-1 bg-ink-100 hover:bg-ink-200 text-ink-700 rounded-xl px-3 py-2.5 text-sm font-bold">Abbrechen</button>' +
+          '<button onclick="_flpDoSend(this)" class="flex-[2] bg-orange-600 hover:bg-orange-700 text-white rounded-xl px-3 py-2.5 text-sm font-bold inline-flex items-center justify-center gap-1.5"><i data-lucide="send" class="w-4 h-4"></i> Senden</button>' +
+        '</div>' +
+      '</div>' +
+    '</div>';
+  if (window.lucide) lucide.createIcons();
+}
+function _flpSendSyncInputs() {
+  const st = window._FLP_ANG; if (!st || !st._send) return;
+  st._send.subject = document.getElementById('flpSendSubject')?.value ?? st._send.subject;
+  st._send.bodyText = document.getElementById('flpSendBody')?.value ?? st._send.bodyText;
+}
+function _flpSendAddFiles(input) {
+  const st = window._FLP_ANG; if (!st || !st._send) return;
+  const files = Array.from((input && input.files) || []);
+  const MAX = 20 * 1024 * 1024;
+  for (const f of files) {
+    if (f.size > MAX) { toast('„' + f.name + '" zu groß (max 20 MB)', 'warn', 6000); continue; }
+    st._send.atts.push({ name: f.name || 'anhang', type: f.type || 'application/octet-stream', size: f.size, blob: f });
+  }
+  if (input) input.value = '';
+  _flpRenderSendAtt();
+}
+function _flpSendRemoveAtt(idx) { const st = window._FLP_ANG; if (st && st._send) { st._send.atts.splice(idx, 1); _flpRenderSendAtt(); } }
+async function _flpSendPickLib() {
+  const st = window._FLP_ANG; if (!st || !st._send) return;
+  if (typeof _openAttachmentPicker !== 'function') return toast('Bibliothek nicht verfügbar', 'warn', 4000);
+  const alreadyIds = st._send.atts.filter(a => a._libRecordId).map(a => a._libRecordId);
+  await _openAttachmentPicker(st.accountId, alreadyIds, async (recs) => {
+    const keepIds = new Set(recs.map(r => r.recordId));
+    st._send.atts = st._send.atts.filter(a => !a._libRecordId || keepIds.has(a._libRecordId));
+    const existing = new Set(st._send.atts.filter(a => a._libRecordId).map(a => a._libRecordId));
+    for (const r of recs) {
+      if (existing.has(r.recordId)) continue;
+      try { const blob = await fetchLibraryAttachmentBlob(r); st._send.atts.push(Object.assign({}, blob, { _libRecordId: r.recordId })); }
+      catch (e) { toast('„' + (r.name || '?') + '" konnte nicht geladen werden: ' + (e.message || e), 'warn', 5000); }
+    }
+    _flpRenderSendAtt();
+  });
+}
+async function _flpDoSend(btn) {
+  const st = window._FLP_ANG; if (!st || !st._send) return;
+  _flpSendSyncInputs();
+  const subject = (st._send.subject || '').trim();
+  const bodyText = (st._send.bodyText || '').trim();
+  if (!bodyText) return toast('Nachricht ist leer', 'warn', 4000);
   setBusy(btn, true, 'Erzeuge PDF + sende…');
   try {
     const blob = await erpQuoteToPdfBlob(_flpBuildErpData());
-    const cover = _flpBuildCover(st);
     const fname = 'Angebot' + ((st.quoteNo && st.quoteNo !== '(Entwurf)') ? '_' + String(st.quoteNo).replace(/[^\w.-]/g, '') : '') + '.pdf';
+    const attachments = [{ name: fname, type: 'application/pdf', blob: blob }]
+      .concat(st._send.atts.map(a => ({ name: a.name, type: a.type, blob: a.blob })));
+    // Betreff als Überschrift im Body-HTML (Reply erbt den Ticket-Betreff; wir zeigen ihn zusätzlich)
+    const bodyHtml = (subject ? '<p style="margin:0 0 10px"><strong>' + escapeHtml(subject) + '</strong></p>' : '') + _flpTextToHtml(bodyText);
     await _fdPostMultipart(st.accountId, 'tickets/' + encodeURIComponent(st.ticketId) + '/reply',
-      { body: cover.bodyHtml },
-      [{ name: fname, type: 'application/pdf', blob: blob }]);
+      { body: bodyHtml }, attachments);
+    _flpCloseSendModal();
     setBusy(btn, false);
     const resEl = document.getElementById('flpPosResult');
-    if (resEl) resEl.innerHTML = '<div class="bg-emerald-50 border border-emerald-200 rounded-xl p-3 text-[12px] text-emerald-900"><p class="font-bold inline-flex items-center gap-1"><i data-lucide="check-circle-2" class="w-4 h-4"></i> Angebot als PDF an den Kunden gesendet (Ticket #' + escapeHtml(String(st.ticketId)) + ')</p></div>';
+    if (resEl) resEl.innerHTML = '<div class="bg-emerald-50 border border-emerald-200 rounded-xl p-3 text-[12px] text-emerald-900"><p class="font-bold inline-flex items-center gap-1"><i data-lucide="check-circle-2" class="w-4 h-4"></i> Angebot an den Kunden gesendet (Ticket #' + escapeHtml(String(st.ticketId)) + ')' + (attachments.length > 1 ? ' · ' + attachments.length + ' Anhänge' : '') + '</p></div>';
     if (window.lucide) lucide.createIcons();
-    toast('Angebot versendet ✓ (als Antwort in Ticket #' + st.ticketId + ')', 'success', 6000);
+    toast('Angebot versendet ✓ (Antwort in Ticket #' + st.ticketId + ')', 'success', 6000);
   } catch (e) {
     setBusy(btn, false);
     toast('Versand fehlgeschlagen: ' + (e.message || e), 'error', 9000);
