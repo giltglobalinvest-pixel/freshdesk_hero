@@ -784,7 +784,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.275';
+const APP_VERSION = 'v2.46.276';
 
 /* ============================================================
    GLOBAL THEME — v2.46.12
@@ -27880,6 +27880,8 @@ async function angChatUserResponse(userText) {
       standort:         prev.standort || '',
       fabriknummer:     prev.fabriknummer || '',
       abrechnung_modus: result.plan?.abrechnung_modus || prev.abrechnung_modus || 'pauschal',
+      // v2.46.276: Preisanzeige-Modus (einzel/gesamt) über Iterationen erhalten
+      preisanzeige_modus: result.plan?.preisanzeige_modus || prev.preisanzeige_modus || 'einzel',
       stundensaetze:    (Array.isArray(result.plan?.stundensaetze) && result.plan.stundensaetze.length)
                           ? result.plan.stundensaetze
                           : (prev.stundensaetze || []),
@@ -27970,7 +27972,8 @@ async function _angChatGenerateOffer(s, userText) {
     '- Wenn User Preise nennt → übernimm EXAKT\n' +
     '- Wenn nicht → realistisch branchenüblich schätzen\n' +
     '- User will bei EINZELNEN Positionen keinen Preis zeigen (z.B. „Preis bei Pos 1+2 weglassen", „Pos 1 nach Aufwand") → setze bei GENAU diesen Positionen preis_aufwand=true und einzelpreis=0. Das PDF zeigt dann „nach Aufwand*" statt 0,00 EUR. NIEMALS 0,00 als sichtbaren Preis stehen lassen.\n' +
-    '- User will KEINEN Gesamtpreis (z.B. „kein Gesamtpreis anzeigen", „Summe weglassen") → gesamtpreis_ausblenden=true. Sonst false bzw. Wert aus dem übergebenen Angebot beibehalten.\n\n' +
+    '- User will KEINEN Gesamtpreis (z.B. „kein Gesamtpreis anzeigen", „Summe weglassen") → gesamtpreis_ausblenden=true. Sonst false bzw. Wert aus dem übergebenen Angebot beibehalten.\n' +
+    '- PREISANZEIGE-MODUS: Will der User ein GESAMTANGEBOT / einen GESAMTPREIS OHNE einzelne Positionspreise (z.B. „nur Gesamtpreis", „keine Einzelpreise", „Positionen ohne Preise, ein Gesamtpreis", „Pauschalangebot über alles") → preisanzeige_modus="gesamt". Die Positionen (bezeichnung + beschreibung) bleiben als Leistungsumfang erhalten, nur ihre Einzelpreise werden nicht gezeigt; am Ende steht der Pauschalpreis (Summe aller Positionen). Die Einzelpreise trotzdem korrekt in "einzelpreis" befüllen (sie werden für die Gesamtsumme gebraucht, nur nicht angezeigt). Standard sonst: preisanzeige_modus="einzel". Modus aus dem übergebenen Angebot beibehalten, wenn der User nichts dazu sagt.\n\n' +
     'VERRECHNUNG / GUTSCHRIFT / ABZUG / ANRECHNUNG / RÜCKKAUF (NEGATIVE POSITIONEN):\n' +
     '- Soll ein Betrag vom Angebot ABGEZOGEN / verrechnet / angerechnet / gutgeschrieben werden (z.B. „Rechnung Nr. 1943 über 5.450 € verrechnen", „Rückkauf Frequenzumrichter anrechnen", „Anzahlung abziehen", „Position 5 minus 5450") → lege dafür eine EIGENE, normale Position mit NEGATIVEM einzelpreis an (z.B. einzelpreis=-5450, menge=1). Diese negative Position reduziert die Netto-Summe automatisch korrekt.\n' +
     '- Bei einer Verrechnung IMMER preis_aufwand=false setzen — NIEMALS „nach Aufwand" für eine Verrechnung. Der negative Betrag MUSS als Zahl sichtbar sein (z.B. „-5.450,00 EUR").\n' +
@@ -28026,6 +28029,7 @@ async function _angChatGenerateOffer(s, userText) {
     '    "abrechnung_modus": "pauschal"|"aufwand",\n' +
     '    "stundensaetze": [{"nr": number, "name": string, "satz": number, "einheit": "Std."|"Anfahrt", "hinweis": string}] (NUR bei aufwand befüllen, sonst []),\n' +
     '    "gesamtpreis_ausblenden": boolean (true = Summen-Block Netto/USt/Brutto wird im PDF NICHT gezeigt),\n' +
+    '    "preisanzeige_modus": "einzel"|"gesamt" ("einzel" = jede Position mit Einzel- + Gesamtpreis (Standard); "gesamt" = Positionen werden OHNE Einzelpreise als Leistungsumfang gelistet und NUR EIN Gesamt-/Pauschalpreis (Summe aller Positionen, netto) am Ende gezeigt),\n' +
     '    "anschreiben_aktiv": boolean,\n' +
     '    "anschreiben_betreff": string,\n' +
     '    "anschreiben_anrede": string,\n' +
@@ -30983,7 +30987,9 @@ function _fdhChatToBkRec(chatState) {
     anschreiben:          anschreiben,
     abrechnung_modus:     s.collected?.abrechnung_modus || 'pauschal',
     preisanzeige_modus:   s.collected?.preisanzeige_modus || (positionen.length ? 'einzel' : 'gesamt'),
-    pauschalpreis_netto:  positionen.length ? 0 : +totals.netto || 0,
+    // v2.46.276: im 'gesamt'-Modus ist der Pauschalpreis die Positionssumme (netto),
+    // sonst 0 bei vorhandenen Positionen (bzw. totals.netto wenn gar keine Positionen).
+    pauschalpreis_netto:  ((s.collected?.preisanzeige_modus === 'gesamt') || !positionen.length) ? (+totals.netto || 0) : 0,
     positionen_json:      JSON.stringify(positionen),
     // v2.46.229: Anfahrts-/Einsatzpauschale-Zeilen generell aus dem Angebot filtern
     // (auch bei wiederhergestellten Alt-Angeboten, die die Zeile noch enthalten könnten)
