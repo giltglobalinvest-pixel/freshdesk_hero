@@ -784,7 +784,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.276';
+const APP_VERSION = 'v2.46.277';
 
 /* ============================================================
    GLOBAL THEME — v2.46.12
@@ -12799,14 +12799,19 @@ async function _qaCollectAttachments(accountId, ticketId, ticket, opts) {
       continue;
     }
     try {
-      const base64 = await _blobToBase64(blob);
+      // v2.46.277: große Bilder verkleinern (Anthropic 10-MB-base64-Limit pro Bild)
+      let useBlob = blob, useMedia = qaMediaType;
+      if (qaMediaType.startsWith('image/')) {
+        try { const shrunk = await _downscaleImageBlobForAI(blob); if (shrunk && shrunk !== blob) { useBlob = shrunk; useMedia = shrunk.type || 'image/jpeg'; } } catch (_) {}
+      }
+      const base64 = await _blobToBase64(useBlob);
       result.push({
         name: a.name || ('attachment-' + a.id),
-        mediaType: qaMediaType,
+        mediaType: useMedia,
         base64: base64,
-        size: blob.size,
+        size: useBlob.size,
       });
-      totalBytes += blob.size;
+      totalBytes += useBlob.size;
     } catch (e) { skipped.push(a.name + ' (b64-err)'); console.warn('[qa-collect] b64:', a.name, e.message); }
   }
   console.log('[qa-collect] geladen:', result.length, 'übersprungen:', skipped);
@@ -27583,6 +27588,43 @@ async function _angChatInitialAnalysis(accountId, ticketId, ticket, profile) {
   return raw || 'Konnte das Ticket nicht analysieren — beschreib mir kurz was zu tun ist.';
 }
 
+/* v2.46.277: Große Bilder für die KI verkleinern — Anthropic erlaubt max. 10 MB
+   base64 pro Bild (≈ 7,8 MB Blob). Wird per Canvas auf max. 2000px lange Kante +
+   JPEG q0.85 reduziert; bei Bedarf iterativ weiter, bis < Ziel-Bytes. Gibt bei
+   Fehler/kleinen Bildern das Original zurück. GIF/SVG bleiben unangetastet. */
+async function _downscaleImageBlobForAI(blob, maxDim, targetBytes) {
+  maxDim = maxDim || 2000;
+  targetBytes = targetBytes || 7 * 1024 * 1024; // Blob-Ziel; base64 ≈ 1,33× → < ~9,3 MB
+  const type = String(blob && blob.type || '').toLowerCase();
+  if (!type.startsWith('image/') || type === 'image/svg+xml' || type === 'image/gif') return blob;
+  if (typeof document === 'undefined' || !document.createElement) return blob;
+  const url = URL.createObjectURL(blob);
+  try {
+    const img = await new Promise((res, rej) => { const im = new Image(); im.onload = () => res(im); im.onerror = () => rej(new Error('img-load')); im.src = url; });
+    let w = img.naturalWidth || img.width, h = img.naturalHeight || img.height;
+    if (!w || !h) return blob;
+    const needResize = Math.max(w, h) > maxDim;
+    if (!needResize && blob.size <= targetBytes) return blob; // schon klein genug
+    const scale = needResize ? (maxDim / Math.max(w, h)) : 1;
+    let cw = Math.max(1, Math.round(w * scale)), ch = Math.max(1, Math.round(h * scale));
+    const canvas = document.createElement('canvas');
+    let q = 0.85, out = blob;
+    for (let attempt = 0; attempt < 5; attempt++) {
+      canvas.width = cw; canvas.height = ch;
+      const ctx = canvas.getContext('2d');
+      ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, cw, ch); // JPEG kennt kein Alpha
+      ctx.drawImage(img, 0, 0, cw, ch);
+      const jpg = await new Promise(r => { try { canvas.toBlob(r, 'image/jpeg', q); } catch (_) { r(null); } });
+      if (jpg) out = jpg;
+      if (jpg && jpg.size <= targetBytes) return jpg;
+      q = Math.max(0.5, q - 0.12);
+      cw = Math.max(1, Math.round(cw * 0.85)); ch = Math.max(1, Math.round(ch * 0.85));
+    }
+    return out;
+  } catch (_) { return blob; }
+  finally { try { URL.revokeObjectURL(url); } catch (_) {} }
+}
+
 /* v2.46.78: Sammelt Attachments aus Ticket + Conversations, lädt sie als base64.
    Nur unterstützte Typen (PDF + Bilder) werden inkludiert. */
 async function _angChatCollectAttachments(accountId, ticketId, ticket, opts) {
@@ -27644,13 +27686,21 @@ async function _angChatCollectAttachments(accountId, ticketId, ticket, opts) {
         console.warn('[Anhänge] ' + a.name + ' ist leer/zu klein — übersprungen');
         continue;
       }
-      const base64 = await _blobToBase64(blob);
+      // v2.46.277: große Bilder verkleinern (Anthropic 10-MB-base64-Limit pro Bild)
+      let useBlob = blob, useMedia = mediaType;
+      if (mediaType.startsWith('image/')) {
+        try {
+          const shrunk = await _downscaleImageBlobForAI(blob);
+          if (shrunk && shrunk !== blob) { useBlob = shrunk; useMedia = shrunk.type || 'image/jpeg'; console.log('[Anhänge] ' + a.name + ' verkleinert: ' + Math.round(blob.size / 1024) + ' → ' + Math.round(useBlob.size / 1024) + ' KB'); }
+        } catch (_) {}
+      }
+      const base64 = await _blobToBase64(useBlob);
       result.push({
         name: a.name || ('attachment-' + a.id),
-        mediaType: mediaType,
+        mediaType: useMedia,
         base64: base64,
       });
-      totalBytes += blob.size;
+      totalBytes += useBlob.size;
     } catch (e) {
       console.warn('Anhang-Base64-Fehler ' + a.name + ':', e.message);
     }
