@@ -784,7 +784,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.278';
+const APP_VERSION = 'v2.46.279';
 
 /* ============================================================
    GLOBAL THEME — v2.46.12
@@ -28042,7 +28042,7 @@ async function _angChatGenerateOffer(s, userText) {
     '- KEINE Formulierungen, die rechtlich binden oder einen Erfolg garantieren: NIEMALS "Behebung sämtlicher Mängel", "dauerhafte Störungsfreiheit", "vollständige Instandsetzung garantiert" o.ä. Wenn nötig absichernd: "nach Befund", "im beschriebenen Umfang".\n\n' +
     'VERBOTENE POSITIONEN:\n' +
     '- NIEMALS eigenständig Sammel-/Füller-Positionen hinzufügen wie „Material und Ersatzteile", „Kleinmaterial", „Verbrauchsmaterial", „Sonstiges", „Anfahrt" o.ä. — NUR Positionen, die der User explizit nennt oder die sich KONKRET aus Ticket/Anhängen ergeben.\n' +
-    '- NIEMALS eine Anfahrtspauschale / Einsatzpauschale / Anfahrtskosten aufnehmen — weder als Position NOCH als Stundensatz-Zeile. Generell weglassen (einsatzpauschale_anfahrt=0).\n' +
+    '- Füge VON DIR AUS (ungefragt) KEINE Anfahrts-/Einsatzpauschale hinzu. AUSNAHME: Verlangt der User AUSDRÜCKLICH eine Einsatz-/Anfahrtspauschale mit Betrag (z.B. „Einsatzpauschale 199 €", „als zweite Position Einsatzpauschale 199 €") → dann nimm sie auf: im Aufwand-Modus als ZUSÄTZLICHE Stundensatz-Zeile (z.B. {name:"Einsatzpauschale", satz:199, einheit:"Pauschal"}), im Pauschal-Modus als eigene Position. Das dedizierte Feld einsatzpauschale_anfahrt bleibt trotzdem 0 (die Pauschale kommt als Zeile/Position, nicht über dieses Feld).\n' +
     '- NIEMALS Aufschläge, Margen oder Abrechnungsmodelle erfinden (z.B. „Selbstkostenpreis zzgl. 15% Aufschlag") — solche Konditionen kommen ausschließlich vom User.\n' +
     '- Materialabrechnung nach Aufwand ist im Aufwand-Modus bereits durch den Standard-Hinweiskasten abgedeckt („Abrechnung nach tatsächlichem Aufwand von Lohn und Material") — dafür braucht es KEINE eigene Position.\n\n' +
     'POSITIONEN-BÜNDELUNG — MATERIAL + ARBEIT IMMER ZUSAMMEN (WICHTIG):\n' +
@@ -28058,7 +28058,7 @@ async function _angChatGenerateOffer(s, userText) {
     '- "pauschal" (Standard): Festpreis-Positionen mit Einzelpreisen.\n' +
     '- "aufwand": KEINE Festpreise — stattdessen Stundensätze-Tabelle (stundensaetze-Array). Positionen beschreiben dann nur den Arbeitsumfang (einzelpreis: 0) oder bleiben leer.\n' +
     '- Wechsle NUR auf "aufwand" wenn der User es explizit will (z.B. „nach Aufwand", „auf Stundenbasis", „Regieleistung"). Sonst: aktuellen Modus aus dem übergebenen Angebot BEIBEHALTEN.\n' +
-    '- STUNDENSÄTZE NIEMALS ERFINDEN: Die Sätze kommen aus dem ERP (an der Anlage hinterlegt) und stehen im übergebenen Angebot. Übernimm sie UNVERÄNDERT. Es gibt nur EINE Zeile: Servicetechniker (Std.). KEINE Einsatzpauschale-/Anfahrtspauschale-Zeile und keine zusätzlichen Zeilen wie „Fahrtzeit" oder „Servicemonteur" hinzufügen.\n' +
+    '- STUNDENSÄTZE NIEMALS ERFINDEN: Die Sätze kommen aus dem ERP (an der Anlage hinterlegt) und stehen im übergebenen Angebot. Übernimm sie UNVERÄNDERT. Standardmäßig gibt es nur EINE Zeile: Servicetechniker (Std.); füge NICHT ungefragt Zeilen wie „Fahrtzeit" oder „Servicemonteur" hinzu. AUSNAHME: Verlangt der User AUSDRÜCKLICH eine weitere Zeile (z.B. eine Einsatzpauschale mit konkretem Betrag), dann füge GENAU DIESE als zusätzliche Zeile hinzu und behalte die bestehende Servicetechniker-Zeile bei.\n' +
     '- NUR wenn der User explizit Sätze nennt (z.B. „Stundensatz 110", „Pauschale 249") → diese exakt übernehmen. Wenn ein Satz 0 ist und der User nichts nennt → in deiner message nachfragen.\n\n' +
     'Branche: ' + (profile.ki_branche_hint || 'Aufzug-Service') + '\n' +
     subtypBlock +
@@ -31097,9 +31097,10 @@ function _fdhChatToBkRec(chatState) {
     // sonst 0 bei vorhandenen Positionen (bzw. totals.netto wenn gar keine Positionen).
     pauschalpreis_netto:  ((s.collected?.preisanzeige_modus === 'gesamt') || !positionen.length) ? (+totals.netto || 0) : 0,
     positionen_json:      JSON.stringify(positionen),
-    // v2.46.229: Anfahrts-/Einsatzpauschale-Zeilen generell aus dem Angebot filtern
-    // (auch bei wiederhergestellten Alt-Angeboten, die die Zeile noch enthalten könnten)
-    stundensaetze_json:   JSON.stringify((s.collected?.stundensaetze || []).filter(x => !/anfahrt|pauschale/i.test(String(x.name || '') + ' ' + String(x.einheit || '')))),
+    // v2.46.279: Stundensätze 1:1 übernehmen — der frühere Anfahrt/Pauschale-Filter
+    // entfernte auch vom User AUSDRÜCKLICH gewünschte Einsatzpauschalen. Das Nicht-
+    // ungefragt-Hinzufügen steuert jetzt der Prompt; explizite Wünsche bleiben erhalten.
+    stundensaetze_json:   JSON.stringify(s.collected?.stundensaetze || []),
     ust_prozent:          +s.collected?.mwst_satz || 19,
     summe_netto_kone:     0,
     summe_netto_vp:       +totals.netto  || 0,
