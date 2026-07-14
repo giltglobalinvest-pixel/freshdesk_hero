@@ -784,7 +784,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.281';
+const APP_VERSION = 'v2.46.282';
 
 /* ============================================================
    GLOBAL THEME — v2.46.12
@@ -28095,28 +28095,37 @@ async function _angChatGenerateOffer(s, userText) {
     '    "anschreiben_gruss": string\n' +
     '  }\n' +
     '}';
-  // Conversation-History: alle bisherigen User-Anweisungen + aktuelle
+  // v2.46.282: Conversation-History TRIMMEN — der komplette aktuelle Stand steckt
+  // ohnehin im collected-JSON (unten). Nur die letzten Austausche mitgeben spart
+  // bei vielen Iterationen deutlich Input/Latenz.
   const messages = [];
-  // Inkludiere vorheriges Plan-JSON wenn iteriert wird
-  const previousMessages = s.history.slice(0, -1); // ohne den letzten user-text (kommt extra)
+  const previousMessages = s.history.slice(0, -1).slice(-8);
   previousMessages.forEach(m => messages.push({ role: m.role, content: m.content }));
   // v2.46.186: Ticket-Anhänge einmalig laden + cachen — die KI liest sie mit
   // (Subunternehmer-Angebote, TÜV-Berichte etc. → Positions-Beschreibungen).
   if (s._genAtts == null) {
     try {
       s._genAtts = await _angChatCollectAttachments(accountId, ticketId, ticket, { maxCount: 4, maxBytes: 16 * 1024 * 1024 });
-      if (s._genAtts.length) console.log('[Angebot-KI] ' + s._genAtts.length + ' Anhang/Anhänge werden mitanalysiert:', s._genAtts.map(a => a.name));
+      if (s._genAtts.length) console.log('[Angebot-KI] ' + s._genAtts.length + ' Anhang/Anhänge geladen (werden bei Bedarf mitgeschickt):', s._genAtts.map(a => a.name));
     } catch (e) { console.warn('[Angebot-KI] Anhang-Load:', e.message); s._genAtts = []; }
   }
   const lastText = userText + (s.collected ? '\n\nAktuelles Angebot (bitte anpassen, nicht neu von 0 starten):\n' + JSON.stringify(s.collected) : '');
   const lastContent = [{ type: 'text', text: lastText }];
-  (s._genAtts || []).forEach(att => {
-    if (att.mediaType === 'application/pdf') {
-      lastContent.push({ type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: att.base64 } });
-    } else if (att.mediaType.startsWith('image/')) {
-      lastContent.push({ type: 'image', source: { type: 'base64', media_type: att.mediaType, data: att.base64 } });
-    }
-  });
+  // v2.46.282: Ticket-Anhänge NUR bei der ERSTEN Generierung mitschicken ODER wenn
+  // der User in DIESER Anweisung ausdrücklich auf einen Anhang/Bild/Bericht verweist.
+  // Bei reinen Text-/Preis-/Anrede-Anpassungen sind die (mehrere hundert KB großen)
+  // Bilder überflüssig und machen jeden Iterations-Call unnötig langsam.
+  const _needAtts = ((s.iteration || 0) === 0) ||
+    /anhang|anhäng|anhaeng|bild|foto|screenshot|pr(ü|ue)fber|report|beleg|zeichnung|datei|dokument|\bpdf\b/i.test(userText);
+  if (_needAtts) {
+    (s._genAtts || []).forEach(att => {
+      if (att.mediaType === 'application/pdf') {
+        lastContent.push({ type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: att.base64 } });
+      } else if (att.mediaType.startsWith('image/')) {
+        lastContent.push({ type: 'image', source: { type: 'base64', media_type: att.mediaType, data: att.base64 } });
+      }
+    });
+  }
   // v2.46.197: per Copy&Paste eingefügte Screenshots des Users mitgeben —
   // die haben für DIESE Anweisung Vorrang (z.B. Screenshot einer Mängelliste)
   if ((s._pendingImages || []).length) {
@@ -28129,12 +28138,16 @@ async function _angChatGenerateOffer(s, userText) {
   // v2.46.251: 16000 statt 8000 — Sonnet 4.5 kann bis 64k Output-Tokens; bei
   // Angeboten mit vielen Positionen + langen Beschreibungen + Anschreiben wurde
   // das JSON bei 8000 abgeschnitten (unvollständig → nicht parsbar).
+  // v2.46.282: System-Prompt (groß + über Iterationen einer Sitzung stabil) via
+  // Prompt-Caching — der erste Call schreibt den Cache, Folge-Iterationen lesen ihn
+  // (deutlich schneller + günstiger).
+  const _cachedSystem = [{ type: 'text', text: sysPrompt, cache_control: { type: 'ephemeral' } }];
   const _callModel = async (maxTok) => proxyJson('/anthropic/v1/messages', {
     method: 'POST',
     body: JSON.stringify({
       model: 'claude-sonnet-4-5-20250929',
       max_tokens: maxTok,
-      system: sysPrompt,
+      system: _cachedSystem,
       messages: messages,
     }),
   });
@@ -28152,7 +28165,7 @@ async function _angChatGenerateOffer(s, userText) {
     try {
       data = await proxyJson('/anthropic/v1/messages', {
         method: 'POST',
-        body: JSON.stringify({ model: 'claude-sonnet-4-5-20250929', max_tokens: 24000, system: sysPrompt, messages: retryMsgs }),
+        body: JSON.stringify({ model: 'claude-sonnet-4-5-20250929', max_tokens: 24000, system: _cachedSystem, messages: retryMsgs }),
       });
     } catch (_) {}
   }
