@@ -784,7 +784,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.279';
+const APP_VERSION = 'v2.46.280';
 
 /* ============================================================
    GLOBAL THEME — v2.46.12
@@ -27936,6 +27936,11 @@ async function angChatUserResponse(userText) {
                           ? result.plan.stundensaetze
                           : (prev.stundensaetze || []),
     });
+    // v2.46.280: Im Aufwand-Modus rendert nur die Stundensätze-Tabelle — Positionen
+    // sind unsichtbar. Bepreiste Positionen (z.B. eine vom User gewünschte
+    // Einsatzpauschale, die die KI fälschlich als Position ablegt) deshalb in
+    // Stundensatz-Zeilen umwandeln, damit sie im Angebot erscheinen.
+    _angAufwandFoldFees(s.collected);
     // v2.46.194: KI hat auf Aufwand geschaltet, aber keine gültigen Sätze?
     // → automatisch die an der ERP-Anlage hinterlegten Sätze laden.
     // Chat-Angaben (Sätze > 0) haben Prio und bleiben unangetastet.
@@ -28057,6 +28062,7 @@ async function _angChatGenerateOffer(s, userText) {
     'ABRECHNUNGSMODUS (pauschal vs. aufwand):\n' +
     '- "pauschal" (Standard): Festpreis-Positionen mit Einzelpreisen.\n' +
     '- "aufwand": KEINE Festpreise — stattdessen Stundensätze-Tabelle (stundensaetze-Array). Positionen beschreiben dann nur den Arbeitsumfang (einzelpreis: 0) oder bleiben leer.\n' +
+    '- WICHTIG im Aufwand-Modus: Im PDF wird NUR die Stundensätze-Tabelle mit Preisen angezeigt, POSITIONEN erscheinen dort NICHT mit Preis. Jeder Festpreis / jede Pauschale (z.B. eine vom User verlangte Einsatzpauschale 199 €) MUSS daher als eigene Zeile im stundensaetze-Array stehen (z.B. {name:"Einsatzpauschale", satz:199, einheit:"Pauschal"}) — NICHT als positionen-Eintrag. Die bestehenden Stundensatz-Zeilen (z.B. Servicetechniker) dabei behalten.\n' +
     '- Wechsle NUR auf "aufwand" wenn der User es explizit will (z.B. „nach Aufwand", „auf Stundenbasis", „Regieleistung"). Sonst: aktuellen Modus aus dem übergebenen Angebot BEIBEHALTEN.\n' +
     '- STUNDENSÄTZE NIEMALS ERFINDEN: Die Sätze kommen aus dem ERP (an der Anlage hinterlegt) und stehen im übergebenen Angebot. Übernimm sie UNVERÄNDERT. Standardmäßig gibt es nur EINE Zeile: Servicetechniker (Std.); füge NICHT ungefragt Zeilen wie „Fahrtzeit" oder „Servicemonteur" hinzu. AUSNAHME: Verlangt der User AUSDRÜCKLICH eine weitere Zeile (z.B. eine Einsatzpauschale mit konkretem Betrag), dann füge GENAU DIESE als zusätzliche Zeile hinzu und behalte die bestehende Servicetechniker-Zeile bei.\n' +
     '- NUR wenn der User explizit Sätze nennt (z.B. „Stundensatz 110", „Pauschale 249") → diese exakt übernehmen. Wenn ein Satz 0 ist und der User nichts nennt → in deiner message nachfragen.\n\n' +
@@ -28235,6 +28241,33 @@ async function _angChatRenderPreview() {
    Priorität: (1) Sätze aus Chat/KI (satz > 0) bleiben UNANGETASTET,
    (2) sonst ERP-Sätze der Anlage (stundensatz + einsatzPauschale),
    (3) sonst 0-Platzhalter + Warn-Toast. Keine erfundenen Werte. */
+/* v2.46.280: Im Aufwand-Modus bepreiste Positionen (Festpreise/Pauschalen, die die
+   KI trotz Anweisung als Position statt Stundensatz-Zeile ablegt) in Stundensatz-
+   Zeilen falten, damit sie sichtbar werden. Positionen mit einzelpreis 0 (reine
+   Aufwand-Beschreibung) bleiben unberührt. */
+function _angAufwandFoldFees(c) {
+  if (!c || (c.abrechnung_modus || 'pauschal') !== 'aufwand') return;
+  const pos = Array.isArray(c.positionen) ? c.positionen : [];
+  const fees = pos.filter(p => (+p.einzelpreis || 0) > 0);
+  if (!fees.length) return;
+  c.stundensaetze = Array.isArray(c.stundensaetze) ? c.stundensaetze : [];
+  const norm = x => String(x || '').toLowerCase().replace(/\s+/g, ' ').trim();
+  const seen = new Set(c.stundensaetze.map(z => norm(z.name)));
+  let nr = c.stundensaetze.length;
+  fees.forEach(p => {
+    const name = String(p.bezeichnung || 'Pauschale').trim();
+    if (seen.has(norm(name))) return;
+    seen.add(norm(name));
+    c.stundensaetze.push({
+      nr: ++nr, name: name, satz: +p.einzelpreis || 0,
+      einheit: (p.einheit && /pausch|einsatz/i.test(p.einheit)) ? p.einheit : 'Pauschal',
+      hinweis: '',
+    });
+  });
+  // umgewandelte Positionen entfernen (im Aufwand-Modus ohnehin nicht gerendert)
+  c.positionen = pos.filter(p => !((+p.einzelpreis || 0) > 0));
+}
+
 async function _angEnsureAufwandSaetze(s) {
   const c = s?.collected;
   if (!c || (c.abrechnung_modus || 'pauschal') !== 'aufwand') return;
