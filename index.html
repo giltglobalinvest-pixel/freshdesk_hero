@@ -784,7 +784,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.282';
+const APP_VERSION = 'v2.46.283';
 
 /* ============================================================
    GLOBAL THEME — v2.46.12
@@ -16483,6 +16483,56 @@ function updateAssistantMicUI(active) {
   if (window.lucide) lucide.createIcons();
 }
 
+/* v2.46.283: Forward-Empfänger auflösen — Name → Freshdesk-Kontakt(e). auto=true bei
+   automatischem Trigger nach dem Render (liest den Namen aus a.forward_to), sonst
+   manuell per Button (liest den aktuellen Input-Text). 1 Treffer → E-Mail übernehmen,
+   mehrere → Auswahl-Dropdown, 0 → Hinweis. */
+async function _asstSearchForwardContact(i, auto) {
+  const ctx = ASSISTANT_CTX;
+  if (!ctx) return;
+  const a = ctx.plan?.actions?.[i];
+  const inp = document.getElementById('stepForwardTo_' + i);
+  const hits = document.getElementById('asstFwdHits_' + i);
+  if (!a || !hits) return;
+  const isEmail = s => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(s || '').trim());
+  let term = '';
+  if (auto) {
+    term = (a.forward_to || []).map(x => String(x).trim()).find(x => x && !isEmail(x)) || '';
+  } else {
+    const parts = (inp?.value || '').split(',').map(s => s.trim()).filter(Boolean);
+    term = parts.find(p => !isEmail(p)) || (inp?.value || '').trim();
+  }
+  if (!term || isEmail(term)) { if (!auto) hits.innerHTML = '<p class="text-[11px] text-ink-500">Bitte einen Namen eingeben (oder es steht bereits eine E-Mail im Feld).</p>'; return; }
+  hits.innerHTML = '<p class="text-[11px] text-ink-500"><span class="spinner inline-block w-3 h-3 mr-1"></span>Suche Kontakt „' + escapeHtml(term) + '" in Freshdesk…</p>';
+  let list = [];
+  try { list = await _searchFdContactsByPlan(ctx.accountId, { recipient_name: term }); } catch (_) {}
+  list = (list || []).filter(c => c && c.email);
+  if (!list.length) {
+    hits.innerHTML = '<p class="text-[11px] text-amber-700">Kein Freshdesk-Kontakt zu „' + escapeHtml(term) + '" gefunden — bitte E-Mail oben manuell eintragen.</p>';
+    return;
+  }
+  if (list.length === 1) {
+    _asstPickForwardContact(i, list[0].email, list[0].name);
+    return;
+  }
+  hits.innerHTML = '<p class="text-[11px] text-ink-600 mb-1">' + list.length + ' Kontakte zu „' + escapeHtml(term) + '" — bitte wählen:</p>' +
+    '<select onchange="_asstPickForwardContact(' + i + ', this.value)" class="w-full text-[12px] px-2 py-1.5 border border-ink-300 rounded-lg bg-white">' +
+      '<option value="">— Kontakt wählen —</option>' +
+      list.map(c => '<option value="' + escapeAttr(c.email) + '">' + escapeHtml((c.name || '(ohne Name)') + ' · ' + c.email) + (c.phone || c.mobile ? ' · ' + escapeHtml(c.phone || c.mobile) : '') + '</option>').join('') +
+    '</select>';
+}
+function _asstPickForwardContact(i, email, name) {
+  if (!email) return;
+  const ctx = ASSISTANT_CTX;
+  const a = ctx?.plan?.actions?.[i];
+  const inp = document.getElementById('stepForwardTo_' + i);
+  if (inp) inp.value = email;
+  if (a) a.forward_to = [email];
+  const hits = document.getElementById('asstFwdHits_' + i);
+  if (hits) hits.innerHTML = '<p class="text-[11px] text-emerald-700 inline-flex items-center gap-1"><i data-lucide="check" class="w-3 h-3"></i> Übernommen: ' + (name ? '<b>' + escapeHtml(name) + '</b> · ' : '') + escapeHtml(email) + '</p>';
+  if (window.lucide) lucide.createIcons();
+}
+
 async function processAssistantCommand(btn) {
   const ctx = ASSISTANT_CTX;
   if (!ctx) return;
@@ -16585,7 +16635,7 @@ async function aiInterpretCommand(ticket, command, accountId) {
     '- WICHTIG — KEINE GRUSSFORMEL UND KEINE SIGNATUR AM ENDE: Die Freshdesk-Signatur des Users enthält bereits eine Grußformel sowie Name, Firma, Telefon, Position. Die Signatur wird automatisch angehängt. Schreibe deshalb NIEMALS „Mit freundlichen Grüßen", „Viele Grüße", „Beste Grüße", „Liebe Grüße", einen Namen, eine Firma, eine Telefonnummer oder eine Position. Beende den Text mit dem letzten inhaltlichen Satz — sonst nichts. (Bei Notizen reicht ebenfalls der Inhalt.)\n' +
     '- Bei assign: nur EINE eindeutige agent_id verwenden. Bei mehrdeutigen Vornamen (mehrere passen) ODER wenn KEINE passende ID im Pool ist → trotzdem type="assign", aber agent_id=null setzen. Im "summary" kurz erklären welche Auswahl der User treffen muss. Die App zeigt dann ein Dropdown.\n' +
     '- Bei group: GENAU dieselbe Regel. Wenn Gruppen-Bezeichnung mehrdeutig oder unklar ist → type="group" mit group_id=null. Niemals raten.\n' +
-    '- Bei forward: forward_to als Array von E-Mail-Adressen.\n' +
+    '- Bei forward: forward_to als Array. Nennt der User eine konkrete E-Mail-Adresse, nimm diese. Nennt er stattdessen nur einen NAMEN (z.B. „weiterleiten an Brübach", „an Herrn Müller weiterleiten") → gib den NAMEN als Eintrag in forward_to zurück; die App sucht dann automatisch den passenden Freshdesk-Kontakt und lässt bei mehreren Treffern auswählen. Erfinde NIEMALS eine E-Mail-Adresse.\n' +
     '- Pro Aktion ein kurzes "summary"-Feld auf Deutsch, das knapp beschreibt was die Aktion bewirkt — der User sieht das als Kachel-Untertitel.\n' +
     '- "unknown" nur als ALLERLETZTER Ausweg, wenn überhaupt nicht klar ist was der User will. Lieber type="assign"/"group" mit ID=null setzen, damit der User per Dropdown selber wählt.\n' +
     '- Antworte AUSSCHLIESSLICH mit dem JSON-Objekt, kein Markdown, keine Erklärung drumherum.\n\n' +
@@ -16844,8 +16894,12 @@ function renderAssistantPreview() {
       }
     } else if (a.type === 'forward') {
       if (isActive && isPending) {
-        body = `<label class="text-[10px] uppercase font-semibold text-${meta.color}-800 block">Empfänger (kommagetrennt)</label>
-                <input id="stepForwardTo_${i}" class="w-full text-sm px-3 py-2 border border-${meta.color}-300 bg-white rounded-lg mt-1 mb-2 font-mono" value="${escapeAttr((a.forward_to || []).join(', '))}" placeholder="empfaenger@beispiel.de">
+        body = `<label class="text-[10px] uppercase font-semibold text-${meta.color}-800 block">Empfänger (E-Mail oder Name)</label>
+                <input id="stepForwardTo_${i}" class="w-full text-sm px-3 py-2 border border-${meta.color}-300 bg-white rounded-lg mt-1 font-mono" value="${escapeAttr((a.forward_to || []).join(', '))}" placeholder="empfaenger@beispiel.de oder Name (z.B. Brübach)">
+                <div class="flex items-center gap-2 mt-1 mb-1">
+                  <button type="button" onclick="_asstSearchForwardContact(${i}, false)" class="text-[11px] text-${meta.color}-700 font-semibold inline-flex items-center gap-1"><i data-lucide="search" class="w-3 h-3"></i> Kontakt in Freshdesk suchen</button>
+                </div>
+                <div id="asstFwdHits_${i}" class="mb-2"></div>
                 <label class="text-[10px] uppercase font-semibold text-${meta.color}-800 block">Nachricht</label>
                 <textarea id="stepBody_${i}" class="w-full text-sm px-3 py-2 border border-${meta.color}-300 bg-white rounded-lg whitespace-pre-line mt-1" rows="6">${escapeHtml(a.body || '')}</textarea>
                 ${_translateBlock(['forward'])}
@@ -17083,6 +17137,16 @@ function renderAssistantPreview() {
   _hydrateMarketingTemplateDropdowns().catch(e => console.warn(e));
   // v2.46.96: Marketing-History-Warnungen für Doublette-Schutz lazy laden
   _hydrateMarketingHistoryWarnings().catch(e => console.warn(e));
+  // v2.46.283: Forward-Empfänger, der als NAME (keine E-Mail) vorliegt, automatisch
+  // im Freshdesk-Kontaktstamm auflösen (bei mehreren Treffern Auswahl-Dropdown).
+  try {
+    (plan.actions || []).forEach((a, i) => {
+      if (a.type === 'forward' && a._state !== 'done' &&
+          (a.forward_to || []).some(x => x && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(x).trim()))) {
+        _asstSearchForwardContact(i, true);
+      }
+    });
+  } catch (_) {}
 
   // Kunden-Sprache im Hintergrund erkennen + in den Übersetzungs-Block-Labels anzeigen.
   // Wird pro Ticket gecacht — kein wiederholter API-Call beim Re-Render.
@@ -17163,6 +17227,9 @@ async function confirmAssistantStep(idx, btnEl) {
     const raw = $('stepForwardTo_' + idx)?.value || '';
     a.forward_to = raw.split(',').map(s => s.trim()).filter(Boolean);
     if (!a.forward_to.length) return toast('Empfänger fehlt', 'warn');
+    // v2.46.283: unaufgelöste Namen abfangen — sonst geht die Weiterleitung an eine ungültige Adresse
+    const _bad = a.forward_to.filter(x => !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(x).trim()));
+    if (_bad.length) return toast('Kein gültiger Empfänger: „' + _bad.join(', ') + '" — bitte „Kontakt in Freshdesk suchen" nutzen und auswählen oder eine E-Mail eintragen.', 'warn', 8000);
   }
   if (a.type === 'marketing_email') {
     // v2.46.85
