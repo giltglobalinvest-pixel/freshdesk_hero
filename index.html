@@ -784,7 +784,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.280';
+const APP_VERSION = 'v2.46.281';
 
 /* ============================================================
    GLOBAL THEME — v2.46.12
@@ -28022,6 +28022,7 @@ async function _angChatGenerateOffer(s, userText) {
     '- Nur wenn der User EXPLIZIT sagt, er will keine Einleitung → anschreiben_aktiv=false.\n' +
     '- anschreiben_anrede: NUR die Anrede-Zeile. Quelle in dieser Reihenfolge: (1) Ansprechpartner aus dem ERP — steht im übergebenen Angebot unter stammdaten.ansprechpartner_vor_ort → "Sehr geehrter Herr <Nachname>," / "Sehr geehrte Frau <Nachname>,". (2) Name des Ticket-Anfragenden. (3) Sonst "Sehr geehrte Damen und Herren,". Keine Titel erfinden, bei unklarem Geschlecht neutral bleiben.\n' +
     '- WICHTIG: Der EMPFÄNGER ist AUSSCHLIESSLICH der unter stammdaten.ansprechpartner_vor_ort genannte Ansprechpartner. Verwende NIEMALS den Namen des Ticket-Anfragenden, wenn dieser vom ansprechpartner_vor_ort abweicht — weder in der Anrede noch im Body. (Hinweis: Die Anrede-Zeile wird nach der Generierung ohnehin automatisch an den gewählten ERP-Kontakt angeglichen.)\n' +
+    '- EMPFÄNGER / ANSPRECHPARTNER / ANSCHRIFT ÄNDERN: Bittet der User ausdrücklich, den Empfänger, Ansprechpartner oder die Anschrift zu ändern (z.B. „Ansprechpartner auf Frau Gerisch-Bertow ändern", „Name in der Anschrift anpassen", „andere Rechnungsanschrift", „z.Hd. Herr Müller"), dann gib die geänderten Felder in stammdaten_update zurück: ansprechpartner_vor_ort = die z.Hd.-Person im Anschriftsfeld (oben links), vertragspartner = Firmenname/Rechnungsempfänger, rechnungs_anschrift = Straße + PLZ + Ort, email, tel. Setze NUR die vom User genannten Felder; passe die anschreiben_anrede entsprechend an (z.B. „Sehr geehrte Frau Gerisch-Bertow,"). Ohne solche ausdrückliche Bitte: stammdaten_update leer lassen (die Stammdaten kommen sonst aus dem ERP/den Stammdaten und dürfen NICHT verändert werden).\n' +
     '- Der anschreiben_body beginnt NICHT mit der Anrede — er startet direkt mit dem ersten Satz. Zwischen Anrede und Body kommt automatisch eine Leerzeile.\n\n' +
     'PREISE:\n' +
     '- Wenn User Preise nennt → übernimm EXAKT\n' +
@@ -28086,6 +28087,7 @@ async function _angChatGenerateOffer(s, userText) {
     '    "stundensaetze": [{"nr": number, "name": string, "satz": number, "einheit": "Std."|"Anfahrt", "hinweis": string}] (NUR bei aufwand befüllen, sonst []),\n' +
     '    "gesamtpreis_ausblenden": boolean (true = Summen-Block Netto/USt/Brutto wird im PDF NICHT gezeigt),\n' +
     '    "preisanzeige_modus": "einzel"|"gesamt" ("einzel" = jede Position mit Einzel- + Gesamtpreis (Standard); "gesamt" = Positionen werden OHNE Einzelpreise als Leistungsumfang gelistet und NUR EIN Gesamt-/Pauschalpreis (Summe aller Positionen, netto) am Ende gezeigt),\n' +
+    '    "stammdaten_update": {"ansprechpartner_vor_ort": string, "vertragspartner": string, "rechnungs_anschrift": string, "email": string, "tel": string} (NUR befüllen, wenn der User den EMPFÄNGER / Ansprechpartner / die Anschrift ändern will — sonst weglassen bzw. leeres Objekt. Nur die tatsächlich zu ändernden Felder setzen. ansprechpartner_vor_ort = die z.Hd.-Person im Anschriftsfeld oben links),\n' +
     '    "anschreiben_aktiv": boolean,\n' +
     '    "anschreiben_betreff": string,\n' +
     '    "anschreiben_anrede": string,\n' +
@@ -28178,6 +28180,17 @@ async function _angChatGenerateOffer(s, userText) {
   // v2.46.254: Wenn ein ERP-Kontakt als Empfänger gewählt ist, hat dessen
   // Anrede (Geschlecht + Nachname) IMMER Vorrang vor der von der KI geratenen —
   // behebt "Sehr geehrter Herr <Ticket-Absender>" bei weiblichem ERP-Kontakt.
+  // v2.46.281: Empfänger/Ansprechpartner-Änderung aus dem Chat in die Stammdaten
+  // übernehmen (z.Hd.-Zeile im Anschriftsfeld + Grundlage für die Anrede) — BEVOR
+  // die Anrede final abgeleitet wird. prev im Caller = s.collected (nach diesem
+  // Call), daher bleibt die Änderung beim Merge erhalten.
+  const _su = parsed.plan && parsed.plan.stammdaten_update;
+  if (_su && typeof _su === 'object') {
+    s.collected = s.collected || {}; s.collected.stammdaten = s.collected.stammdaten || {};
+    ['ansprechpartner_vor_ort', 'vertragspartner', 'rechnungs_anschrift', 'email', 'tel'].forEach(k => {
+      if (_su[k] != null && String(_su[k]).trim()) s.collected.stammdaten[k] = String(_su[k]).trim();
+    });
+  }
   const _detAnrede = _angDeriveAnredeFromErp(s);
   if (_detAnrede) parsed.plan.anschreiben_anrede = _detAnrede;
   return parsed;
