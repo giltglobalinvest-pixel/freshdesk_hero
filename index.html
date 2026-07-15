@@ -788,7 +788,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.284';
+const APP_VERSION = 'v2.46.285';
 
 /* ============================================================
    GLOBAL THEME — v2.46.12
@@ -40841,19 +40841,17 @@ if ('serviceWorker' in navigator && (location.protocol === 'https:' || location.
 }
 </script>
 
-<!-- CI_MODULE_START (Kontakt-Import aus Screenshot · v2.46.284) -->
+<!-- CI_MODULE_START (Kontakt-Import als KI-Chat · v2.46.285) -->
 <script>
 /* ============================================================================
-   v2.46.284: KONTAKT-IMPORT aus Screenshot → Freshdesk + ERP
-   Globaler FAB → Modal: Mandant/Account wählen, Screenshot(s) einfügen/hochladen,
-   KI extrahiert Kontaktdaten → editierbares Prüf-Formular → Push:
-   - Freshdesk: Kontakt (Dedup per Email → anlegen/aktualisieren)
+   v2.46.285: KONTAKT-IMPORT als KI-CHAT → Freshdesk + ERP
+   Globaler FAB → Modal mit Chat: Screenshots per Cmd/Strg+V oder Datei + Text.
+   Die KI extrahiert die Kontaktdaten und fragt fehlende Pflichtangaben nach
+   (Vor-/Nachname, E-Mail, Firma). Ist alles da → „Kontakt anlegen"-Karte:
+   - Freshdesk: Kontakt (Dedup per Email → anlegen)
    - ERP je nach Account-Typ:
-       * 'aufzug'  → val.town-Proxy (erpFetch): Kunde suchen; Kontakt-Dedup; anlegen.
-                     Kein Kunde → „Kunde anlegen" anbieten.
-       * 'flp'     → ERP Hero (Airtable): Customer suchen; Contact-Dedup; anlegen.
-                     Kein Kunde → „Kunde anlegen" anbieten.
-   Existiert der Kontakt bereits → nichts ändern (nur melden).
+       * 'aufzug' → val.town-Proxy: Kunde suchen; Kontakt-Dedup; anlegen. Kein Kunde → anbieten.
+       * 'flp'    → ERP Hero (Airtable): Customer suchen; Contact-Dedup; anlegen. Kein Kunde → anbieten.
    ========================================================================== */
 var _CI = null;
 
@@ -40863,6 +40861,10 @@ function _ciMandantType(account) {
   try { if (typeof _erpFirmaSlugForAccount === 'function' && _erpFirmaSlugForAccount(account)) return 'aufzug'; } catch (_) {}
   return 'none';
 }
+function _ciTypeLabel(type) {
+  return type === 'flp' ? 'ERP Hero (FLP)' : type === 'aufzug' ? 'Aufzug-ERP' : 'nur Freshdesk';
+}
+function _ciAccount() { return (APP_STATE.accounts || []).find(a => a.id === _CI?.accountId) || null; }
 
 function openContactImportModal() {
   const accounts = APP_STATE.accounts || [];
@@ -40871,20 +40873,36 @@ function openContactImportModal() {
   if (!host) { host = document.createElement('div'); host.id = 'ciHost'; document.body.appendChild(host); }
   const preselect = (APP_STATE.currentAccount && APP_STATE.currentAccount !== 'all' && accounts.find(a => a.id === APP_STATE.currentAccount))
     ? APP_STATE.currentAccount : accounts[0].id;
-  _CI = { accountId: preselect, files: [], extracted: null, step: 'input' };
-  const speechAvailable = false; // (kein Voice hier)
+  _CI = { accountId: preselect, chat: [], contact: {}, pending: [], ready: false, busy: false };
+  const accOpts = accounts.map(a => {
+    const t = _ciMandantType(a);
+    return '<option value="' + escapeAttr(a.id) + '"' + (a.id === preselect ? ' selected' : '') + '>' + escapeHtml(a.name) + ' · ' + _ciTypeLabel(t) + '</option>';
+  }).join('');
   host.innerHTML =
     '<div class="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/50" onclick="if(event.target===this)closeContactImportModal()">' +
-      '<div class="bg-white w-full max-w-md rounded-t-3xl sm:rounded-2xl shadow-2xl flex flex-col safe-bottom" style="max-height:94vh">' +
+      '<div class="bg-white w-full max-w-md rounded-t-3xl sm:rounded-2xl shadow-2xl flex flex-col safe-bottom" style="max-height:94vh;height:94vh">' +
         '<div class="safe-top px-4 py-3 border-b border-ink-200 flex items-center justify-between gap-2 shrink-0">' +
-          '<h3 class="font-bold text-ink-900 inline-flex items-center gap-2"><i data-lucide="user-plus" class="w-5 h-5 text-emerald-600"></i> Kontakt aus Screenshot</h3>' +
-          '<button onclick="closeContactImportModal()" class="w-9 h-9 rounded-lg hover:bg-ink-100 flex items-center justify-center"><i data-lucide="x" class="w-5 h-5 text-ink-700"></i></button>' +
+          '<div class="min-w-0"><h3 class="font-bold text-ink-900 inline-flex items-center gap-2"><i data-lucide="user-plus" class="w-5 h-5 text-emerald-600"></i> Kontakt erfassen</h3>' +
+            '<p class="text-[10px] text-ink-500">Screenshot einfügen (Cmd/Strg+V) oder tippen — die KI ergänzt fehlende Angaben.</p></div>' +
+          '<button onclick="closeContactImportModal()" class="w-9 h-9 rounded-lg hover:bg-ink-100 flex items-center justify-center shrink-0"><i data-lucide="x" class="w-5 h-5 text-ink-700"></i></button>' +
         '</div>' +
-        '<div id="ciBody" class="flex-1 overflow-y-auto p-4 space-y-3"></div>' +
-        '<div id="ciFooter" class="border-t border-ink-200 p-3 flex gap-2 shrink-0"></div>' +
+        '<div class="px-4 pt-2 shrink-0">' +
+          '<label class="text-[10px] font-bold text-ink-500 uppercase tracking-wider">Mandant / Account</label>' +
+          '<select id="ciAccount" onchange="_CI.accountId=this.value;_ciChatAppend(\'assistant\',\'Mandant gewechselt zu \'+this.selectedOptions[0].textContent.trim()+\'.\')" class="w-full mt-0.5 px-2.5 py-1.5 border border-ink-300 rounded-lg text-[13px] bg-white">' + accOpts + '</select>' +
+        '</div>' +
+        '<div id="ciChat" class="flex-1 overflow-y-auto p-3 space-y-2 bg-ink-50 mt-2"></div>' +
+        '<div id="ciPending" class="px-3 shrink-0"></div>' +
+        '<div class="p-2 border-t border-ink-200 flex gap-1.5 items-end shrink-0">' +
+          '<button type="button" onclick="document.getElementById(\'ciFileInput\').click()" class="w-9 h-9 rounded-lg border border-ink-300 hover:bg-ink-100 flex items-center justify-center shrink-0" title="Screenshot/Datei anhängen"><i data-lucide="paperclip" class="w-4 h-4 text-ink-600"></i></button>' +
+          '<input id="ciFileInput" type="file" accept="image/*,application/pdf" multiple class="hidden" onchange="_ciAddFiles(this)">' +
+          '<textarea id="ciInput" rows="1" placeholder="Screenshot einfügen (Cmd/Strg+V) oder z.B. „Max Müller, Muster GmbH, max@muster.de"…" class="flex-1 px-3 py-2 border border-ink-300 rounded-lg text-[13px] resize-none" onkeydown="if(event.key===\'Enter\'&&!event.shiftKey){event.preventDefault();_ciChatSend()}"></textarea>' +
+          '<button onclick="_ciChatSend()" class="w-9 h-9 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg flex items-center justify-center shrink-0"><i data-lucide="send" class="w-4 h-4"></i></button>' +
+        '</div>' +
       '</div>' +
     '</div>';
-  _ciRenderInput();
+  const chat = document.getElementById('ciChat');
+  if (chat) chat.innerHTML = '<div class="text-[12.5px] text-ink-700 bg-white border border-ink-200 rounded-2xl px-3 py-2">Hallo 👋 Füg einen <b>Screenshot</b> ein (Visitenkarte, E-Mail-Signatur — Cmd/Strg+V) oder tippe die Kontaktdaten. Ich erkenne Name, Firma, E-Mail, Telefon, Rolle & Anschrift und frage nach, falls etwas fehlt. Danach lege ich den Kontakt in <b>Freshdesk</b> und im <b>ERP</b> an.</div>';
+  setTimeout(() => { const ta = document.getElementById('ciInput'); if (ta) { ta.focus(); ta.addEventListener('paste', _ciHandlePaste); } }, 60);
   if (window.lucide) lucide.createIcons();
   document.body.style.overflow = 'hidden';
 }
@@ -40895,71 +40913,51 @@ function closeContactImportModal() {
   document.body.style.overflow = '';
 }
 
-function _ciAccountOptions() {
-  const accounts = APP_STATE.accounts || [];
-  return accounts.map(a => {
-    const t = _ciMandantType(a);
-    const badge = t === 'flp' ? ' (ERP Hero)' : t === 'aufzug' ? ' (Aufzug-ERP)' : ' (nur Freshdesk)';
-    return '<option value="' + escapeAttr(a.id) + '"' + (a.id === _CI.accountId ? ' selected' : '') + '>' + escapeHtml(a.name) + badge + '</option>';
-  }).join('');
+/* ---- Chat-Rendering ---- */
+function _ciChatAppend(role, text, skipStore) {
+  if (_CI && !skipStore) { _CI.chat = _CI.chat || []; _CI.chat.push({ role, content: text }); }
+  const el = document.getElementById('ciChat');
+  if (!el) return;
+  const isUser = role === 'user';
+  const b = document.createElement('div');
+  b.className = 'flex ' + (isUser ? 'justify-end' : 'justify-start');
+  b.innerHTML = '<div class="' + (isUser ? 'bg-emerald-600 text-white' : 'bg-white border border-ink-200 text-ink-800') + ' rounded-2xl px-3 py-2 text-[12.5px] max-w-[88%] whitespace-pre-wrap">' + escapeHtml(text) + '</div>';
+  el.appendChild(b); el.scrollTop = el.scrollHeight;
+}
+function _ciChatAppendRaw(html) {
+  const el = document.getElementById('ciChat');
+  if (!el) return null;
+  const wrap = document.createElement('div');
+  wrap.innerHTML = html;
+  el.appendChild(wrap); el.scrollTop = el.scrollHeight;
+  if (window.lucide) lucide.createIcons();
+  return wrap;
 }
 
-function _ciRenderInput() {
-  const body = document.getElementById('ciBody');
-  const footer = document.getElementById('ciFooter');
-  if (!body || !footer) return;
-  body.innerHTML =
-    '<label class="text-xs font-bold text-ink-700 uppercase tracking-wider block">Mandant / Account</label>' +
-    '<select id="ciAccount" onchange="_CI.accountId=this.value" class="w-full px-3 py-2.5 border border-ink-300 rounded-xl text-sm font-medium bg-white">' + _ciAccountOptions() + '</select>' +
-    '<div>' +
-      '<div class="flex items-center justify-between mb-1">' +
-        '<label class="text-xs font-bold text-ink-700 uppercase tracking-wider">Screenshot(s) / Foto der Kontaktdaten</label>' +
-        '<button type="button" onclick="document.getElementById(\'ciFileInput\').click()" class="text-[11px] font-semibold text-emerald-600 inline-flex items-center gap-1"><i data-lucide="image-plus" class="w-3.5 h-3.5"></i> Hinzufügen</button>' +
-      '</div>' +
-      '<input id="ciFileInput" type="file" accept="image/*,application/pdf" multiple class="hidden" onchange="_ciAddFiles(this)">' +
-      '<div id="ciAttachList" class="space-y-1">' + _ciAttachListHtml() + '</div>' +
-      '<p class="text-[10px] text-ink-400 mt-1">Screenshot einfügen: ins Notizfeld klicken und Cmd/Strg+V. Visitenkarte, E-Mail-Signatur, Kontaktliste …</p>' +
-    '</div>' +
-    '<label class="text-xs font-bold text-ink-700 uppercase tracking-wider block">Notiz / Ergänzung (optional)</label>' +
-    '<textarea id="ciNotes" rows="2" placeholder="z.B. „Ist der Hausmeister der Anlage in der Musterstr. 1" — hilft der KI + der Kunden-Zuordnung" class="w-full px-3 py-2 border border-ink-300 rounded-xl text-[13px] resize-none"></textarea>' +
-    '<div class="bg-emerald-50 border border-emerald-200 rounded-xl p-2.5 text-[11px] text-emerald-900">' +
-      '<p class="font-bold mb-0.5">Was passiert</p>' +
-      '<p>KI liest die Kontaktdaten → du prüfst/ergänzt → Anlegen in Freshdesk und im ERP (Kunde wird gesucht, bei Bedarf angelegt). Existiert der Kontakt schon, wird nichts geändert.</p>' +
-    '</div>';
-  footer.innerHTML =
-    '<button onclick="closeContactImportModal()" class="flex-1 bg-ink-100 hover:bg-ink-200 text-ink-700 rounded-xl px-3 py-3 text-sm font-bold">Abbrechen</button>' +
-    '<button onclick="_ciExtract(this)" class="flex-[2] bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl px-3 py-3 text-sm font-bold inline-flex items-center justify-center gap-1.5"><i data-lucide="sparkles" class="w-4 h-4"></i> Extrahieren & prüfen</button>';
-  setTimeout(() => { const ta = document.getElementById('ciNotes'); if (ta) ta.addEventListener('paste', _ciHandlePaste); }, 50);
+/* ---- Anhänge (pending, gehen mit der nächsten Nachricht mit) ---- */
+function _ciRenderPending() {
+  const host = document.getElementById('ciPending');
+  if (!host) return;
+  const p = (_CI && _CI.pending) || [];
+  host.innerHTML = p.length
+    ? '<div class="flex flex-wrap gap-1.5 py-1.5">' + p.map((f, i) =>
+        '<span class="inline-flex items-center gap-1 bg-ink-100 border border-ink-200 rounded-lg px-2 py-1 text-[11px]"><i data-lucide="' + (String(f.type).startsWith('image/') ? 'image' : 'file-text') + '" class="w-3 h-3"></i>' + escapeHtml((f.name || 'Bild').slice(0, 22)) + '<button onclick="_ciRemovePending(' + i + ')" class="ml-0.5 text-ink-500 hover:text-rose-600">✕</button></span>'
+      ).join('') + '</div>'
+    : '';
   if (window.lucide) lucide.createIcons();
 }
-
-/* ---- Anhänge (Bilder/PDF) ---- */
-function _ciAttachListHtml() {
-  const files = (_CI && _CI.files) || [];
-  if (!files.length) return '<p class="text-[11px] text-ink-400 italic">Kein Screenshot</p>';
-  return files.map((f, i) => {
-    const isImg = String(f.type || '').startsWith('image/');
-    return '<div class="flex items-center gap-2 bg-ink-50 border border-ink-200 rounded-lg px-2 py-1.5">' +
-      '<i data-lucide="' + (isImg ? 'image' : 'file-text') + '" class="w-4 h-4 text-ink-500 shrink-0"></i>' +
-      '<span class="flex-1 min-w-0 truncate text-[12px] text-ink-700">' + escapeHtml(f.name || 'Bild') + '</span>' +
-      '<span class="text-[10px] text-ink-400 shrink-0">' + Math.max(1, Math.round((f.size || 0) / 1024)) + ' KB</span>' +
-      '<button type="button" onclick="_ciRemoveFile(' + i + ')" class="w-6 h-6 rounded hover:bg-ink-200 flex items-center justify-center shrink-0"><i data-lucide="x" class="w-3.5 h-3.5 text-ink-500"></i></button>' +
-    '</div>';
-  }).join('');
-}
-function _ciRenderAttachList() { const h = document.getElementById('ciAttachList'); if (h) { h.innerHTML = _ciAttachListHtml(); if (window.lucide) lucide.createIcons(); } }
 function _ciAddFiles(input) {
   if (!_CI) return;
   const files = Array.from((input && input.files) || []);
   const MAX = 20 * 1024 * 1024;
   for (const f of files) {
     if (f.size > MAX) { toast('„' + f.name + '" zu groß (max 20 MB)', 'warn', 6000); continue; }
-    _CI.files.push({ name: f.name || 'bild', type: f.type || 'application/octet-stream', size: f.size, blob: f });
+    _CI.pending.push({ name: f.name || 'datei', type: f.type || 'application/octet-stream', blob: f });
   }
   if (input) input.value = '';
-  _ciRenderAttachList();
+  _ciRenderPending();
 }
-function _ciRemoveFile(i) { if (_CI && _CI.files) { _CI.files.splice(i, 1); _ciRenderAttachList(); } }
+function _ciRemovePending(i) { if (_CI && _CI.pending) { _CI.pending.splice(i, 1); _ciRenderPending(); } }
 function _ciHandlePaste(e) {
   if (!_CI) return;
   const items = (e.clipboardData && e.clipboardData.items) || [];
@@ -40967,124 +40965,107 @@ function _ciHandlePaste(e) {
   for (const it of items) {
     if (it.kind === 'file' && String(it.type || '').startsWith('image/')) {
       const blob = it.getAsFile();
-      if (blob) { const ext = (String(it.type).split('/')[1] || 'png').split('+')[0]; _CI.files.push({ name: 'screenshot-' + (_CI.files.length + 1) + '.' + ext, type: it.type, size: blob.size, blob }); added++; }
+      if (blob) { const ext = (String(it.type).split('/')[1] || 'png').split('+')[0]; _CI.pending.push({ name: 'screenshot-' + (_CI.pending.length + 1) + '.' + ext, type: it.type, blob }); added++; }
     }
   }
-  if (added) { _ciRenderAttachList(); toast(added + ' Screenshot' + (added > 1 ? 's' : '') + ' hinzugefügt', 'success', 2500); }
+  if (added) { _ciRenderPending(); toast(added + ' Screenshot' + (added > 1 ? 's' : '') + ' angehängt — jetzt „Senden"', 'success', 2500); }
 }
 
-/* ---- KI-Extraktion ---- */
-async function _ciExtract(btn) {
-  if (!_CI) return;
-  _CI.accountId = document.getElementById('ciAccount')?.value || _CI.accountId;
-  const notes = (document.getElementById('ciNotes')?.value || '').trim();
-  if (!_CI.files.length && !notes) return toast('Bitte einen Screenshot hinzufügen (oder Notiz)', 'warn', 4000);
-  setBusy(btn, true, 'KI liest Kontakt…');
+/* ---- Chat-Senden (KI extrahiert + fragt nach) ---- */
+async function _ciChatSend() {
+  if (!_CI || _CI.busy) return;
+  const ta = document.getElementById('ciInput');
+  const text = (ta?.value || '').trim();
+  const imgs = (_CI.pending || []).slice();
+  if (!text && !imgs.length) return;
+  _CI.busy = true;
+  if (ta) ta.value = '';
+  const userLabel = text || ('[' + imgs.length + ' Screenshot' + (imgs.length > 1 ? 's' : '') + ']');
+  _ciChatAppend('user', userLabel);
+  _CI.pending = []; _ciRenderPending();
+  _ciChatAppend('assistant', '…', true);
+  const chatEl = document.getElementById('ciChat');
+  const thinking = chatEl?.lastElementChild;
   try {
-    const sys = 'Du extrahierst KONTAKTDATEN aus einem/mehreren Screenshots (Visitenkarte, E-Mail-Signatur, Kontaktliste, Formular) + optionaler Notiz. ' +
-      'Antworte NUR mit JSON, KEINE Erklärung, KEINE Codeblock-Fences:\n' +
-      '{"anrede":"","vorname":"","nachname":"","firma":"","email":"","telefon":"","mobil":"","strasse":"","plz":"","ort":"","land":"","rolle":"","website":""}\n\n' +
-      'Regeln:\n' +
-      '- anrede = "Herr" oder "Frau" (aus Anrede/Signatur/klar geschlechtstypischem Vornamen); bei Unsicherheit leer.\n' +
-      '- vorname/nachname getrennt.\n' +
-      '- firma = Firmenname/Unternehmen des Kontakts (für die Kunden-Zuordnung im ERP wichtig).\n' +
-      '- email = geschäftliche E-Mail; telefon = Festnetz; mobil = Mobilnummer.\n' +
-      '- strasse/plz/ort/land = Anschrift, falls erkennbar.\n' +
-      '- rolle = Funktion/Position (z.B. "Hausverwaltung", "Geschäftsführung", "Technik").\n' +
-      '- website falls vorhanden.\n' +
-      'Wenn ein Wert nicht erkennbar ist: leerer String "". NIEMALS raten (Ausnahme: Geschlecht aus klarem Vornamen).';
-    const content = [{ type: 'text', text: 'KONTAKT-QUELLE:' + (notes ? '\nNotiz: ' + notes : '') + (_CI.files.length ? '\n\n' + _CI.files.length + ' Bild/PDF folgen als Content-Blocks.' : '') }];
-    for (const f of _CI.files) {
+    const sys = 'Du bist ein Kontakt-Erfassungs-Assistent für ein CRM (Freshdesk + ERP). Der User liefert Kontaktdaten per Text und/oder Screenshots (Visitenkarte, E-Mail-Signatur, Kontaktliste). ' +
+      'Extrahiere die Felder und führe sie mit dem bisherigen Stand zusammen. Fehlt eine PFLICHTANGABE (Vorname, Nachname, E-Mail, Firma), FRAGE gezielt + freundlich nach — nur nach dem, was noch fehlt (nicht alles auf einmal). ' +
+      'Antworte AUSSCHLIESSLICH mit JSON, ohne Markdown:\n' +
+      '{"message": string (kurze deutsche Chat-Antwort: Rückfrage nach fehlenden Pflichtfeldern ODER Bestätigung), "contact": {"anrede":"","vorname":"","nachname":"","firma":"","email":"","telefon":"","mobil":"","strasse":"","plz":"","ort":"","land":"","rolle":"","website":""}, "ready": boolean}\n' +
+      'Regeln: contact = der VOLLSTÄNDIGE aktuelle Stand (bekannte + neu erkannte Felder). anrede "Herr"/"Frau" aus Anrede/Signatur/klarem Vornamen, sonst leer. Eigennamen/E-Mails/Nummern NICHT erfinden. ' +
+      'ready=true NUR wenn vorname, nachname, email UND firma vorhanden sind und keine Rückfrage offen ist; message dann eine kurze Bestätigung wie „Alles da — ich kann den Kontakt jetzt anlegen." Sonst ready=false und message = die konkrete Rückfrage.';
+    const messages = [];
+    (_CI.chat || []).filter(m => m.content !== '…').slice(-10).forEach(m => { if (m.role === 'user' || m.role === 'assistant') messages.push({ role: m.role, content: m.content }); });
+    const content = [{ type: 'text', text: (text || '(nur Screenshot(s))') + '\n\nBisheriger Stand (bitte zusammenführen):\n' + JSON.stringify(_CI.contact || {}) }];
+    for (const f of imgs) {
       try {
         let blob = f.blob;
         if (String(f.type).startsWith('image/') && typeof _downscaleImageBlobForAI === 'function') { try { const s = await _downscaleImageBlobForAI(blob); if (s) blob = s; } catch (_) {} }
         const b64 = await _fileToBase64(blob);
         if (f.type === 'application/pdf') content.push({ type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: b64 } });
         else if (String(f.type).startsWith('image/')) content.push({ type: 'image', source: { type: 'base64', media_type: (blob.type || f.type || 'image/jpeg'), data: b64 } });
-      } catch (e) { console.warn('[CI] Bild-Encode:', e.message); }
+      } catch (er) { console.warn('[CI] img', er.message); }
     }
-    const data = await proxyJson('/anthropic/v1/messages', { method: 'POST', body: JSON.stringify({ model: 'claude-sonnet-4-5-20250929', max_tokens: 700, system: sys, messages: [{ role: 'user', content }] }) });
+    messages.push({ role: 'user', content });
+    const data = await proxyJson('/anthropic/v1/messages', { method: 'POST', body: JSON.stringify({ model: 'claude-sonnet-4-5-20250929', max_tokens: 900, system: sys, messages }) });
     const raw = (data?.content?.[0]?.text || '').trim();
-    const p = (typeof parseAIJson === 'function') ? parseAIJson(raw) : JSON.parse(raw);
-    _CI.extracted = {
-      anrede: p.anrede || '', vorname: p.vorname || '', nachname: p.nachname || '', firma: p.firma || '',
-      email: p.email || '', telefon: p.telefon || '', mobil: p.mobil || '',
-      strasse: p.strasse || '', plz: p.plz || '', ort: p.ort || '', land: p.land || '', rolle: p.rolle || '', website: p.website || '',
-    };
-    setBusy(btn, false);
-    _ciRenderReview();
+    const obj = (typeof parseAIJson === 'function') ? parseAIJson(raw) : JSON.parse(raw);
+    if (thinking) thinking.remove();
+    _CI.chat = (_CI.chat || []).filter(m => m.content !== '…');
+    if (obj.contact && typeof obj.contact === 'object') {
+      _CI.contact = _CI.contact || {};
+      Object.keys(obj.contact).forEach(k => { const v = obj.contact[k]; if (v != null && String(v).trim()) _CI.contact[k] = String(v).trim(); });
+    }
+    _CI.ready = !!obj.ready;
+    _ciChatAppend('assistant', obj.message || (obj.ready ? 'Alles da — ich kann den Kontakt anlegen.' : 'Bitte ergänze die fehlenden Angaben.'));
+    if (_CI.ready) _ciRenderConfirmCard();
   } catch (e) {
-    setBusy(btn, false);
-    toast('Extraktion fehlgeschlagen: ' + (e.message || e), 'error', 8000);
-  }
+    if (thinking) thinking.remove();
+    _CI.chat = (_CI.chat || []).filter(m => m.content !== '…');
+    _ciChatAppend('assistant', '⚠ ' + (e.message || e));
+  } finally { _CI.busy = false; }
 }
 
-/* ---- Prüf-Formular ---- */
-function _ciRenderReview() {
-  if (!_CI || !_CI.extracted) return;
-  const body = document.getElementById('ciBody');
-  const footer = document.getElementById('ciFooter');
-  if (!body || !footer) return;
-  const account = (APP_STATE.accounts || []).find(a => a.id === _CI.accountId);
-  const type = _ciMandantType(account);
-  const e = _CI.extracted;
-  const missingName = !e.vorname && !e.nachname;
-  const missingEmail = !e.email;
-  const anschrift = [e.strasse, [e.plz, e.ort].filter(Boolean).join(' ')].filter(Boolean).join(', ');
-  const fld = (id, label, val, ph, req) =>
-    '<div><label class="text-[11px] font-bold text-ink-700 uppercase tracking-wider">' + label + (req ? ' <span class="text-rose-500">*</span>' : '') + '</label>' +
-    '<input id="' + id + '" value="' + escapeAttr(val || '') + '" placeholder="' + escapeAttr(ph || '') + '" class="w-full mt-0.5 px-2.5 py-1.5 border ' + (req && !val ? 'border-rose-300 bg-rose-50/40' : 'border-ink-300') + ' rounded-lg text-sm"></div>';
-  const typeLabel = type === 'flp' ? 'ERP Hero (FLP)' : type === 'aufzug' ? 'Aufzug-ERP' : 'nur Freshdesk (kein ERP verknüpft)';
-  body.innerHTML =
-    '<div class="bg-emerald-50 border border-emerald-200 rounded-xl p-2.5 text-[11px] text-emerald-900 flex items-center gap-2"><i data-lucide="sparkles" class="w-4 h-4 shrink-0"></i><span>KI-Vorschlag — bitte prüfen/ergänzen. Ziel: <b>Freshdesk</b> + <b>' + escapeHtml(typeLabel) + '</b>.</span></div>' +
-    ((missingName || missingEmail) ? '<div class="bg-amber-50 border border-amber-200 rounded-xl p-2.5 text-[11px] text-amber-800">Bitte ergänzen: ' + [missingName ? 'Name' : '', missingEmail ? 'E-Mail' : ''].filter(Boolean).join(' + ') + '. Ohne diese Angaben ist kein sauberer Kontakt möglich.</div>' : '') +
-    '<div class="grid grid-cols-3 gap-1.5">' +
-      '<div><label class="text-[11px] font-bold text-ink-700 uppercase tracking-wider">Anrede</label><select id="ciAnrede" class="w-full mt-0.5 px-2 py-1.5 border border-ink-300 rounded-lg text-sm bg-white"><option value=""' + (!e.anrede ? ' selected' : '') + '>—</option><option' + (/herr/i.test(e.anrede) ? ' selected' : '') + '>Herr</option><option' + (/frau/i.test(e.anrede) ? ' selected' : '') + '>Frau</option></select></div>' +
-      fld('ciVorname', 'Vorname', e.vorname, 'Max', true) +
-      fld('ciNachname', 'Nachname', e.nachname, 'Mustermann', true) +
-    '</div>' +
-    fld('ciFirma', 'Firma (für Kunden-Zuordnung im ERP)', e.firma, 'Muster GmbH', type !== 'none') +
-    '<div class="grid grid-cols-1 sm:grid-cols-2 gap-1.5">' +
-      fld('ciEmail', 'E-Mail', e.email, 'max@firma.de', true) +
-      fld('ciTel', 'Telefon', e.telefon, '0711 …') +
-    '</div>' +
-    '<div class="grid grid-cols-1 sm:grid-cols-2 gap-1.5">' +
-      fld('ciMobil', 'Mobil', e.mobil, '0170 …') +
-      fld('ciRolle', 'Rolle/Funktion', e.rolle, 'Hausverwaltung') +
-    '</div>' +
-    fld('ciAnschrift', 'Anschrift (Straße, PLZ Ort)', anschrift, 'Musterstr. 1, 70000 Stuttgart') +
-    '<div id="ciResult" class="text-[12px]"></div>';
-  footer.innerHTML =
-    '<button onclick="_ciRenderInput()" class="flex-1 bg-ink-100 hover:bg-ink-200 text-ink-700 rounded-xl px-3 py-3 text-sm font-bold inline-flex items-center justify-center gap-1"><i data-lucide="arrow-left" class="w-4 h-4"></i> Zurück</button>' +
-    '<button onclick="_ciPush(this)" class="flex-[2] bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl px-3 py-3 text-sm font-bold inline-flex items-center justify-center gap-1.5"><i data-lucide="upload-cloud" class="w-4 h-4"></i> Kontakt anlegen</button>';
-  if (window.lucide) lucide.createIcons();
+/* ---- Bestätigungs-Karte (ready) ---- */
+function _ciContactSummaryHtml(c) {
+  const rows = [
+    ['Name', [c.anrede, c.vorname, c.nachname].filter(Boolean).join(' ')],
+    ['Firma', c.firma], ['E-Mail', c.email], ['Telefon', c.telefon], ['Mobil', c.mobil],
+    ['Rolle', c.rolle], ['Anschrift', [c.strasse, [c.plz, c.ort].filter(Boolean).join(' ')].filter(Boolean).join(', ')],
+  ].filter(r => r[1]);
+  return rows.map(r => '<div class="flex gap-2 text-[11.5px]"><span class="text-ink-500 w-16 shrink-0">' + r[0] + '</span><span class="text-ink-900 font-medium">' + escapeHtml(r[1]) + '</span></div>').join('');
+}
+function _ciRenderConfirmCard() {
+  const c = _CI.contact || {};
+  const type = _ciMandantType(_ciAccount());
+  _ciChatAppendRaw(
+    '<div class="bg-white border border-emerald-300 rounded-2xl p-3 shadow-sm">' +
+      '<p class="text-[11px] font-bold text-emerald-700 uppercase tracking-wider mb-1.5 inline-flex items-center gap-1"><i data-lucide="check-circle-2" class="w-3.5 h-3.5"></i> Bereit zum Anlegen</p>' +
+      '<div class="space-y-0.5 mb-2">' + _ciContactSummaryHtml(c) + '</div>' +
+      '<p class="text-[10px] text-ink-500 mb-2">Ziel: Freshdesk + ' + escapeHtml(_ciTypeLabel(type)) + '. Etwas falsch? Schreib es einfach unten in den Chat.</p>' +
+      '<button onclick="_ciDoCreate(this)" class="w-full bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl px-3 py-2.5 text-sm font-bold inline-flex items-center justify-center gap-1.5"><i data-lucide="upload-cloud" class="w-4 h-4"></i> Kontakt anlegen</button>' +
+    '</div>'
+  );
 }
 
-function _ciReadForm() {
-  const g = id => (document.getElementById(id)?.value || '').trim();
-  const addr = (typeof _flpParseAddress === 'function') ? _flpParseAddress(g('ciAnschrift')) : { street: g('ciAnschrift'), zip: '', city: '', country: 'Deutschland' };
-  return {
-    anrede: g('ciAnrede'), vorname: g('ciVorname'), nachname: g('ciNachname'), firma: g('ciFirma'),
-    email: g('ciEmail'), telefon: g('ciTel'), mobil: g('ciMobil'), rolle: g('ciRolle'),
-    anschrift: g('ciAnschrift'), strasse: addr.street, plz: addr.zip, ort: addr.city, land: addr.country || 'Deutschland',
-  };
-}
-
-/* ---- Push nach Freshdesk + ERP ---- */
-async function _ciPush(btn) {
+/* ---- Push nach Freshdesk + ERP (liest aus _CI.contact) ---- */
+async function _ciDoCreate(btn) {
   if (!_CI) return;
-  const d = _ciReadForm();
-  const account = (APP_STATE.accounts || []).find(a => a.id === _CI.accountId);
-  const type = _ciMandantType(account);
-  const resEl = document.getElementById('ciResult');
+  const c = _CI.contact || {};
+  const d = {
+    anrede: c.anrede || '', vorname: c.vorname || '', nachname: c.nachname || '', firma: c.firma || '',
+    email: c.email || '', telefon: c.telefon || '', mobil: c.mobil || '', rolle: c.rolle || '',
+    strasse: c.strasse || '', plz: c.plz || '', ort: c.ort || '', land: c.land || 'Deutschland',
+    anschrift: [c.strasse, [c.plz, c.ort].filter(Boolean).join(' ')].filter(Boolean).join(', '),
+  };
   const isEmail = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(d.email);
-  if (!d.vorname && !d.nachname) return toast('Vor- oder Nachname fehlt', 'warn', 4000);
-  if (!isEmail) return toast('Gültige E-Mail fehlt (für sauberen Kontakt-Abgleich)', 'warn', 5000);
-  _CI._data = d; // für „Kunde anlegen"-Folgeschritt
+  if (!d.vorname && !d.nachname) return toast('Vor-/Nachname fehlt', 'warn', 4000);
+  if (!isEmail) return toast('Gültige E-Mail fehlt', 'warn', 4000);
+  _CI._data = d;
+  const account = _ciAccount();
+  const type = _ciMandantType(account);
   setBusy(btn, true, 'Freshdesk…');
   const log = [];
   try {
-    // 1) FRESHDESK: Dedup per Email → anlegen/aktualisieren
     const fullName = [d.vorname, d.nachname].filter(Boolean).join(' ') || d.email;
     const base = '/freshdesk/' + encodeURIComponent(_CI.accountId) + '/api/v2';
     const payload = { name: fullName, email: d.email };
@@ -41093,124 +41074,84 @@ async function _ciPush(btn) {
     if (d.rolle)   payload.job_title = d.rolle;
     let fdExisting = [];
     try { fdExisting = await proxyJson(base + '/contacts?email=' + encodeURIComponent(d.email)); } catch (_) {}
-    if (Array.isArray(fdExisting) && fdExisting[0]) {
-      log.push('Freshdesk: Kontakt existiert bereits (nicht überschrieben)');
-    } else {
-      try { await proxyJson(base + '/contacts', { method: 'POST', body: JSON.stringify(payload) }); log.push('Freshdesk: Kontakt angelegt ✓'); }
-      catch (e) { log.push('Freshdesk: Fehler — ' + (e.message || e)); }
-    }
-    // 2) ERP
-    if (type === 'aufzug') { await _ciPushAufzug(account, d, log); }
-    else if (type === 'flp') { await _ciPushFlp(account, d, log); }
-    else { log.push('ERP: kein ERP mit diesem Account verknüpft — nur Freshdesk.'); }
+    if (Array.isArray(fdExisting) && fdExisting[0]) log.push('Freshdesk: Kontakt existiert bereits (nicht überschrieben)');
+    else { try { await proxyJson(base + '/contacts', { method: 'POST', body: JSON.stringify(payload) }); log.push('Freshdesk: Kontakt angelegt ✓'); } catch (e) { log.push('Freshdesk: Fehler — ' + (e.message || e)); } }
+    if (type === 'aufzug') await _ciPushAufzug(account, d, log);
+    else if (type === 'flp') await _ciPushFlp(account, d, log);
+    else log.push('ERP: kein ERP mit diesem Account verknüpft — nur Freshdesk.');
     setBusy(btn, false);
-    _ciShowResult(resEl, log);
-  } catch (e) {
-    setBusy(btn, false);
-    log.push('Abbruch: ' + (e.message || e));
-    _ciShowResult(resEl, log);
-  }
+    if (btn) btn.disabled = true;
+    _ciShowResult(log);
+  } catch (e) { setBusy(btn, false); log.push('Abbruch: ' + (e.message || e)); _ciShowResult(log); }
 }
 
-function _ciShowResult(resEl, log) {
-  if (!resEl) return;
-  resEl.innerHTML = '<div class="bg-white border border-ink-200 rounded-xl p-3 space-y-1">' +
+function _ciShowResult(log) {
+  _ciChatAppendRaw('<div class="bg-white border border-ink-200 rounded-2xl p-3 space-y-1">' +
     log.map(l => '<p class="text-[12px] ' + (/Fehler|Abbruch/i.test(l) ? 'text-rose-700' : /angelegt|✓/.test(l) ? 'text-emerald-700' : 'text-ink-700') + '">• ' + escapeHtml(l) + '</p>').join('') +
-    '</div>';
+    '</div>');
 }
 
 /* ---- ERP: Aufzug (val.town-Proxy) ---- */
 async function _ciPushAufzug(account, d, log) {
   const slug = _erpFirmaSlugForAccount(account);
   if (!slug || !APP_KEYS.erpProxyUrl) { log.push('Aufzug-ERP: nicht konfiguriert — übersprungen.'); return; }
-  // Kunde per Firmenname suchen
   let kunden = [];
   try { kunden = await erpLoadKunden(slug); } catch (e) { log.push('Aufzug-ERP: Kundenliste-Fehler — ' + (e.message || e)); return; }
   const nname = String(d.firma || '').toLowerCase().replace(/\s+/g, ' ').trim();
   let kunde = nname ? (kunden || []).find(k => String(k.firmenname || '').toLowerCase().replace(/\s+/g, ' ').trim() === nname) : null;
-  if (!kunde && nname) {
-    const hits = (kunden || []).filter(k => String(k.firmenname || '').toLowerCase().includes(nname));
-    if (hits.length === 1) kunde = hits[0];
-  }
-  if (!kunde) {
-    log.push('Aufzug-ERP: kein Kunde „' + (d.firma || '(ohne Firma)') + '" gefunden.');
-    _ciOfferCreateKunde('aufzug', d);
-    return;
-  }
+  if (!kunde && nname) { const hits = (kunden || []).filter(k => String(k.firmenname || '').toLowerCase().includes(nname)); if (hits.length === 1) kunde = hits[0]; }
+  if (!kunde) { log.push('Aufzug-ERP: kein Kunde „' + (d.firma || '(ohne Firma)') + '" gefunden.'); _ciOfferCreateKunde('aufzug', d); return; }
   const kdnr = kunde.kundennummer || kunde.id;
-  // Kontakt-Dedup
   let kontakte = [];
   try { kontakte = await erpLoadKundenKontakte(slug, kdnr); } catch (_) {}
-  const exists = (kontakte || []).some(k =>
-    (d.email && k.email && String(k.email).toLowerCase() === d.email.toLowerCase()) ||
-    (_erpKontaktName(k).toLowerCase() === [d.vorname, d.nachname].filter(Boolean).join(' ').toLowerCase()));
+  const exists = (kontakte || []).some(k => (d.email && k.email && String(k.email).toLowerCase() === d.email.toLowerCase()) || (_erpKontaktName(k).toLowerCase() === [d.vorname, d.nachname].filter(Boolean).join(' ').toLowerCase()));
   if (exists) { log.push('Aufzug-ERP: Kontakt existiert bereits bei „' + kunde.firmenname + '" (nichts geändert).'); return; }
-  try {
-    await erpCreateKundenKontakt(slug, kdnr, { anrede: d.anrede || 'Herr', vorname: d.vorname, nachname: d.nachname || d.vorname, email: d.email, telefon: d.telefon, mobile: d.mobil, rolle: d.rolle });
-    log.push('Aufzug-ERP: Kontakt bei „' + kunde.firmenname + '" angelegt ✓');
-  } catch (e) { log.push('Aufzug-ERP: Kontakt-Fehler — ' + (e.message || e)); }
+  try { await erpCreateKundenKontakt(slug, kdnr, { anrede: d.anrede || 'Herr', vorname: d.vorname, nachname: d.nachname || d.vorname, email: d.email, telefon: d.telefon, mobile: d.mobil, rolle: d.rolle }); log.push('Aufzug-ERP: Kontakt bei „' + kunde.firmenname + '" angelegt ✓'); }
+  catch (e) { log.push('Aufzug-ERP: Kontakt-Fehler — ' + (e.message || e)); }
 }
 
 /* ---- ERP: FLP (ERP Hero / Airtable) ---- */
 async function _ciPushFlp(account, d, log) {
-  // ERP-Hero-Mandant (Company) bestimmen
   let companies = [];
   try { companies = await erpHeroLoadCompanies(); } catch (e) { log.push('ERP Hero: Mandanten-Fehler — ' + (e.message || e)); return; }
   if (!companies.length) { log.push('ERP Hero: kein Mandant gefunden — übersprungen.'); return; }
   const mandant = (_CI._flpMandantId && companies.find(c => c.id === _CI._flpMandantId)) || companies[0];
   const companyId = mandant.id;
-  // Kunde suchen (per Email oder Firmenname)
   let customer = null;
   try { customer = await _flpFindCustomer(companyId, d.email, d.firma); } catch (_) {}
   if (!customer && d.firma) {
     const esc = String(d.firma).toLowerCase().replace(/'/g, '');
-    try {
-      const recs = await erpHeroRead('Customer', { filter: "LOWER({name1})='" + esc + "'", maxRecords: 20 });
-      customer = (recs || []).find(r => (r.f.company_id || []).includes(companyId)) || null;
-    } catch (_) {}
+    try { const recs = await erpHeroRead('Customer', { filter: "LOWER({name1})='" + esc + "'", maxRecords: 20 }); customer = (recs || []).find(r => (r.f.company_id || []).includes(companyId)) || null; } catch (_) {}
   }
-  if (!customer) {
-    log.push('ERP Hero: kein Kunde „' + (d.firma || '(ohne Firma)') + '" bei Mandant „' + (mandant.name || '') + '" gefunden.');
-    _ciOfferCreateKunde('flp', d, companyId);
-    return;
-  }
-  // Kontakt-Dedup
+  if (!customer) { log.push('ERP Hero: kein Kunde „' + (d.firma || '(ohne Firma)') + '" bei Mandant „' + (mandant.name || '') + '" gefunden.'); _ciOfferCreateKunde('flp', d, companyId); return; }
   let existing = null;
   try { existing = await _flpFindContact(customer.id, d.email); } catch (_) {}
   if (existing) { log.push('ERP Hero: Kontakt existiert bereits bei „' + (customer.f?.name1 || '') + '" (nichts geändert).'); return; }
-  const contactFields = _flpStripEmpty({
-    first_name: d.vorname, last_name: d.nachname || d.vorname,
-    name: [d.vorname, d.nachname].filter(Boolean).join(' '),
-    email: d.email, phone: d.telefon || d.mobil, role: d.rolle, customer_id: [customer.id],
-  });
+  const contactFields = _flpStripEmpty({ first_name: d.vorname, last_name: d.nachname || d.vorname, name: [d.vorname, d.nachname].filter(Boolean).join(' '), email: d.email, phone: d.telefon || d.mobil, role: d.rolle, customer_id: [customer.id] });
   try { await erpHeroWrite('Contact', contactFields); log.push('ERP Hero: Kontakt bei „' + (customer.f?.name1 || '') + '" angelegt ✓'); }
   catch (e) { log.push('ERP Hero: Kontakt-Fehler — ' + (e.message || e)); }
 }
 
-/* ---- „Kunde anlegen"-Angebot (kein Kunde gefunden) ---- */
+/* ---- „Kunde anlegen"-Angebot (kein Kunde gefunden) — als Chat-Karte ---- */
 function _ciOfferCreateKunde(kind, d, companyId) {
-  const resEl = document.getElementById('ciResult');
-  if (!resEl) return;
   _CI._createKunde = { kind, companyId };
-  const box = document.createElement('div');
-  box.className = 'bg-indigo-50 border border-indigo-200 rounded-xl p-3 mt-2 text-[12px] text-indigo-900';
-  box.innerHTML = '<p class="mb-2">Soll ich den Kunden <b>„' + escapeHtml(d.firma || '(ohne Firma)') + '"</b> im ERP anlegen und den Kontakt daran hängen?' +
-    (kind === 'aufzug' ? ' (braucht eine vollständige Anschrift für die Adresse.)' : '') + '</p>' +
-    '<button onclick="_ciCreateKundeThenKontakt(this)" class="w-full bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg px-3 py-2 text-sm font-bold inline-flex items-center justify-center gap-1.5"><i data-lucide="building" class="w-4 h-4"></i> Kunde + Kontakt im ERP anlegen</button>';
-  resEl.appendChild(box);
-  if (window.lucide) lucide.createIcons();
+  _ciChatAppendRaw(
+    '<div class="bg-indigo-50 border border-indigo-200 rounded-2xl p-3 text-[12px] text-indigo-900">' +
+      '<p class="mb-2">Kein Kunde <b>„' + escapeHtml(d.firma || '(ohne Firma)') + '"</b> im ERP gefunden. Soll ich ihn anlegen und den Kontakt daran hängen?' + (kind === 'aufzug' ? ' (Braucht eine vollständige Anschrift.)' : '') + '</p>' +
+      '<button onclick="_ciCreateKundeThenKontakt(this)" class="w-full bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg px-3 py-2 text-sm font-bold inline-flex items-center justify-center gap-1.5"><i data-lucide="building" class="w-4 h-4"></i> Kunde + Kontakt im ERP anlegen</button>' +
+    '</div>'
+  );
 }
 async function _ciCreateKundeThenKontakt(btn) {
   if (!_CI || !_CI._createKunde || !_CI._data) return;
   const d = _CI._data; const { kind, companyId } = _CI._createKunde;
-  const account = (APP_STATE.accounts || []).find(a => a.id === _CI.accountId);
-  const resEl = document.getElementById('ciResult');
+  const account = _ciAccount();
   const log = [];
   setBusy(btn, true, 'Lege Kunde an…');
   try {
     if (kind === 'aufzug') {
       const slug = _erpFirmaSlugForAccount(account);
-      if (!d.anschrift) { setBusy(btn, false); return toast('Für den Aufzug-ERP-Kunden ist eine Anschrift nötig (Straße, PLZ Ort). Bitte oben ergänzen.', 'warn', 8000); }
+      if (!d.anschrift) { setBusy(btn, false); return toast('Für den Aufzug-ERP-Kunden ist eine Anschrift nötig (Straße, PLZ Ort). Bitte im Chat ergänzen.', 'warn', 8000); }
       const kunde = await erpCreateKunde(slug, { firmenname: d.firma, adresse: d.anschrift, email: d.email, telefon: d.telefon });
       const kdnr = kunde.kundennummer || kunde.id;
       log.push('Aufzug-ERP: Kunde „' + d.firma + '" angelegt ✓');
@@ -41218,21 +41159,17 @@ async function _ciCreateKundeThenKontakt(btn) {
       log.push('Aufzug-ERP: Kontakt angelegt ✓');
     } else if (kind === 'flp') {
       const custFields = _flpStripEmpty({ name1: d.firma, company_id: [companyId], status: 'aktiv', street: d.strasse, zip: d.plz, city: d.ort, country: d.land || 'Deutschland', email: d.email, phone: d.telefon, payment_terms: '14 Tage netto', delivery_terms: 'EXW Fellbach' });
-      const c = await erpHeroWrite('Customer', custFields);
+      const cc = await erpHeroWrite('Customer', custFields);
       log.push('ERP Hero: Kunde „' + d.firma + '" angelegt ✓');
-      const contactFields = _flpStripEmpty({ first_name: d.vorname, last_name: d.nachname || d.vorname, name: [d.vorname, d.nachname].filter(Boolean).join(' '), email: d.email, phone: d.telefon || d.mobil, role: d.rolle, customer_id: [c.id] });
+      const contactFields = _flpStripEmpty({ first_name: d.vorname, last_name: d.nachname || d.vorname, name: [d.vorname, d.nachname].filter(Boolean).join(' '), email: d.email, phone: d.telefon || d.mobil, role: d.rolle, customer_id: [cc.id] });
       await erpHeroWrite('Contact', contactFields);
       log.push('ERP Hero: Kontakt angelegt ✓');
     }
     setBusy(btn, false);
-    if (btn) btn.closest('div')?.remove();
-    // an bestehendes Ergebnis anhängen
-    if (resEl) resEl.insertAdjacentHTML('beforeend', '<div class="bg-white border border-emerald-200 rounded-xl p-3 mt-2 space-y-1">' + log.map(l => '<p class="text-[12px] text-emerald-700">• ' + escapeHtml(l) + '</p>').join('') + '</div>');
+    if (btn) btn.disabled = true;
+    _ciShowResult(log);
     toast('Kunde + Kontakt im ERP angelegt ✓', 'success', 5000);
-  } catch (e) {
-    setBusy(btn, false);
-    toast('ERP-Kunde anlegen fehlgeschlagen: ' + (e.message || e), 'error', 9000);
-  }
+  } catch (e) { setBusy(btn, false); toast('ERP-Kunde anlegen fehlgeschlagen: ' + (e.message || e), 'error', 9000); }
 }
 
 </script>
