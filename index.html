@@ -788,7 +788,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.285';
+const APP_VERSION = 'v2.46.286';
 
 /* ============================================================
    GLOBAL THEME — v2.46.12
@@ -35681,10 +35681,12 @@ function _crawlMandantScoped() {
 /* Sichtbare Liste (Mandant + Typ-Filter + Spam-Filter) — MUSS mit _crawlRecAt
    synchron bleiben, damit der gefilterte Index i auf denselben Record zeigt. */
 function _crawlVisible() {
-  return _crawlMandantScoped().filter(r =>
-    (!CRAWL_STATE.filterTyp || r.kontakt_typ === CRAWL_STATE.filterTyp) &&
-    (CRAWL_STATE.showHidden || r.hidden !== 'spam')
-  );
+  return _crawlMandantScoped().filter(r => {
+    if (CRAWL_STATE.filterTyp && r.kontakt_typ !== CRAWL_STATE.filterTyp) return false;
+    if (r.hidden === 'spam')   return !!CRAWL_STATE.showHidden;      // Spam-Toggle
+    if (r.hidden === 'hidden') return !!CRAWL_STATE.showHiddenSoft;  // v2.46.286: Ausblenden-Toggle
+    return true;
+  });
 }
 
 const CRAWLED_TYPES_MAP = {
@@ -35913,6 +35915,7 @@ function _renderCrawledContacts() {
   const scoped = _crawlMandantScoped();       // v2.46.218: auf gewählten Mandanten begrenzt
   const list = _crawlVisible();
   const hiddenCount = scoped.filter(r => r.hidden === 'spam').length;
+  const softHiddenCount = scoped.filter(r => r.hidden === 'hidden').length; // v2.46.286
   const accId = CONTACTS_STATE.searchAccountId;
   const mandantName = (accId && accId !== 'all')
     ? (((APP_STATE.accounts || []).find(a => String(a.id) === String(accId)) || {}).name || accId)
@@ -35931,19 +35934,27 @@ function _renderCrawledContacts() {
         '</select>' +
         '<button onclick="showCrawledContacts(this)" class="px-2 py-1 bg-white border border-violet-300 text-violet-700 rounded-lg text-[11px] font-bold" title="Neu laden">↻</button>' +
       '</div>' +
-      (hiddenCount ?
-        '<label class="mt-1.5 inline-flex items-center gap-1.5 text-[10px] text-violet-800 cursor-pointer">' +
-          '<input type="checkbox"' + (CRAWL_STATE.showHidden ? ' checked' : '') + ' onchange="CRAWL_STATE.showHidden=this.checked;_renderCrawledContacts()" class="rounded border-violet-300">' +
-          '<span>Ausgeblendete (Spam) anzeigen (' + hiddenCount + ')</span>' +
-        '</label>' : '') +
+      ((hiddenCount || softHiddenCount) ?
+        '<div class="mt-1.5 flex items-center gap-3 flex-wrap">' +
+          (softHiddenCount ?
+            '<label class="inline-flex items-center gap-1.5 text-[10px] text-violet-800 cursor-pointer">' +
+              '<input type="checkbox"' + (CRAWL_STATE.showHiddenSoft ? ' checked' : '') + ' onchange="CRAWL_STATE.showHiddenSoft=this.checked;_renderCrawledContacts()" class="rounded border-violet-300">' +
+              '<span>Ausgeblendete anzeigen (' + softHiddenCount + ')</span>' +
+            '</label>' : '') +
+          (hiddenCount ?
+            '<label class="inline-flex items-center gap-1.5 text-[10px] text-violet-800 cursor-pointer">' +
+              '<input type="checkbox"' + (CRAWL_STATE.showHidden ? ' checked' : '') + ' onchange="CRAWL_STATE.showHidden=this.checked;_renderCrawledContacts()" class="rounded border-violet-300">' +
+              '<span>Spam anzeigen (' + hiddenCount + ')</span>' +
+            '</label>' : '') +
+        '</div>' : '') +
       '<p class="text-[10px] text-violet-700 mt-1">Aus Ticket-Signaturen erfasst. Push-Buttons legen an bzw. aktualisieren — FD/FS nutzen die bestehenden Flows, MC = Mailchimp-Upsert.</p>' +
     '</div>' +
     (list.length ? list.map((r, i) =>
-      '<div class="' + (r.hidden === 'spam' ? 'bg-rose-50 border-rose-200' : 'bg-white border-ink-200') + ' rounded-xl border p-3 mb-2">' +
+      '<div class="' + (r.hidden === 'spam' ? 'bg-rose-50 border-rose-200' : r.hidden === 'hidden' ? 'bg-ink-50 border-ink-200 opacity-60' : 'bg-white border-ink-200') + ' rounded-xl border p-3 mb-2 transition">' +
         '<div class="flex items-start gap-2 flex-wrap">' +
           '<div class="flex-1 min-w-[220px] cursor-pointer" onclick="_crawlDetail(' + i + ')" title="Vollständige Kontaktdetails anzeigen">' +
             '<p class="font-bold text-ink-900 text-sm hover:text-violet-700">' + escapeHtml(r.name || r.email) + (r.position ? ' <span class="font-normal text-ink-500">· ' + escapeHtml(r.position) + '</span>' : '') +
-              (r.hidden === 'spam' ? ' <span class="text-[9px] font-bold px-1.5 py-0.5 rounded border bg-rose-100 text-rose-700 border-rose-300 align-middle">SPAM</span>' : '') +
+              (r.hidden === 'spam' ? ' <span class="text-[9px] font-bold px-1.5 py-0.5 rounded border bg-rose-100 text-rose-700 border-rose-300 align-middle">SPAM</span>' : r.hidden === 'hidden' ? ' <span class="text-[9px] font-bold px-1.5 py-0.5 rounded border bg-ink-100 text-ink-600 border-ink-300 align-middle">AUSGEBLENDET</span>' : '') +
               ' <i data-lucide="info" class="w-3 h-3 inline-block text-ink-400 align-middle"></i></p>' +
             '<p class="text-[11px] text-ink-600">' + escapeHtml(r.firma || '') + '</p>' +
             '<p class="text-[11px] text-ink-500 font-mono">' + escapeHtml(r.email) + (r.telefon ? ' · ' + escapeHtml(r.telefon) : '') + (r.mobil ? ' · ' + escapeHtml(r.mobil) : '') + '</p>' +
@@ -35961,6 +35972,12 @@ function _renderCrawledContacts() {
               '<button onclick="_crawlPushMc(' + i + ', this)" class="px-2 py-1 bg-yellow-500 hover:bg-yellow-600 text-white rounded text-[10px] font-bold" title="Zu Mailchimp pushen (Upsert)">→ MC</button>' +
               '<button onclick="_crawlRecheck(' + i + ', this)" class="px-2 py-1 bg-ink-100 hover:bg-ink-200 text-ink-700 rounded text-[10px] font-bold" title="Status neu prüfen">↻</button>' +
               '<button onclick="_crawlEdit(' + i + ')" class="px-2 py-1 bg-ink-100 hover:bg-ink-200 text-ink-700 rounded text-[10px] font-bold" title="Kontaktdaten bearbeiten (Name/Firma/Kontakt)">✎</button>' +
+              // v2.46.286: neutrales Ausblenden (ausgrauen, reversibel) — separat von Spam
+              (r.hidden !== 'spam'
+                ? (r.hidden === 'hidden'
+                    ? '<button onclick="_crawlToggleSoftHidden(' + i + ', this)" class="px-2 py-1 bg-emerald-600 hover:bg-emerald-700 text-white rounded text-[10px] font-bold" title="Wieder einblenden">↩ Einblenden</button>'
+                    : '<button onclick="_crawlToggleSoftHidden(' + i + ', this)" class="px-2 py-1 bg-ink-500 hover:bg-ink-600 text-white rounded text-[10px] font-bold inline-flex items-center gap-1" title="Ausblenden (ausgrauen, reversibel)"><i data-lucide="eye-off" class="w-3 h-3"></i> Ausblenden</button>')
+                : '') +
               (r.hidden === 'spam'
                 ? '<button onclick="_crawlToggleHidden(' + i + ', this)" class="px-2 py-1 bg-emerald-600 hover:bg-emerald-700 text-white rounded text-[10px] font-bold" title="Nicht mehr als Spam — wieder einblenden">↩ Kein Spam</button>'
                 : '<button onclick="_crawlToggleHidden(' + i + ', this)" class="px-2 py-1 bg-rose-600 hover:bg-rose-700 text-white rounded text-[10px] font-bold" title="Als Spam markieren & ausblenden">🚫 Spam</button>') +
@@ -36152,6 +36169,21 @@ async function _crawlToggleHidden(i, btn) {
     r.hidden = next;
     _renderCrawledContacts();
     toast(next === 'spam' ? 'Als Spam markiert & ausgeblendet' : 'Spam-Markierung entfernt ✓', 'success', 2500);
+  } catch (e) { setBusy(btn, false); toast('Fehlgeschlagen: ' + (e.message || e), 'error', 6000); }
+}
+
+/* v2.46.286: neutrales Ausblenden (ausgrauen, reversibel) — separat von Spam. */
+async function _crawlToggleSoftHidden(i, btn) {
+  const r = _crawlRecAt(i);
+  if (!r) return;
+  const next = r.hidden === 'hidden' ? '' : 'hidden';
+  setBusy(btn, true);
+  try {
+    await airtableUpdateWithAutoField(CRAWLED_TABLE, r.recordId, { hidden: next, updated_at: nowIso() }, CRAWLED_TYPES_MAP);
+    r.hidden = next;
+    _renderCrawledContacts();
+    if (next === 'hidden' && !CRAWL_STATE.showHiddenSoft) toast('Ausgeblendet — über „Ausgeblendete anzeigen" oben wieder sichtbar', 'success', 3500);
+    else toast(next === 'hidden' ? 'Ausgeblendet ✓' : 'Wieder eingeblendet ✓', 'success', 2500);
   } catch (e) { setBusy(btn, false); toast('Fehlgeschlagen: ' + (e.message || e), 'error', 6000); }
 }
 
