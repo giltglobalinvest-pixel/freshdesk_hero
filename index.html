@@ -788,7 +788,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.291';
+const APP_VERSION = 'v2.46.292';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -36131,6 +36131,9 @@ async function _zdbRunSetup(accId, btn) {
     toast('Migration abgeschlossen: ' + stats.kontakte + ' Kontakte, ' + stats.firmen + ' Firmen', 'success', 6000);
   } catch (e) {
     _zdbLog('✖ Fehler: ' + e.message);
+    if (/403/.test(e.message || '')) {
+      _zdbLog('  → Airtable-Token hat keinen Zugriff auf die neuen Tabellen. In Airtable den Token für Base ' + ZDB_BASE_ID + ' auf „All tables in this base" setzen (data + schema, read+write), dann erneut migrieren.');
+    }
     toast('Migration fehlgeschlagen: ' + e.message, 'error', 9000);
   } finally { setBusy(btn, false); }
 }
@@ -36196,23 +36199,32 @@ async function _zdbRenderTableView() {
   if (window.lucide) lucide.createIcons();
   const bodyEl = document.getElementById('zdbTableBody');
   try {
-    const soft = e => { if (/40[34]/.test(e.message || '')) return null; throw e; };
-    const [firmen, kontakte] = await Promise.all([
-      airtableRead(names.firma, { maxRecords: 5000 }).catch(soft),
-      airtableRead(names.kontakt, { maxRecords: 5000 }).catch(soft),
-    ]);
-    if (firmen === null && kontakte === null) {
+    const readTbl = async (name) => {
+      try { return { rows: await airtableRead(name, { maxRecords: 5000 }) }; }
+      catch (e) { const m = String(e.message || ''); return { err: /403/.test(m) ? 'perm' : (/404/.test(m) ? 'missing' : 'other'), msg: m }; }
+    };
+    const [fRes, kRes] = await Promise.all([readTbl(names.firma), readTbl(names.kontakt)]);
+    if (fRes.err === 'perm' || kRes.err === 'perm') { bodyEl.innerHTML = _zdbPermHintHtml(); return; }
+    if (fRes.err === 'missing' && kRes.err === 'missing') {
       bodyEl.innerHTML = '<div class="text-center py-6"><p class="text-sm text-ink-600">Für diesen Mandanten sind die Tabellen noch nicht angelegt.</p>' +
         '<p class="text-[12px] text-ink-500 mt-1">Einstellungen → <b>Zentrale Kontakt-DB</b> → „Tabellen anlegen + migrieren".</p></div>';
       return;
     }
+    if (fRes.err === 'other' || kRes.err === 'other') { bodyEl.innerHTML = '<p class="text-sm text-rose-600">Fehler beim Laden: ' + escapeHtml(fRes.msg || kRes.msg || '') + '</p>'; return; }
+    const firmen = fRes.rows || [];
+    const kontakte = kRes.rows || [];
     const firmaName = {};
-    (firmen || []).forEach(r => { firmaName[r.id] = (r.fields && r.fields.name) || ''; });
-    bodyEl.innerHTML = (tab === 'firmen') ? _zdbFirmenTable(firmen || []) : _zdbKontakteTable(kontakte || [], firmaName);
+    firmen.forEach(r => { firmaName[r.id] = (r.fields && r.fields.name) || ''; });
+    bodyEl.innerHTML = (tab === 'firmen') ? _zdbFirmenTable(firmen) : _zdbKontakteTable(kontakte, firmaName);
     if (window.lucide) lucide.createIcons();
   } catch (e) {
     bodyEl.innerHTML = '<p class="text-sm text-rose-600">Fehler beim Laden: ' + escapeHtml(e.message) + '</p>';
   }
+}
+function _zdbPermHintHtml() {
+  return '<div class="text-center py-6">' +
+    '<p class="text-sm text-amber-700 font-bold inline-flex items-center gap-1"><i data-lucide="lock" class="w-4 h-4"></i> Airtable-Token hat keinen Zugriff auf die neuen Tabellen (403)</p>' +
+    '<p class="text-[12px] text-ink-600 mt-2 max-w-md mx-auto">Der Token ist auf bestimmte Tabellen beschränkt — die neu angelegten Firma_/Kontakt_-Tabellen sind nicht im Scope. In Airtable (<b>Builder Hub → Personal access tokens</b>) den Token für die Base <span class="font-mono text-[11px]">' + ZDB_BASE_ID + '</span> auf <b>„All tables in this base"</b> setzen (data.records read+write, schema.bases read+write). Danach in den Einstellungen erneut migrieren.</p></div>';
 }
 function _zdbFirmenTable(rows) {
   if (!rows.length) return '<p class="text-sm text-ink-500 py-4 text-center">Noch keine Firmen in der Tabelle.</p>';
