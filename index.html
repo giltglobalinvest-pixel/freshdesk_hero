@@ -788,7 +788,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.287';
+const APP_VERSION = 'v2.46.288';
 
 /* ============================================================
    GLOBAL THEME — v2.46.12
@@ -15358,18 +15358,96 @@ async function translateMessage(text, targetLang, options) {
   }
 }
 
-/* Inline-Button-Toggle für eine Conversation-Bubble.
+/* Batch-Übersetzung mehrerer Textfragmente (indiziert, 1:1-sicher).
+   Gibt {sourceLang, byIndex:{i:übersetzung}} zurück. Zuordnung läuft über den
+   mitgeschickten Index — dadurch bleibt sie auch stabil, falls die KI mal ein
+   Fragment splittet/zusammenzieht. */
+async function _translateBatch(cores, targetLang) {
+  const target = (targetLang || USER_DEFAULT_LANG).toLowerCase().slice(0, 2);
+  const cacheKey = 'batch:' + target + ':' + _hashText(JSON.stringify(cores).slice(0, 6000)) + ':' + cores.length;
+  if (_TRANSLATE_CACHE.has(cacheKey)) return _TRANSLATE_CACHE.get(cacheKey);
+  const payload = cores.map((s, i) => ({ i, s }));
+  const sys = 'Du übersetzt Textfragmente aus einer HTML-E-Mail in die Zielsprache. ' +
+    'Übersetze jedes Fragment sinngemäß, behalte Tonfall + Anrede bei. ' +
+    'Namen, Firmennamen, E-Mail-Adressen, URLs, IDs, Produktcodes, Telefonnummern, reine Zahlen NICHT übersetzen (unverändert zurückgeben). ' +
+    'Gib zu JEDEM Eingabe-Index genau ein Ergebnis mit demselben Index zurück — gleiche Anzahl, gleiche Indizes. ' +
+    'Antworte AUSSCHLIESSLICH mit JSON, kein Markdown.';
+  const user = 'ZIEL-SPRACHE: ' + (LANG_NAMES[target] || target) + ' (' + target + ')\n\n' +
+    'FRAGMENTE:\n' + JSON.stringify(payload) + '\n\n' +
+    'Antwort exakt so: {"sourceLang":"<iso2>","t":[{"i":<index>,"s":"<übersetzt>"}, ...]}';
+  const data = await proxyJson('/anthropic/v1/messages', {
+    method: 'POST',
+    body: JSON.stringify({
+      model: 'claude-haiku-4-5-20251001',
+      max_tokens: 8000,
+      system: sys,
+      messages: [{ role: 'user', content: user }],
+    }),
+  });
+  const respText = (data.content && data.content[0] && data.content[0].text) || '';
+  let parsed = null;
+  try { const m = respText.match(/\{[\s\S]*\}/); if (m) parsed = JSON.parse(m[0]); } catch (_) {}
+  if (!parsed || !Array.isArray(parsed.t)) throw new Error('KI-Antwort unbrauchbar: ' + respText.slice(0, 120));
+  const byIndex = {};
+  parsed.t.forEach(o => { if (o && typeof o.i === 'number' && typeof o.s === 'string') byIndex[o.i] = o.s; });
+  const result = { sourceLang: String(parsed.sourceLang || target).toLowerCase().slice(0, 2), byIndex };
+  _TRANSLATE_CACHE.set(cacheKey, result);
+  return result;
+}
+
+/* Übersetzt die sichtbaren Text-Knoten eines Containers IN-PLACE — die komplette
+   HTML-Struktur (Tabellen, Fett, Bilder/Logo, Layout, Links) bleibt erhalten,
+   nur der Text wird ersetzt. Links behalten ihre href im Attribut → keine
+   ausgeschriebenen Tracking-URLs. Nur lokal im DOM (Freshdesk unberührt). */
+async function _translateNodesInPlace(container, targetLang) {
+  const target = (targetLang || USER_DEFAULT_LANG).toLowerCase().slice(0, 2);
+  const walker = document.createTreeWalker(container, NodeFilter.SHOW_TEXT, null);
+  const items = [];
+  let node;
+  while ((node = walker.nextNode())) {
+    const rawv = node.nodeValue || '';
+    const core = rawv.trim();
+    if (core.length < 2) continue;                              // reiner Whitespace / einzelnes Zeichen
+    if (!/[A-Za-zÀ-ÿ]{2,}/.test(core)) continue;                // keine echten Wörter (Zahlen/Symbole)
+    if (/^https?:\/\//i.test(core) || /^www\./i.test(core)) continue; // reine URL
+    if (/^[\w.+-]+@[\w.-]+\.\w+$/.test(core)) continue;         // reine E-Mail
+    const lead = (rawv.match(/^\s*/) || [''])[0];
+    const trail = (rawv.match(/\s*$/) || [''])[0];
+    items.push({ node, lead, trail, core });
+  }
+  // Nichts sinnvoll Übersetzbares (z.B. reine Bild-Mail) → Plain-Text-Fallback
+  if (!items.length) {
+    const whole = (container.textContent || '').trim();
+    if (!whole) return { sourceLang: target };
+    const r = await translateMessage(whole.slice(0, 6000), target);
+    return { sourceLang: r.sourceLang, plain: r.translation };
+  }
+  const cores = items.map(i => i.core);
+  const totalChars = cores.reduce((a, c) => a + c.length, 0);
+  // Sehr großer Thread → Plain-Text-Fallback, um Token-Limits sicher zu vermeiden
+  if (cores.length > 400 || totalChars > 12000) {
+    const whole = (container.textContent || '').trim();
+    const r = await translateMessage(whole.slice(0, 6000), target);
+    return { sourceLang: r.sourceLang, plain: r.translation };
+  }
+  const res = await _translateBatch(cores, target);
+  for (let i = 0; i < items.length; i++) {
+    const tr = res.byIndex[i];
+    if (typeof tr === 'string') items[i].node.nodeValue = items[i].lead + tr + items[i].trail;
+  }
+  return { sourceLang: res.sourceLang };
+}
+
+/* Inline-Button-Toggle für Erste Anfrage / Conversation-Bubble.
    - btnEl: der geklickte Button
-   - container: das Element in das die Übersetzung eingefügt wird
-   - text: Original-Text
-   Wenn schon eine Übersetzung angezeigt wird: entfernt sie. Sonst: lädt + zeigt. */
+   - containerSel: Selector/Element des zu übersetzenden Bereichs
+   Übersetzt in-place (Formatierung bleibt erhalten); „Original zeigen" stellt
+   das gesicherte Original-HTML wieder her. NUR lokal, Freshdesk unberührt. */
 async function toggleInlineTranslation(btnEl, containerSel, text) {
   const container = typeof containerSel === 'string' ? document.querySelector(containerSel) : containerSel;
   if (!container) return;
   const lbl = btnEl.querySelector('[data-translate-label]');
   // Bereits übersetzt? → Original-HTML wiederherstellen.
-  // WICHTIG: Wir ersetzen den Text NUR hier in Freshdesk Hero (lokal im DOM) —
-  // das Freshdesk-Ticket selbst bleibt komplett unberührt.
   if (container._fdhTransOrig != null) {
     container.innerHTML = container._fdhTransOrig;
     container._fdhTransOrig = null;
@@ -15382,26 +15460,29 @@ async function toggleInlineTranslation(btnEl, containerSel, text) {
   if (lbl) lbl.textContent = 'Übersetze…';
   btnEl.disabled = true;
   try {
-    const res = await translateMessage(text, USER_DEFAULT_LANG);
-    // Original-HTML (inkl. evtl. kaputt gerenderter Mail-Struktur/Bilder) sichern
-    // und in-place durch den lesbaren Übersetzungstext ersetzen.
+    // Original-HTML sichern, dann Text-Knoten in-place übersetzen (Formatierung bleibt).
     container._fdhTransOrig = container.innerHTML;
-    const view = document.createElement('div');
-    view.setAttribute('data-translation-view', '');
-    view.className = 'border-l-2 border-emerald-400 bg-emerald-50/50 rounded-r px-3 py-2';
-    view.innerHTML =
-      '<div class="flex items-center gap-1.5 mb-1.5 text-[10px] uppercase tracking-wider text-emerald-700 font-semibold">' +
-        '<i data-lucide="languages" class="w-3 h-3"></i>' +
-        '<span>' + escapeHtml(res.targetLangName) + ' <span class="opacity-70">(aus ' + escapeHtml(res.sourceLangName) + ')</span></span>' +
-      '</div>' +
-      '<div class="text-sm text-ink-800 whitespace-pre-line break-words">' + escapeHtml(res.translation) + '</div>';
-    container.innerHTML = '';
-    container.appendChild(view);
+    const res = await _translateNodesInPlace(container, USER_DEFAULT_LANG);
+    // Fallback-Fall (keine übersetzbaren Knoten / riesiger Thread): Plain-Text-Box
+    if (res.plain != null) {
+      container.innerHTML = '<div class="text-sm text-ink-800 whitespace-pre-line break-words">' + escapeHtml(res.plain) + '</div>';
+    }
+    // Kleines Sprach-Badge oben einfügen (verschwindet beim „Original zeigen")
+    const src = String(res.sourceLang || '').toLowerCase().slice(0, 2);
+    const tgtName = LANG_NAMES[USER_DEFAULT_LANG] || USER_DEFAULT_LANG.toUpperCase();
+    const badge = document.createElement('div');
+    badge.className = 'flex items-center gap-1.5 mb-2 text-[10px] uppercase tracking-wider text-emerald-700 font-semibold';
+    badge.innerHTML = '<i data-lucide="languages" class="w-3 h-3"></i><span>' + escapeHtml(tgtName) +
+      (src && src !== USER_DEFAULT_LANG ? ' <span class="opacity-70">(aus ' + escapeHtml(LANG_NAMES[src] || src.toUpperCase()) + ')</span>' : '') +
+      '</span>';
+    container.insertBefore(badge, container.firstChild);
     btnEl.classList.add('bg-emerald-100', 'text-emerald-700');
     btnEl.classList.remove('hover:bg-ink-100', 'text-ink-500');
-    if (lbl) lbl.textContent = res.sourceLang === USER_DEFAULT_LANG ? 'Gleiche Sprache' : 'Original zeigen';
+    if (lbl) lbl.textContent = (src && src !== USER_DEFAULT_LANG) ? 'Original zeigen' : 'Gleiche Sprache';
     if (window.lucide) lucide.createIcons();
   } catch (e) {
+    // Fehler → Original wiederherstellen, damit nichts halb-übersetzt stehen bleibt
+    if (container._fdhTransOrig != null) { container.innerHTML = container._fdhTransOrig; container._fdhTransOrig = null; }
     toast('Übersetzung fehlgeschlagen: ' + e.message, 'error', 6000);
     if (lbl) lbl.textContent = 'Übersetzen';
   } finally {
