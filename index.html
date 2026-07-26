@@ -788,7 +788,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.292';
+const APP_VERSION = 'v2.46.293';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -35933,9 +35933,30 @@ async function _zdbUpdate(tableName, id, fields) {
   return _zdbFetchJson('https://api.airtable.com/v0/' + ZDB_BASE_ID + '/' + encodeURIComponent(tableName) + '/' + id,
     { method: 'PATCH', headers: { Authorization: 'Bearer ' + APP_KEYS.airtableWriteKey, 'Content-Type': 'application/json' }, body: JSON.stringify({ fields, typecast: true }) });
 }
+/* Liest ZDB-Tabellen DIREKT mit dem Write-Key (hat data.records:read) — umgeht den
+   evtl. eingeschränkten Read-Key, der neue Tabellen sonst mit 403 blockt. */
+async function _zdbRead(tableName, opts) {
+  opts = opts || {};
+  const base = 'https://api.airtable.com/v0/' + ZDB_BASE_ID + '/' + encodeURIComponent(tableName);
+  const H = { Authorization: 'Bearer ' + APP_KEYS.airtableWriteKey };
+  const all = [];
+  let offset = null;
+  for (let g = 0; g < 60; g++) {
+    const p = new URLSearchParams();
+    if (opts.filter) p.set('filterByFormula', opts.filter);
+    if (opts.maxRecords) p.set('maxRecords', String(opts.maxRecords));
+    if (!opts.maxRecords) p.set('pageSize', '100');
+    if (offset) p.set('offset', offset);
+    const d = await _zdbFetchJson(base + '?' + p.toString(), { headers: H });
+    (d.records || []).forEach(x => all.push(x));
+    offset = d.offset || null;
+    if (!offset || opts.maxRecords) break;
+  }
+  return all;
+}
 async function _zdbSelect(tableName, opts) {
   for (let i = 0; i < 3; i++) {
-    try { return await airtableRead(tableName, opts); }
+    try { return await _zdbRead(tableName, opts); }
     catch (e) { if (i === 2) throw e; await _zdbSleep(600 * (i + 1)); }
   }
   return [];
@@ -36143,8 +36164,8 @@ async function _zdbShowCounts(accId, btn) {
   setBusy(btn, true, '…');
   try {
     const names = _zdbTableNames(account);
-    const firmen = await airtableRead(names.firma, { maxRecords: 5000 }).catch(() => null);
-    const kontakte = await airtableRead(names.kontakt, { maxRecords: 5000 }).catch(() => null);
+    const firmen = await _zdbRead(names.firma, { maxRecords: 5000 }).catch(() => null);
+    const kontakte = await _zdbRead(names.kontakt, { maxRecords: 5000 }).catch(() => null);
     const el = document.querySelector('[data-zdb-acc="' + CSS.escape(String(accId)) + '"] [data-zdb-status]');
     if (el) el.textContent = firmen == null ? 'Tabellen noch nicht angelegt.' : ((firmen.length) + ' Firmen · ' + (kontakte == null ? 0 : kontakte.length) + ' Kontakte');
   } catch (e) { toast('Zählen fehlgeschlagen: ' + e.message, 'error', 5000); }
@@ -36200,8 +36221,8 @@ async function _zdbRenderTableView() {
   const bodyEl = document.getElementById('zdbTableBody');
   try {
     const readTbl = async (name) => {
-      try { return { rows: await airtableRead(name, { maxRecords: 5000 }) }; }
-      catch (e) { const m = String(e.message || ''); return { err: /403/.test(m) ? 'perm' : (/404/.test(m) ? 'missing' : 'other'), msg: m }; }
+      try { return { rows: await _zdbRead(name, { maxRecords: 5000 }) }; }
+      catch (e) { const m = String(e.message || ''); return { err: /403/.test(m) ? 'perm' : (/404|NOT_FOUND|could not be found/i.test(m) ? 'missing' : 'other'), msg: m }; }
     };
     const [fRes, kRes] = await Promise.all([readTbl(names.firma), readTbl(names.kontakt)]);
     if (fRes.err === 'perm' || kRes.err === 'perm') { bodyEl.innerHTML = _zdbPermHintHtml(); return; }
