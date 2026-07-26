@@ -788,7 +788,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.289';
+const APP_VERSION = 'v2.46.290';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -24739,6 +24739,17 @@ async function _flpPushKundeKontakt(btn) {
     else if (contact) { await erpHeroUpdate('Contact', contact.id, contactFields); contStatus = 'aktualisiert'; }
     else if (lastName || cEmail) { const ct = await erpHeroWrite('Contact', contactFields); contact = { id: ct.id, f: contactFields }; contStatus = 'angelegt'; }
     st.contact = contact;
+    // v2.46.290: ZUSÄTZLICH in die zentrale Mandanten-DB (falls für den Mandanten aktiviert).
+    // Non-blocking + fehlertolerant — darf den ERP-Push nie beeinträchtigen.
+    try {
+      const _zaccId = st.accountId || (st.ticket && st.ticket._accountId);
+      const _zacc = (APP_STATE.accounts || []).find(a => String(a.id) === String(_zaccId));
+      if (_zacc && typeof zdbSaveFirmaKontakt === 'function') {
+        zdbSaveFirmaKontakt(_zacc,
+          { name: name1, strasse: addr.street, plz: addr.zip, ort: addr.city, land: addr.country, email: email, telefon: g('flpKTel'), ust_id: g('flpKVat'), freshdesk_company_id: fdCompanyId ? String(fdCompanyId) : '', quelle: 'flp-push' },
+          { vorname: g('flpCFirst'), nachname: lastName, telefon: g('flpCTel'), email: cEmail, position: g('flpCRole'), typ: 'Kunde', quelle: 'flp-push' });
+      }
+    } catch (_) {}
     setBusy(btn, false);
     toast('ERP Hero: Kunde ' + custStatus + (contStatus ? ' · Kontakt ' + contStatus : '') + ' ✓', 'success', 4000);
     _flpSaveDraft();
@@ -35800,6 +35811,343 @@ async function _checkFsForEmail(accountId, email) {
    ist der Kontakt vollständig in Freshdesk / Freshsales / zu Mailchimp
    gepusht? Kontakte-Seite bekommt eine „Gecrawlt"-Ansicht mit manuellen
    Push-Buttons (nutzen die vorhandenen Flows) + Kontakttyp-Verwaltung. */
+/* ============================================================================
+   ZENTRALE KONTAKT-DB (ZDB) — v2.46.290
+   Ziel: Airtable als zentrale CRM-Datenbank (löst langfristig Freshsales ab,
+   NICHT Freshdesk/Ticketing). Pro Mandant zwei GETRENNTE, eigene Tabellen:
+     Firma_<Slug>    (Name, Strasse, PLZ, Ort, Land, …)
+     Kontakt_<Slug>  (Vorname, Nachname, Telefon, Mobil, Email, Typ, → Firma)
+   Bestehende Daten (CrawledContacts, ERP Hero) bleiben UNANGETASTET — die
+   Migration ist eine KOPIE mit Dedup. Geschrieben wird ZUSÄTZLICH zu den
+   bisherigen Zielen. Tabellen werden bei Bedarf via Meta-API automatisch angelegt.
+   ============================================================================ */
+const ZDB_BASE_ID = APP_CONFIG.APP_BASE_ID;
+const ZDB_TYP_OPTIONS = ['Kunde', 'Interessent', 'Lieferant', 'Partner', 'Sonstige'];
+const ZDB_ENABLED_KEY = 'fdh_zdb_enabled_accounts';
+const _ZDB_TABLE_CACHE = new Map();   // slug → {slug, firma:{id,name}, kontakt:{id,name}}
+
+function _zdbSleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+function _zdbGetEnabled() { try { return new Set(JSON.parse(localStorage.getItem(ZDB_ENABLED_KEY) || '[]')); } catch (_) { return new Set(); } }
+function _zdbSetEnabled(set) { try { localStorage.setItem(ZDB_ENABLED_KEY, JSON.stringify(Array.from(set))); } catch (_) {} }
+function _zdbIsEnabled(account) { return !!account && _zdbGetEnabled().has(String(account.id)); }
+
+/* Airtable-sicherer, stabiler Slug pro Mandant (aus dem Account-Namen). */
+function _zdbSlug(account) {
+  const raw = String((account && (account.name || account.id)) || '').trim();
+  const s = raw
+    .replace(/ä/g, 'ae').replace(/ö/g, 'oe').replace(/ü/g, 'ue').replace(/ß/g, 'ss')
+    .replace(/Ä/g, 'Ae').replace(/Ö/g, 'Oe').replace(/Ü/g, 'Ue')
+    .replace(/[^A-Za-z0-9]+/g, '_').replace(/^_+|_+$/g, '').slice(0, 40);
+  return s || ('acc_' + ((account && account.id) || 'x'));
+}
+function _zdbTableNames(account) {
+  const slug = _zdbSlug(account);
+  return { slug, firma: 'Firma_' + slug, kontakt: 'Kontakt_' + slug };
+}
+function _zdbFirmaFieldSpecs() {
+  return [
+    { name: 'name', type: 'singleLineText' },              // Primary (Firmenname)
+    { name: 'strasse', type: 'singleLineText' },
+    { name: 'plz', type: 'singleLineText' },
+    { name: 'ort', type: 'singleLineText' },
+    { name: 'land', type: 'singleLineText' },
+    { name: 'email', type: 'singleLineText' },
+    { name: 'telefon', type: 'singleLineText' },
+    { name: 'ust_id', type: 'singleLineText' },
+    { name: 'quelle', type: 'singleLineText' },
+    { name: 'freshdesk_company_id', type: 'singleLineText' },
+    { name: 'created_at', type: 'singleLineText' },
+    { name: 'updated_at', type: 'singleLineText' },
+  ];
+}
+function _zdbKontaktFieldSpecs(firmaTableId) {
+  return [
+    { name: 'name', type: 'singleLineText' },              // Primary (Vorname Nachname)
+    { name: 'vorname', type: 'singleLineText' },
+    { name: 'nachname', type: 'singleLineText' },
+    { name: 'telefon', type: 'singleLineText' },
+    { name: 'mobil', type: 'singleLineText' },
+    { name: 'email', type: 'singleLineText' },
+    { name: 'typ', type: 'singleSelect', options: { choices: ZDB_TYP_OPTIONS.map(n => ({ name: n })) } },
+    { name: 'firma', type: 'multipleRecordLinks', options: { linkedTableId: firmaTableId } },
+    { name: 'position', type: 'singleLineText' },
+    { name: 'quelle', type: 'singleLineText' },
+    { name: 'freshdesk_contact_id', type: 'singleLineText' },
+    { name: 'created_at', type: 'singleLineText' },
+    { name: 'updated_at', type: 'singleLineText' },
+  ];
+}
+
+/* Legt Firma_/Kontakt_-Tabellen des Mandanten an (idempotent) und ergänzt fehlende
+   Felder. Firma zuerst — Kontakt.firma verlinkt auf deren Table-ID. */
+async function _zdbEnsureTables(account) {
+  const names = _zdbTableNames(account);
+  if (_ZDB_TABLE_CACHE.has(names.slug)) return _ZDB_TABLE_CACHE.get(names.slug);
+  if (!APP_KEYS.airtableWriteKey) throw new Error('Schreib-Key fehlt — bitte einloggen');
+  const auth = 'Bearer ' + APP_KEYS.airtableWriteKey;
+  const jsonH = { Authorization: auth, 'Content-Type': 'application/json' };
+  const metaUrl = 'https://api.airtable.com/v0/meta/bases/' + ZDB_BASE_ID + '/tables';
+  const getTables = async () => {
+    const r = await fetch(metaUrl, { headers: { Authorization: auth } });
+    if (!r.ok) throw new Error('Meta-API HTTP ' + r.status);
+    return (await r.json()).tables || [];
+  };
+  const createTable = async (name, fields) => {
+    const r = await fetch(metaUrl, { method: 'POST', headers: jsonH, body: JSON.stringify({ name, fields }) });
+    if (!r.ok) throw new Error('Tabelle „' + name + '": ' + (await r.text()).slice(0, 220));
+    return await r.json();
+  };
+  const addField = async (tableId, spec) => {
+    const r = await fetch(metaUrl + '/' + tableId + '/fields', { method: 'POST', headers: jsonH, body: JSON.stringify(spec) });
+    if (!r.ok) { const t = await r.text(); if (!/DUPLICATE|already exists|same name/i.test(t)) throw new Error('Feld „' + spec.name + '": ' + t.slice(0, 160)); }
+  };
+  const tables = await getTables();
+  let firmaT = tables.find(t => t.name === names.firma);
+  if (!firmaT) firmaT = await createTable(names.firma, _zdbFirmaFieldSpecs());
+  const fHave = new Set((firmaT.fields || []).map(f => f.name));
+  for (const spec of _zdbFirmaFieldSpecs()) if (!fHave.has(spec.name)) await addField(firmaT.id, spec);
+  let kontaktT = tables.find(t => t.name === names.kontakt);
+  if (!kontaktT) kontaktT = await createTable(names.kontakt, _zdbKontaktFieldSpecs(firmaT.id));
+  const kHave = new Set((kontaktT.fields || []).map(f => f.name));
+  for (const spec of _zdbKontaktFieldSpecs(firmaT.id)) if (!kHave.has(spec.name)) await addField(kontaktT.id, spec);
+  const res = { slug: names.slug, firma: { id: firmaT.id, name: names.firma }, kontakt: { id: kontaktT.id, name: names.kontakt } };
+  _ZDB_TABLE_CACHE.set(names.slug, res);
+  return res;
+}
+
+/* Direkt-Schreiber gegen die ZDB-Base (typecast:true → Select/Link ok, 429-Retry). */
+async function _zdbFetchJson(url, init) {
+  for (let i = 0; i < 4; i++) {
+    const r = await fetch(url, init);
+    if (r.status === 429) { await _zdbSleep(1000 * (i + 1)); continue; }
+    if (!r.ok) throw new Error('HTTP ' + r.status + ': ' + (await r.text()).slice(0, 180));
+    return await r.json();
+  }
+  throw new Error('Airtable 429 (Rate-Limit) — bitte erneut versuchen');
+}
+async function _zdbWrite(tableName, fields) {
+  return _zdbFetchJson('https://api.airtable.com/v0/' + ZDB_BASE_ID + '/' + encodeURIComponent(tableName),
+    { method: 'POST', headers: { Authorization: 'Bearer ' + APP_KEYS.airtableWriteKey, 'Content-Type': 'application/json' }, body: JSON.stringify({ fields, typecast: true }) });
+}
+async function _zdbUpdate(tableName, id, fields) {
+  return _zdbFetchJson('https://api.airtable.com/v0/' + ZDB_BASE_ID + '/' + encodeURIComponent(tableName) + '/' + id,
+    { method: 'PATCH', headers: { Authorization: 'Bearer ' + APP_KEYS.airtableWriteKey, 'Content-Type': 'application/json' }, body: JSON.stringify({ fields, typecast: true }) });
+}
+async function _zdbSelect(tableName, opts) {
+  for (let i = 0; i < 3; i++) {
+    try { return await airtableRead(tableName, opts); }
+    catch (e) { if (i === 2) throw e; await _zdbSleep(600 * (i + 1)); }
+  }
+  return [];
+}
+function _zdbClean(o) {
+  const r = {};
+  for (const [k, v] of Object.entries(o || {})) {
+    if (v == null) continue;
+    if (typeof v === 'string' && !v.trim()) continue;
+    if (Array.isArray(v) && !v.length) continue;
+    r[k] = v;
+  }
+  return r;
+}
+const _zdbEsc = s => String(s == null ? '' : s).replace(/'/g, "\\'");
+
+/* Upsert Firma → Record-ID. Dedup: freshdesk_company_id, sonst name+ort. */
+async function _zdbUpsertFirma(names, data) {
+  let hit = null;
+  try {
+    if (data.freshdesk_company_id) {
+      hit = (await _zdbSelect(names.firma.name, { filter: "{freshdesk_company_id}='" + _zdbEsc(data.freshdesk_company_id) + "'", maxRecords: 1 }))[0] || null;
+    }
+    if (!hit && data.name) {
+      const f = "AND(LOWER({name})='" + _zdbEsc(String(data.name).toLowerCase()) + "',LOWER({ort})='" + _zdbEsc(String(data.ort || '').toLowerCase()) + "')";
+      hit = (await _zdbSelect(names.firma.name, { filter: f, maxRecords: 1 }))[0] || null;
+    }
+  } catch (_) {}
+  const fields = _zdbClean(Object.assign({}, data, { updated_at: nowIso() }));
+  if (hit) { await _zdbUpdate(names.firma.name, hit.id, fields); return hit.id; }
+  fields.created_at = nowIso();
+  return (await _zdbWrite(names.firma.name, fields)).id;
+}
+/* Upsert Kontakt → Record-ID. Dedup: email, sonst vorname+nachname. */
+async function _zdbUpsertKontakt(names, data, firmaRecId) {
+  const fields = _zdbClean(Object.assign({}, data));
+  if (!fields.name) { const nm = [data.vorname, data.nachname].filter(Boolean).join(' ').trim(); if (nm) fields.name = nm; }
+  if (firmaRecId) fields.firma = [firmaRecId];
+  let hit = null;
+  try {
+    if (data.email) {
+      hit = (await _zdbSelect(names.kontakt.name, { filter: "LOWER({email})='" + _zdbEsc(String(data.email).toLowerCase()) + "'", maxRecords: 1 }))[0] || null;
+    }
+    if (!hit && (data.vorname || data.nachname)) {
+      const f = "AND(LOWER({vorname})='" + _zdbEsc(String(data.vorname || '').toLowerCase()) + "',LOWER({nachname})='" + _zdbEsc(String(data.nachname || '').toLowerCase()) + "')";
+      hit = (await _zdbSelect(names.kontakt.name, { filter: f, maxRecords: 1 }))[0] || null;
+    }
+  } catch (_) {}
+  fields.updated_at = nowIso();
+  if (hit) { await _zdbUpdate(names.kontakt.name, hit.id, fields); return hit.id; }
+  fields.created_at = nowIso();
+  return (await _zdbWrite(names.kontakt.name, fields)).id;
+}
+
+/* Öffentliche Speicher-API: wird ZUSÄTZLICH an bestehenden Speicherpunkten aufgerufen.
+   Non-blocking gedacht — Fehler dürfen die bestehenden Flows NIE kippen. */
+async function zdbSaveFirmaKontakt(account, firmaData, kontaktData) {
+  if (!account || !_zdbIsEnabled(account)) return null;
+  try {
+    const names = await _zdbEnsureTables(account);
+    let firmaId = null;
+    if (firmaData && (firmaData.name || firmaData.freshdesk_company_id)) firmaId = await _zdbUpsertFirma(names, firmaData);
+    let kontaktId = null;
+    if (kontaktData && (kontaktData.email || kontaktData.vorname || kontaktData.nachname)) kontaktId = await _zdbUpsertKontakt(names, kontaktData, firmaId);
+    return { firmaId, kontaktId };
+  } catch (e) { console.warn('[ZDB] Speichern fehlgeschlagen:', e.message); return null; }
+}
+
+/* Einmal-Migration eines Mandanten: kopiert bestehende Kontakte in die ZDB-Tabellen.
+   Quellen: ERP Hero (nur FLP) + CrawledContacts des Mandanten. Dedup-sicher (re-run ok). */
+async function _zdbMigrateAccount(account, log) {
+  log = log || (() => {});
+  const names = await _zdbEnsureTables(account);
+  const stats = { firmen: 0, kontakte: 0, quellen: [] };
+  const isFlp = (typeof _angebotsProfilKey === 'function') && _angebotsProfilKey(account) === 'flp-ersatzteile';
+
+  if (isFlp) {
+    log('ERP Hero: Kunden laden…');
+    const customers = await erpHeroRead('Customer', { maxRecords: 2000 }).catch(() => []);
+    const custMap = {};
+    for (const c of customers) {
+      const f = c.f || {};
+      const firmaData = _zdbClean({ name: f.name1, strasse: f.street, plz: f.zip, ort: f.city, land: f.country, email: f.email, telefon: f.phone, ust_id: f.vat_id, freshdesk_company_id: f.freshdesk_company_id, quelle: 'erp-hero' });
+      if (!firmaData.name) continue;
+      custMap[c.id] = await _zdbUpsertFirma(names, firmaData);
+      stats.firmen++;
+      if (stats.firmen % 10 === 0) log('  ERP Hero: ' + stats.firmen + ' Firmen…');
+      await _zdbSleep(80);
+    }
+    log('ERP Hero: Kontakte laden…');
+    const contacts = await erpHeroRead('Contact', { maxRecords: 4000 }).catch(() => []);
+    for (const ct of contacts) {
+      const f = ct.f || {};
+      const firmaRecId = ((f.customer_id || [])[0] && custMap[(f.customer_id || [])[0]]) || null;
+      const kdata = _zdbClean({ vorname: f.first_name, nachname: f.last_name, telefon: f.phone, mobil: f.mobile, email: f.email, position: f.role, typ: 'Kunde', quelle: 'erp-hero' });
+      if (!kdata.email && !kdata.nachname) continue;
+      await _zdbUpsertKontakt(names, kdata, firmaRecId);
+      stats.kontakte++;
+      if (stats.kontakte % 20 === 0) log('  ERP Hero: ' + stats.kontakte + ' Kontakte…');
+      await _zdbSleep(80);
+    }
+    stats.quellen.push('ERP Hero');
+  }
+
+  log('Gecrawlte Kontakte laden…');
+  const crawled = await _zdbSelect(CRAWLED_TABLE, { filter: "{account_id}='" + _zdbEsc(account.id) + "'", maxRecords: 5000 }).catch(() => []);
+  let cCount = 0;
+  for (const rec of crawled) {
+    const f = rec.fields || {};
+    if (f.hidden === 'spam') continue;
+    let firmaRecId = null;
+    if (f.firma) firmaRecId = await _zdbUpsertFirma(names, _zdbClean({ name: f.firma, quelle: 'crawl' }));
+    const parts = String(f.name || '').trim().split(/\s+/).filter(Boolean);
+    const vorname = parts.length > 1 ? parts.slice(0, -1).join(' ') : (parts[0] || '');
+    const nachname = parts.length > 1 ? parts[parts.length - 1] : '';
+    const kdata = _zdbClean({ vorname, nachname, telefon: f.telefon, mobil: f.mobil, email: f.email, position: f.position, typ: f.kontakt_typ, quelle: 'crawl', freshdesk_contact_id: f.fd_contact_id });
+    if (!kdata.email && !kdata.vorname && !kdata.nachname) continue;
+    await _zdbUpsertKontakt(names, kdata, firmaRecId);
+    stats.kontakte++; cCount++;
+    if (cCount % 20 === 0) log('  Crawl: ' + cCount + ' Kontakte…');
+    await _zdbSleep(80);
+  }
+  stats.quellen.push('CrawledContacts');
+  return stats;
+}
+
+/* ---- Admin-UI (Settings → „Zentrale Kontakt-DB") ---- */
+function openZdbAdmin() {
+  let host = document.getElementById('zdbAdminHost');
+  if (!host) { host = document.createElement('div'); host.id = 'zdbAdminHost'; document.body.appendChild(host); }
+  const accts = (APP_STATE.accounts || []);
+  const enabled = _zdbGetEnabled();
+  host.innerHTML =
+    '<div class="fixed inset-0 z-[75] bg-black/40 flex items-start justify-center overflow-y-auto p-4" onclick="if(event.target===this)_zdbCloseAdmin()">' +
+      '<div class="bg-white rounded-2xl shadow-xl w-full max-w-2xl my-8">' +
+        '<div class="flex items-center justify-between p-4 border-b border-ink-200">' +
+          '<h2 class="font-bold text-ink-900 inline-flex items-center gap-2"><i data-lucide="database" class="w-5 h-5"></i> Zentrale Kontakt-DB — Mandanten-Tabellen</h2>' +
+          '<button onclick="_zdbCloseAdmin()" class="text-ink-400 hover:text-ink-700"><i data-lucide="x" class="w-5 h-5"></i></button>' +
+        '</div>' +
+        '<div class="p-4 space-y-3">' +
+          '<p class="text-[12px] text-ink-600 bg-indigo-50 border border-indigo-200 rounded-lg px-3 py-2">Legt pro Mandant getrennte Tabellen <b>Firma_/Kontakt_</b> in der App-Base an und kopiert bestehende Kontakte hinein. <b>Altdaten (CrawledContacts, ERP Hero) bleiben unverändert.</b> „Aktiv" = beim Speichern wird zusätzlich hierher geschrieben.</p>' +
+          (accts.length ? accts.map(a => _zdbAdminRow(a, enabled.has(String(a.id)))).join('') : '<p class="text-sm text-ink-500">Keine Mandanten geladen.</p>') +
+          '<div id="zdbAdminLog" class="hidden mt-2 text-[11px] font-mono bg-ink-900 text-emerald-200 rounded-lg p-3 max-h-52 overflow-y-auto whitespace-pre-wrap"></div>' +
+        '</div>' +
+      '</div>' +
+    '</div>';
+  if (window.lucide) lucide.createIcons();
+}
+function _zdbCloseAdmin() { const h = document.getElementById('zdbAdminHost'); if (h) h.innerHTML = ''; }
+function _zdbAdminRow(account, isEnabled) {
+  const names = _zdbTableNames(account);
+  const id = escapeAttr(String(account.id));
+  return '<div class="border border-ink-200 rounded-xl p-3" data-zdb-acc="' + id + '">' +
+    '<div class="flex items-center justify-between gap-2 flex-wrap">' +
+      '<div class="min-w-0"><p class="font-bold text-sm text-ink-900 truncate">' + escapeHtml(account.name || account.id) + '</p>' +
+        '<p class="text-[10px] text-ink-500 font-mono truncate">' + escapeHtml(names.firma) + ' · ' + escapeHtml(names.kontakt) + '</p></div>' +
+      '<label class="inline-flex items-center gap-1.5 text-[11px] font-semibold text-ink-700 cursor-pointer shrink-0">' +
+        '<input type="checkbox" data-zdb-toggle ' + (isEnabled ? 'checked' : '') + ' onchange="_zdbToggleEnabled(\'' + id + '\', this.checked)"> aktiv</label>' +
+    '</div>' +
+    '<div class="flex gap-2 mt-2 flex-wrap">' +
+      '<button onclick="_zdbRunSetup(\'' + id + '\', this)" class="px-3 py-1.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg text-[12px] font-bold inline-flex items-center gap-1"><i data-lucide="table-2" class="w-3.5 h-3.5"></i> Tabellen anlegen + migrieren</button>' +
+      '<button onclick="_zdbShowCounts(\'' + id + '\', this)" class="px-3 py-1.5 bg-ink-100 hover:bg-ink-200 text-ink-700 rounded-lg text-[12px] font-bold">Datensätze zählen</button>' +
+    '</div>' +
+    '<div class="mt-1.5 text-[11px] text-ink-600" data-zdb-status></div>' +
+  '</div>';
+}
+function _zdbToggleEnabled(accId, on) {
+  const set = _zdbGetEnabled();
+  if (on) set.add(String(accId)); else set.delete(String(accId));
+  _zdbSetEnabled(set);
+  toast('Zentral-DB für Mandant ' + (on ? 'aktiviert' : 'deaktiviert'), 'info', 2500);
+}
+function _zdbLog(msg) {
+  const el = document.getElementById('zdbAdminLog');
+  if (!el) return;
+  el.classList.remove('hidden');
+  el.textContent += (el.textContent ? '\n' : '') + msg;
+  el.scrollTop = el.scrollHeight;
+}
+async function _zdbRunSetup(accId, btn) {
+  const account = (APP_STATE.accounts || []).find(a => String(a.id) === String(accId));
+  if (!account) return;
+  if (!confirm('Für „' + (account.name || accId) + '" die Tabellen Firma_/Kontakt_ anlegen und bestehende Kontakte hineinkopieren?\n\nAltdaten (CrawledContacts, ERP Hero) bleiben unverändert.')) return;
+  setBusy(btn, true, 'Läuft…');
+  _zdbLog('▶ ' + (account.name || accId) + ': Tabellen sicherstellen…');
+  try {
+    await _zdbEnsureTables(account);
+    _zdbLog('  Tabellen OK. Migration läuft (kopiert, löscht nichts)…');
+    const stats = await _zdbMigrateAccount(account, _zdbLog);
+    _zdbLog('✔ Fertig: ' + stats.firmen + ' Firmen, ' + stats.kontakte + ' Kontakte (Quellen: ' + stats.quellen.join(', ') + ')');
+    const set = _zdbGetEnabled(); set.add(String(account.id)); _zdbSetEnabled(set);
+    const cb = document.querySelector('[data-zdb-acc="' + CSS.escape(String(accId)) + '"] [data-zdb-toggle]'); if (cb) cb.checked = true;
+    toast('Migration abgeschlossen: ' + stats.kontakte + ' Kontakte, ' + stats.firmen + ' Firmen', 'success', 6000);
+  } catch (e) {
+    _zdbLog('✖ Fehler: ' + e.message);
+    toast('Migration fehlgeschlagen: ' + e.message, 'error', 9000);
+  } finally { setBusy(btn, false); }
+}
+async function _zdbShowCounts(accId, btn) {
+  const account = (APP_STATE.accounts || []).find(a => String(a.id) === String(accId));
+  if (!account) return;
+  setBusy(btn, true, '…');
+  try {
+    const names = _zdbTableNames(account);
+    const firmen = await airtableRead(names.firma, { maxRecords: 5000 }).catch(() => null);
+    const kontakte = await airtableRead(names.kontakt, { maxRecords: 5000 }).catch(() => null);
+    const el = document.querySelector('[data-zdb-acc="' + CSS.escape(String(accId)) + '"] [data-zdb-status]');
+    if (el) el.textContent = firmen == null ? 'Tabellen noch nicht angelegt.' : ((firmen.length) + ' Firmen · ' + (kontakte == null ? 0 : kontakte.length) + ' Kontakte');
+  } catch (e) { toast('Zählen fehlgeschlagen: ' + e.message, 'error', 5000); }
+  finally { setBusy(btn, false); }
+}
+
 const CRAWLED_TABLE = 'CrawledContacts';
 const CONTACT_TYPES_TABLE = 'ContactTypes';
 const CRAWL_STATE = {
@@ -39507,6 +39855,17 @@ async function renderSettingsPage() {
 
   $('pageContent').innerHTML = `
     <div class="space-y-4">
+
+      <!-- ============ ZENTRALE KONTAKT-DB ============ -->
+      <div class="bg-white border-2 border-indigo-300 rounded-2xl p-4 shadow-sm">
+        <div class="flex items-center justify-between gap-3 flex-wrap">
+          <div class="flex items-center gap-3 min-w-0">
+            <div class="w-10 h-10 rounded-xl bg-gradient-to-br from-indigo-500 to-violet-600 flex items-center justify-center shrink-0"><i data-lucide="database" class="w-5 h-5 text-white"></i></div>
+            <div class="min-w-0"><h3 class="font-semibold text-ink-900 text-base">Zentrale Kontakt-DB</h3><p class="text-[12px] text-ink-500">Getrennte Firma_/Kontakt_-Tabellen pro Mandant · Migration bestehender Kontakte</p></div>
+          </div>
+          <button onclick="openZdbAdmin()" class="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg text-sm font-bold inline-flex items-center gap-2 shrink-0"><i data-lucide="settings-2" class="w-4 h-4"></i> Öffnen</button>
+        </div>
+      </div>
 
       <!-- ============ SCHNELL-SETUP (Auto via Val.town API) ============ -->
       <div class="bg-gradient-to-br from-emerald-50 via-brand-50 to-brand-100 border-2 border-brand-300 rounded-2xl p-4 shadow-sm">
