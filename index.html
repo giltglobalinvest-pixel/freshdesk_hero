@@ -788,7 +788,11 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.288';
+const APP_VERSION = 'v2.46.289';
+
+// Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
+// Auf false setzen, um das Auto-Übersetzen abzuschalten.
+let AUTO_TRANSLATE_TICKETS = true;
 
 /* ============================================================
    GLOBAL THEME — v2.46.12
@@ -13564,6 +13568,10 @@ function renderTicketDetailBody(ticket) {
     </div>`;
   if (window.lucide) lucide.createIcons();
 
+  // Fremdsprachige Ticket-Inhalte beim Öffnen automatisch übersetzen (in-place,
+  // Formatierung bleibt). Deutsche Inhalte werden per Heuristik übersprungen.
+  try { _autoTranslateForeignAreas($('ticketDetailBody')); } catch (_) {}
+
   // KI-Validierung der „gefundenen" Tel-Nummern: prüft ob sie zum Anfragenden gehören
   // oder z.B. aus einer Signatur einer dritten Person in einer weitergeleiteten Mail
   // stammen. Pills mit data-tel-pending werden nach Antwort entweder bestätigt
@@ -15443,12 +15451,15 @@ async function _translateNodesInPlace(container, targetLang) {
    - containerSel: Selector/Element des zu übersetzenden Bereichs
    Übersetzt in-place (Formatierung bleibt erhalten); „Original zeigen" stellt
    das gesicherte Original-HTML wieder her. NUR lokal, Freshdesk unberührt. */
-async function toggleInlineTranslation(btnEl, containerSel, text) {
+async function toggleInlineTranslation(btnEl, containerSel, text, opts) {
+  opts = opts || {};
   const container = typeof containerSel === 'string' ? document.querySelector(containerSel) : containerSel;
-  if (!container) return;
+  if (!container || !btnEl) return;
   const lbl = btnEl.querySelector('[data-translate-label]');
-  // Bereits übersetzt? → Original-HTML wiederherstellen.
+  // Bereits übersetzt? → Original-HTML wiederherstellen. (Auto-Modus fasst bereits
+  // übersetzte Bereiche nicht an.)
   if (container._fdhTransOrig != null) {
+    if (opts.auto) return;
     container.innerHTML = container._fdhTransOrig;
     container._fdhTransOrig = null;
     btnEl.classList.remove('bg-emerald-100', 'text-emerald-700');
@@ -15463,12 +15474,20 @@ async function toggleInlineTranslation(btnEl, containerSel, text) {
     // Original-HTML sichern, dann Text-Knoten in-place übersetzen (Formatierung bleibt).
     container._fdhTransOrig = container.innerHTML;
     const res = await _translateNodesInPlace(container, USER_DEFAULT_LANG);
+    const src = String(res.sourceLang || '').toLowerCase().slice(0, 2);
+    // Auto-Modus + Quelle ist bereits die Zielsprache → nichts anzeigen, Original lassen
+    // (fängt Heuristik-Fehlalarme lautlos ab).
+    if (opts.auto && (!src || src === USER_DEFAULT_LANG)) {
+      container.innerHTML = container._fdhTransOrig;
+      container._fdhTransOrig = null;
+      if (lbl) lbl.textContent = 'Übersetzen';
+      return;
+    }
     // Fallback-Fall (keine übersetzbaren Knoten / riesiger Thread): Plain-Text-Box
     if (res.plain != null) {
       container.innerHTML = '<div class="text-sm text-ink-800 whitespace-pre-line break-words">' + escapeHtml(res.plain) + '</div>';
     }
     // Kleines Sprach-Badge oben einfügen (verschwindet beim „Original zeigen")
-    const src = String(res.sourceLang || '').toLowerCase().slice(0, 2);
     const tgtName = LANG_NAMES[USER_DEFAULT_LANG] || USER_DEFAULT_LANG.toUpperCase();
     const badge = document.createElement('div');
     badge.className = 'flex items-center gap-1.5 mb-2 text-[10px] uppercase tracking-wider text-emerald-700 font-semibold';
@@ -15483,7 +15502,8 @@ async function toggleInlineTranslation(btnEl, containerSel, text) {
   } catch (e) {
     // Fehler → Original wiederherstellen, damit nichts halb-übersetzt stehen bleibt
     if (container._fdhTransOrig != null) { container.innerHTML = container._fdhTransOrig; container._fdhTransOrig = null; }
-    toast('Übersetzung fehlgeschlagen: ' + e.message, 'error', 6000);
+    if (opts.auto) { console.warn('[auto-translate]', e.message); }
+    else { toast('Übersetzung fehlgeschlagen: ' + e.message, 'error', 6000); }
     if (lbl) lbl.textContent = 'Übersetzen';
   } finally {
     btnEl.disabled = false;
@@ -15518,6 +15538,38 @@ function _renderTranslateButton(text, containerId) {
     toggleInlineTranslation(btn, target, text);
   });
 })();
+
+/* Grobe Heuristik: ist der Text wahrscheinlich Deutsch? Dient NUR dazu, den
+   automatischen Übersetzungs-Call für deutsche Inhalte zu sparen. Bei Unsicherheit
+   lieber als NICHT-deutsch behandeln — die KI prüft dann die echte Quellsprache
+   und revertiert im Auto-Modus lautlos, falls es doch Deutsch war. */
+function _looksGerman(text) {
+  const t = ' ' + String(text || '').toLowerCase().replace(/\s+/g, ' ').slice(0, 3000) + ' ';
+  if (!t.trim()) return true; // leer → nicht übersetzen
+  const de = (t.match(/ (der|die|das|und|ist|nicht|mit|für|sich|auf|ein|eine|sie|ihre|ihr|wir|uns|sehr|geehrte|geehrter|freundlichen|grüßen|grüße|bitte|wurde|haben|hat|kann|noch|oder|auch|dem|den|von|vom|zum|zur|bei|aber|schon|hallo|guten|danke|keine|über|müssen|können|wegen|anbei) /g) || []).length;
+  const en = (t.match(/ (the|and|you|your|are|is|was|were|this|that|with|for|have|has|will|would|dear|regards|invoice|thank|thanks|hello|we|our|please|from|of|in|on|at|about|next|reaching|out|payment|kind) /g) || []).length;
+  const umlautBonus = /[äöüß]/.test(t) ? 3 : 0;
+  return (de + umlautBonus) >= en;
+}
+
+/* Nach dem Ticket-Render aufgerufen: prüft alle Übersetzungs-Bereiche (Erste Anfrage
+   + jede Verlauf-Nachricht) und übersetzt fremdsprachige AUTOMATISCH in-place —
+   als hätte man „Übersetzen" geklickt. Deutsche Inhalte werden per Heuristik
+   übersprungen (kein KI-Call). Rein lokal, Freshdesk unberührt. */
+function _autoTranslateForeignAreas(root) {
+  if (!root || AUTO_TRANSLATE_TICKETS === false) return;
+  const btns = Array.from(root.querySelectorAll('[data-translate-trigger]')).slice(0, 12);
+  btns.forEach(btn => {
+    const sel = btn.dataset.target;
+    if (!sel) return;
+    const container = document.querySelector(sel);
+    if (!container || container._fdhTransOrig != null) return;
+    let text = '';
+    try { text = decodeURIComponent(btn.dataset.text || ''); } catch (_) { text = ''; }
+    if (!text.trim() || _looksGerman(text)) return; // wahrscheinlich Deutsch → nichts tun
+    toggleInlineTranslation(btn, sel, text, { auto: true });
+  });
+}
 
 /* ============================================================
    Direkt-Antwort-Composer mit Übersetzungs-Option
