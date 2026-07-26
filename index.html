@@ -788,7 +788,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.286';
+const APP_VERSION = 'v2.46.287';
 
 /* ============================================================
    GLOBAL THEME — v2.46.12
@@ -950,6 +950,13 @@ function fmtDate(iso) {
 function htmlToText(s) {
   if (!s) return '';
   let t = String(s);
+  // <style>/<script>/<head>-Inhalte + HTML-Kommentare KOMPLETT entfernen (inkl. Inhalt).
+  // Sonst leckt bei HTML-Mails (z.B. Freshworks-System-Mails mit großen <style>-Blöcken)
+  // das CSS/JS als Text in Übersetzung, Vorschau & KI-Input.
+  t = t.replace(/<!--[\s\S]*?-->/g, '');
+  t = t.replace(/<style[\s\S]*?<\/style>/gi, '');
+  t = t.replace(/<script[\s\S]*?<\/script>/gi, '');
+  t = t.replace(/<head[\s\S]*?<\/head>/gi, '');
   // Block-Elemente in Newlines
   t = t.replace(/<br\s*\/?>/gi, '\n');
   t = t.replace(/<\/(p|div|li|h[1-6]|tr|table|blockquote)>/gi, '\n');
@@ -15359,43 +15366,44 @@ async function translateMessage(text, targetLang, options) {
 async function toggleInlineTranslation(btnEl, containerSel, text) {
   const container = typeof containerSel === 'string' ? document.querySelector(containerSel) : containerSel;
   if (!container) return;
-  const existing = container.querySelector('[data-translation-box]');
-  if (existing) {
-    existing.remove();
+  const lbl = btnEl.querySelector('[data-translate-label]');
+  // Bereits übersetzt? → Original-HTML wiederherstellen.
+  // WICHTIG: Wir ersetzen den Text NUR hier in Freshdesk Hero (lokal im DOM) —
+  // das Freshdesk-Ticket selbst bleibt komplett unberührt.
+  if (container._fdhTransOrig != null) {
+    container.innerHTML = container._fdhTransOrig;
+    container._fdhTransOrig = null;
     btnEl.classList.remove('bg-emerald-100', 'text-emerald-700');
     btnEl.classList.add('hover:bg-ink-100', 'text-ink-500');
-    const lbl = btnEl.querySelector('[data-translate-label]');
     if (lbl) lbl.textContent = 'Übersetzen';
+    if (window.lucide) lucide.createIcons();
     return;
   }
-  const lbl = btnEl.querySelector('[data-translate-label]');
-  const origIcon = btnEl.querySelector('[data-lucide]');
   if (lbl) lbl.textContent = 'Übersetze…';
-  if (origIcon) origIcon.setAttribute('data-lucide', 'loader-circle');
   btnEl.disabled = true;
-  if (window.lucide) lucide.createIcons();
   try {
     const res = await translateMessage(text, USER_DEFAULT_LANG);
-    const box = document.createElement('div');
-    box.setAttribute('data-translation-box', '');
-    box.className = 'mt-2 border-l-2 border-emerald-400 bg-emerald-50/60 rounded-r px-3 py-2';
-    box.innerHTML = `
-      <div class="flex items-center gap-1.5 mb-1 text-[10px] uppercase tracking-wider text-emerald-700 font-semibold">
-        <i data-lucide="languages" class="w-3 h-3"></i>
-        <span>${escapeHtml(res.targetLangName)} <span class="opacity-70">(aus ${escapeHtml(res.sourceLangName)})</span></span>
-      </div>
-      <div class="text-sm text-ink-800 whitespace-pre-line break-words">${escapeHtml(res.translation)}</div>`;
-    container.appendChild(box);
+    // Original-HTML (inkl. evtl. kaputt gerenderter Mail-Struktur/Bilder) sichern
+    // und in-place durch den lesbaren Übersetzungstext ersetzen.
+    container._fdhTransOrig = container.innerHTML;
+    const view = document.createElement('div');
+    view.setAttribute('data-translation-view', '');
+    view.className = 'border-l-2 border-emerald-400 bg-emerald-50/50 rounded-r px-3 py-2';
+    view.innerHTML =
+      '<div class="flex items-center gap-1.5 mb-1.5 text-[10px] uppercase tracking-wider text-emerald-700 font-semibold">' +
+        '<i data-lucide="languages" class="w-3 h-3"></i>' +
+        '<span>' + escapeHtml(res.targetLangName) + ' <span class="opacity-70">(aus ' + escapeHtml(res.sourceLangName) + ')</span></span>' +
+      '</div>' +
+      '<div class="text-sm text-ink-800 whitespace-pre-line break-words">' + escapeHtml(res.translation) + '</div>';
+    container.innerHTML = '';
+    container.appendChild(view);
     btnEl.classList.add('bg-emerald-100', 'text-emerald-700');
     btnEl.classList.remove('hover:bg-ink-100', 'text-ink-500');
     if (lbl) lbl.textContent = res.sourceLang === USER_DEFAULT_LANG ? 'Gleiche Sprache' : 'Original zeigen';
-    if (origIcon) origIcon.setAttribute('data-lucide', 'languages');
     if (window.lucide) lucide.createIcons();
   } catch (e) {
     toast('Übersetzung fehlgeschlagen: ' + e.message, 'error', 6000);
     if (lbl) lbl.textContent = 'Übersetzen';
-    if (origIcon) origIcon.setAttribute('data-lucide', 'languages');
-    if (window.lucide) lucide.createIcons();
   } finally {
     btnEl.disabled = false;
   }
