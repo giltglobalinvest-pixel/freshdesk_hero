@@ -791,7 +791,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.47.3';
+const APP_VERSION = 'v2.47.4';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -27244,36 +27244,44 @@ function _mbPvSheet(bodyHtml, extraBtnHtml) {
     '</div>';
   if (window.lucide) lucide.createIcons();
 }
-/* Aufzug-Vorschau: HTML-Angebot (gleicher Renderer wie Desktop-Fallback) auf die
-   Bildschirmbreite herunterskaliert (transform:scale, Höhe per onload gemessen).
-   Ein PDF-Iframe passt sich auf iOS nicht der Breite an — daher HTML statt PDF-Blob.
-   Der „PDF"-Button oben liefert das exakte PDF in einem neuen Tab. */
+/* Aufzug-Vorschau: das EXAKTE PDF (gleiches _fdhBuildBkAngebotPdfBlob wie beim
+   Senden) — kein abweichender HTML-Renderer. Jede Seite wird via pdf.js auf die
+   Bildschirmbreite gerendert (Canvas, scharf per devicePixelRatio) und gestapelt.
+   So ist die Vorschau 1:1 das PDF, nur handygerecht skaliert. */
 async function _mbPreviewSheetAufzug() {
   const s = window._ANG_CHAT; if (!s) return;
-  let html = '';
-  try {
-    const totals = _angebotCalcTotals(s.collected);
-    const ctx = { accountId: s.accountId, ticketId: s.ticketId, ticket: s.ticket, profile: s.profile,
-      standort: (s.collected && s.collected.standort) || '', fabriknummer: (s.collected && s.collected.fabriknummer) || '',
-      plan: Object.assign({}, s.collected, { _totals: totals }) };
-    html = _renderAngebotHtml(ctx);
-  } catch (e) { html = '<p style="padding:24px;font-family:sans-serif;color:#64748b">Vorschau nicht verfügbar — nutze „PDF" oben.</p>'; }
   const pdfBtn = '<button onclick="angChatPreviewBkPdf(this)" class="shrink-0 text-[12px] font-bold text-indigo-600 px-2.5 py-1.5 rounded-lg border border-indigo-200 inline-flex items-center gap-1"><i data-lucide="file-text" class="w-3.5 h-3.5"></i> PDF</button>';
-  const body = '<div id="mbPvOuter" style="width:100%;overflow:hidden;"><div id="mbPvInner" style="transform-origin:top left;"><iframe id="mbPvFrame" scrolling="no" style="border:0;width:794px;background:#fff;display:block" srcdoc="' + escapeAttr(html) + '"></iframe></div></div>';
-  _mbPvSheet(body, pdfBtn);
-  const frame = document.getElementById('mbPvFrame');
-  if (frame) { frame.addEventListener('load', _mbPvFitFrame); setTimeout(_mbPvFitFrame, 160); }
-}
-function _mbPvFitFrame() {
-  const frame = document.getElementById('mbPvFrame'), inner = document.getElementById('mbPvInner'), outer = document.getElementById('mbPvOuter');
-  if (!frame || !inner || !outer) return;
-  let h = Math.round(794 * 1.414);
-  try { const d = frame.contentDocument || (frame.contentWindow && frame.contentWindow.document); if (d && d.body) h = Math.max(d.body.scrollHeight, d.documentElement.scrollHeight, 300); } catch (_) {}
-  frame.style.height = h + 'px';
-  const avail = outer.clientWidth || window.innerWidth;
-  const scale = Math.min(1, avail / 794);
-  inner.style.transform = 'scale(' + scale + ')';
-  outer.style.height = Math.ceil(h * scale) + 'px';
+  _mbPvSheet('<div id="mbPvPdf" class="p-3"><div class="text-center text-ink-400 text-sm py-12"><span class="spinner inline-block w-5 h-5 border-[2px] text-indigo-500"></span><p class="mt-2">Baue PDF-Vorschau…</p></div></div>', pdfBtn);
+  try {
+    const blob = await _fdhBuildBkAngebotPdfBlob(s);   // identisch zum versendeten PDF
+    await _ensurePdfLibs();
+    if (!window.pdfjsLib) throw new Error('pdf.js nicht verfügbar');
+    const buf = await blob.arrayBuffer();
+    let host = document.getElementById('mbPvPdf');
+    if (!host) return;  // Sheet inzwischen geschlossen
+    const pdf = await window.pdfjsLib.getDocument({ data: buf }).promise;
+    const avail = Math.max(240, (host.clientWidth || window.innerWidth) - 0);
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);  // Schärfe, aber Speicher begrenzen
+    host.innerHTML = '';
+    for (let p = 1; p <= pdf.numPages; p++) {
+      if (!document.getElementById('mbPvPdf')) return;  // Sheet geschlossen → abbrechen
+      const page = await pdf.getPage(p);
+      const vp1 = page.getViewport({ scale: 1 });
+      const cssScale = avail / vp1.width;
+      const vp = page.getViewport({ scale: cssScale * dpr });
+      const canvas = document.createElement('canvas');
+      canvas.width = Math.round(vp.width); canvas.height = Math.round(vp.height);
+      canvas.style.width = avail + 'px';
+      canvas.style.height = Math.round(avail * vp1.height / vp1.width) + 'px';
+      canvas.style.display = 'block'; canvas.style.margin = '0 auto 12px';
+      canvas.style.background = '#fff'; canvas.style.boxShadow = '0 1px 8px rgba(0,0,0,.18)';
+      host.appendChild(canvas);
+      await page.render({ canvasContext: canvas.getContext('2d'), viewport: vp }).promise;
+    }
+  } catch (e) {
+    const host = document.getElementById('mbPvPdf');
+    if (host) host.innerHTML = '<p class="p-6 text-center text-ink-500 text-sm">Vorschau konnte nicht erzeugt werden — öffne sie über „PDF" oben.<br><span class="text-ink-400 text-[11px]">' + escapeHtml(e.message || String(e)) + '</span></p>';
+  }
 }
 function _mbPreviewSheetFlp() {
   try {
