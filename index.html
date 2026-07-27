@@ -791,7 +791,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.47.0';
+const APP_VERSION = 'v2.47.1';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -27121,7 +27121,7 @@ function _mbRender() {
   const total = ad.totalNet();
   host.innerHTML =
     '<div class="fixed inset-0 z-[62] bg-ink-50 flex flex-col safe-bottom">' +
-      '<div class="safe-top px-3 py-2.5 bg-white border-b border-ink-200 flex items-center gap-2 shrink-0">' +
+      '<div class="px-3 pb-2.5 bg-white border-b border-ink-200 flex items-center gap-2 shrink-0" style="padding-top:calc(env(safe-area-inset-top, 0px) + 0.625rem)">' +
         '<button onclick="_mbClose();' + ad.closeCall + '" class="w-9 h-9 -ml-1 rounded-lg hover:bg-ink-100 flex items-center justify-center shrink-0"><i data-lucide="x" class="w-5 h-5 text-ink-700"></i></button>' +
         '<div class="min-w-0 flex-1"><h3 class="font-bold text-ink-900 text-[15px] leading-tight truncate">' + escapeHtml(ad.title) + '</h3>' +
           '<p class="text-[11px] text-ink-500 truncate">' + escapeHtml(ad.sub || '') + '</p></div>' +
@@ -27216,7 +27216,7 @@ function _mbCatRender(full) {
   }).join('');
   host.innerHTML =
     '<div class="fixed inset-0 z-[66] bg-ink-50 flex flex-col safe-bottom">' +
-      '<div class="safe-top px-3 py-2.5 bg-white border-b border-ink-200 flex items-center gap-2 shrink-0">' +
+      '<div class="px-3 pb-2.5 bg-white border-b border-ink-200 flex items-center gap-2 shrink-0" style="padding-top:calc(env(safe-area-inset-top, 0px) + 0.625rem)">' +
         '<button onclick="_mbCatClose()" class="w-9 h-9 -ml-1 rounded-lg hover:bg-ink-100 flex items-center justify-center shrink-0"><i data-lucide="arrow-left" class="w-5 h-5 text-ink-700"></i></button>' +
         '<div class="flex-1 relative"><i data-lucide="search" class="w-4 h-4 text-ink-400 absolute left-2.5 top-1/2 -translate-y-1/2"></i>' +
           '<input id="mbCatSearch" value="' + escapeAttr(st.q || '') + '" oninput="_mbCatSearch(this.value)" placeholder="Katalog durchsuchen…" autocomplete="off" class="w-full pl-8 pr-2 py-2 border border-ink-300 rounded-lg text-sm"></div>' +
@@ -27236,7 +27236,7 @@ function _mbPvSheet(bodyHtml, extraBtnHtml) {
   if (!host) { host = document.createElement('div'); host.id = 'mbPvHost'; document.body.appendChild(host); }
   host.innerHTML =
     '<div class="fixed inset-0 z-[68] bg-ink-200 flex flex-col safe-bottom">' +
-      '<div class="safe-top px-3 py-2.5 bg-white border-b border-ink-200 flex items-center gap-2 shrink-0">' +
+      '<div class="px-3 pb-2.5 bg-white border-b border-ink-200 flex items-center gap-2 shrink-0" style="padding-top:calc(env(safe-area-inset-top, 0px) + 0.625rem)">' +
         '<button onclick="_mbPvClose()" class="w-9 h-9 -ml-1 rounded-lg hover:bg-ink-100 flex items-center justify-center shrink-0"><i data-lucide="arrow-left" class="w-5 h-5 text-ink-700"></i></button>' +
         '<span class="font-bold text-ink-800 text-sm flex-1">Angebots-Vorschau</span>' + (extraBtnHtml || '') +
       '</div>' +
