@@ -788,7 +788,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.305';
+const APP_VERSION = 'v2.46.306';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -27016,17 +27016,41 @@ function angChatToggleAnchor() {
 /* v2.46.305: Positionen direkt manuell bearbeiten (parallel zum Chat).
    Arbeitet auf einer Kopie s._posEdit; „Übernehmen" schreibt zurück + aktualisiert
    die PDF-Vorschau. */
-function openAngPositionenEditor() {
+let _ANG_POS_KAT = [];
+async function openAngPositionenEditor() {
   const s = window._ANG_CHAT;
   if (!s) return;
   s._posEdit = JSON.parse(JSON.stringify(s.collected?.positionen || []));
+  try { _ANG_POS_KAT = await loadPositionskatalog().catch(() => []); } catch (_) { _ANG_POS_KAT = []; }
+  _angPosRender();
+}
+function _angPosMove(i, dir) {
+  const s = window._ANG_CHAT; if (!s || !s._posEdit) return;
+  _angPosReadInputs();
+  const j = i + dir;
+  if (j < 0 || j >= s._posEdit.length) return;
+  const tmp = s._posEdit[i]; s._posEdit[i] = s._posEdit[j]; s._posEdit[j] = tmp;
+  _angPosRender();
+}
+function _angPosAddFromKatalog(idx) {
+  const s = window._ANG_CHAT; if (!s) return;
+  const k = (_ANG_POS_KAT || [])[+idx]; if (!k) return;
+  _angPosReadInputs();
+  (s._posEdit = s._posEdit || []).push({
+    bezeichnung: k.titel || '', beschreibung: k.beschreibung || '', menge: 1, einheit: k.einheit || 'ST',
+    einzelpreis: (k.einzelpreis !== '' && k.einzelpreis != null) ? +k.einzelpreis : 0, kategorie: 'Material',
+  });
   _angPosRender();
 }
 function _angPosClose() { const h = document.getElementById('angPosHost'); if (h) h.innerHTML = ''; }
 function _angPosRowHtml(p, i) {
   return '<div class="border border-ink-200 rounded-xl p-3" data-pos="' + i + '">' +
     '<div class="flex items-center justify-between mb-1"><span class="text-[10px] font-bold text-ink-400 uppercase tracking-wider">Position ' + (i + 1) + '</span>' +
-      '<button onclick="_angPosDelete(' + i + ')" class="text-rose-500 hover:bg-rose-50 p-1 rounded" title="Position löschen"><i data-lucide="trash-2" class="w-4 h-4"></i></button></div>' +
+      '<div class="flex items-center gap-0.5">' +
+        '<button onclick="_angPosMove(' + i + ',-1)" class="text-ink-400 hover:text-ink-700 hover:bg-ink-100 p-1 rounded" title="nach oben"><i data-lucide="chevron-up" class="w-4 h-4"></i></button>' +
+        '<button onclick="_angPosMove(' + i + ',1)" class="text-ink-400 hover:text-ink-700 hover:bg-ink-100 p-1 rounded" title="nach unten"><i data-lucide="chevron-down" class="w-4 h-4"></i></button>' +
+        '<button onclick="_angPosDelete(' + i + ')" class="text-rose-500 hover:bg-rose-50 p-1 rounded" title="Position löschen"><i data-lucide="trash-2" class="w-4 h-4"></i></button>' +
+      '</div></div>' +
     '<input id="pos_bez_' + i + '" value="' + escapeAttr(p.bezeichnung || '') + '" placeholder="Bezeichnung / Titel" class="w-full mb-1.5 px-2 py-1.5 border border-ink-300 rounded-lg text-sm font-semibold">' +
     '<textarea id="pos_beschr_' + i + '" rows="3" placeholder="Leistungsbeschreibung — eine Zeile je Punkt" class="w-full mb-1.5 px-2 py-1.5 border border-ink-300 rounded-lg text-[13px]">' + escapeHtml(p.beschreibung || '') + '</textarea>' +
     '<div class="grid grid-cols-3 gap-1.5">' +
@@ -27050,8 +27074,15 @@ function _angPosRender() {
           '<button onclick="_angPosClose()" class="w-9 h-9 rounded-lg hover:bg-ink-100 flex items-center justify-center"><i data-lucide="x" class="w-5 h-5 text-ink-700"></i></button>' +
         '</div>' +
         '<div class="flex-1 overflow-y-auto p-4 space-y-3" id="angPosBody">' + (rows || '<p class="text-sm text-ink-500 text-center py-6">Noch keine Positionen — „+ Position" zum Anlegen.</p>') + '</div>' +
-        '<div class="px-4 py-3 border-t border-ink-200 flex items-center justify-between gap-2">' +
-          '<button onclick="_angPosAdd()" class="px-3 py-2 text-sm font-bold bg-ink-100 hover:bg-ink-200 text-ink-700 rounded-lg inline-flex items-center gap-1"><i data-lucide="plus" class="w-4 h-4"></i> Position</button>' +
+        '<div class="px-4 py-3 border-t border-ink-200 flex items-center justify-between gap-2 flex-wrap">' +
+          '<div class="flex items-center gap-2 flex-wrap">' +
+            '<button onclick="_angPosAdd()" class="px-3 py-2 text-sm font-bold bg-ink-100 hover:bg-ink-200 text-ink-700 rounded-lg inline-flex items-center gap-1"><i data-lucide="plus" class="w-4 h-4"></i> Position</button>' +
+            ((_ANG_POS_KAT || []).length
+              ? '<select onchange="_angPosAddFromKatalog(this.value); this.value=\'\'" class="px-2 py-2 border border-ink-300 rounded-lg text-[12px] bg-white max-w-[180px]" title="Position aus dem Katalog einfügen"><option value="">+ aus Katalog…</option>' +
+                  _ANG_POS_KAT.map((k, idx) => (k.aktiv !== false && k.titel) ? ('<option value="' + idx + '">' + escapeHtml((k.leistungstyp ? '[' + k.leistungstyp + '] ' : '') + k.titel) + '</option>') : '').join('') +
+                '</select>'
+              : '') +
+          '</div>' +
           '<button onclick="_angPosSave(this)" class="px-4 py-2 text-sm font-bold bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg inline-flex items-center gap-1"><i data-lucide="check" class="w-4 h-4"></i> Übernehmen</button>' +
         '</div>' +
       '</div>' +
