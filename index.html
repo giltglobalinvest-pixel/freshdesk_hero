@@ -788,7 +788,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.302';
+const APP_VERSION = 'v2.46.303';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -26245,6 +26245,7 @@ async function openAngebotsChatModal(accountId, ticketId, forcedRestore) {
     // State initialisieren
     window._ANG_CHAT = {
       accountId, ticketId, ticket, profile, account,
+      _restored: !!forcedRestore,   // v2.46.303: bereits existierendes Angebot — KEINE neue Nummer reservieren
       stepIdx: 0,
       history: [],     // [{role:'user'|'assistant', content:'...'}]
       collected: (function() {
@@ -28423,7 +28424,9 @@ async function _angChatGenerateOffer(s, userText) {
   const katalogBlock = _angKatalogPromptBlock(_katalog);
   // v2.46.302: laufende Angebotsnummer EINMAL reservieren (aus dem Berichtskonverter),
   // damit PDF-Nummer und BK-Archiv-Nummer übereinstimmen.
-  if (s.angebotNummer == null && APP_KEYS.bkAirtableBaseId) {
+  // v2.46.303: NUR für neue Angebote — bereits existierende (aus dem BK wiederhergestellte)
+  // behalten ihr Verhalten von vorher (keine neue Nummer reservieren/aufzwingen).
+  if (s.angebotNummer == null && !s._restored && APP_KEYS.bkAirtableBaseId) {
     try { s.angebotNummer = await _bkNextAppAngebotNum(APP_KEYS.bkAirtableBaseId); } catch (_) { s.angebotNummer = null; }
   }
   const sysPrompt =
