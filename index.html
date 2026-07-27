@@ -791,7 +791,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.309';
+const APP_VERSION = 'v2.47.0';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -24766,6 +24766,7 @@ async function _flpPushKundeKontakt(btn) {
 }
 
 function closeFlpAngebotModal() {
+  try { _mbClose(); } catch (_) {}  // v2.47: mobilen Builder mit schließen
   const h = document.getElementById('subModalHost');
   if (h) h.innerHTML = '';
   delete window._FLP_ANG;
@@ -24903,6 +24904,7 @@ function _flpRenderPositionen() {
     if (pick) _flpOnBundleChange(pick);
   }).catch(() => { const sel = document.getElementById('flpBundleSel'); if (sel) sel.innerHTML = '<option value="">Kein Bundle</option>'; });
   _flpLoadArticles(st.mandantName).then(a => { st.catalog = a; }).catch(() => { st.catalog = []; });
+  if (_mbNarrow()) { try { _mbSync('flp'); } catch (_) {} }  // v2.47: mobiler Positions-Builder
 }
 
 function _flpChatAppend(role, content, skipStore) {
@@ -24941,6 +24943,7 @@ function _flpRenderPosTable() {
   ).join('') : '<p class="text-[12px] text-ink-400 italic px-1">Noch keine Positionen — „KI-Positionen erstellen" oder manuell „+ Position".</p>';
   if (window.lucide) lucide.createIcons();
   _flpUpdateTotals();
+  _mbRerender();  // v2.47: mobilen Builder mitziehen (falls offen)
 }
 
 function _flpUpdateTotals() {
@@ -26480,6 +26483,8 @@ async function openAngebotsChatModal(accountId, ticketId, forcedRestore) {
     }
     // v2.46.175: Vorschau SOFORT rendern (BK-Design mit Stammdaten) — nicht erst nach 1. KI-Runde
     _angChatRenderPreview().catch(e => console.warn('Initial-Preview:', e));
+    // v2.47: Auf schmalen Screens den klick-/katalogbasierten Positions-Builder öffnen
+    if (_mbNarrow()) { try { _mbSync('aufzug'); } catch (_) {} }
     // v2.46.209: Stammdaten SOFORT aus dem ERP laden (per Fabriknummer) — ohne
     // dass der User den ERP-Button drücken muss. Bei Fehler: Hinweis-Bubble,
     // manueller Weg bleibt. Nicht wenn schon ein gespeicherter Stand da ist.
@@ -27072,6 +27077,324 @@ function angChatToggleAnchor() {
    Arbeitet auf einer Kopie s._posEdit; „Übernehmen" schreibt zurück + aktualisiert
    die PDF-Vorschau. */
 let _ANG_POS_KAT = [];
+
+/* =========================================================================
+   v2.47: MOBILER ANGEBOTS-BUILDER  (#mbHost)
+   „Weniger Chat, mehr Klicken." Positionen zuerst, Katalog als Hauptquelle,
+   Vorschau nur auf Abruf. Legt sich als eigene Vollbild-Ebene ÜBER das
+   bestehende Chat/Vorschau-Modal (Aufzug bzw. FLP), das darunter unverändert
+   weiterläuft. Auto-Aktivierung < 768px. Adapter kapseln beide Welten:
+   Aufzug  → window._ANG_CHAT.collected.positionen
+   FLP     → window._FLP_ANG.positionen
+   ========================================================================= */
+const _MB_BP = 768;
+function _mbNarrow() { return window.innerWidth < _MB_BP; }
+function _mbHostOn() { const h = document.getElementById('mbHost'); return !!(h && h.dataset.on === '1'); }
+function _mbRerender() { try { if (window._MB && _mbHostOn()) _mbRender(); } catch (_) {} }
+
+/* Öffnet (oder synchronisiert) den Builder für einen Flow. Idempotent. */
+function _mbSync(flow) {
+  if (window._MB && window._MB.flow === flow && _mbHostOn()) { _mbRerender(); return; }
+  const ad = flow === 'flp' ? _mbAdapterFlp() : _mbAdapterAufzug();
+  if (ad) _mbOpen(ad);
+}
+async function _mbOpen(ad) {
+  window._MB = ad;
+  let host = document.getElementById('mbHost');
+  if (!host) { host = document.createElement('div'); host.id = 'mbHost'; document.body.appendChild(host); }
+  host.dataset.on = '1';
+  _mbRender();
+  try { if (ad.loadCatalog) { await ad.loadCatalog(); _mbRerender(); } } catch (_) {}
+}
+function _mbClose() {
+  const host = document.getElementById('mbHost');
+  if (host) { host.innerHTML = ''; host.dataset.on = '0'; host.style.display = ''; }
+  ['mbCatHost', 'mbEditHost', 'mbPvHost', 'mbReturnFab'].forEach(id => { const e = document.getElementById(id); if (e) e.remove(); });
+  delete window._MB; delete window._MB_CAT;
+}
+
+function _mbRender() {
+  const ad = window._MB; if (!ad) return;
+  const host = document.getElementById('mbHost'); if (!host) return;
+  const pos = ad.positions() || [];
+  const rows = pos.map((p, i) => _mbRowHtml(ad.view(p), i)).join('');
+  const total = ad.totalNet();
+  host.innerHTML =
+    '<div class="fixed inset-0 z-[62] bg-ink-50 flex flex-col safe-bottom">' +
+      '<div class="safe-top px-3 py-2.5 bg-white border-b border-ink-200 flex items-center gap-2 shrink-0">' +
+        '<button onclick="_mbClose();' + ad.closeCall + '" class="w-9 h-9 -ml-1 rounded-lg hover:bg-ink-100 flex items-center justify-center shrink-0"><i data-lucide="x" class="w-5 h-5 text-ink-700"></i></button>' +
+        '<div class="min-w-0 flex-1"><h3 class="font-bold text-ink-900 text-[15px] leading-tight truncate">' + escapeHtml(ad.title) + '</h3>' +
+          '<p class="text-[11px] text-ink-500 truncate">' + escapeHtml(ad.sub || '') + '</p></div>' +
+        '<button onclick="_mbPeekClassic()" class="shrink-0 text-[11px] font-semibold text-ink-500 px-2 py-1.5 rounded-lg hover:bg-ink-100" title="Klassische Ansicht (Chat + Vorschau nebeneinander)">klassisch</button>' +
+        '<button onclick="_mbPeekChat()" class="shrink-0 text-[12px] font-bold text-indigo-600 px-2.5 py-1.5 rounded-lg border border-indigo-200 inline-flex items-center gap-1"><i data-lucide="sparkles" class="w-3.5 h-3.5"></i> KI</button>' +
+      '</div>' +
+      (ad.chipsHtml ? '<div class="px-3 pt-2 flex items-center gap-1.5 overflow-x-auto shrink-0 pb-0.5">' + ad.chipsHtml() + '</div>' : '') +
+      '<div id="mbList" class="flex-1 overflow-y-auto px-3 py-2 space-y-2">' +
+        (rows || '<div class="text-center text-ink-400 text-sm py-12"><i data-lucide="package" class="w-9 h-9 mx-auto opacity-30"></i><p class="mt-2 leading-snug">Noch keine Positionen.<br>Tippe unten auf <b class="text-indigo-500">aus Katalog</b>.</p></div>') +
+      '</div>' +
+      '<div class="px-3 pt-2 grid grid-cols-2 gap-2 shrink-0">' +
+        '<button onclick="_mbOpenCatalog()" class="py-3 rounded-xl bg-indigo-600 active:bg-indigo-700 text-white text-[13px] font-bold inline-flex items-center justify-center gap-1.5"><i data-lucide="book-open" class="w-4 h-4"></i> aus Katalog</button>' +
+        '<button onclick="_mbAddFree()" class="py-3 rounded-xl border border-ink-300 active:bg-ink-100 text-ink-700 text-[13px] font-bold inline-flex items-center justify-center gap-1.5"><i data-lucide="plus" class="w-4 h-4"></i> freie Position</button>' +
+      '</div>' +
+      '<div class="bg-white border-t border-ink-200 shrink-0 mt-2">' +
+        '<div class="px-3 pt-2 flex items-center gap-2">' +
+          '<div class="min-w-0"><p class="text-[10px] text-ink-400 leading-none uppercase tracking-wider">Netto</p><p class="text-[18px] font-bold text-ink-900 leading-tight">' + _formatEur(total) + '</p></div>' +
+          '<div class="flex-1"></div>' +
+          '<button onclick="_mbPeekPreview()" class="px-3 py-2.5 rounded-xl border border-ink-300 active:bg-ink-100 text-ink-700 text-[13px] font-bold inline-flex items-center gap-1.5"><i data-lucide="eye" class="w-4 h-4"></i> Vorschau</button>' +
+        '</div>' +
+        '<div class="px-3 py-2 flex gap-2">' + ad.actionsHtml() + '</div>' +
+      '</div>' +
+    '</div>';
+  if (window.lucide) lucide.createIcons();
+}
+
+function _mbRowHtml(v, i) {
+  const priceLbl = (v.price > 0 ? _formatEur(v.price) : '—') + ' / ' + escapeHtml(v.unit || 'St');
+  return '<div class="bg-white border border-ink-200 rounded-xl p-3">' +
+    '<div class="flex items-start gap-2">' +
+      '<div class="flex-1 min-w-0" onclick="_mbEdit(' + i + ')">' +
+        '<p class="text-[14px] font-bold text-ink-900 leading-snug">' + (escapeHtml(v.title || '') || '<span class="text-ink-400 font-normal italic">ohne Titel — tippen zum Bearbeiten</span>') + '</p>' +
+        (v.subtitle ? '<p class="text-[11.5px] text-ink-500 leading-snug mt-0.5">' + escapeHtml(v.subtitle) + '</p>' : '') +
+      '</div>' +
+      '<button onclick="_mbDel(' + i + ')" class="shrink-0 text-ink-300 hover:text-rose-500 p-1"><i data-lucide="trash-2" class="w-4 h-4"></i></button>' +
+    '</div>' +
+    '<div class="flex items-center justify-between mt-2 gap-2">' +
+      '<div class="inline-flex items-center gap-1.5">' +
+        '<button onclick="_mbStep(' + i + ',-1)" class="w-8 h-8 rounded-lg border border-ink-300 active:bg-ink-100 text-ink-700 flex items-center justify-center text-xl leading-none pb-0.5">−</button>' +
+        '<input inputmode="decimal" value="' + escapeAttr(String(v.menge)) + '" onchange="_mbSetMenge(' + i + ',this.value)" class="w-11 text-center px-1 py-1.5 border border-ink-300 rounded-lg text-sm font-semibold">' +
+        '<button onclick="_mbStep(' + i + ',1)" class="w-8 h-8 rounded-lg border border-ink-300 active:bg-ink-100 text-ink-700 flex items-center justify-center text-xl leading-none pb-0.5">+</button>' +
+      '</div>' +
+      '<div class="text-right min-w-0"><p class="text-[10px] text-ink-400 leading-none truncate">' + priceLbl + '</p><p class="text-[15px] font-bold text-ink-900 leading-tight">' + _formatEur(v.line) + '</p></div>' +
+    '</div>' +
+  '</div>';
+}
+
+function _mbAfterMutate() { const ad = window._MB; if (!ad) return; try { ad.sync && ad.sync(); } catch (_) {} _mbRender(); }
+function _mbStep(i, d) { const ad = window._MB; if (ad) { ad.step(i, d); _mbAfterMutate(); } }
+function _mbSetMenge(i, v) { const ad = window._MB; if (ad) { ad.setMenge(i, v); _mbAfterMutate(); } }
+function _mbDel(i) { const ad = window._MB; if (ad) { ad.remove(i); _mbAfterMutate(); } }
+function _mbAddFree() { const ad = window._MB; if (ad) ad.addFree(); }
+function _mbEdit(i) { const ad = window._MB; if (ad) ad.edit(i); }
+
+/* --- Katalog-Picker (durchsuchbar, tippen = hinzufügen, Mehrfach-Auswahl) --- */
+function _mbOpenCatalog() {
+  const ad = window._MB; if (!ad) return;
+  window._MB_CAT = { items: ad.catalog() || [], q: '' };
+  _mbCatRender(true);
+}
+function _mbCatClose() { const h = document.getElementById('mbCatHost'); if (h) h.remove(); delete window._MB_CAT; _mbRerender(); }
+function _mbCatSearch(v) {
+  const st = window._MB_CAT; if (!st) return;
+  st.q = v; const el = document.getElementById('mbCatSearch'); const cp = el ? el.selectionStart : null;
+  _mbCatRender(false);
+  const el2 = document.getElementById('mbCatSearch'); if (el2) { el2.focus(); try { el2.setSelectionRange(cp, cp); } catch (_) {} }
+}
+function _mbCatPick(oi) {
+  const ad = window._MB, st = window._MB_CAT; if (!ad || !st) return;
+  const it = st.items[oi]; if (!it) return;
+  ad.addFromCatalog(it); try { ad.sync && ad.sync(); } catch (_) {}
+  toast((it.titel || 'Position') + ' hinzugefügt', 'success', 1400);
+  _mbRerender();
+}
+function _mbCatRender(full) {
+  const st = window._MB_CAT; if (!st) return;
+  let host = document.getElementById('mbCatHost');
+  if (!host) { host = document.createElement('div'); host.id = 'mbCatHost'; document.body.appendChild(host); }
+  const q = (st.q || '').toLowerCase().trim();
+  const list = q ? st.items.filter(it => (String(it.titel || '') + ' ' + String(it.leistungstyp || '') + ' ' + String(it.beschreibung || '')).toLowerCase().includes(q)) : st.items;
+  const rows = list.map(it => {
+    const oi = st.items.indexOf(it);
+    const price = (+it.einzelpreis > 0) ? _formatEur(+it.einzelpreis) : '';
+    return '<button onclick="_mbCatPick(' + oi + ')" class="w-full text-left bg-white border border-ink-200 rounded-xl p-3 flex items-start gap-2 active:bg-indigo-50">' +
+      '<div class="flex-1 min-w-0">' +
+        (it.leistungstyp ? '<span class="text-[9px] font-bold uppercase tracking-wider text-indigo-500">' + escapeHtml(it.leistungstyp) + '</span>' : '') +
+        '<p class="text-[14px] font-bold text-ink-900 leading-snug">' + escapeHtml(it.titel || '') + '</p>' +
+        (it.beschreibung ? '<p class="text-[11.5px] text-ink-500 leading-snug mt-0.5">' + escapeHtml(String(it.beschreibung).split(/\n/)[0]) + '</p>' : '') +
+      '</div>' +
+      '<div class="shrink-0 text-right pl-1">' + (price ? '<p class="text-[13px] font-bold text-ink-900">' + price + '</p>' : '') + '<i data-lucide="plus-circle" class="w-6 h-6 text-indigo-600 inline-block mt-0.5"></i></div>' +
+    '</button>';
+  }).join('');
+  host.innerHTML =
+    '<div class="fixed inset-0 z-[66] bg-ink-50 flex flex-col safe-bottom">' +
+      '<div class="safe-top px-3 py-2.5 bg-white border-b border-ink-200 flex items-center gap-2 shrink-0">' +
+        '<button onclick="_mbCatClose()" class="w-9 h-9 -ml-1 rounded-lg hover:bg-ink-100 flex items-center justify-center shrink-0"><i data-lucide="arrow-left" class="w-5 h-5 text-ink-700"></i></button>' +
+        '<div class="flex-1 relative"><i data-lucide="search" class="w-4 h-4 text-ink-400 absolute left-2.5 top-1/2 -translate-y-1/2"></i>' +
+          '<input id="mbCatSearch" value="' + escapeAttr(st.q || '') + '" oninput="_mbCatSearch(this.value)" placeholder="Katalog durchsuchen…" autocomplete="off" class="w-full pl-8 pr-2 py-2 border border-ink-300 rounded-lg text-sm"></div>' +
+        '<button onclick="_mbCatClose()" class="shrink-0 text-[12px] font-bold text-indigo-600 px-2.5 py-2 rounded-lg">Fertig</button>' +
+      '</div>' +
+      '<div class="flex-1 overflow-y-auto px-3 py-2 space-y-2">' +
+        (rows || '<p class="text-center text-ink-400 text-sm py-12">' + (st.items.length ? 'Kein Treffer.' : 'Katalog ist leer für diesen Mandanten.<br>Positionen werden beim Erstellen automatisch gelernt.') + '</p>') +
+      '</div>' +
+    '</div>';
+  if (window.lucide) lucide.createIcons();
+}
+
+/* --- Vorschau als eigenes Vollbild-Sheet (nur auf Abruf) --- */
+function _mbPvClose() { const h = document.getElementById('mbPvHost'); if (h) h.remove(); }
+function _mbPvSheet(bodyHtml, extraBtnHtml) {
+  let host = document.getElementById('mbPvHost');
+  if (!host) { host = document.createElement('div'); host.id = 'mbPvHost'; document.body.appendChild(host); }
+  host.innerHTML =
+    '<div class="fixed inset-0 z-[68] bg-ink-200 flex flex-col safe-bottom">' +
+      '<div class="safe-top px-3 py-2.5 bg-white border-b border-ink-200 flex items-center gap-2 shrink-0">' +
+        '<button onclick="_mbPvClose()" class="w-9 h-9 -ml-1 rounded-lg hover:bg-ink-100 flex items-center justify-center shrink-0"><i data-lucide="arrow-left" class="w-5 h-5 text-ink-700"></i></button>' +
+        '<span class="font-bold text-ink-800 text-sm flex-1">Angebots-Vorschau</span>' + (extraBtnHtml || '') +
+      '</div>' +
+      '<div class="flex-1 min-h-0 overflow-auto">' + bodyHtml + '</div>' +
+    '</div>';
+  if (window.lucide) lucide.createIcons();
+}
+async function _mbPreviewSheetAufzug() {
+  const s = window._ANG_CHAT; if (!s) return;
+  _mbPvSheet('<div class="p-8 text-center text-ink-400 text-sm"><span class="spinner inline-block w-5 h-5 border-[2px] text-indigo-500"></span><p class="mt-2">Baue PDF-Vorschau…</p></div>');
+  try { await _angChatRenderPreview(); } catch (_) {}
+  const url = s._previewBlobUrl;
+  const body = url
+    ? '<iframe class="w-full h-full bg-white" style="border:0;min-height:80vh" src="' + url + '#toolbar=0&navpanes=0"></iframe>'
+    : '<p class="p-8 text-center text-ink-400 text-sm">Vorschau konnte nicht erzeugt werden — versuch es über „klassisch".</p>';
+  if (document.getElementById('mbPvHost')) _mbPvSheet(body);
+}
+function _mbPreviewSheetFlp() {
+  try {
+    const sheets = erpQuoteRenderSheets(_flpBuildErpData());
+    const body = '<div style="padding:10px 0;"><div style="zoom:0.47;width:794px;margin:0 auto;">' +
+      sheets.map(x => '<div style="width:794px;margin:0 auto 20px;background:#fff;box-shadow:0 1px 8px rgba(0,0,0,.18);">' + x + '</div>').join('') +
+      '</div></div>';
+    const pdfBtn = '<button onclick="_flpOpenPdf(this)" class="shrink-0 text-[12px] font-bold text-indigo-600 px-2.5 py-1.5 rounded-lg border border-indigo-200 inline-flex items-center gap-1"><i data-lucide="file-text" class="w-3.5 h-3.5"></i> PDF</button>';
+    _mbPvSheet(body, pdfBtn);
+  } catch (e) { toast('Vorschau fehlgeschlagen: ' + (e.message || e), 'error', 6000); }
+}
+function _mbPeekPreview() { const ad = window._MB; if (!ad) return; try { ad.sync && ad.sync(); } catch (_) {} ad.previewSheet(); }
+
+/* --- Zum Chat / zur klassischen Ansicht „durchschauen" (Builder kurz ausblenden) --- */
+function _mbHideForPeek(label) {
+  const host = document.getElementById('mbHost'); if (host) host.style.display = 'none';
+  let fab = document.getElementById('mbReturnFab');
+  if (!fab) { fab = document.createElement('div'); fab.id = 'mbReturnFab'; document.body.appendChild(fab); }
+  fab.innerHTML = '<button onclick="_mbEndPeek()" class="fixed z-[69] left-1/2 -translate-x-1/2 px-4 py-2.5 rounded-full bg-ink-900 text-white text-[13px] font-bold shadow-2xl inline-flex items-center gap-1.5" style="bottom:5.25rem">' +
+    '<i data-lucide="arrow-left" class="w-4 h-4"></i> zurück zu ' + escapeHtml(label) + '</button>';
+  if (window.lucide) lucide.createIcons();
+}
+function _mbEndPeek() {
+  const fab = document.getElementById('mbReturnFab'); if (fab) fab.remove();
+  const host = document.getElementById('mbHost'); if (host) host.style.display = '';
+  _mbRerender();
+}
+function _mbPeekChat() {
+  const ad = window._MB; if (!ad) return;
+  if (ad.flow === 'aufzug') {
+    const chatCol = document.getElementById('angChatCol'), prevCol = document.getElementById('angChatPreviewCol');
+    if (chatCol) { chatCol.classList.remove('hidden'); chatCol.classList.add('flex'); }
+    if (prevCol) { prevCol.classList.add('hidden'); prevCol.classList.remove('flex'); }
+    const inp = document.getElementById('angChatTextInput'); if (inp) setTimeout(() => { try { inp.focus(); } catch (_) {} }, 60);
+  } else {
+    const inp = document.getElementById('flpChatInput'); if (inp) setTimeout(() => { try { inp.focus(); } catch (_) {} }, 60);
+  }
+  _mbHideForPeek('Positionen');
+}
+function _mbPeekClassic() { _mbHideForPeek('Builder'); }
+
+/* --- FLP: Einzel-Position bearbeiten (Bottom-Sheet) --- */
+function _mbEditFlp(i) {
+  const st = window._FLP_ANG; if (!st || !st.positionen || !st.positionen[i]) return;
+  const p = st.positionen[i];
+  let host = document.getElementById('mbEditHost');
+  if (!host) { host = document.createElement('div'); host.id = 'mbEditHost'; document.body.appendChild(host); }
+  const fld = (label, id, val, type, extra) => '<div><label class="text-[10px] font-bold text-ink-500 uppercase tracking-wider">' + label + '</label><input id="' + id + '" ' + (type ? ('type="' + type + '" ') : '') + (extra || '') + ' value="' + escapeAttr(val == null ? '' : String(val)) + '" class="w-full px-2 py-2 border border-ink-300 rounded-lg text-sm"></div>';
+  host.innerHTML =
+    '<div class="fixed inset-0 z-[74] flex items-end justify-center bg-black/50" onclick="if(event.target===this)_mbEditFlpClose()">' +
+      '<div class="bg-white w-full max-w-lg rounded-t-2xl shadow-2xl flex flex-col safe-bottom" style="max-height:92vh">' +
+        '<div class="px-4 py-3 border-b border-ink-200 flex items-center justify-between"><h3 class="font-bold text-ink-900">Position ' + (i + 1) + '</h3><button onclick="_mbEditFlpClose()" class="w-9 h-9 rounded-lg hover:bg-ink-100 flex items-center justify-center"><i data-lucide="x" class="w-5 h-5 text-ink-700"></i></button></div>' +
+        '<div class="p-4 space-y-2.5 overflow-y-auto">' +
+          fld('Bezeichnung', 'mbf_bez', p.bezeichnung, '', 'placeholder="Artikelname"') +
+          fld('Artikel-Nr (optional)', 'mbf_art', p.article_no, '', 'placeholder="z.B. V3F16L"') +
+          '<div class="grid grid-cols-2 gap-2">' + fld('Menge', 'mbf_menge', p.menge, 'number', 'step="1" inputmode="decimal"') + fld('Einheit', 'mbf_unit', p.unit || 'Stück', '', '') + '</div>' +
+          '<div class="grid grid-cols-3 gap-2">' + fld('E-Preis €', 'mbf_preis', p.einzelpreis, 'number', 'step="0.01" inputmode="decimal"') + fld('Rabatt %', 'mbf_rab', p.rabatt_pct, 'number', 'step="1" inputmode="decimal"') + fld('MwSt %', 'mbf_mwst', p.mwst, 'number', 'step="1" inputmode="decimal"') + '</div>' +
+        '</div>' +
+        '<div class="px-4 py-3 border-t border-ink-200 flex gap-2"><button onclick="_mbEditFlpClose()" class="flex-1 py-2.5 rounded-xl border border-ink-300 text-ink-700 font-bold">Abbrechen</button><button onclick="_mbEditFlpSave(' + i + ')" class="flex-1 py-2.5 rounded-xl bg-indigo-600 text-white font-bold">Übernehmen</button></div>' +
+      '</div></div>';
+  if (window.lucide) lucide.createIcons();
+}
+function _mbEditFlpClose() { const h = document.getElementById('mbEditHost'); if (h) h.remove(); }
+function _mbEditFlpSave(i) {
+  const st = window._FLP_ANG; if (!st || !st.positionen || !st.positionen[i]) return;
+  const g = id => document.getElementById(id); const p = st.positionen[i];
+  const num = v => +String(v == null ? '' : v).replace(',', '.') || 0;
+  p.bezeichnung = g('mbf_bez').value; p.article_no = g('mbf_art').value;
+  p.menge = num(g('mbf_menge').value); p.unit = g('mbf_unit').value || 'Stück';
+  p.einzelpreis = num(g('mbf_preis').value); p.rabatt_pct = num(g('mbf_rab').value); p.mwst = num(g('mbf_mwst').value) || 19;
+  _mbEditFlpClose();
+  try { _flpRenderPosTable(); _flpRenderPdfPreview(); _flpSaveDraft(); } catch (_) {}
+  _mbRender();
+}
+
+/* Aufzug: Pauschal-Flag toggeln (Summe zeigen/weglassen). */
+function _mbToggleFlag(flag) { const s = window._ANG_CHAT; if (!s) return; s.collected = s.collected || {}; s.collected[flag] = !s.collected[flag]; try { _angChatRenderPreview(); } catch (_) {} _mbRender(); }
+
+/* --- Adapter: Aufzug --- */
+function _mbAdapterAufzug() {
+  const s = window._ANG_CHAT; if (!s) return null;
+  s.collected = s.collected || {}; s.collected.positionen = s.collected.positionen || [];
+  const P = () => (s.collected.positionen || []);
+  const mengeOf = p => (p.menge == null ? 1 : +p.menge);
+  return {
+    flow: 'aufzug',
+    title: 'Angebot · #' + (s.ticketId || '?'),
+    sub: (s.collected.stammdaten && s.collected.stammdaten.vertragspartner) || (s.ticket && s.ticket.subject) || '',
+    closeCall: 'closeAngebotsChatModal()',
+    positions: P,
+    view(p) { const m = mengeOf(p), pr = +p.einzelpreis || 0; return { title: p.bezeichnung || '', subtitle: String(p.beschreibung || '').split(/\n/)[0] || '', menge: m, price: pr, unit: p.einheit || 'ST', line: m * pr }; },
+    step(i, d) { const p = P()[i]; if (p) p.menge = Math.max(0, mengeOf(p) + d); },
+    setMenge(i, v) { const p = P()[i]; if (p) p.menge = Math.max(0, +String(v).replace(',', '.') || 0); },
+    remove(i) { P().splice(i, 1); },
+    addFromCatalog(e) { P().push({ bezeichnung: e.titel || '', beschreibung: e.beschreibung || '', menge: 1, einheit: e.einheit || 'ST', einzelpreis: (+e.einzelpreis > 0 ? +e.einzelpreis : 0), kategorie: 'Material' }); },
+    addFree() { P().push({ bezeichnung: '', beschreibung: '', menge: 1, einheit: 'ST', einzelpreis: 0, kategorie: 'Material' }); openAngPositionenEditor(); },
+    edit() { openAngPositionenEditor(); },
+    async loadCatalog() { try { const kl = await loadPositionskatalog().catch(() => []); _ANG_POS_KAT = _katalogEntriesFor((s.account && s.account.id) || s.accountId, kl); } catch (_) { _ANG_POS_KAT = []; } },
+    catalog() { return (_ANG_POS_KAT || []).filter(k => k.titel && k.aktiv !== false).map(k => ({ titel: k.titel, beschreibung: k.beschreibung || '', einheit: k.einheit || 'ST', einzelpreis: k.einzelpreis, leistungstyp: k.leistungstyp || '' })); },
+    totalNet() { let n = 0; P().forEach(p => { n += mengeOf(p) * (+p.einzelpreis || 0); }); return n; },
+    sync() { s.collected._totals = _angebotCalcTotals(s.collected); },
+    previewSheet() { _mbPreviewSheetAufzug(); },
+    chipsHtml() {
+      const c = s.collected || {};
+      const chip = (active, label, onclick) => '<button onclick="' + onclick + '" class="shrink-0 text-[11px] font-semibold px-2.5 py-1 rounded-full border ' + (active ? 'bg-indigo-600 text-white border-indigo-600' : 'bg-white text-ink-600 border-ink-300') + '">' + label + '</button>';
+      return chip(!c.gesamtsumme_weglassen, 'Gesamtsumme zeigen', "_mbToggleFlag('gesamtsumme_weglassen')");
+    },
+    actionsHtml() { return '<button onclick="_mbPeekChat()" class="flex-1 py-3 rounded-xl bg-emerald-600 active:bg-emerald-700 text-white text-[13px] font-bold inline-flex items-center justify-center gap-1.5"><i data-lucide="send" class="w-4 h-4"></i> Senden / Speichern</button>'; },
+  };
+}
+
+/* --- Adapter: FLP (ERP Hero) --- */
+function _mbAdapterFlp() {
+  const st = window._FLP_ANG; if (!st) return null;
+  st.positionen = st.positionen || [];
+  const P = () => (st.positionen || []);
+  return {
+    flow: 'flp',
+    title: 'FLP-Angebot',
+    sub: (st.customer && st.customer.f && st.customer.f.name1) || st.mandantName || '',
+    closeCall: 'closeFlpAngebotModal()',
+    positions: P,
+    view(p) { const m = +p.menge || 0, pr = +p.einzelpreis || 0, rab = +p.rabatt_pct || 0; return { title: p.bezeichnung || '', subtitle: [p.article_no ? ('Art ' + p.article_no) : '', rab ? ('−' + rab + '%') : ''].filter(Boolean).join(' · '), menge: m, price: pr, unit: p.unit || 'Stück', line: m * pr * (1 - rab / 100) }; },
+    step(i, d) { const p = P()[i]; if (p) p.menge = Math.max(0, (+p.menge || 0) + d); },
+    setMenge(i, v) { const p = P()[i]; if (p) p.menge = Math.max(0, +String(v).replace(',', '.') || 0); },
+    remove(i) { P().splice(i, 1); },
+    addFromCatalog(e) { P().push({ article_no: e.leistungstyp || '', bezeichnung: e.titel || '', menge: 1, einzelpreis: +e.einzelpreis || 0, rabatt_pct: 0, mwst: +e._vat || 19, unit: e.einheit || 'Stück', _existing: true }); },
+    addFree() { P().push({ article_no: '', bezeichnung: '', menge: 1, einzelpreis: 0, rabatt_pct: 0, mwst: 19, unit: 'Stück' }); _mbEditFlp(P().length - 1); },
+    edit(i) { _mbEditFlp(i); },
+    async loadCatalog() { try { if (!st.catalog) st.catalog = await _flpLoadArticles(st.mandantName).catch(() => []); } catch (_) {} },
+    catalog() { return (st.catalog || []).filter(a => a.name1).map(a => ({ titel: a.name1, beschreibung: '', einheit: 'Stück', einzelpreis: a.sales_price, leistungstyp: a.article_no || '', _vat: a.vat_rate })); },
+    totalNet() { return _flpCalcTotals(P()).netto; },
+    sync() { try { _flpRenderPosTable(); _flpRenderPdfPreview(); _flpSaveDraft(); } catch (_) {} },
+    previewSheet() { _mbPreviewSheetFlp(); },
+    chipsHtml: null,
+    actionsHtml() {
+      return '<button onclick="_flpSendAngebot(this)" class="flex-1 py-3 rounded-xl bg-orange-600 active:bg-orange-700 text-white text-[13px] font-bold inline-flex items-center justify-center gap-1.5"><i data-lucide="send" class="w-4 h-4"></i> An Kunden</button>' +
+        '<button onclick="_flpPushAngebot(this)" class="flex-1 py-3 rounded-xl bg-indigo-600 active:bg-indigo-700 text-white text-[13px] font-bold inline-flex items-center justify-center gap-1.5"><i data-lucide="upload-cloud" class="w-4 h-4"></i> In ERP</button>';
+    },
+  };
+}
+
 async function openAngPositionenEditor() {
   const s = window._ANG_CHAT;
   if (!s) return;
@@ -28995,6 +29318,7 @@ async function _angChatRenderPreview() {
   }
   const togBtn = document.getElementById('angChatMobilePreviewBtn');
   if (togBtn) togBtn.classList.remove('hidden');
+  _mbRerender();  // v2.47: mobilen Builder mitziehen (Totals/Positionen aktuell halten)
 }
 
 /* v2.46.194: Stellt im Aufwand-Modus sicher, dass gültige Stundensätze da sind.
@@ -29619,6 +29943,7 @@ function _angChatToCtx(s) {
 }
 
 function closeAngebotsChatModal() {
+  try { _mbClose(); } catch (_) {}  // v2.47: mobilen Builder mit schließen
   delete window._ANG_CHAT;
   const host = document.getElementById('subModalHost');
   if (host) host.innerHTML = '';
