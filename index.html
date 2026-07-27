@@ -788,7 +788,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.295';
+const APP_VERSION = 'v2.46.296';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -35825,6 +35825,9 @@ const ZDB_BASE_ID = APP_CONFIG.APP_BASE_ID;
 const ZDB_TYP_OPTIONS = ['Kunde', 'Interessent', 'Lieferant', 'Partner', 'Sonstige'];
 const ZDB_ENABLED_KEY = 'fdh_zdb_enabled_accounts';
 const _ZDB_TABLE_CACHE = new Map();   // slug → {slug, firma:{id,name}, kontakt:{id,name}}
+// v2.46.296: Autosave global für ALLE Mandanten (Tabellen werden bei Bedarf automatisch
+// angelegt). Auf false setzen, um das automatische Mitschreiben komplett abzuschalten.
+let ZDB_AUTOSAVE = true;
 
 function _zdbSleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 function _zdbGetEnabled() { try { return new Set(JSON.parse(localStorage.getItem(ZDB_ENABLED_KEY) || '[]')); } catch (_) { return new Set(); } }
@@ -35858,6 +35861,7 @@ function _zdbFirmaFieldSpecs() {
     { name: 'freshdesk_company_id', type: 'singleLineText' },
     { name: 'created_at', type: 'singleLineText' },
     { name: 'updated_at', type: 'singleLineText' },
+    { name: 'sync_konflikt', type: 'multilineText' },
   ];
 }
 function _zdbKontaktFieldSpecs(firmaTableId) {
@@ -35875,6 +35879,7 @@ function _zdbKontaktFieldSpecs(firmaTableId) {
     { name: 'freshdesk_contact_id', type: 'singleLineText' },
     { name: 'created_at', type: 'singleLineText' },
     { name: 'updated_at', type: 'singleLineText' },
+    { name: 'sync_konflikt', type: 'multilineText' },
   ];
 }
 
@@ -35973,48 +35978,76 @@ function _zdbClean(o) {
 }
 const _zdbEsc = s => String(s == null ? '' : s).replace(/'/g, "\\'");
 
-/* Upsert Firma → Record-ID. Dedup: freshdesk_company_id, sonst name+ort. */
+function _zdbNorm(v) { return String(v == null ? '' : v).trim().toLowerCase(); }
+async function _zdbUpdateSafe(tableName, id, patch) {
+  // sync_konflikt-Feld existiert evtl. auf Alt-Tabellen noch nicht → dann ohne erneut versuchen
+  try { return await _zdbUpdate(tableName, id, patch); }
+  catch (e) { if (/sync_konflikt|UNKNOWN_FIELD/i.test(e.message) && ('sync_konflikt' in patch)) { const p = Object.assign({}, patch); delete p.sync_konflikt; return await _zdbUpdate(tableName, id, p); } throw e; }
+}
+/* Non-destruktives Sync-Upsert Firma → Record-ID. Leere Felder werden gefüllt, bestehende
+   NIE überschrieben; Abweichungen landen als JSON im Feld sync_konflikt (zur Prüfung). */
 async function _zdbUpsertFirma(names, data) {
   let hit = null;
   try {
-    if (data.freshdesk_company_id) {
-      hit = (await _zdbSelect(names.firma.name, { filter: "{freshdesk_company_id}='" + _zdbEsc(data.freshdesk_company_id) + "'", maxRecords: 1 }))[0] || null;
-    }
-    if (!hit && data.name) {
-      const f = "AND(LOWER({name})='" + _zdbEsc(String(data.name).toLowerCase()) + "',LOWER({ort})='" + _zdbEsc(String(data.ort || '').toLowerCase()) + "')";
-      hit = (await _zdbSelect(names.firma.name, { filter: f, maxRecords: 1 }))[0] || null;
-    }
+    if (data.freshdesk_company_id) hit = (await _zdbSelect(names.firma.name, { filter: "{freshdesk_company_id}='" + _zdbEsc(data.freshdesk_company_id) + "'", maxRecords: 1 }))[0] || null;
+    if (!hit && data.name) hit = (await _zdbSelect(names.firma.name, { filter: "AND(LOWER({name})='" + _zdbEsc(String(data.name).toLowerCase()) + "',LOWER({ort})='" + _zdbEsc(String(data.ort || '').toLowerCase()) + "')", maxRecords: 1 }))[0] || null;
   } catch (_) {}
-  const fields = _zdbClean(Object.assign({}, data, { updated_at: nowIso() }));
-  if (hit) { await _zdbUpdate(names.firma.name, hit.id, fields); return hit.id; }
-  fields.created_at = nowIso();
-  return (await _zdbWrite(names.firma.name, fields)).id;
+  if (!hit) return (await _zdbWrite(names.firma.name, _zdbClean(Object.assign({}, data, { created_at: nowIso(), updated_at: nowIso() })))).id;
+  const ex = hit.fields || {};
+  const patch = {}, conflicts = {};
+  for (const k of ['name', 'strasse', 'plz', 'ort', 'land', 'email', 'telefon', 'ust_id']) {
+    const nv = data[k]; if (nv == null || !String(nv).trim()) continue;
+    const ev = ex[k];
+    if (ev == null || !String(ev).trim()) patch[k] = nv;
+    else if (_zdbNorm(ev) !== _zdbNorm(nv)) conflicts[k] = { bestand: String(ev), neu: String(nv), quelle: data.quelle || '' };
+  }
+  if (data.freshdesk_company_id && !ex.freshdesk_company_id) patch.freshdesk_company_id = String(data.freshdesk_company_id);
+  if (data.quelle) patch.quelle = data.quelle;
+  patch.sync_konflikt = Object.keys(conflicts).length ? JSON.stringify(conflicts) : '';
+  patch.updated_at = nowIso();
+  await _zdbUpdateSafe(names.firma.name, hit.id, patch);
+  return hit.id;
 }
-/* Upsert Kontakt → Record-ID. Dedup: email, sonst vorname+nachname. */
+/* Non-destruktives Sync-Upsert Kontakt → Record-ID. */
 async function _zdbUpsertKontakt(names, data, firmaRecId) {
-  const fields = _zdbClean(Object.assign({}, data));
-  if (!fields.name) { const nm = [data.vorname, data.nachname].filter(Boolean).join(' ').trim(); if (nm) fields.name = nm; }
-  if (firmaRecId) fields.firma = [firmaRecId];
   let hit = null;
   try {
-    if (data.email) {
-      hit = (await _zdbSelect(names.kontakt.name, { filter: "LOWER({email})='" + _zdbEsc(String(data.email).toLowerCase()) + "'", maxRecords: 1 }))[0] || null;
-    }
-    if (!hit && (data.vorname || data.nachname)) {
-      const f = "AND(LOWER({vorname})='" + _zdbEsc(String(data.vorname || '').toLowerCase()) + "',LOWER({nachname})='" + _zdbEsc(String(data.nachname || '').toLowerCase()) + "')";
-      hit = (await _zdbSelect(names.kontakt.name, { filter: f, maxRecords: 1 }))[0] || null;
-    }
+    if (data.email) hit = (await _zdbSelect(names.kontakt.name, { filter: "LOWER({email})='" + _zdbEsc(String(data.email).toLowerCase()) + "'", maxRecords: 1 }))[0] || null;
+    if (!hit && (data.vorname || data.nachname)) hit = (await _zdbSelect(names.kontakt.name, { filter: "AND(LOWER({vorname})='" + _zdbEsc(String(data.vorname || '').toLowerCase()) + "',LOWER({nachname})='" + _zdbEsc(String(data.nachname || '').toLowerCase()) + "')", maxRecords: 1 }))[0] || null;
   } catch (_) {}
-  fields.updated_at = nowIso();
-  if (hit) { await _zdbUpdate(names.kontakt.name, hit.id, fields); return hit.id; }
-  fields.created_at = nowIso();
-  return (await _zdbWrite(names.kontakt.name, fields)).id;
+  const nm = [data.vorname, data.nachname].filter(x => x && String(x).trim()).join(' ').trim();
+  if (!hit) {
+    const fields = _zdbClean(Object.assign({}, data, { created_at: nowIso(), updated_at: nowIso() }));
+    if (nm && !fields.name) fields.name = nm;
+    if (firmaRecId) fields.firma = [firmaRecId];
+    return (await _zdbWrite(names.kontakt.name, fields)).id;
+  }
+  const ex = hit.fields || {};
+  const patch = {}, conflicts = {};
+  for (const k of ['vorname', 'nachname', 'email', 'telefon', 'mobil', 'position', 'typ']) {
+    const nv = data[k]; if (nv == null || !String(nv).trim()) continue;
+    const ev = ex[k];
+    if (ev == null || !String(ev).trim()) patch[k] = nv;
+    else if (_zdbNorm(ev) !== _zdbNorm(nv)) conflicts[k] = { bestand: String(ev), neu: String(nv), quelle: data.quelle || '' };
+  }
+  if (firmaRecId) {
+    const exF = (ex.firma || [])[0];
+    if (!exF) patch.firma = [firmaRecId];
+    else if (exF !== firmaRecId) conflicts.firma = { bestand: exF, neu: firmaRecId, quelle: data.quelle || '', link: true };
+  }
+  if (nm && (!ex.name || !String(ex.name).trim())) patch.name = nm;
+  if (data.freshdesk_contact_id && !ex.freshdesk_contact_id) patch.freshdesk_contact_id = String(data.freshdesk_contact_id);
+  if (data.quelle) patch.quelle = data.quelle;
+  patch.sync_konflikt = Object.keys(conflicts).length ? JSON.stringify(conflicts) : '';
+  patch.updated_at = nowIso();
+  await _zdbUpdateSafe(names.kontakt.name, hit.id, patch);
+  return hit.id;
 }
 
 /* Öffentliche Speicher-API: wird ZUSÄTZLICH an bestehenden Speicherpunkten aufgerufen.
    Non-blocking gedacht — Fehler dürfen die bestehenden Flows NIE kippen. */
 async function zdbSaveFirmaKontakt(account, firmaData, kontaktData) {
-  if (!account || !_zdbIsEnabled(account)) return null;
+  if (!account || ZDB_AUTOSAVE === false) return null;
   try {
     const names = await _zdbEnsureTables(account);
     let firmaId = null;
@@ -36023,6 +36056,20 @@ async function zdbSaveFirmaKontakt(account, firmaData, kontaktData) {
     if (kontaktData && (kontaktData.email || kontaktData.vorname || kontaktData.nachname)) kontaktId = await _zdbUpsertKontakt(names, kontaktData, firmaId);
     return { firmaId, kontaktId };
   } catch (e) { console.warn('[ZDB] Speichern fehlgeschlagen:', e.message); return null; }
+}
+
+/* Bequemer Wrapper: loser Kontakt (name als String ODER vorname/nachname; firma als String)
+   → Zentral-DB. Non-blocking, fehlertolerant. Für Crawler / FD-FS-Push / sonstige Quellen. */
+function _zdbSaveContactLoose(account, c) {
+  if (!account || !c) return;
+  try {
+    const parts = String(c.name || '').trim().split(/\s+/).filter(Boolean);
+    const vorname = c.vorname != null ? c.vorname : (parts.length > 1 ? parts.slice(0, -1).join(' ') : (parts[0] || ''));
+    const nachname = c.nachname != null ? c.nachname : (parts.length > 1 ? parts[parts.length - 1] : '');
+    zdbSaveFirmaKontakt(account,
+      c.firma ? { name: c.firma, strasse: c.strasse, plz: c.plz, ort: c.ort, land: c.land, quelle: c.quelle } : null,
+      { vorname, nachname, email: c.email, telefon: c.telefon, mobil: c.mobil, position: c.position, typ: c.typ, quelle: c.quelle, freshdesk_contact_id: c.fdId });
+  } catch (_) {}
 }
 
 /* Einmal-Migration eines Mandanten: kopiert bestehende Kontakte in die ZDB-Tabellen.
@@ -36243,8 +36290,10 @@ function _zdbPaintView() {
   else if (d.error === 'perm') body = '<div class="bg-white rounded-xl border border-ink-200 p-4">' + _zdbPermHintHtml() + '</div>';
   else if (d.error === 'missing') body = '<div class="bg-white rounded-xl border border-ink-200 p-4"><div class="text-center py-6"><p class="text-sm text-ink-600">Für diesen Mandanten sind die Tabellen noch nicht angelegt.</p><p class="text-[12px] text-ink-500 mt-1">Einstellungen → <b>Zentrale Kontakt-DB</b> → „Tabellen anlegen + migrieren".</p></div></div>';
   else if (d.error) body = '<div class="bg-white rounded-xl border border-ink-200 p-4"><p class="text-sm text-rose-600">Fehler beim Laden: ' + escapeHtml(d.msg || '') + '</p></div>';
-  else body = (tab === 'firmen') ? _zdbFirmenBody(d) : _zdbKontakteBody(d);
+  else body = (tab === 'konflikte') ? _zdbKonflikteBody(d) : (tab === 'firmen') ? _zdbFirmenBody(d) : _zdbKontakteBody(d);
   const canEdit = !!d.firmen;
+  const _konf = canEdit ? d.firmen.concat(d.kontakte).filter(r => r.fields && String(r.fields.sync_konflikt || '').trim()) : [];
+  const konfTab = _konf.length ? '<button onclick="_zdbViewSetTab(\'konflikte\')" class="px-3 py-1 rounded-lg text-[12px] font-bold inline-flex items-center gap-1 ' + (tab === 'konflikte' ? 'bg-rose-600 text-white' : 'bg-rose-100 text-rose-700 hover:bg-rose-200') + '"><i data-lucide="alert-triangle" class="w-3.5 h-3.5"></i> Konflikte ' + _konf.length + '</button>' : '';
   box.innerHTML =
     '<div class="bg-white rounded-xl border border-indigo-200 p-2.5 mb-2">' +
       '<div class="flex items-center gap-2 flex-wrap">' +
@@ -36255,7 +36304,7 @@ function _zdbPaintView() {
         '<button onclick="closeZdbTableView()" class="text-[11px] bg-ink-50 hover:bg-ink-100 border border-ink-200 text-ink-700 px-2 py-1.5 rounded inline-flex items-center gap-1"><i data-lucide="x" class="w-3 h-3"></i> Schließen</button>' +
       '</div>' +
       '<p class="text-[10px] text-ink-500 font-mono mt-1 truncate">' + escapeHtml(names.firma) + ' · ' + escapeHtml(names.kontakt) + '</p>' +
-      '<div class="flex gap-1 mt-2 items-center">' + tabBtn('kontakte', 'Kontakte') + tabBtn('firmen', 'Firmen') +
+      '<div class="flex gap-1 mt-2 items-center flex-wrap">' + tabBtn('kontakte', 'Kontakte') + tabBtn('firmen', 'Firmen') + konfTab +
         (canEdit ? '<div class="flex-1"></div><button onclick="_zdbNewRecord(\'' + tab + '\')" class="px-2.5 py-1 rounded-lg text-[12px] font-bold bg-emerald-600 hover:bg-emerald-700 text-white inline-flex items-center gap-1"><i data-lucide="plus" class="w-3.5 h-3.5"></i> Neu</button>' : '') +
       '</div>' +
     '</div>' + body;
@@ -36307,6 +36356,61 @@ function _zdbFirmenBody(d) {
   return '<div class="bg-white rounded-xl border border-ink-200 p-4">' +
     '<p class="text-[11px] text-ink-500 mb-1.5 font-semibold">' + rows.length + ' Firmen <span class="font-normal text-ink-400">· Zeile tippen = bearbeiten</span></p>' +
     '<div class="overflow-x-auto"><table class="w-full text-[12px] border-collapse"><thead><tr><th class="border-b border-ink-200 bg-ink-50 w-8"></th>' + _zdbHeadCells(cols) + '<th class="text-left font-semibold text-ink-600 px-2 py-1.5 border-b border-ink-200 bg-ink-50">Kontakte</th></tr></thead><tbody>' + trs + '</tbody></table></div></div>';
+}
+
+/* ---- Sync-Konflikte: abweichende Werte prüfen (Neu übernehmen / Bestand behalten) ---- */
+function _zdbKonflikteBody(d) {
+  const items = [];
+  const collect = (arr, kind) => (arr || []).forEach(r => {
+    const raw = r.fields && r.fields.sync_konflikt; if (!raw || !String(raw).trim()) return;
+    let conf = null; try { conf = JSON.parse(raw); } catch (_) {}
+    if (conf && Object.keys(conf).length) items.push({ kind, id: r.id, fields: r.fields, conf });
+  });
+  collect(d.firmen, 'firma'); collect(d.kontakte, 'kontakt');
+  if (!items.length) return '<div class="bg-white rounded-xl border border-ink-200 p-6 text-center text-sm text-ink-500">Keine offenen Sync-Konflikte. 👍</div>';
+  const lbl = { name: 'Name', strasse: 'Strasse', plz: 'PLZ', ort: 'Ort', land: 'Land', email: 'E-Mail', telefon: 'Telefon', ust_id: 'USt-ID', vorname: 'Vorname', nachname: 'Nachname', mobil: 'Mobil', position: 'Position', typ: 'Typ', firma: 'Firma' };
+  const cards = items.map(it => {
+    const disp = it.fields.name || [it.fields.vorname, it.fields.nachname].filter(Boolean).join(' ') || it.fields.email || '?';
+    const rowsHtml = Object.keys(it.conf).map(k => {
+      const c = it.conf[k];
+      const bestand = c.link ? (d.firmaName[c.bestand] || c.bestand) : c.bestand;
+      const neu = c.link ? (d.firmaName[c.neu] || c.neu) : c.neu;
+      return '<div class="text-[12px] py-1 border-b border-ink-100 last:border-0">' +
+        '<span class="text-ink-500 font-semibold">' + escapeHtml(lbl[k] || k) + '</span>' +
+        '<div class="pl-2"><span class="text-ink-400">Bestand:</span> <span class="text-ink-800">' + escapeHtml(String(bestand)) + '</span></div>' +
+        '<div class="pl-2"><span class="text-emerald-600">Neu (' + escapeHtml(c.quelle || '?') + '):</span> <span class="text-emerald-800 font-medium">' + escapeHtml(String(neu)) + '</span></div>' +
+        '</div>';
+    }).join('');
+    return '<div class="bg-white rounded-xl border border-rose-200 p-3 mb-2">' +
+      '<p class="font-bold text-sm text-ink-900 mb-1.5 inline-flex items-center gap-1.5"><span class="text-[9px] font-bold px-1.5 py-0.5 rounded bg-rose-100 text-rose-700 border border-rose-300 uppercase">' + (it.kind === 'firma' ? 'Firma' : 'Kontakt') + '</span> ' + escapeHtml(disp) + '</p>' +
+      rowsHtml +
+      '<div class="flex gap-2 mt-2 justify-end">' +
+        '<button onclick="_zdbResolveConflict(\'' + it.kind + '\',\'' + it.id + '\',\'keep\', this)" class="px-3 py-1.5 text-[12px] font-bold bg-ink-100 hover:bg-ink-200 text-ink-700 rounded-lg">Bestand behalten</button>' +
+        '<button onclick="_zdbResolveConflict(\'' + it.kind + '\',\'' + it.id + '\',\'take\', this)" class="px-3 py-1.5 text-[12px] font-bold bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg inline-flex items-center gap-1"><i data-lucide="check" class="w-3.5 h-3.5"></i> Neu übernehmen</button>' +
+      '</div></div>';
+  }).join('');
+  return '<div><p class="text-[11px] text-rose-600 mb-1.5 font-semibold">' + items.length + ' Datensatz/-sätze mit abweichenden Werten — bitte prüfen</p>' + cards + '</div>';
+}
+async function _zdbResolveConflict(kind, recId, action, btn) {
+  const d = ZDB_VIEW_STATE.data; const account = _zdbCurrentAccount();
+  if (!d || !account) return;
+  const names = _zdbTableNames(account);
+  const tableName = kind === 'firma' ? names.firma : names.kontakt;
+  const arr = kind === 'firma' ? d.firmen : d.kontakte;
+  const rec = arr.find(r => r.id === recId); if (!rec) return;
+  let conf = {}; try { conf = JSON.parse(rec.fields.sync_konflikt || '{}'); } catch (_) {}
+  const patch = { sync_konflikt: '', updated_at: nowIso() };
+  if (action === 'take') { for (const k of Object.keys(conf)) { const c = conf[k]; patch[k] = c.link ? [c.neu] : c.neu; } }
+  if (btn) setBusy(btn, true, '…');
+  try {
+    await _zdbUpdateSafe(tableName, recId, patch);
+    Object.assign(rec.fields, patch);
+    if (action === 'take' && kind === 'firma' && patch.name) d.firmaName[recId] = patch.name;
+    const remain = d.firmen.concat(d.kontakte).some(r => r.fields && String(r.fields.sync_konflikt || '').trim());
+    if (!remain) ZDB_VIEW_STATE.tab = 'kontakte';
+    _zdbPaintView();
+    toast(action === 'take' ? 'Neue Werte übernommen ✓' : 'Bestand behalten ✓', 'success', 3000);
+  } catch (e) { if (btn) setBusy(btn, false); toast('Fehler: ' + e.message, 'error', 6000); }
 }
 
 /* ---- Inline-Bearbeiten / Neu (Modal, schreibt zurück nach Airtable) ---- */
@@ -36555,6 +36659,9 @@ async function _crawlTicketSignatures(accountId, ticket, opts) {
         fd_status: fd.status, fd_contact_id: fd.id, fs_status: fs, mc_status: 'unbekannt',
         crawled_at: nowIso(), updated_at: nowIso(),
       }, CRAWLED_TYPES_MAP);
+      // v2.46.296: zusätzlich in die zentrale Mandanten-DB
+      const _zaCrawl = (APP_STATE.accounts || []).find(a => String(a.id) === String(accountId));
+      _zdbSaveContactLoose(_zaCrawl, { name: p.name, firma: p.firma, email, telefon: p.telefon, mobil: p.mobil, position: p.position, fdId: fd.id, quelle: 'crawl' });
       added++; addedNames.push(p.name || email);
     }
     if (added) {
@@ -36755,6 +36862,9 @@ async function _crawlPushFd(i, btn) {
     }
     await airtableUpdateWithAutoField(CRAWLED_TABLE, r.recordId, { fd_status: 'komplett', fd_contact_id: String(cid || ''), updated_at: nowIso() }, CRAWLED_TYPES_MAP);
     r.fd_status = 'komplett'; r.fd_contact_id = String(cid || '');
+    // v2.46.296: zusätzlich in die zentrale Mandanten-DB
+    _zdbSaveContactLoose((APP_STATE.accounts || []).find(a => String(a.id) === String(r.account_id)),
+      { name: r.name, firma: r.firma, email: r.email, telefon: r.telefon, mobil: r.mobil, position: r.position, typ: r.kontakt_typ, fdId: String(cid || ''), quelle: 'freshdesk' });
     _renderCrawledContacts();
     toast('Freshdesk aktualisiert ✓', 'success', 3000);
   } catch (e) { setBusy(btn, false); toast('FD-Push: ' + (e.message || e), 'error', 8000); }
@@ -36772,6 +36882,9 @@ async function _crawlPushFs(i, btn) {
   try {
     await airtableUpdateWithAutoField(CRAWLED_TABLE, r.recordId, { fs_status: 'komplett', updated_at: nowIso() }, CRAWLED_TYPES_MAP);
     r.fs_status = 'komplett';
+    // v2.46.296: zusätzlich in die zentrale Mandanten-DB
+    _zdbSaveContactLoose((APP_STATE.accounts || []).find(a => String(a.id) === String(r.account_id)),
+      { name: r.name, firma: r.firma, email: r.email, telefon: r.telefon, mobil: r.mobil, position: r.position, typ: r.kontakt_typ, quelle: 'freshsales' });
     _renderCrawledContacts();
   } catch (_) {}
 }
@@ -41864,6 +41977,15 @@ async function _ciDoCreate(btn) {
     if (type === 'aufzug') await _ciPushAufzug(account, d, log);
     else if (type === 'flp') await _ciPushFlp(account, d, log);
     else log.push('ERP: kein ERP mit diesem Account verknüpft — nur Freshdesk.');
+    // v2.46.296: zusätzlich in die zentrale Mandanten-DB
+    try {
+      if (account && typeof zdbSaveFirmaKontakt === 'function') {
+        zdbSaveFirmaKontakt(account,
+          d.firma ? { name: d.firma, strasse: d.strasse, plz: d.plz, ort: d.ort, land: d.land, quelle: 'import' } : null,
+          { vorname: d.vorname, nachname: d.nachname, email: d.email, telefon: d.telefon, mobil: d.mobil, position: d.rolle, quelle: 'import' });
+        log.push('Zentrale DB: gespeichert ✓');
+      }
+    } catch (_) {}
     setBusy(btn, false);
     if (btn) btn.disabled = true;
     _ciShowResult(log);
