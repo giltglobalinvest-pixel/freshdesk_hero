@@ -788,7 +788,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.298';
+const APP_VERSION = 'v2.46.299';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -26503,6 +26503,7 @@ function _angMapBkFieldsToRestore(f) {
       abrechnung_modus:       f.abrechnung_modus || 'pauschal',
       preisanzeige_modus:     f.preisanzeige_modus || 'einzel',
       gesamtpreis_ausblenden: !!f.gesamtpreis_ausblenden,
+      gesamtsumme_weglassen: !!f.gesamtsumme_weglassen,
       positionen, stundensaetze,
       mwst_satz:              +f.ust_prozent || 19,
       pauschalpreis_netto:    +f.pauschalpreis_netto || 0,
@@ -28165,6 +28166,9 @@ async function angChatUserResponse(userText) {
       stundensaetze:    (Array.isArray(result.plan?.stundensaetze) && result.plan.stundensaetze.length)
                           ? result.plan.stundensaetze
                           : (prev.stundensaetze || []),
+      // v2.46.299: Summen-Flags über Iterationen erhalten (KI gibt sie nicht immer zurück)
+      gesamtsumme_weglassen:  (result.plan && result.plan.gesamtsumme_weglassen != null) ? !!result.plan.gesamtsumme_weglassen : !!prev.gesamtsumme_weglassen,
+      gesamtpreis_ausblenden: (result.plan && result.plan.gesamtpreis_ausblenden != null) ? !!result.plan.gesamtpreis_ausblenden : !!prev.gesamtpreis_ausblenden,
     });
     // v2.46.280: Im Aufwand-Modus rendert nur die Stundensätze-Tabelle — Positionen
     // sind unsichtbar. Bepreiste Positionen (z.B. eine vom User gewünschte
@@ -28258,7 +28262,8 @@ async function _angChatGenerateOffer(s, userText) {
     '- Wenn User Preise nennt → übernimm EXAKT\n' +
     '- Wenn nicht → realistisch branchenüblich schätzen\n' +
     '- User will bei EINZELNEN Positionen keinen Preis zeigen (z.B. „Preis bei Pos 1+2 weglassen", „Pos 1 nach Aufwand") → setze bei GENAU diesen Positionen preis_aufwand=true und einzelpreis=0. Das PDF zeigt dann „nach Aufwand*" statt 0,00 EUR. NIEMALS 0,00 als sichtbaren Preis stehen lassen.\n' +
-    '- User will KEINEN Gesamtpreis (z.B. „kein Gesamtpreis anzeigen", „Summe weglassen") → gesamtpreis_ausblenden=true. Sonst false bzw. Wert aus dem übergebenen Angebot beibehalten.\n' +
+    '- User will die GESAMTSUMME GANZ WEGLASSEN (z.B. „Gesamtsumme weglassen", „keine Gesamtsumme", „ohne Summe", „bei zwei Varianten keine Summe zeigen") → gesamtsumme_weglassen=true. Die einzelnen Positionspreise bleiben sichtbar, es wird aber KEINE Summenzeile mehr gezeigt (weiterhin ein Pauschalangebot). Häufig sinnvoll bei alternativen Varianten.\n' +
+    '- User will die Summe stattdessen als „nach Aufwand" ausweisen (variable Abrechnung, kein Festpreis-Total) → gesamtpreis_ausblenden=true. Beide Flags aus dem übergebenen Angebot beibehalten, wenn der User nichts dazu sagt.\n' +
     '- PREISANZEIGE-MODUS: Will der User ein GESAMTANGEBOT / einen GESAMTPREIS OHNE einzelne Positionspreise (z.B. „nur Gesamtpreis", „keine Einzelpreise", „Positionen ohne Preise, ein Gesamtpreis", „Pauschalangebot über alles") → preisanzeige_modus="gesamt". Die Positionen (bezeichnung + beschreibung) bleiben als Leistungsumfang erhalten, nur ihre Einzelpreise werden nicht gezeigt; am Ende steht der Pauschalpreis (Summe aller Positionen). Die Einzelpreise trotzdem korrekt in "einzelpreis" befüllen (sie werden für die Gesamtsumme gebraucht, nur nicht angezeigt). Standard sonst: preisanzeige_modus="einzel". Modus aus dem übergebenen Angebot beibehalten, wenn der User nichts dazu sagt.\n\n' +
     'VERRECHNUNG / GUTSCHRIFT / ABZUG / ANRECHNUNG / RÜCKKAUF (NEGATIVE POSITIONEN):\n' +
     '- Soll ein Betrag vom Angebot ABGEZOGEN / verrechnet / angerechnet / gutgeschrieben werden (z.B. „Rechnung Nr. 1943 über 5.450 € verrechnen", „Rückkauf Frequenzumrichter anrechnen", „Anzahlung abziehen", „Position 5 minus 5450") → lege dafür eine EIGENE, normale Position mit NEGATIVEM einzelpreis an (z.B. einzelpreis=-5450, menge=1). Diese negative Position reduziert die Netto-Summe automatisch korrekt.\n' +
@@ -28315,7 +28320,8 @@ async function _angChatGenerateOffer(s, userText) {
     '    "einsatzpauschale_anfahrt": number (IMMER 0 — Anfahrts-/Einsatzpauschale wird generell NICHT ins Angebot aufgenommen),\n' +
     '    "abrechnung_modus": "pauschal"|"aufwand",\n' +
     '    "stundensaetze": [{"nr": number, "name": string, "satz": number, "einheit": "Std."|"Anfahrt", "hinweis": string}] (NUR bei aufwand befüllen, sonst []),\n' +
-    '    "gesamtpreis_ausblenden": boolean (true = Summen-Block Netto/USt/Brutto wird im PDF NICHT gezeigt),\n' +
+    '    "gesamtpreis_ausblenden": boolean (true = Gesamtsumme wird als „nach Aufwand" ausgewiesen statt Netto/USt/Brutto — für variable Abrechnung),\n' +
+    '    "gesamtsumme_weglassen": boolean (true = GAR KEINE Summenzeile im PDF — die einzelnen Positionspreise bleiben sichtbar, aber ohne jede Gesamtsumme; für Pauschalangebote mit z.B. zwei Alternativ-Varianten, wo eine Summe keinen Sinn ergibt),\n' +
     '    "preisanzeige_modus": "einzel"|"gesamt" ("einzel" = jede Position mit Einzel- + Gesamtpreis (Standard); "gesamt" = Positionen werden OHNE Einzelpreise als Leistungsumfang gelistet und NUR EIN Gesamt-/Pauschalpreis (Summe aller Positionen, netto) am Ende gezeigt),\n' +
     '    "stammdaten_update": {"ansprechpartner_vor_ort": string, "vertragspartner": string, "rechnungs_anschrift": string, "email": string, "tel": string} (NUR befüllen, wenn der User den EMPFÄNGER / Ansprechpartner / die Anschrift ändern will — sonst weglassen bzw. leeres Objekt. Nur die tatsächlich zu ändernden Felder setzen. ansprechpartner_vor_ort = die z.Hd.-Person im Anschriftsfeld oben links),\n' +
     '    "anschreiben_aktiv": boolean,\n' +
@@ -30577,6 +30583,7 @@ async function _bkSaveAngebotToBK(chatState) {
   // seiner eigenen App; bei false reicht der Default „unchecked" — und wir
   // vermeiden Auto-Create-Sonderfälle für Checkbox-Typen).
   if (!fields.gesamtpreis_ausblenden) delete fields.gesamtpreis_ausblenden;
+  if (!fields.gesamtsumme_weglassen) delete fields.gesamtsumme_weglassen;
   const defaults = {
     app_angebot_num:      'number',
     firma:                'singleLineText',
@@ -31216,7 +31223,10 @@ async function _buildAngebotPdf(rec) {
   if (y + 32 > 270) { doc.addPage(); y = 22; _angPdfHeader(doc, ml, mr, BR, GREY_L, GREY_X); y = 30; }
   y += 4;
   const ust = +rec.ust_prozent || 19;
-  if (isGesamt) {
+  if (rec.gesamtsumme_weglassen) {
+    // v6.90: Gesamtsumme KOMPLETT weglassen (z.B. bei zwei Alternativ-Varianten) —
+    // Pauschalangebot mit sichtbaren Positionspreisen, aber ganz ohne Summenzeile.
+  } else if (isGesamt) {
     // v5.93: Pauschalpreis-Block am Ende — eigener prominenter Block, dezent eingerahmt
     const pauschal = +rec.pauschalpreis_netto || 0;
     const ustBetrag = pauschal * ust/100;
@@ -31403,6 +31413,7 @@ function _fdhChatToBkRec(chatState) {
     erstellt_von:         APP_KEYS.user?.name || '',
     // v2.46.184: von der KI steuerbar („kein Gesamtpreis anzeigen")
     gesamtpreis_ausblenden: !!c.gesamtpreis_ausblenden,
+    gesamtsumme_weglassen: !!c.gesamtsumme_weglassen,
   };
 }
 
