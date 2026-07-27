@@ -791,7 +791,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.47.4';
+const APP_VERSION = 'v2.47.5';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -27138,9 +27138,10 @@ function _mbRender() {
       '</div>' +
       '<div class="bg-white border-t border-ink-200 shrink-0 mt-2">' +
         '<div class="px-3 pt-2 flex items-center gap-2">' +
-          '<div class="min-w-0"><p class="text-[10px] text-ink-400 leading-none uppercase tracking-wider">Netto</p><p class="text-[18px] font-bold text-ink-900 leading-tight">' + _formatEur(total) + '</p></div>' +
+          '<div class="min-w-0 shrink"><p class="text-[10px] text-ink-400 leading-none uppercase tracking-wider">Netto</p><p class="text-[17px] font-bold text-ink-900 leading-tight truncate">' + _formatEur(total) + '</p></div>' +
           '<div class="flex-1"></div>' +
-          '<button onclick="_mbPeekPreview()" class="px-3 py-2.5 rounded-xl border border-ink-300 active:bg-ink-100 text-ink-700 text-[13px] font-bold inline-flex items-center gap-1.5"><i data-lucide="eye" class="w-4 h-4"></i> Vorschau</button>' +
+          '<button onclick="_mbSaveDraft(this)" class="shrink-0 px-2.5 py-2.5 rounded-xl border border-ink-300 active:bg-ink-100 text-ink-700 text-[12px] font-bold inline-flex items-center gap-1"><i data-lucide="save" class="w-4 h-4"></i> Entwurf</button>' +
+          '<button onclick="_mbPeekPreview()" class="shrink-0 px-2.5 py-2.5 rounded-xl border border-ink-300 active:bg-ink-100 text-ink-700 text-[12px] font-bold inline-flex items-center gap-1"><i data-lucide="eye" class="w-4 h-4"></i> Vorschau</button>' +
         '</div>' +
         '<div class="px-3 py-2 flex gap-2">' + ad.actionsHtml() + '</div>' +
       '</div>' +
@@ -27430,6 +27431,7 @@ function _mbAufzugActions() {
   if (window.lucide) lucide.createIcons();
 }
 function _mbPeekPreview() { const ad = window._MB; if (!ad) return; try { ad.sync && ad.sync(); } catch (_) {} ad.previewSheet(); }
+function _mbSaveDraft(btn) { const ad = window._MB; if (!ad) return; try { ad.sync && ad.sync(); } catch (_) {} if (ad.saveDraft) ad.saveDraft(btn); }
 
 /* --- Zum Chat / zur klassischen Ansicht „durchschauen" (Builder kurz ausblenden) --- */
 function _mbHideForPeek(label) {
@@ -27520,6 +27522,7 @@ function _mbAdapterAufzug() {
     totalNet() { let n = 0; P().forEach(p => { n += mengeOf(p) * (+p.einzelpreis || 0); }); return n; },
     sync() { s.collected._totals = _angebotCalcTotals(s.collected); },
     previewSheet() { _mbPreviewSheetAufzug(); },
+    saveDraft(btn) { return angebotSaveDraft(btn); },  // Airtable-Entwurf + lokaler Speicherpunkt
     chatHistory() { const s = window._ANG_CHAT; return s ? (s.history || []) : []; },
     chatSend(t) { return angChatUserResponse(t); },
     chatPlaceholder: 'z.B. „Frequenzumrichter tauschen, pauschal 8.500 €"',
@@ -27556,6 +27559,7 @@ function _mbAdapterFlp() {
     totalNet() { return _flpCalcTotals(P()).netto; },
     sync() { try { _flpRenderPosTable(); _flpRenderPdfPreview(); _flpSaveDraft(); } catch (_) {} },
     previewSheet() { _mbPreviewSheetFlp(); },
+    saveDraft(btn) { try { _flpSaveDraft(); } catch (_) {} if (btn) { setBusy(btn, true, ''); setTimeout(() => setBusy(btn, false), 350); } toast('Entwurf gespeichert ✓', 'success', 2500); },
     chatHistory() { const st = window._FLP_ANG; return st ? (st.chat || []) : []; },
     chatSend(t) { const i = document.createElement('textarea'); i.value = t; return _flpChatSend(i); },
     chatPlaceholder: 'z.B. „Frequenzumrichter V3F16L, 1 Stück"',
