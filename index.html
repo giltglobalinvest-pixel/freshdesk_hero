@@ -788,7 +788,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.304';
+const APP_VERSION = 'v2.46.305';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -26490,6 +26490,7 @@ function _renderAngChatShell() {
                 // („nach Aufwand" → Aufwand-Modus mit ERP-Sätzen). Modus steht im Iter-Label.
                 '<span id="angErpBadge"></span>' +
                 '<button onclick="openAngStammdatenEditor()" class="inline-flex items-center gap-1 px-2 py-1 bg-indigo-50 hover:bg-indigo-100 border border-indigo-200 text-indigo-700 rounded-md text-[10px] font-bold" title="Stammdaten (Kunde, Anschrift, Kontakt) bearbeiten"><i data-lucide="edit-3" class="w-3 h-3"></i> Stammdaten</button>' +
+                '<button onclick="openAngPositionenEditor()" class="inline-flex items-center gap-1 px-2 py-1 bg-indigo-50 hover:bg-indigo-100 border border-indigo-200 text-indigo-700 rounded-md text-[10px] font-bold" title="Angebots-Positionen direkt bearbeiten (Titel, Beschreibung, Menge, Preis)"><i data-lucide="list" class="w-3 h-3"></i> Positionen</button>' +
                 '<span id="angChatIterLabel" class="text-ink-500">Noch keine Daten</span>' +
               '</div>' +
             '</div>' +
@@ -27012,6 +27013,81 @@ function angChatToggleAnchor() {
 
 /* v2.46.161: Stammdaten-Editor — überschreibt die aus dem Ticket
    automatisch übernommenen Vertragspartner/Anschrift/Tel/Email/Ansprechpartner. */
+/* v2.46.305: Positionen direkt manuell bearbeiten (parallel zum Chat).
+   Arbeitet auf einer Kopie s._posEdit; „Übernehmen" schreibt zurück + aktualisiert
+   die PDF-Vorschau. */
+function openAngPositionenEditor() {
+  const s = window._ANG_CHAT;
+  if (!s) return;
+  s._posEdit = JSON.parse(JSON.stringify(s.collected?.positionen || []));
+  _angPosRender();
+}
+function _angPosClose() { const h = document.getElementById('angPosHost'); if (h) h.innerHTML = ''; }
+function _angPosRowHtml(p, i) {
+  return '<div class="border border-ink-200 rounded-xl p-3" data-pos="' + i + '">' +
+    '<div class="flex items-center justify-between mb-1"><span class="text-[10px] font-bold text-ink-400 uppercase tracking-wider">Position ' + (i + 1) + '</span>' +
+      '<button onclick="_angPosDelete(' + i + ')" class="text-rose-500 hover:bg-rose-50 p-1 rounded" title="Position löschen"><i data-lucide="trash-2" class="w-4 h-4"></i></button></div>' +
+    '<input id="pos_bez_' + i + '" value="' + escapeAttr(p.bezeichnung || '') + '" placeholder="Bezeichnung / Titel" class="w-full mb-1.5 px-2 py-1.5 border border-ink-300 rounded-lg text-sm font-semibold">' +
+    '<textarea id="pos_beschr_' + i + '" rows="3" placeholder="Leistungsbeschreibung — eine Zeile je Punkt" class="w-full mb-1.5 px-2 py-1.5 border border-ink-300 rounded-lg text-[13px]">' + escapeHtml(p.beschreibung || '') + '</textarea>' +
+    '<div class="grid grid-cols-3 gap-1.5">' +
+      '<div><label class="text-[10px] text-ink-500">Menge</label><input id="pos_menge_' + i + '" type="number" step="0.01" value="' + escapeAttr(p.menge != null ? String(p.menge) : '1') + '" class="w-full px-2 py-1.5 border border-ink-300 rounded-lg text-sm"></div>' +
+      '<div><label class="text-[10px] text-ink-500">Einheit</label><input id="pos_einheit_' + i + '" value="' + escapeAttr(p.einheit || 'ST') + '" class="w-full px-2 py-1.5 border border-ink-300 rounded-lg text-sm"></div>' +
+      '<div><label class="text-[10px] text-ink-500">Einzelpreis €</label><input id="pos_preis_' + i + '" type="number" step="0.01" value="' + escapeAttr(p.einzelpreis != null && p.einzelpreis !== '' ? String(p.einzelpreis) : '') + '" class="w-full px-2 py-1.5 border border-ink-300 rounded-lg text-sm"></div>' +
+    '</div>' +
+    '<label class="inline-flex items-center gap-1.5 mt-1.5 text-[11px] text-ink-600 cursor-pointer"><input type="checkbox" id="pos_aufwand_' + i + '" ' + (p.preis_aufwand ? 'checked' : '') + '> „nach Aufwand" statt Festpreis</label>' +
+  '</div>';
+}
+function _angPosRender() {
+  const s = window._ANG_CHAT; if (!s) return;
+  let host = document.getElementById('angPosHost');
+  if (!host) { host = document.createElement('div'); host.id = 'angPosHost'; document.body.appendChild(host); }
+  const rows = (s._posEdit || []).map((p, i) => _angPosRowHtml(p, i)).join('');
+  host.innerHTML =
+    '<div class="fixed inset-0 z-[72] flex items-end sm:items-center justify-center bg-black/50" onclick="if(event.target===this)_angPosClose()">' +
+      '<div class="bg-white w-full max-w-lg sm:rounded-2xl rounded-t-2xl shadow-2xl flex flex-col safe-bottom" style="max-height:92vh">' +
+        '<div class="px-4 py-3 border-b border-ink-200 flex items-center justify-between gap-2">' +
+          '<h3 class="font-bold text-ink-900 inline-flex items-center gap-2"><i data-lucide="list" class="w-4 h-4 text-indigo-600"></i> Positionen bearbeiten</h3>' +
+          '<button onclick="_angPosClose()" class="w-9 h-9 rounded-lg hover:bg-ink-100 flex items-center justify-center"><i data-lucide="x" class="w-5 h-5 text-ink-700"></i></button>' +
+        '</div>' +
+        '<div class="flex-1 overflow-y-auto p-4 space-y-3" id="angPosBody">' + (rows || '<p class="text-sm text-ink-500 text-center py-6">Noch keine Positionen — „+ Position" zum Anlegen.</p>') + '</div>' +
+        '<div class="px-4 py-3 border-t border-ink-200 flex items-center justify-between gap-2">' +
+          '<button onclick="_angPosAdd()" class="px-3 py-2 text-sm font-bold bg-ink-100 hover:bg-ink-200 text-ink-700 rounded-lg inline-flex items-center gap-1"><i data-lucide="plus" class="w-4 h-4"></i> Position</button>' +
+          '<button onclick="_angPosSave(this)" class="px-4 py-2 text-sm font-bold bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg inline-flex items-center gap-1"><i data-lucide="check" class="w-4 h-4"></i> Übernehmen</button>' +
+        '</div>' +
+      '</div>' +
+    '</div>';
+  if (window.lucide) lucide.createIcons();
+}
+function _angPosReadInputs() {
+  const s = window._ANG_CHAT; if (!s || !s._posEdit) return;
+  s._posEdit = s._posEdit.map((p, i) => {
+    const bez = document.getElementById('pos_bez_' + i);
+    if (!bez) return p;
+    const g = id => document.getElementById(id);
+    const preisEl = g('pos_preis_' + i);
+    return Object.assign({}, p, {
+      bezeichnung: bez.value,
+      beschreibung: (g('pos_beschr_' + i) || {}).value || '',
+      menge: +(g('pos_menge_' + i) || {}).value || 1,
+      einheit: (g('pos_einheit_' + i) || {}).value || 'ST',
+      einzelpreis: (preisEl && preisEl.value !== '') ? (+preisEl.value || 0) : 0,
+      preis_aufwand: !!(g('pos_aufwand_' + i) && g('pos_aufwand_' + i).checked),
+    });
+  });
+}
+function _angPosAdd() { const s = window._ANG_CHAT; if (!s) return; _angPosReadInputs(); (s._posEdit = s._posEdit || []).push({ bezeichnung: '', beschreibung: '', menge: 1, einheit: 'ST', einzelpreis: 0, kategorie: 'Material' }); _angPosRender(); }
+function _angPosDelete(i) { const s = window._ANG_CHAT; if (!s) return; _angPosReadInputs(); s._posEdit.splice(i, 1); _angPosRender(); }
+async function _angPosSave(btn) {
+  const s = window._ANG_CHAT; if (!s) return;
+  _angPosReadInputs();
+  s.collected = s.collected || {};
+  s.collected.positionen = (s._posEdit || []).filter(p => String(p.bezeichnung || '').trim() || +p.einzelpreis);
+  s.collected._totals = (typeof _angebotCalcTotals === 'function') ? _angebotCalcTotals(s.collected) : s.collected._totals;
+  _angPosClose();
+  try { await _angChatRenderPreview(); } catch (_) {}
+  toast('Positionen übernommen', 'success', 2500);
+}
+
 function openAngStammdatenEditor() {
   const s = window._ANG_CHAT;
   if (!s) return;
