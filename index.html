@@ -788,7 +788,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.300';
+const APP_VERSION = 'v2.46.301';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -30764,7 +30764,10 @@ async function _bkSaveAngebotToBK(chatState) {
   // seiner eigenen App; bei false reicht der Default „unchecked" — und wir
   // vermeiden Auto-Create-Sonderfälle für Checkbox-Typen).
   if (!fields.gesamtpreis_ausblenden) delete fields.gesamtpreis_ausblenden;
-  if (!fields.gesamtsumme_weglassen) delete fields.gesamtsumme_weglassen;
+  // v2.46.301: reines FDH-Render-Flag — NICHT ins Berichtskonverter-Archiv schreiben
+  // (die BK-App-Tabelle App_Angebote kennt das Feld nicht → sonst 422 UNKNOWN_FIELD_NAME).
+  // Das App-PDF berücksichtigt es ohnehin direkt über _fdhChatToBkRec.
+  delete fields.gesamtsumme_weglassen;
   const defaults = {
     app_angebot_num:      'number',
     firma:                'singleLineText',
