@@ -791,7 +791,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.307';
+const APP_VERSION = 'v2.46.308';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -25684,11 +25684,12 @@ async function _flpPushAngebot(btn) {
    ============================================================================ */
 const ANGEBOTS_KATALOG_TABLE = 'Angebots_Positionskatalog';
 let _ANG_KATALOG_CACHE = null;
-const _KATALOG = { entries: [], editing: null, search: '' };
+const _KATALOG = { entries: [], editing: null, search: '', mandant: '' };
 
 function _angKatalogFieldSpecs() {
   return [
     { name: 'titel', type: 'singleLineText' },
+    { name: 'mandant', type: 'singleLineText' },   // v2.46.308: Katalog pro Mandant getrennt (Account-ID)
     { name: 'leistungstyp', type: 'singleLineText' },
     { name: 'beschreibung', type: 'multilineText' },
     { name: 'einzelpreis', type: 'number', options: { precision: 2 } },
@@ -25699,7 +25700,18 @@ function _angKatalogFieldSpecs() {
     { name: 'updated_at', type: 'singleLineText' },
   ];
 }
-async function _angKatalogEnsureTable() { return ensureTable(ANGEBOTS_KATALOG_TABLE, _angKatalogFieldSpecs()); }
+/* Nur die Einträge EINES Mandanten (Account-ID als String). */
+function _katalogEntriesFor(mandant, list) {
+  const m = String(mandant == null ? '' : mandant);
+  return (list || _ANG_KATALOG_CACHE || []).filter(e => String(e.mandant || '') === m);
+}
+function _katalogMandantName(id) { const a = (APP_STATE.accounts || []).find(x => String(x.id) === String(id)); return a ? (a.name || a.id) : (String(id || '').trim() || 'Nicht zugeordnet'); }
+async function _angKatalogEnsureTable() {
+  const t = await ensureTable(ANGEBOTS_KATALOG_TABLE, _angKatalogFieldSpecs());
+  // v2.46.308: mandant-Feld auf Alt-Tabellen nachlegen (ensureTable ergänzt keine Felder)
+  try { await ensureAirtableField(ANGEBOTS_KATALOG_TABLE, 'mandant', 'singleLineText'); } catch (_) {}
+  return t;
+}
 
 /* Lädt den Positionskatalog (gecacht). Bei fehlender Tabelle → leer. */
 async function loadPositionskatalog(force) {
@@ -25707,7 +25719,7 @@ async function loadPositionskatalog(force) {
   try {
     const recs = await airtableRead(ANGEBOTS_KATALOG_TABLE, { maxRecords: 500 });
     _ANG_KATALOG_CACHE = recs.map(r => ({
-      id: r.id, titel: r.fields.titel || '', leistungstyp: r.fields.leistungstyp || '',
+      id: r.id, titel: r.fields.titel || '', mandant: r.fields.mandant || '', leistungstyp: r.fields.leistungstyp || '',
       beschreibung: r.fields.beschreibung || '', einzelpreis: (r.fields.einzelpreis != null ? r.fields.einzelpreis : ''),
       einheit: r.fields.einheit || '', aktiv: r.fields.aktiv !== false, sortierung: +r.fields.sortierung || 0,
     })).sort((a, b) => (a.leistungstyp || '').localeCompare(b.leistungstyp || '') || (a.sortierung - b.sortierung) || a.titel.localeCompare(b.titel));
@@ -25738,7 +25750,20 @@ async function openPositionskatalog() {
   try { await _angKatalogEnsureTable(); } catch (e) { console.warn('Katalog-Tabelle:', e.message); }
   await loadPositionskatalog(true);
   _KATALOG.entries = _ANG_KATALOG_CACHE || [];
+  // Mandant vorbelegen: gemerkter, sonst erster Account
+  let m = '';
+  try { m = localStorage.getItem('fdh_katalog_mandant') || ''; } catch (_) {}
+  const accs = (APP_STATE.accounts || []);
+  if (!accs.some(a => String(a.id) === String(m))) m = accs.length ? String(accs[0].id) : '';
+  _KATALOG.mandant = m;
   _katalogRender();
+}
+function _katalogPickMandant(id) { _KATALOG.mandant = id; try { localStorage.setItem('fdh_katalog_mandant', id); } catch (_) {} _KATALOG.search = ''; _katalogRender(); }
+function _katalogMandantOptions() {
+  const cur = String(_KATALOG.mandant || '');
+  let html = (APP_STATE.accounts || []).map(a => '<option value="' + escapeAttr(String(a.id)) + '"' + (String(a.id) === cur ? ' selected' : '') + '>' + escapeHtml(a.name || a.id) + '</option>').join('');
+  if ((_KATALOG.entries || []).some(e => !String(e.mandant || '').trim())) html += '<option value=""' + (cur === '' ? ' selected' : '') + '>— Nicht zugeordnet (Altbestand) —</option>';
+  return html;
 }
 function _katalogCloseMgr() { const h = document.getElementById('katalogHost'); if (h) h.innerHTML = ''; }
 function _katalogRender() {
@@ -25756,8 +25781,9 @@ function _katalogRender() {
   if (window.lucide) lucide.createIcons();
 }
 function _katalogFilteredEntries() {
+  let entries = _katalogEntriesFor(_KATALOG.mandant, _KATALOG.entries);
   const q = (_KATALOG.search || '').trim().toLowerCase();
-  return q ? _KATALOG.entries.filter(e => (e.titel + ' ' + e.leistungstyp + ' ' + e.beschreibung).toLowerCase().includes(q)) : _KATALOG.entries;
+  return q ? entries.filter(e => (e.titel + ' ' + e.leistungstyp + ' ' + e.beschreibung).toLowerCase().includes(q)) : entries;
 }
 function _katalogListBodyHtml() {
   const entries = _katalogFilteredEntries();
@@ -25783,20 +25809,25 @@ function _katalogListBodyHtml() {
 }
 function _katalogRefreshList() { const el = document.getElementById('katalogListBody'); if (el) { el.innerHTML = _katalogListBodyHtml(); if (window.lucide) lucide.createIcons(); } }
 function _katalogListHtml() {
+  const isUnassigned = String(_KATALOG.mandant || '') === '';
+  const cnt = _katalogEntriesFor(_KATALOG.mandant, _KATALOG.entries).length;
   return '<div class="p-4">' +
+    '<div class="flex items-center gap-2 mb-3 flex-wrap">' +
+      '<label class="text-[11px] font-bold text-ink-600 inline-flex items-center gap-1"><i data-lucide="building-2" class="w-3.5 h-3.5"></i> Mandant:</label>' +
+      '<select onchange="_katalogPickMandant(this.value)" class="px-2 py-1.5 border border-ink-300 rounded-lg text-[12px] bg-white max-w-[240px]">' + _katalogMandantOptions() + '</select>' +
+    '</div>' +
     '<div class="flex items-center gap-2 mb-3">' +
       '<input value="' + escapeAttr(_KATALOG.search || '') + '" oninput="_KATALOG.search=this.value;_katalogRefreshList()" placeholder="Suchen — Titel, Typ, Beschreibung …" class="flex-1 px-2.5 py-1.5 border border-ink-300 rounded-lg text-sm">' +
       '<button onclick="_katalogNew()" class="px-3 py-1.5 bg-amber-600 hover:bg-amber-700 text-white rounded-lg text-sm font-bold inline-flex items-center gap-1 shrink-0"><i data-lucide="plus" class="w-4 h-4"></i> Neu</button>' +
     '</div>' +
-    '<div class="flex items-center gap-2 mb-2 flex-wrap">' +
-      '<button onclick="_katalogBulkFromOffers(this)" class="px-3 py-1.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg text-[12px] font-bold inline-flex items-center gap-1"><i data-lucide="sparkles" class="w-3.5 h-3.5"></i> Aus bestehenden Angeboten erzeugen</button>' +
-      '<span class="text-[10px] text-ink-400">Neue Angebote werden automatisch gelernt (dedup nach Titel).</span>' +
-    '</div>' +
-    '<p class="text-[11px] text-ink-500 mb-2">' + _KATALOG.entries.length + ' Positionen · Die Angebots-KI übernimmt Titel + Beschreibung passender Einträge möglichst 1:1.</p>' +
-    '<div id="katalogListBody" class="max-h-[55vh] overflow-y-auto">' + _katalogListBodyHtml() + '</div>' +
+    (isUnassigned
+      ? '<div class="flex items-center gap-2 mb-2 flex-wrap"><button onclick="_katalogDeleteUnassigned(this)" class="px-3 py-1.5 bg-rose-600 hover:bg-rose-700 text-white rounded-lg text-[12px] font-bold inline-flex items-center gap-1"><i data-lucide="trash-2" class="w-3.5 h-3.5"></i> Alle nicht zugeordneten löschen</button><span class="text-[10px] text-ink-400">Altbestand (vor der Mandanten-Trennung). Pro Mandant neu erzeugen, dann hier aufräumen.</span></div>'
+      : '<div class="flex items-center gap-2 mb-2 flex-wrap"><button onclick="_katalogBulkFromOffers(this)" class="px-3 py-1.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg text-[12px] font-bold inline-flex items-center gap-1"><i data-lucide="sparkles" class="w-3.5 h-3.5"></i> Aus Angeboten dieses Mandanten erzeugen</button><span class="text-[10px] text-ink-400">Nur Angebote dieses Mandanten · neue lernen automatisch.</span></div>') +
+    '<p class="text-[11px] text-ink-500 mb-2">' + cnt + ' Positionen für <b>' + escapeHtml(_katalogMandantName(_KATALOG.mandant)) + '</b> · Die KI nutzt nur den Katalog des jeweiligen Mandanten.</p>' +
+    '<div id="katalogListBody" class="max-h-[52vh] overflow-y-auto">' + _katalogListBodyHtml() + '</div>' +
   '</div>';
 }
-function _katalogNew() { _KATALOG.editing = { id: null, titel: '', leistungstyp: '', beschreibung: '', einzelpreis: '', einheit: '', aktiv: true }; _katalogRender(); }
+function _katalogNew() { _KATALOG.editing = { id: null, titel: '', leistungstyp: '', beschreibung: '', einzelpreis: '', einheit: '', aktiv: true, mandant: _KATALOG.mandant }; _katalogRender(); }
 function _katalogEdit(id) { const e = _KATALOG.entries.find(x => x.id === id); if (!e) return; _KATALOG.editing = Object.assign({}, e); _katalogRender(); }
 function _katalogCancelEdit() { _KATALOG.editing = null; _katalogRender(); }
 function _katalogEditHtml() {
@@ -25828,7 +25859,8 @@ async function _katalogSave(btn) {
   if (!titel) return toast('Titel fehlt', 'warn', 3000);
   const preisRaw = g('katPreis').trim();
   const fields = {
-    titel, leistungstyp: g('katTyp').trim(), beschreibung: g('katBeschr'),
+    titel, mandant: (e.id ? (e.mandant || _KATALOG.mandant || '') : String(_KATALOG.mandant || '')),
+    leistungstyp: g('katTyp').trim(), beschreibung: g('katBeschr'),
     einheit: g('katEinheit').trim(), aktiv: !!(document.getElementById('katAktiv') && document.getElementById('katAktiv').checked),
     updated_at: nowIso(),
   };
@@ -25878,14 +25910,14 @@ function _katalogCleanFields(o) {
 }
 /* Übernimmt eine Position (aus Chat- oder BK-Format) in den Katalog, wenn der Titel neu ist.
    `seen` = Set normalisierter Titel (wird ergänzt). Gibt true zurück, wenn angelegt. */
-async function _katalogAddIfNew(p, seen) {
+async function _katalogAddIfNew(p, seen, mandant) {
   const titel = String(p.titel || p.bezeichnung || '').trim();
   const key = _katalogNormTitle(titel);
   if (!key || seen.has(key)) return false;
   const beschr = Array.isArray(p.leistungsbeschreibung) ? p.leistungsbeschreibung.join('\n') : String(p.leistungsbeschreibung || p.beschreibung || '');
   const preis = +(p.vp != null ? p.vp : p.einzelpreis);
   await airtableWrite(ANGEBOTS_KATALOG_TABLE, _katalogCleanFields({
-    titel, leistungstyp: _katalogGuessTyp(titel, beschr), beschreibung: String(beschr).trim(),
+    titel, mandant: String(mandant || ''), leistungstyp: _katalogGuessTyp(titel, beschr), beschreibung: String(beschr).trim(),
     einzelpreis: (preis > 0 ? preis : undefined), einheit: p.einheit || '', aktiv: true,
     created_at: nowIso(), updated_at: nowIso(),
   }));
@@ -25897,13 +25929,15 @@ async function _angKatalogAutoLearn(s) {
   if (!KATALOG_AUTOLEARN || !s || !s.collected) return;
   const pos = (s.collected.positionen || []).filter(p => p && p.bezeichnung && String(p.bezeichnung).trim() && (+p.einzelpreis > 0 || String(p.beschreibung || '').trim()));
   if (!pos.length) return;
+  const mandant = String((s.account && s.account.id) || s.accountId || '');
+  if (!mandant) return;
   try {
     await _angKatalogEnsureTable();
-    const existing = await loadPositionskatalog(true);
-    const seen = new Set((existing || []).map(e => _katalogNormTitle(e.titel)));
+    const existing = _katalogEntriesFor(mandant, await loadPositionskatalog(true));
+    const seen = new Set(existing.map(e => _katalogNormTitle(e.titel)));
     let n = 0;
-    for (const p of pos) { if (await _katalogAddIfNew(p, seen)) n++; }
-    if (n) { _ANG_KATALOG_CACHE = null; console.log('[Katalog] ' + n + ' Position(en) automatisch gelernt'); }
+    for (const p of pos) { if (await _katalogAddIfNew(p, seen, mandant)) n++; }
+    if (n) { _ANG_KATALOG_CACHE = null; console.log('[Katalog] ' + n + ' Position(en) für Mandant ' + mandant + ' gelernt'); }
   } catch (e) { console.warn('[Katalog auto-learn]', e.message); }
 }
 /* Bulk: aus ALLEN bereits erstellten Angeboten (Berichtskonverter) einen Katalog erzeugen. */
@@ -25913,7 +25947,7 @@ async function _bkReadAllAngebote() {
   const all = [];
   let offset = null;
   for (let g = 0; g < 60; g++) {
-    const url = 'https://api.airtable.com/v0/' + base + '/App_Angebote?fields[]=positionen_json&pageSize=100' + (offset ? '&offset=' + encodeURIComponent(offset) : '');
+    const url = 'https://api.airtable.com/v0/' + base + '/App_Angebote?fields[]=positionen_json&fields[]=freshdesk_account_id&pageSize=100' + (offset ? '&offset=' + encodeURIComponent(offset) : '');
     const r = await fetch(url, { headers: { Authorization: 'Bearer ' + APP_KEYS.airtableWriteKey } });
     if (!r.ok) throw new Error('BK-Angebote lesen HTTP ' + r.status);
     const d = await r.json();
@@ -25925,27 +25959,45 @@ async function _bkReadAllAngebote() {
 }
 async function _katalogBulkFromOffers(btn) {
   if (!APP_KEYS.bkAirtableBaseId) return toast('Berichtskonverter-Base nicht konfiguriert (Admin → Einstellungen)', 'warn', 5000);
-  if (!confirm('Aus allen bereits erstellten Angeboten (Berichtskonverter) einen Katalog erzeugen?\n\nBestehende Katalog-Einträge bleiben erhalten — es werden nur neue Titel ergänzt (dedup).')) return;
+  const mandant = String(_KATALOG.mandant || '');
+  if (!mandant) return toast('Bitte oben einen Mandanten wählen', 'warn', 4000);
+  if (!confirm('Aus den Angeboten von „' + _katalogMandantName(mandant) + '" den Katalog erzeugen?\n\nNur Angebote DIESES Mandanten werden übernommen. Bestehende Einträge bleiben — nur neue Titel werden ergänzt (dedup).')) return;
   setBusy(btn, true, 'Lese Angebote…');
   try {
     await _angKatalogEnsureTable();
-    const existing = await loadPositionskatalog(true);
-    const seen = new Set((existing || []).map(e => _katalogNormTitle(e.titel)));
+    const existing = _katalogEntriesFor(mandant, await loadPositionskatalog(true));
+    const seen = new Set(existing.map(e => _katalogNormTitle(e.titel)));
     const offers = await _bkReadAllAngebote();
     let added = 0, scanned = 0;
     for (const rec of offers) {
+      if (String((rec.fields && rec.fields.freshdesk_account_id) || '') !== mandant) continue;  // nur dieser Mandant
       let positionen = [];
       try { positionen = JSON.parse((rec.fields && rec.fields.positionen_json) || '[]'); } catch (_) {}
       if (!Array.isArray(positionen)) positionen = [];
-      for (const p of positionen) { if (await _katalogAddIfNew(p, seen)) { added++; if (added % 5 === 0) setBusy(btn, true, added + ' übernommen…'); } }
+      for (const p of positionen) { if (await _katalogAddIfNew(p, seen, mandant)) { added++; if (added % 5 === 0) setBusy(btn, true, added + ' übernommen…'); } }
       scanned++;
     }
     _ANG_KATALOG_CACHE = null;
     await loadPositionskatalog(true);
     _KATALOG.entries = _ANG_KATALOG_CACHE || [];
     _katalogRender();
-    toast(added + ' neue Position(en) aus ' + scanned + ' Angeboten übernommen ✓', 'success', 7000);
+    toast(added + ' neue Position(en) aus ' + scanned + ' Angeboten von „' + _katalogMandantName(mandant) + '" übernommen ✓', 'success', 7000);
   } catch (e) { setBusy(btn, false); toast('Bulk-Import fehlgeschlagen: ' + e.message, 'error', 9000); }
+}
+/* Altbestand aufräumen: alle nicht zugeordneten (mandant leer) Einträge löschen. */
+async function _katalogDeleteUnassigned(btn) {
+  const unassigned = (_KATALOG.entries || []).filter(e => !String(e.mandant || '').trim());
+  if (!unassigned.length) return toast('Nichts aufzuräumen', 'info', 2500);
+  if (!confirm(unassigned.length + ' nicht zugeordnete Katalog-Positionen (Altbestand vor der Mandanten-Trennung) endgültig löschen?')) return;
+  setBusy(btn, true, 'Lösche…');
+  try {
+    for (const e of unassigned) { await airtableDelete(ANGEBOTS_KATALOG_TABLE, e.id).catch(() => {}); }
+    await loadPositionskatalog(true);
+    _KATALOG.entries = _ANG_KATALOG_CACHE || [];
+    const accs = (APP_STATE.accounts || []); _KATALOG.mandant = accs.length ? String(accs[0].id) : '';
+    _katalogRender();
+    toast(unassigned.length + ' Altbestand-Einträge gelöscht ✓', 'success', 4000);
+  } catch (e) { setBusy(btn, false); toast('Löschen fehlgeschlagen: ' + e.message, 'error', 7000); }
 }
 
 const ANGEBOTE_TABLE = 'Angebote';
@@ -27024,7 +27076,7 @@ async function openAngPositionenEditor() {
   const s = window._ANG_CHAT;
   if (!s) return;
   s._posEdit = JSON.parse(JSON.stringify(s.collected?.positionen || []));
-  try { _ANG_POS_KAT = await loadPositionskatalog().catch(() => []); } catch (_) { _ANG_POS_KAT = []; }
+  try { const _kl = await loadPositionskatalog().catch(() => []); _ANG_POS_KAT = _katalogEntriesFor((s.account && s.account.id) || s.accountId, _kl); } catch (_) { _ANG_POS_KAT = []; }
   _angPosRender();
 }
 function _angPosMove(i, dir) {
@@ -28627,7 +28679,7 @@ async function _angChatGenerateOffer(s, userText) {
   const preisRefBlock = _angPreisReferenzBlock(s._preishist);
   // v2.46.300: Positionskatalog (kuratierte Standard-Positionen, Titel + Beschreibung 1:1)
   const _katalog = await loadPositionskatalog().catch(() => []);
-  const katalogBlock = _angKatalogPromptBlock(_katalog);
+  const katalogBlock = _angKatalogPromptBlock(_katalogEntriesFor((s.account && s.account.id) || s.accountId, _katalog));
   // v2.46.302: laufende Angebotsnummer EINMAL reservieren (aus dem Berichtskonverter),
   // damit PDF-Nummer und BK-Archiv-Nummer übereinstimmen.
   // v2.46.303: NUR für neue Angebote — bereits existierende (aus dem BK wiederhergestellte)
