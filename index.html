@@ -791,7 +791,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.308';
+const APP_VERSION = 'v2.46.309';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -27097,11 +27097,61 @@ function _angPosAddFromKatalog(idx) {
   });
   _angPosRender();
 }
+/* v2.46.309: Position direkt aus dem Editor in den Katalog des Mandanten speichern.
+   Bestehender Titel wird AKTUALISIERT (explizite User-Aktion), sonst neu angelegt. */
+async function _angPosSaveToKatalog(i) {
+  const s = window._ANG_CHAT; if (!s) return;
+  _angPosReadInputs();
+  const p = (s._posEdit || [])[i]; if (!p) return;
+  const titel = String(p.bezeichnung || '').trim();
+  if (!titel) return toast('Bezeichnung fehlt', 'warn', 3000);
+  const mandant = String((s.account && s.account.id) || s.accountId || '');
+  try {
+    await _angKatalogEnsureTable();
+    const existing = _katalogEntriesFor(mandant, await loadPositionskatalog(true)).find(e => _katalogNormTitle(e.titel) === _katalogNormTitle(titel));
+    const beschr = String(p.beschreibung || '').trim();
+    const preis = +p.einzelpreis;
+    const fields = _katalogCleanFields({
+      titel, mandant, leistungstyp: (existing && existing.leistungstyp) || _katalogGuessTyp(titel, beschr),
+      beschreibung: beschr, einzelpreis: (preis > 0 ? preis : undefined), einheit: p.einheit || '', aktiv: true, updated_at: nowIso(),
+    });
+    if (existing) await airtableUpdate(ANGEBOTS_KATALOG_TABLE, existing.id, fields);
+    else { fields.created_at = nowIso(); await airtableWrite(ANGEBOTS_KATALOG_TABLE, fields); }
+    _ANG_KATALOG_CACHE = null;
+    _ANG_POS_KAT = _katalogEntriesFor(mandant, await loadPositionskatalog(true));
+    toast(existing ? 'Katalog aktualisiert ✓' : 'In Katalog gespeichert ✓', 'success', 3000);
+  } catch (e) { toast('Katalog-Speichern fehlgeschlagen: ' + e.message, 'error', 6000); }
+}
+async function _angPosSaveAllToKatalog(btn) {
+  const s = window._ANG_CHAT; if (!s) return;
+  _angPosReadInputs();
+  const pos = (s._posEdit || []).filter(p => String(p.bezeichnung || '').trim());
+  if (!pos.length) return toast('Keine Positionen', 'warn', 3000);
+  const mandant = String((s.account && s.account.id) || s.accountId || '');
+  setBusy(btn, true, 'Speichern…');
+  try {
+    await _angKatalogEnsureTable();
+    const cat = _katalogEntriesFor(mandant, await loadPositionskatalog(true));
+    let neu = 0, upd = 0;
+    for (const p of pos) {
+      const titel = String(p.bezeichnung).trim();
+      const existing = cat.find(e => _katalogNormTitle(e.titel) === _katalogNormTitle(titel));
+      const beschr = String(p.beschreibung || '').trim(); const preis = +p.einzelpreis;
+      const fields = _katalogCleanFields({ titel, mandant, leistungstyp: (existing && existing.leistungstyp) || _katalogGuessTyp(titel, beschr), beschreibung: beschr, einzelpreis: (preis > 0 ? preis : undefined), einheit: p.einheit || '', aktiv: true, updated_at: nowIso() });
+      if (existing) { await airtableUpdate(ANGEBOTS_KATALOG_TABLE, existing.id, fields); upd++; }
+      else { fields.created_at = nowIso(); const c = await airtableWrite(ANGEBOTS_KATALOG_TABLE, fields); cat.push({ id: c.id, titel, mandant }); neu++; }
+    }
+    _ANG_KATALOG_CACHE = null; _ANG_POS_KAT = _katalogEntriesFor(mandant, await loadPositionskatalog(true));
+    setBusy(btn, false);
+    toast(neu + ' neu, ' + upd + ' aktualisiert im Katalog ✓', 'success', 4000);
+  } catch (e) { setBusy(btn, false); toast('Fehlgeschlagen: ' + e.message, 'error', 6000); }
+}
 function _angPosClose() { const h = document.getElementById('angPosHost'); if (h) h.innerHTML = ''; }
 function _angPosRowHtml(p, i) {
   return '<div class="border border-ink-200 rounded-xl p-3" data-pos="' + i + '">' +
     '<div class="flex items-center justify-between mb-1"><span class="text-[10px] font-bold text-ink-400 uppercase tracking-wider">Position ' + (i + 1) + '</span>' +
       '<div class="flex items-center gap-0.5">' +
+        '<button onclick="_angPosSaveToKatalog(' + i + ')" class="text-amber-600 hover:bg-amber-50 p-1 rounded" title="Diese Position in den Katalog speichern/aktualisieren"><i data-lucide="bookmark-plus" class="w-4 h-4"></i></button>' +
         '<button onclick="_angPosMove(' + i + ',-1)" class="text-ink-400 hover:text-ink-700 hover:bg-ink-100 p-1 rounded" title="nach oben"><i data-lucide="chevron-up" class="w-4 h-4"></i></button>' +
         '<button onclick="_angPosMove(' + i + ',1)" class="text-ink-400 hover:text-ink-700 hover:bg-ink-100 p-1 rounded" title="nach unten"><i data-lucide="chevron-down" class="w-4 h-4"></i></button>' +
         '<button onclick="_angPosDelete(' + i + ')" class="text-rose-500 hover:bg-rose-50 p-1 rounded" title="Position löschen"><i data-lucide="trash-2" class="w-4 h-4"></i></button>' +
@@ -27132,6 +27182,7 @@ function _angPosRender() {
         '<div class="px-4 py-3 border-t border-ink-200 flex items-center justify-between gap-2 flex-wrap">' +
           '<div class="flex items-center gap-2 flex-wrap">' +
             '<button onclick="_angPosAdd()" class="px-3 py-2 text-sm font-bold bg-ink-100 hover:bg-ink-200 text-ink-700 rounded-lg inline-flex items-center gap-1"><i data-lucide="plus" class="w-4 h-4"></i> Position</button>' +
+            '<button onclick="_angPosSaveAllToKatalog(this)" class="px-2.5 py-2 text-[12px] font-bold bg-amber-100 hover:bg-amber-200 text-amber-800 rounded-lg inline-flex items-center gap-1" title="Alle Positionen in den Katalog dieses Mandanten übernehmen"><i data-lucide="bookmark-plus" class="w-3.5 h-3.5"></i> alle → Katalog</button>' +
             ((_ANG_POS_KAT || []).length
               ? '<select onchange="_angPosAddFromKatalog(this.value); this.value=\'\'" class="px-2 py-2 border border-ink-300 rounded-lg text-[12px] bg-white max-w-[180px]" title="Position aus dem Katalog einfügen"><option value="">+ aus Katalog…</option>' +
                   _ANG_POS_KAT.map((k, idx) => (k.aktiv !== false && k.titel) ? ('<option value="' + idx + '">' + escapeHtml((k.leistungstyp ? '[' + k.leistungstyp + '] ' : '') + k.titel) + '</option>') : '').join('') +
