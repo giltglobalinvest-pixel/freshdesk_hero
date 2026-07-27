@@ -788,7 +788,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.296';
+const APP_VERSION = 'v2.46.297';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -36287,8 +36287,7 @@ function _zdbPaintView() {
   const tabBtn = (key, label) => '<button onclick="_zdbViewSetTab(\'' + key + '\')" class="px-3 py-1 rounded-lg text-[12px] font-bold ' + (tab === key ? 'bg-indigo-600 text-white' : 'bg-ink-100 text-ink-700 hover:bg-ink-200') + '">' + label + '</button>';
   let body;
   if (d.loading) body = '<div class="bg-white rounded-xl border border-ink-200 p-4 text-sm text-ink-500">Lade aus Airtable…</div>';
-  else if (d.error === 'perm') body = '<div class="bg-white rounded-xl border border-ink-200 p-4">' + _zdbPermHintHtml() + '</div>';
-  else if (d.error === 'missing') body = '<div class="bg-white rounded-xl border border-ink-200 p-4"><div class="text-center py-6"><p class="text-sm text-ink-600">Für diesen Mandanten sind die Tabellen noch nicht angelegt.</p><p class="text-[12px] text-ink-500 mt-1">Einstellungen → <b>Zentrale Kontakt-DB</b> → „Tabellen anlegen + migrieren".</p></div></div>';
+  else if (d.error === 'perm' || d.error === 'missing') body = '<div class="bg-white rounded-xl border border-ink-200 p-4"><div class="text-center py-6"><p class="text-sm text-ink-600">Für diesen Mandanten sind die Tabellen noch nicht angelegt.</p><p class="text-[12px] text-ink-500 mt-1">Einstellungen → <b>Zentrale Kontakt-DB</b> → beim Mandanten „Tabellen anlegen + migrieren" (oder es füllt sich automatisch beim ersten Kontakt).</p><p class="text-[10px] text-ink-400 mt-2">Bleibt es bestehen: Airtable-Token-Zugriff für die Base prüfen.</p></div></div>';
   else if (d.error) body = '<div class="bg-white rounded-xl border border-ink-200 p-4"><p class="text-sm text-rose-600">Fehler beim Laden: ' + escapeHtml(d.msg || '') + '</p></div>';
   else body = (tab === 'konflikte') ? _zdbKonflikteBody(d) : (tab === 'firmen') ? _zdbFirmenBody(d) : _zdbKontakteBody(d);
   const canEdit = !!d.firmen;
