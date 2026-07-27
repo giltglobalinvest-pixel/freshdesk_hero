@@ -791,7 +791,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.47.1';
+const APP_VERSION = 'v2.47.2';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -27126,7 +27126,7 @@ function _mbRender() {
         '<div class="min-w-0 flex-1"><h3 class="font-bold text-ink-900 text-[15px] leading-tight truncate">' + escapeHtml(ad.title) + '</h3>' +
           '<p class="text-[11px] text-ink-500 truncate">' + escapeHtml(ad.sub || '') + '</p></div>' +
         '<button onclick="_mbPeekClassic()" class="shrink-0 text-[11px] font-semibold text-ink-500 px-2 py-1.5 rounded-lg hover:bg-ink-100" title="Klassische Ansicht (Chat + Vorschau nebeneinander)">klassisch</button>' +
-        '<button onclick="_mbPeekChat()" class="shrink-0 text-[12px] font-bold text-indigo-600 px-2.5 py-1.5 rounded-lg border border-indigo-200 inline-flex items-center gap-1"><i data-lucide="sparkles" class="w-3.5 h-3.5"></i> KI</button>' +
+        '<button onclick="_mbChatOpen()" class="shrink-0 text-[12px] font-bold text-indigo-600 px-2.5 py-1.5 rounded-lg border border-indigo-200 inline-flex items-center gap-1"><i data-lucide="sparkles" class="w-3.5 h-3.5"></i> KI</button>' +
       '</div>' +
       (ad.chipsHtml ? '<div class="px-3 pt-2 flex items-center gap-1.5 overflow-x-auto shrink-0 pb-0.5">' + ad.chipsHtml() + '</div>' : '') +
       '<div id="mbList" class="flex-1 overflow-y-auto px-3 py-2 space-y-2">' +
@@ -27244,25 +27244,135 @@ function _mbPvSheet(bodyHtml, extraBtnHtml) {
     '</div>';
   if (window.lucide) lucide.createIcons();
 }
+/* Aufzug-Vorschau: HTML-Angebot (gleicher Renderer wie Desktop-Fallback) auf die
+   Bildschirmbreite herunterskaliert (transform:scale, Höhe per onload gemessen).
+   Ein PDF-Iframe passt sich auf iOS nicht der Breite an — daher HTML statt PDF-Blob.
+   Der „PDF"-Button oben liefert das exakte PDF in einem neuen Tab. */
 async function _mbPreviewSheetAufzug() {
   const s = window._ANG_CHAT; if (!s) return;
-  _mbPvSheet('<div class="p-8 text-center text-ink-400 text-sm"><span class="spinner inline-block w-5 h-5 border-[2px] text-indigo-500"></span><p class="mt-2">Baue PDF-Vorschau…</p></div>');
-  try { await _angChatRenderPreview(); } catch (_) {}
-  const url = s._previewBlobUrl;
-  const body = url
-    ? '<iframe class="w-full h-full bg-white" style="border:0;min-height:80vh" src="' + url + '#toolbar=0&navpanes=0"></iframe>'
-    : '<p class="p-8 text-center text-ink-400 text-sm">Vorschau konnte nicht erzeugt werden — versuch es über „klassisch".</p>';
-  if (document.getElementById('mbPvHost')) _mbPvSheet(body);
+  let html = '';
+  try {
+    const totals = _angebotCalcTotals(s.collected);
+    const ctx = { accountId: s.accountId, ticketId: s.ticketId, ticket: s.ticket, profile: s.profile,
+      standort: (s.collected && s.collected.standort) || '', fabriknummer: (s.collected && s.collected.fabriknummer) || '',
+      plan: Object.assign({}, s.collected, { _totals: totals }) };
+    html = _renderAngebotHtml(ctx);
+  } catch (e) { html = '<p style="padding:24px;font-family:sans-serif;color:#64748b">Vorschau nicht verfügbar — nutze „PDF" oben.</p>'; }
+  const pdfBtn = '<button onclick="angChatPreviewBkPdf(this)" class="shrink-0 text-[12px] font-bold text-indigo-600 px-2.5 py-1.5 rounded-lg border border-indigo-200 inline-flex items-center gap-1"><i data-lucide="file-text" class="w-3.5 h-3.5"></i> PDF</button>';
+  const body = '<div id="mbPvOuter" style="width:100%;overflow:hidden;"><div id="mbPvInner" style="transform-origin:top left;"><iframe id="mbPvFrame" scrolling="no" style="border:0;width:794px;background:#fff;display:block" srcdoc="' + escapeAttr(html) + '"></iframe></div></div>';
+  _mbPvSheet(body, pdfBtn);
+  const frame = document.getElementById('mbPvFrame');
+  if (frame) { frame.addEventListener('load', _mbPvFitFrame); setTimeout(_mbPvFitFrame, 160); }
+}
+function _mbPvFitFrame() {
+  const frame = document.getElementById('mbPvFrame'), inner = document.getElementById('mbPvInner'), outer = document.getElementById('mbPvOuter');
+  if (!frame || !inner || !outer) return;
+  let h = Math.round(794 * 1.414);
+  try { const d = frame.contentDocument || (frame.contentWindow && frame.contentWindow.document); if (d && d.body) h = Math.max(d.body.scrollHeight, d.documentElement.scrollHeight, 300); } catch (_) {}
+  frame.style.height = h + 'px';
+  const avail = outer.clientWidth || window.innerWidth;
+  const scale = Math.min(1, avail / 794);
+  inner.style.transform = 'scale(' + scale + ')';
+  outer.style.height = Math.ceil(h * scale) + 'px';
 }
 function _mbPreviewSheetFlp() {
   try {
     const sheets = erpQuoteRenderSheets(_flpBuildErpData());
-    const body = '<div style="padding:10px 0;"><div style="zoom:0.47;width:794px;margin:0 auto;">' +
+    const z = Math.min(1, (window.innerWidth - 8) / 794);  // dynamisch auf Bildschirmbreite fitten
+    const body = '<div style="padding:10px 0;"><div style="zoom:' + z + ';width:794px;margin:0 auto;">' +
       sheets.map(x => '<div style="width:794px;margin:0 auto 20px;background:#fff;box-shadow:0 1px 8px rgba(0,0,0,.18);">' + x + '</div>').join('') +
       '</div></div>';
     const pdfBtn = '<button onclick="_flpOpenPdf(this)" class="shrink-0 text-[12px] font-bold text-indigo-600 px-2.5 py-1.5 rounded-lg border border-indigo-200 inline-flex items-center gap-1"><i data-lucide="file-text" class="w-3.5 h-3.5"></i> PDF</button>';
     _mbPvSheet(body, pdfBtn);
   } catch (e) { toast('Vorschau fehlgeschlagen: ' + (e.message || e), 'error', 6000); }
+}
+
+/* =============== Mobiler KI-Chat (Vollbild, Bubble-UI) ====================
+   Reduzierte, handytaugliche Chat-Oberfläche — treibt dieselbe KI-Pipeline
+   wie der Desktop-Chat (Aufzug: angChatUserResponse, FLP: _flpChatSend),
+   rendert die Bubbles aber aus der jeweiligen History (s.history / st.chat). */
+function _mbChatClose() { const h = document.getElementById('mbChatHost'); if (h) h.remove(); _mbRerender(); }
+function _mbChatOpen() {
+  const ad = window._MB; if (!ad || !ad.chatSend) return;
+  let host = document.getElementById('mbChatHost');
+  if (!host) { host = document.createElement('div'); host.id = 'mbChatHost'; document.body.appendChild(host); }
+  host.innerHTML =
+    '<div class="fixed inset-0 z-[70] bg-ink-50 flex flex-col safe-bottom">' +
+      '<div class="px-3 pb-2.5 bg-white border-b border-ink-200 flex items-center gap-2 shrink-0" style="padding-top:calc(env(safe-area-inset-top, 0px) + 0.625rem)">' +
+        '<button onclick="_mbChatClose()" class="w-9 h-9 -ml-1 rounded-lg hover:bg-ink-100 flex items-center justify-center shrink-0"><i data-lucide="arrow-left" class="w-5 h-5 text-ink-700"></i></button>' +
+        '<div class="w-8 h-8 rounded-full bg-indigo-100 text-indigo-600 flex items-center justify-center shrink-0"><i data-lucide="sparkles" class="w-4 h-4"></i></div>' +
+        '<div class="min-w-0 flex-1"><h3 class="font-bold text-ink-900 text-[15px] leading-tight">KI-Assistent</h3><p class="text-[11px] text-ink-500 leading-tight">baut deine Positionen</p></div>' +
+        '<button onclick="_mbChatClose()" class="shrink-0 text-[12px] font-bold text-indigo-600 px-2.5 py-2 rounded-lg">Fertig</button>' +
+      '</div>' +
+      '<div id="mbChatBubbles" class="flex-1 overflow-y-auto px-3 py-3 space-y-2.5"></div>' +
+      '<div class="px-2.5 py-2 bg-white border-t border-ink-200 shrink-0 flex items-end gap-2">' +
+        '<textarea id="mbChatInput" rows="1" placeholder="' + escapeAttr(ad.chatPlaceholder || 'Nachricht…') + '" oninput="_mbChatAutogrow(this)" onkeydown="if(event.key===\'Enter\'&&!event.shiftKey){event.preventDefault();_mbChatSend()}" class="flex-1 px-3 py-2.5 border border-ink-300 rounded-2xl text-[15px] resize-none max-h-32" style="min-height:44px"></textarea>' +
+        '<button id="mbChatSendBtn" onclick="_mbChatSend()" class="shrink-0 w-11 h-11 rounded-full bg-indigo-600 active:bg-indigo-700 text-white flex items-center justify-center"><i data-lucide="arrow-up" class="w-5 h-5"></i></button>' +
+      '</div>' +
+    '</div>';
+  if (window.lucide) lucide.createIcons();
+  _mbChatRenderBubbles(false);
+  setTimeout(() => { const i = document.getElementById('mbChatInput'); if (i) try { i.focus(); } catch (_) {} }, 80);
+}
+function _mbChatAutogrow(el) { el.style.height = 'auto'; el.style.height = Math.min(el.scrollHeight, 128) + 'px'; }
+function _mbChatScroll() { const b = document.getElementById('mbChatBubbles'); if (b) b.scrollTop = b.scrollHeight; }
+function _mbChatBubbleHtml(role, content, typing) {
+  const isUser = role === 'user';
+  const inner = typing
+    ? '<span class="inline-flex gap-1"><span class="w-1.5 h-1.5 bg-ink-400 rounded-full animate-bounce" style="animation-delay:0ms"></span><span class="w-1.5 h-1.5 bg-ink-400 rounded-full animate-bounce" style="animation-delay:120ms"></span><span class="w-1.5 h-1.5 bg-ink-400 rounded-full animate-bounce" style="animation-delay:240ms"></span></span>'
+    : escapeHtml(content).replace(/\n/g, '<br>');
+  return '<div class="flex ' + (isUser ? 'justify-end' : 'justify-start') + '">' +
+    '<div class="' + (isUser ? 'bg-indigo-600 text-white rounded-2xl rounded-br-md' : 'bg-white border border-ink-200 text-ink-800 rounded-2xl rounded-bl-md') + ' px-3.5 py-2.5 text-[15px] leading-snug max-w-[85%] whitespace-pre-wrap break-words">' + inner + '</div></div>';
+}
+function _mbChatRenderBubbles(showTyping) {
+  const ad = window._MB; const b = document.getElementById('mbChatBubbles'); if (!ad || !b) return;
+  const hist = (ad.chatHistory() || []).filter(m => m && m.content && m.content !== '…' && m.content !== '__typing__');
+  let html = hist.length
+    ? hist.map(m => _mbChatBubbleHtml(m.role, m.content, false)).join('')
+    : '<div class="text-center text-ink-400 text-[13px] px-4 py-8 leading-relaxed">' + escapeHtml(ad.chatIntro || 'Beschreib, was du brauchst — die KI baut die Positionen.') + '</div>';
+  if (showTyping) html += _mbChatBubbleHtml('assistant', '', true);
+  b.innerHTML = html;
+  if (window.lucide) lucide.createIcons();
+  _mbChatScroll();
+}
+async function _mbChatSend() {
+  const ad = window._MB; if (!ad || !ad.chatSend) return;
+  const ta = document.getElementById('mbChatInput'); if (!ta) return;
+  const t = (ta.value || '').trim(); if (!t) return;
+  ta.value = ''; ta.style.height = '44px';
+  const btn = document.getElementById('mbChatSendBtn'); if (btn) btn.disabled = true;
+  let p;
+  try { p = ad.chatSend(t); } catch (e) { p = Promise.reject(e); }
+  _mbChatRenderBubbles(true);  // History enthält die User-Nachricht bereits (synchron gepusht) + Typing-Indikator
+  try { await p; } catch (e) { toast('KI-Fehler: ' + (e.message || e), 'error', 6000); }
+  if (btn) btn.disabled = false;
+  _mbChatRenderBubbles(false);
+}
+
+/* =============== Aufzug: mobile Aktions-Auswahl (Senden/Speichern) ========= */
+function _mbAufzugActionsClose() { const h = document.getElementById('mbActHost'); if (h) h.remove(); }
+function _mbAufzugActions() {
+  const s = window._ANG_CHAT; if (!s) return;
+  const hasPlan = !!((s.collected && (s.collected.positionen || []).length) || (s.collected && (s.collected.stundensaetze || []).length) || (s.iteration > 0));
+  let host = document.getElementById('mbActHost');
+  if (!host) { host = document.createElement('div'); host.id = 'mbActHost'; document.body.appendChild(host); }
+  const bkBtn = APP_KEYS.bkAirtableBaseId
+    ? '<button onclick="_mbAufzugActionsClose();angChatSaveToBerichtskonverter(this)" class="w-full py-3 rounded-xl bg-emerald-600 active:bg-emerald-700 text-white text-[14px] font-bold inline-flex items-center justify-center gap-2"><i data-lucide="database" class="w-4 h-4"></i> Im Berichtskonverter speichern</button>'
+    : '';
+  const planBtns = hasPlan
+    ? '<button onclick="_mbAufzugActionsClose();angChatExecuteFinal(this)" class="w-full py-3 rounded-xl bg-indigo-600 active:bg-indigo-700 text-white text-[14px] font-bold inline-flex items-center justify-center gap-2"><i data-lucide="send" class="w-4 h-4"></i> PDF erzeugen &amp; an Kunden senden</button>' +
+      '<button onclick="_mbAufzugActionsClose();angebotSaveDraft(this)" class="w-full py-3 rounded-xl border border-ink-300 active:bg-ink-100 text-ink-700 text-[14px] font-bold inline-flex items-center justify-center gap-2"><i data-lucide="save" class="w-4 h-4"></i> Als Entwurf speichern</button>'
+    : '<p class="text-center text-[13px] text-ink-500 py-2">Noch keine Positionen — füge welche über „aus Katalog" oder die KI hinzu.</p>';
+  host.innerHTML =
+    '<div class="fixed inset-0 z-[74] flex items-end justify-center bg-black/50" onclick="if(event.target===this)_mbAufzugActionsClose()">' +
+      '<div class="bg-white w-full max-w-lg rounded-t-2xl shadow-2xl safe-bottom">' +
+        '<div class="px-4 py-3 border-b border-ink-200 flex items-center justify-between"><h3 class="font-bold text-ink-900">Angebot</h3><button onclick="_mbAufzugActionsClose()" class="w-9 h-9 rounded-lg hover:bg-ink-100 flex items-center justify-center"><i data-lucide="x" class="w-5 h-5 text-ink-700"></i></button></div>' +
+        '<div class="p-4 space-y-2.5">' + planBtns + bkBtn +
+          '<button onclick="_mbAufzugActionsClose();angChatPreviewBkPdf(this)" class="w-full py-2.5 rounded-xl text-[13px] font-semibold text-indigo-600 inline-flex items-center justify-center gap-1.5"><i data-lucide="external-link" class="w-4 h-4"></i> PDF in neuem Tab öffnen</button>' +
+        '</div>' +
+      '</div>' +
+    '</div>';
+  if (window.lucide) lucide.createIcons();
 }
 function _mbPeekPreview() { const ad = window._MB; if (!ad) return; try { ad.sync && ad.sync(); } catch (_) {} ad.previewSheet(); }
 
@@ -27355,12 +27465,16 @@ function _mbAdapterAufzug() {
     totalNet() { let n = 0; P().forEach(p => { n += mengeOf(p) * (+p.einzelpreis || 0); }); return n; },
     sync() { s.collected._totals = _angebotCalcTotals(s.collected); },
     previewSheet() { _mbPreviewSheetAufzug(); },
+    chatHistory() { const s = window._ANG_CHAT; return s ? (s.history || []) : []; },
+    chatSend(t) { return angChatUserResponse(t); },
+    chatPlaceholder: 'z.B. „Frequenzumrichter tauschen, pauschal 8.500 €"',
+    chatIntro: 'Beschreib, was das Angebot enthalten soll — ich baue die Positionen. Z.B. „Wartungsvertrag 24 Monate, 145 €/Monat mit Notruf" oder „Störung behoben, nach Aufwand".',
     chipsHtml() {
       const c = s.collected || {};
       const chip = (active, label, onclick) => '<button onclick="' + onclick + '" class="shrink-0 text-[11px] font-semibold px-2.5 py-1 rounded-full border ' + (active ? 'bg-indigo-600 text-white border-indigo-600' : 'bg-white text-ink-600 border-ink-300') + '">' + label + '</button>';
       return chip(!c.gesamtsumme_weglassen, 'Gesamtsumme zeigen', "_mbToggleFlag('gesamtsumme_weglassen')");
     },
-    actionsHtml() { return '<button onclick="_mbPeekChat()" class="flex-1 py-3 rounded-xl bg-emerald-600 active:bg-emerald-700 text-white text-[13px] font-bold inline-flex items-center justify-center gap-1.5"><i data-lucide="send" class="w-4 h-4"></i> Senden / Speichern</button>'; },
+    actionsHtml() { return '<button onclick="_mbAufzugActions()" class="flex-1 py-3 rounded-xl bg-emerald-600 active:bg-emerald-700 text-white text-[13px] font-bold inline-flex items-center justify-center gap-1.5"><i data-lucide="send" class="w-4 h-4"></i> Senden / Speichern</button>'; },
   };
 }
 
@@ -27387,6 +27501,10 @@ function _mbAdapterFlp() {
     totalNet() { return _flpCalcTotals(P()).netto; },
     sync() { try { _flpRenderPosTable(); _flpRenderPdfPreview(); _flpSaveDraft(); } catch (_) {} },
     previewSheet() { _mbPreviewSheetFlp(); },
+    chatHistory() { const st = window._FLP_ANG; return st ? (st.chat || []) : []; },
+    chatSend(t) { const i = document.createElement('textarea'); i.value = t; return _flpChatSend(i); },
+    chatPlaceholder: 'z.B. „Frequenzumrichter V3F16L, 1 Stück"',
+    chatIntro: 'Beschreib die gewünschten Ersatzteile — ich prüfe ERP Hero, übernehme vorhandene Preise oder lege neue Artikel an.',
     chipsHtml: null,
     actionsHtml() {
       return '<button onclick="_flpSendAngebot(this)" class="flex-1 py-3 rounded-xl bg-orange-600 active:bg-orange-700 text-white text-[13px] font-bold inline-flex items-center justify-center gap-1.5"><i data-lucide="send" class="w-4 h-4"></i> An Kunden</button>' +
