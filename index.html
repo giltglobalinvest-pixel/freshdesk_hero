@@ -681,6 +681,9 @@
     <button onclick="navTo('angebote'); closeMenu();" class="w-full text-left px-3 py-2 text-sm hover:bg-ink-50 flex items-center gap-2">
       <i data-lucide="receipt" class="w-4 h-4 text-indigo-500"></i> Angebote
     </button>
+    <button onclick="openPositionskatalog(); closeMenu();" class="w-full text-left px-3 py-2 text-sm hover:bg-ink-50 flex items-center gap-2">
+      <i data-lucide="book-marked" class="w-4 h-4 text-amber-500"></i> Positionskatalog
+    </button>
     <button onclick="navTo('marketing'); closeMenu();" class="w-full text-left px-3 py-2 text-sm hover:bg-ink-50 flex items-center gap-2">
       <i data-lucide="megaphone" class="w-4 h-4 text-orange-500"></i> Marketing-Emails
     </button>
@@ -788,7 +791,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.306';
+const APP_VERSION = 'v2.46.307';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
