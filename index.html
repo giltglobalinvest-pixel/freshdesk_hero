@@ -788,7 +788,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.303';
+const APP_VERSION = 'v2.46.304';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -25785,6 +25785,10 @@ function _katalogListHtml() {
       '<input value="' + escapeAttr(_KATALOG.search || '') + '" oninput="_KATALOG.search=this.value;_katalogRefreshList()" placeholder="Suchen — Titel, Typ, Beschreibung …" class="flex-1 px-2.5 py-1.5 border border-ink-300 rounded-lg text-sm">' +
       '<button onclick="_katalogNew()" class="px-3 py-1.5 bg-amber-600 hover:bg-amber-700 text-white rounded-lg text-sm font-bold inline-flex items-center gap-1 shrink-0"><i data-lucide="plus" class="w-4 h-4"></i> Neu</button>' +
     '</div>' +
+    '<div class="flex items-center gap-2 mb-2 flex-wrap">' +
+      '<button onclick="_katalogBulkFromOffers(this)" class="px-3 py-1.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg text-[12px] font-bold inline-flex items-center gap-1"><i data-lucide="sparkles" class="w-3.5 h-3.5"></i> Aus bestehenden Angeboten erzeugen</button>' +
+      '<span class="text-[10px] text-ink-400">Neue Angebote werden automatisch gelernt (dedup nach Titel).</span>' +
+    '</div>' +
     '<p class="text-[11px] text-ink-500 mb-2">' + _KATALOG.entries.length + ' Positionen · Die Angebots-KI übernimmt Titel + Beschreibung passender Einträge möglichst 1:1.</p>' +
     '<div id="katalogListBody" class="max-h-[55vh] overflow-y-auto">' + _katalogListBodyHtml() + '</div>' +
   '</div>';
@@ -25847,6 +25851,98 @@ async function _katalogDelete(id, btn) {
     _katalogRender();
     toast('Gelöscht', 'info', 2500);
   } catch (e) { setBusy(btn, false); toast('Löschen fehlgeschlagen: ' + e.message, 'error', 6000); }
+}
+
+/* ---- Auto-Lernen + Bulk aus Angeboten ---- */
+let KATALOG_AUTOLEARN = true;  // neue Angebote füttern den Katalog automatisch (dedup by Titel)
+function _katalogNormTitle(t) { return String(t == null ? '' : t).trim().toLowerCase().replace(/\s+/g, ' '); }
+function _katalogGuessTyp(titel, beschr) {
+  const s = (String(titel || '') + ' ' + String(beschr || '')).toLowerCase();
+  if (/austausch|tausch|ersatzger|erneuer|neuger/.test(s)) return 'Austausch';
+  if (/reparat|instandsetz|störung|behebung/.test(s)) return 'Reparatur';
+  if (/modernis|umbau|nachrüst|aufrüst/.test(s)) return 'Modernisierung';
+  if (/wartung|inspektion|prüf/.test(s)) return 'Wartung';
+  return 'Allgemein';
+}
+function _katalogCleanFields(o) {
+  const r = {};
+  for (const [k, v] of Object.entries(o || {})) {
+    if (v == null) continue;
+    if (typeof v === 'string' && !v.trim()) continue;
+    r[k] = v;
+  }
+  return r;
+}
+/* Übernimmt eine Position (aus Chat- oder BK-Format) in den Katalog, wenn der Titel neu ist.
+   `seen` = Set normalisierter Titel (wird ergänzt). Gibt true zurück, wenn angelegt. */
+async function _katalogAddIfNew(p, seen) {
+  const titel = String(p.titel || p.bezeichnung || '').trim();
+  const key = _katalogNormTitle(titel);
+  if (!key || seen.has(key)) return false;
+  const beschr = Array.isArray(p.leistungsbeschreibung) ? p.leistungsbeschreibung.join('\n') : String(p.leistungsbeschreibung || p.beschreibung || '');
+  const preis = +(p.vp != null ? p.vp : p.einzelpreis);
+  await airtableWrite(ANGEBOTS_KATALOG_TABLE, _katalogCleanFields({
+    titel, leistungstyp: _katalogGuessTyp(titel, beschr), beschreibung: String(beschr).trim(),
+    einzelpreis: (preis > 0 ? preis : undefined), einheit: p.einheit || '', aktiv: true,
+    created_at: nowIso(), updated_at: nowIso(),
+  }));
+  seen.add(key);
+  return true;
+}
+/* Auto-Lernen: Positionen eines fertigen Angebots in den Katalog übernehmen. Non-blocking. */
+async function _angKatalogAutoLearn(s) {
+  if (!KATALOG_AUTOLEARN || !s || !s.collected) return;
+  const pos = (s.collected.positionen || []).filter(p => p && p.bezeichnung && String(p.bezeichnung).trim() && (+p.einzelpreis > 0 || String(p.beschreibung || '').trim()));
+  if (!pos.length) return;
+  try {
+    await _angKatalogEnsureTable();
+    const existing = await loadPositionskatalog(true);
+    const seen = new Set((existing || []).map(e => _katalogNormTitle(e.titel)));
+    let n = 0;
+    for (const p of pos) { if (await _katalogAddIfNew(p, seen)) n++; }
+    if (n) { _ANG_KATALOG_CACHE = null; console.log('[Katalog] ' + n + ' Position(en) automatisch gelernt'); }
+  } catch (e) { console.warn('[Katalog auto-learn]', e.message); }
+}
+/* Bulk: aus ALLEN bereits erstellten Angeboten (Berichtskonverter) einen Katalog erzeugen. */
+async function _bkReadAllAngebote() {
+  const base = APP_KEYS.bkAirtableBaseId;
+  if (!base) throw new Error('Berichtskonverter-Base nicht konfiguriert');
+  const all = [];
+  let offset = null;
+  for (let g = 0; g < 60; g++) {
+    const url = 'https://api.airtable.com/v0/' + base + '/App_Angebote?fields[]=positionen_json&pageSize=100' + (offset ? '&offset=' + encodeURIComponent(offset) : '');
+    const r = await fetch(url, { headers: { Authorization: 'Bearer ' + APP_KEYS.airtableWriteKey } });
+    if (!r.ok) throw new Error('BK-Angebote lesen HTTP ' + r.status);
+    const d = await r.json();
+    (d.records || []).forEach(x => all.push(x));
+    offset = d.offset || null;
+    if (!offset) break;
+  }
+  return all;
+}
+async function _katalogBulkFromOffers(btn) {
+  if (!APP_KEYS.bkAirtableBaseId) return toast('Berichtskonverter-Base nicht konfiguriert (Admin → Einstellungen)', 'warn', 5000);
+  if (!confirm('Aus allen bereits erstellten Angeboten (Berichtskonverter) einen Katalog erzeugen?\n\nBestehende Katalog-Einträge bleiben erhalten — es werden nur neue Titel ergänzt (dedup).')) return;
+  setBusy(btn, true, 'Lese Angebote…');
+  try {
+    await _angKatalogEnsureTable();
+    const existing = await loadPositionskatalog(true);
+    const seen = new Set((existing || []).map(e => _katalogNormTitle(e.titel)));
+    const offers = await _bkReadAllAngebote();
+    let added = 0, scanned = 0;
+    for (const rec of offers) {
+      let positionen = [];
+      try { positionen = JSON.parse((rec.fields && rec.fields.positionen_json) || '[]'); } catch (_) {}
+      if (!Array.isArray(positionen)) positionen = [];
+      for (const p of positionen) { if (await _katalogAddIfNew(p, seen)) { added++; if (added % 5 === 0) setBusy(btn, true, added + ' übernommen…'); } }
+      scanned++;
+    }
+    _ANG_KATALOG_CACHE = null;
+    await loadPositionskatalog(true);
+    _KATALOG.entries = _ANG_KATALOG_CACHE || [];
+    _katalogRender();
+    toast(added + ' neue Position(en) aus ' + scanned + ' Angeboten übernommen ✓', 'success', 7000);
+  } catch (e) { setBusy(btn, false); toast('Bulk-Import fehlgeschlagen: ' + e.message, 'error', 9000); }
 }
 
 const ANGEBOTE_TABLE = 'Angebote';
@@ -30853,6 +30949,8 @@ async function _bkSaveAngebotToBK(chatState) {
   } catch (e) {
     console.warn('[BK-Save] app_pdf-Upload fehlgeschlagen (Record ist trotzdem da):', e.message);
   }
+  // v2.46.304: Positionen dieses Angebots automatisch in den Katalog lernen (non-blocking, dedup)
+  _angKatalogAutoLearn(s).catch(() => {});
   return { recordId: created.id, angNum };
 }
 
