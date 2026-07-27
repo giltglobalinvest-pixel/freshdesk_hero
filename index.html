@@ -791,7 +791,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.47.6';
+const APP_VERSION = 'v2.47.7';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -38167,7 +38167,21 @@ function closeCrawlDetail() {
 async function renderContactsPage() {
   setPageTitle('Kontakte', 'KI-Suche · Marketing-History · Sales-Filter');
   const accountsCount = (APP_STATE.accounts || []).length;
-  $('pageContent').innerHTML = '<div class="space-y-3 max-w-3xl mx-auto">' +
+  const showAdv = (function () { try { return localStorage.getItem('fdh_contacts_show_adv') === '1'; } catch (_) { return false; } })();
+  $('pageContent').innerHTML = '<div class="space-y-3">' +
+    // v2.47: Primär-Leiste — nur Gecrawlt + Zentrale DB; Rest per „Erweiterte Suche" einblendbar
+    '<div class="bg-white rounded-xl border border-ink-200 p-2.5">' +
+      '<div class="flex flex-wrap items-center gap-2">' +
+        '<button onclick="showCrawledContacts(this)" class="flex-1 min-w-[160px] px-4 py-2.5 bg-gradient-to-br from-violet-500 to-indigo-600 hover:from-violet-600 hover:to-indigo-700 text-white rounded-lg text-sm font-bold inline-flex items-center justify-center gap-1.5" title="Zeige alle aus Ticket-Signaturen gecrawlten Kontakte"><i data-lucide="radar" class="w-4 h-4"></i> Gecrawlt</button>' +
+        '<button onclick="showZdbTableView(this)" class="flex-1 min-w-[160px] px-4 py-2.5 bg-gradient-to-br from-indigo-600 to-blue-700 hover:from-indigo-700 hover:to-blue-800 text-white rounded-lg text-sm font-bold inline-flex items-center justify-center gap-1.5" title="Tabellarische Ansicht der zentralen Kontakt-DB (synchron zu Airtable)"><i data-lucide="database" class="w-4 h-4"></i> Zentrale DB</button>' +
+        '<label class="text-[11px] inline-flex items-center gap-1.5 cursor-pointer select-none shrink-0 ml-auto text-ink-600">' +
+          '<input type="checkbox" id="contactsAdvToggle" ' + (showAdv ? 'checked' : '') + ' onchange="_toggleContactsAdvanced(this.checked)" class="w-4 h-4 accent-orange-600">' +
+          '<span class="font-semibold uppercase tracking-wider inline-flex items-center gap-1"><i data-lucide="sliders-horizontal" class="w-3.5 h-3.5"></i> Erweiterte Suche</span>' +
+        '</label>' +
+      '</div>' +
+    '</div>' +
+    // Erweiterter Bereich (KI-Suche, gespeicherte Suchen, Mandant, MKT-Filter) — standardmäßig versteckt
+    '<div id="contactsAdvanced" class="' + (showAdv ? '' : 'hidden ') + 'space-y-3">' +
     '<div class="bg-gradient-to-br from-orange-50 to-amber-50 border border-orange-200 rounded-xl p-3 text-[12px] text-orange-900">' +
       '<p class="font-bold inline-flex items-center gap-1 mb-1"><i data-lucide="sparkles" class="w-4 h-4"></i> KI-Suche · Mandant wählbar (' + accountsCount + ' verfügbar)</p>' +
       '<p>Beschreib in Worten welche Kontakte du sehen willst. Beispiele:</p>' +
@@ -38203,10 +38217,7 @@ async function renderContactsPage() {
       '</div>' +
       '<div id="contactsActionRow" class="flex flex-wrap gap-2 items-center">' +
         '<button id="contactsSearchBtn" onclick="_runContactSearch(this)" class="flex-1 min-w-[140px] px-3 py-2 bg-gradient-to-br from-orange-500 to-amber-600 hover:from-orange-600 hover:to-amber-700 text-white rounded-lg text-sm font-bold inline-flex items-center justify-center gap-1"><i data-lucide="search" class="w-4 h-4"></i> Suchen</button>' +
-        // v2.46.204: Gecrawlte Kontakte (aus Ticket-Signaturen) anzeigen
-        '<button onclick="showCrawledContacts(this)" class="px-3 py-2 bg-gradient-to-br from-violet-500 to-indigo-600 hover:from-violet-600 hover:to-indigo-700 text-white rounded-lg text-sm font-bold inline-flex items-center justify-center gap-1" title="Zeige alle aus Ticket-Signaturen gecrawlten Kontakte"><i data-lucide="radar" class="w-4 h-4"></i> Gecrawlt</button>' +
-        // v2.46.291: Tabellarische Ansicht der zentralen Kontakt-DB (Airtable-synchron)
-        '<button onclick="showZdbTableView(this)" class="px-3 py-2 bg-gradient-to-br from-indigo-600 to-blue-700 hover:from-indigo-700 hover:to-blue-800 text-white rounded-lg text-sm font-bold inline-flex items-center justify-center gap-1" title="Tabellarische Ansicht der zentralen Kontakt-DB (synchron zu Airtable)"><i data-lucide="database" class="w-4 h-4"></i> Zentrale DB</button>' +
+        // Gecrawlt + Zentrale DB stehen jetzt in der Primär-Leiste oben
         '<select id="contactsSort" onchange="_onContactsSort(this.value)" class="px-2 py-2 border border-ink-300 rounded-lg text-sm bg-white">' +
           '<option value="name"'   + (CONTACTS_STATE.sort === 'name'   ? ' selected' : '') + '>A → Z</option>' +
           '<option value="recent"' + (CONTACTS_STATE.sort === 'recent' ? ' selected' : '') + '>Letzte Marketing-Mail</option>' +
@@ -38235,6 +38246,7 @@ async function renderContactsPage() {
         '</label>' +
       '</div>' +
     '</div>' +
+    '</div>' +  // schließt #contactsAdvanced
     // Massenversand-Toolbar (versteckt bis Auswahl > 0)
     '<div id="contactsBulkBar" class="hidden bg-orange-600 text-white rounded-xl px-3 py-2 flex flex-wrap items-center gap-2 shadow-md">' +
       '<i data-lucide="check-square" class="w-4 h-4"></i>' +
@@ -38248,8 +38260,8 @@ async function renderContactsPage() {
     '<div id="contactsResults">' +
       '<div class="bg-white rounded-xl border border-dashed border-ink-300 p-6 text-center text-sm text-ink-500">' +
         '<i data-lucide="users" class="w-8 h-8 inline text-ink-400"></i>' +
-        '<p class="mt-2">Gib einen Suchbegriff ein und klick auf <b>Suchen</b>.</p>' +
-        '<p class="text-[11px] text-ink-400 mt-1">Geladene Kontakte siehst du hier — mit Marketing-History und Sync-Status.</p>' +
+        '<p class="mt-2">Wähle oben <b>Gecrawlt</b> oder <b>Zentrale DB</b>.</p>' +
+        '<p class="text-[11px] text-ink-400 mt-1">Für die KI-/Marketing-Suche oben rechts <b>Erweiterte Suche</b> aktivieren.</p>' +
       '</div>' +
     '</div>' +
   '</div>';
@@ -38279,6 +38291,14 @@ function _useContactPrompt(s) {
   CONTACTS_STATE.prompt = s;
   const el = document.getElementById('contactsPrompt');
   if (el) el.value = s;
+}
+
+/* v2.47: Erweiterten Suchbereich (KI-Suche/Gespeichert/Mandant/MKT-Filter) ein-/ausblenden.
+   Standardmäßig versteckt — nur Gecrawlt + Zentrale DB sichtbar. Präferenz in localStorage. */
+function _toggleContactsAdvanced(v) {
+  const el = document.getElementById('contactsAdvanced');
+  if (el) el.classList.toggle('hidden', !v);
+  try { localStorage.setItem('fdh_contacts_show_adv', v ? '1' : '0'); } catch (_) {}
 }
 
 function _onContactsSort(v) {
@@ -39653,8 +39673,8 @@ function _renderContactsResults() {
   if (!CONTACTS_STATE.results.length) {
     host.innerHTML = '<div class="bg-white rounded-xl border border-dashed border-ink-300 p-6 text-center text-sm text-ink-500">' +
       '<i data-lucide="users" class="w-8 h-8 inline text-ink-400"></i>' +
-      '<p class="mt-2">Gib einen Suchbegriff ein und klick auf <b>Suchen</b>.</p>' +
-      '<p class="text-[11px] text-ink-400 mt-1">Geladene Kontakte siehst du hier — mit Marketing-History und Sync-Status.</p>' +
+      '<p class="mt-2">Wähle oben <b>Gecrawlt</b> oder <b>Zentrale DB</b>.</p>' +
+      '<p class="text-[11px] text-ink-400 mt-1">Für die KI-/Marketing-Suche oben rechts <b>Erweiterte Suche</b> aktivieren.</p>' +
     '</div>';
     if (window.lucide) lucide.createIcons();
     _updateBulkBar();
