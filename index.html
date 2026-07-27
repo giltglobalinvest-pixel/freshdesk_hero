@@ -791,7 +791,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.47.5';
+const APP_VERSION = 'v2.47.6';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -27245,31 +27245,29 @@ function _mbPvSheet(bodyHtml, extraBtnHtml) {
     '</div>';
   if (window.lucide) lucide.createIcons();
 }
-/* Aufzug-Vorschau: das EXAKTE PDF (gleiches _fdhBuildBkAngebotPdfBlob wie beim
-   Senden) — kein abweichender HTML-Renderer. Jede Seite wird via pdf.js auf die
-   Bildschirmbreite gerendert (Canvas, scharf per devicePixelRatio) und gestapelt.
-   So ist die Vorschau 1:1 das PDF, nur handygerecht skaliert. */
-async function _mbPreviewSheetAufzug() {
-  const s = window._ANG_CHAT; if (!s) return;
-  const pdfBtn = '<button onclick="angChatPreviewBkPdf(this)" class="shrink-0 text-[12px] font-bold text-indigo-600 px-2.5 py-1.5 rounded-lg border border-indigo-200 inline-flex items-center gap-1"><i data-lucide="file-text" class="w-3.5 h-3.5"></i> PDF</button>';
+/* Vorschau = das EXAKTE PDF. Gemeinsamer Renderer: baut den PDF-Blob (Aufzug:
+   _fdhBuildBkAngebotPdfBlob, FLP/ERP Hero: erpQuoteToPdfBlob — dasselbe, was
+   „PDF öffnen"/Versand nutzt) und rendert jede Seite via pdf.js auf Bildschirm-
+   breite (Canvas, scharf per devicePixelRatio, gestapelt). 1:1 das PDF, nur
+   handygerecht skaliert — KEINE abweichende HTML-Vorlage. */
+async function _mbPreviewSheetPdf(buildBlob, pdfBtn) {
   _mbPvSheet('<div id="mbPvPdf" class="p-3"><div class="text-center text-ink-400 text-sm py-12"><span class="spinner inline-block w-5 h-5 border-[2px] text-indigo-500"></span><p class="mt-2">Baue PDF-Vorschau…</p></div></div>', pdfBtn);
   try {
-    const blob = await _fdhBuildBkAngebotPdfBlob(s);   // identisch zum versendeten PDF
+    const blob = await buildBlob();
     await _ensurePdfLibs();
     if (!window.pdfjsLib) throw new Error('pdf.js nicht verfügbar');
     const buf = await blob.arrayBuffer();
-    let host = document.getElementById('mbPvPdf');
+    const host = document.getElementById('mbPvPdf');
     if (!host) return;  // Sheet inzwischen geschlossen
     const pdf = await window.pdfjsLib.getDocument({ data: buf }).promise;
-    const avail = Math.max(240, (host.clientWidth || window.innerWidth) - 0);
+    const avail = Math.max(240, host.clientWidth || window.innerWidth);
     const dpr = Math.min(window.devicePixelRatio || 1, 2);  // Schärfe, aber Speicher begrenzen
     host.innerHTML = '';
     for (let p = 1; p <= pdf.numPages; p++) {
       if (!document.getElementById('mbPvPdf')) return;  // Sheet geschlossen → abbrechen
       const page = await pdf.getPage(p);
       const vp1 = page.getViewport({ scale: 1 });
-      const cssScale = avail / vp1.width;
-      const vp = page.getViewport({ scale: cssScale * dpr });
+      const vp = page.getViewport({ scale: (avail / vp1.width) * dpr });
       const canvas = document.createElement('canvas');
       canvas.width = Math.round(vp.width); canvas.height = Math.round(vp.height);
       canvas.style.width = avail + 'px';
@@ -27284,16 +27282,15 @@ async function _mbPreviewSheetAufzug() {
     if (host) host.innerHTML = '<p class="p-6 text-center text-ink-500 text-sm">Vorschau konnte nicht erzeugt werden — öffne sie über „PDF" oben.<br><span class="text-ink-400 text-[11px]">' + escapeHtml(e.message || String(e)) + '</span></p>';
   }
 }
+function _mbPreviewSheetAufzug() {
+  const s = window._ANG_CHAT; if (!s) return;
+  const pdfBtn = '<button onclick="angChatPreviewBkPdf(this)" class="shrink-0 text-[12px] font-bold text-indigo-600 px-2.5 py-1.5 rounded-lg border border-indigo-200 inline-flex items-center gap-1"><i data-lucide="file-text" class="w-3.5 h-3.5"></i> PDF</button>';
+  _mbPreviewSheetPdf(() => _fdhBuildBkAngebotPdfBlob(s), pdfBtn);
+}
 function _mbPreviewSheetFlp() {
-  try {
-    const sheets = erpQuoteRenderSheets(_flpBuildErpData());
-    const z = Math.min(1, (window.innerWidth - 8) / 794);  // dynamisch auf Bildschirmbreite fitten
-    const body = '<div style="padding:10px 0;"><div style="zoom:' + z + ';width:794px;margin:0 auto;">' +
-      sheets.map(x => '<div style="width:794px;margin:0 auto 20px;background:#fff;box-shadow:0 1px 8px rgba(0,0,0,.18);">' + x + '</div>').join('') +
-      '</div></div>';
-    const pdfBtn = '<button onclick="_flpOpenPdf(this)" class="shrink-0 text-[12px] font-bold text-indigo-600 px-2.5 py-1.5 rounded-lg border border-indigo-200 inline-flex items-center gap-1"><i data-lucide="file-text" class="w-3.5 h-3.5"></i> PDF</button>';
-    _mbPvSheet(body, pdfBtn);
-  } catch (e) { toast('Vorschau fehlgeschlagen: ' + (e.message || e), 'error', 6000); }
+  if (typeof erpQuoteToPdfBlob !== 'function') return toast('PDF-Renderer nicht geladen — App neu laden', 'error', 5000);
+  const pdfBtn = '<button onclick="_flpOpenPdf(this)" class="shrink-0 text-[12px] font-bold text-indigo-600 px-2.5 py-1.5 rounded-lg border border-indigo-200 inline-flex items-center gap-1"><i data-lucide="file-text" class="w-3.5 h-3.5"></i> PDF</button>';
+  _mbPreviewSheetPdf(() => erpQuoteToPdfBlob(_flpBuildErpData()), pdfBtn);
 }
 
 /* =============== Mobiler KI-Chat (Vollbild, Bubble-UI) ====================
