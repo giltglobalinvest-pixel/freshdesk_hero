@@ -788,7 +788,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.299';
+const APP_VERSION = 'v2.46.300';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -25672,6 +25672,183 @@ async function _flpPushAngebot(btn) {
   }
 }
 
+/* ============================================================================
+   ANGEBOTS-POSITIONSKATALOG (v2.46.300)
+   Kuratierte Standard-Positionen (Titel + Leistungsbeschreibung je Leistungstyp),
+   die die Angebots-KI beim Generieren möglichst 1:1 übernimmt. Verwaltung unter
+   Einstellungen → „Angebots-Positionskatalog". Tabelle in der App-Base, wird bei
+   Bedarf via Meta-API automatisch angelegt.
+   ============================================================================ */
+const ANGEBOTS_KATALOG_TABLE = 'Angebots_Positionskatalog';
+let _ANG_KATALOG_CACHE = null;
+const _KATALOG = { entries: [], editing: null, search: '' };
+
+function _angKatalogFieldSpecs() {
+  return [
+    { name: 'titel', type: 'singleLineText' },
+    { name: 'leistungstyp', type: 'singleLineText' },
+    { name: 'beschreibung', type: 'multilineText' },
+    { name: 'einzelpreis', type: 'number', options: { precision: 2 } },
+    { name: 'einheit', type: 'singleLineText' },
+    { name: 'aktiv', type: 'checkbox', options: { color: 'greenBright', icon: 'check' } },
+    { name: 'sortierung', type: 'number', options: { precision: 0 } },
+    { name: 'created_at', type: 'singleLineText' },
+    { name: 'updated_at', type: 'singleLineText' },
+  ];
+}
+async function _angKatalogEnsureTable() { return ensureTable(ANGEBOTS_KATALOG_TABLE, _angKatalogFieldSpecs()); }
+
+/* Lädt den Positionskatalog (gecacht). Bei fehlender Tabelle → leer. */
+async function loadPositionskatalog(force) {
+  if (!force && _ANG_KATALOG_CACHE) return _ANG_KATALOG_CACHE;
+  try {
+    const recs = await airtableRead(ANGEBOTS_KATALOG_TABLE, { maxRecords: 500 });
+    _ANG_KATALOG_CACHE = recs.map(r => ({
+      id: r.id, titel: r.fields.titel || '', leistungstyp: r.fields.leistungstyp || '',
+      beschreibung: r.fields.beschreibung || '', einzelpreis: (r.fields.einzelpreis != null ? r.fields.einzelpreis : ''),
+      einheit: r.fields.einheit || '', aktiv: r.fields.aktiv !== false, sortierung: +r.fields.sortierung || 0,
+    })).sort((a, b) => (a.leistungstyp || '').localeCompare(b.leistungstyp || '') || (a.sortierung - b.sortierung) || a.titel.localeCompare(b.titel));
+    return _ANG_KATALOG_CACHE;
+  } catch (e) { console.warn('Positionskatalog laden:', e.message); return _ANG_KATALOG_CACHE || []; }
+}
+
+/* Prompt-Block für die Angebots-KI — Titel + Beschreibung bevorzugt wortwörtlich. */
+function _angKatalogPromptBlock(katalog) {
+  const active = (katalog || []).filter(k => k.aktiv && k.titel);
+  if (!active.length) return '';
+  const lines = active.slice(0, 80).map(k => {
+    const preis = (k.einzelpreis !== '' && k.einzelpreis != null) ? ('\n  Richtpreis: ' + k.einzelpreis + ' EUR' + (k.einheit ? ' / ' + k.einheit : '')) : '';
+    const beschr = String(k.beschreibung || '').trim().split('\n').map(l => '  ' + l).join('\n');
+    return '• [' + (k.leistungstyp || 'Allgemein') + '] ' + k.titel + (beschr.trim() ? '\n' + beschr : '') + preis;
+  });
+  return '\n\nPOSITIONSKATALOG (vom User gepflegte Standard-Positionen — HÖCHSTE PRIORITÄT für die Formulierung):\n' +
+    'Passt die Anfrage inhaltlich zu einer dieser Positionen, übernimm den TITEL (bezeichnung) und die LEISTUNGSBESCHREIBUNG (beschreibung) MÖGLICHST WORTWÖRTLICH — passe nur Menge und ggf. Preis an den konkreten Fall an. Nutze den Richtpreis als Standardpreis, wenn der User keinen eigenen nennt.\n' +
+    lines.join('\n') + '\n';
+}
+
+/* ---- Verwaltungs-UI ---- */
+async function openPositionskatalog() {
+  let host = document.getElementById('katalogHost');
+  if (!host) { host = document.createElement('div'); host.id = 'katalogHost'; document.body.appendChild(host); }
+  host.innerHTML = '<div class="fixed inset-0 z-[75] bg-black/40 flex items-start justify-center p-4"><div class="bg-white rounded-2xl shadow-xl w-full max-w-2xl my-8 p-6 text-center text-sm text-ink-500">Lade Katalog…</div></div>';
+  _KATALOG.editing = null; _KATALOG.search = '';
+  try { await _angKatalogEnsureTable(); } catch (e) { console.warn('Katalog-Tabelle:', e.message); }
+  await loadPositionskatalog(true);
+  _KATALOG.entries = _ANG_KATALOG_CACHE || [];
+  _katalogRender();
+}
+function _katalogCloseMgr() { const h = document.getElementById('katalogHost'); if (h) h.innerHTML = ''; }
+function _katalogRender() {
+  const host = document.getElementById('katalogHost'); if (!host) return;
+  const inner = _KATALOG.editing ? _katalogEditHtml() : _katalogListHtml();
+  host.innerHTML =
+    '<div class="fixed inset-0 z-[75] bg-black/40 flex items-start justify-center overflow-y-auto p-4" onclick="if(event.target===this)_katalogCloseMgr()">' +
+      '<div class="bg-white rounded-2xl shadow-xl w-full max-w-2xl my-8">' +
+        '<div class="flex items-center justify-between p-4 border-b border-ink-200">' +
+          '<h2 class="font-bold text-ink-900 inline-flex items-center gap-2"><i data-lucide="book-marked" class="w-5 h-5"></i> Angebots-Positionskatalog</h2>' +
+          '<button onclick="_katalogCloseMgr()" class="text-ink-400 hover:text-ink-700"><i data-lucide="x" class="w-5 h-5"></i></button>' +
+        '</div>' + inner +
+      '</div>' +
+    '</div>';
+  if (window.lucide) lucide.createIcons();
+}
+function _katalogFilteredEntries() {
+  const q = (_KATALOG.search || '').trim().toLowerCase();
+  return q ? _KATALOG.entries.filter(e => (e.titel + ' ' + e.leistungstyp + ' ' + e.beschreibung).toLowerCase().includes(q)) : _KATALOG.entries;
+}
+function _katalogListBodyHtml() {
+  const entries = _katalogFilteredEntries();
+  const q = (_KATALOG.search || '').trim();
+  if (!entries.length) return '<p class="text-sm text-ink-500 text-center py-8">' + (q ? 'Keine Treffer.' : 'Noch keine Positionen. Lege die erste an.') + '</p>';
+  const groups = {}; entries.forEach(e => { const g = e.leistungstyp || 'Allgemein'; (groups[g] = groups[g] || []).push(e); });
+  return Object.keys(groups).sort().map(g =>
+    '<div class="mb-3"><p class="text-[10px] uppercase tracking-wider font-bold text-amber-600 mb-1">' + escapeHtml(g) + '</p>' +
+    groups[g].map(e =>
+      '<div class="border border-ink-200 rounded-xl p-2.5 mb-1.5 ' + (e.aktiv ? '' : 'opacity-50') + '">' +
+        '<div class="flex items-start justify-between gap-2">' +
+          '<div class="min-w-0 cursor-pointer flex-1" onclick="_katalogEdit(\'' + e.id + '\')">' +
+            '<p class="font-bold text-sm text-ink-900">' + escapeHtml(e.titel) + (e.aktiv ? '' : ' <span class="text-[9px] text-ink-400">(inaktiv)</span>') + '</p>' +
+            '<p class="text-[11px] text-ink-500 whitespace-pre-line line-clamp-3">' + escapeHtml(e.beschreibung || '') + '</p>' +
+            ((e.einzelpreis !== '' && e.einzelpreis != null) ? '<p class="text-[10px] text-emerald-700 mt-0.5">Richtpreis: ' + escapeHtml(String(e.einzelpreis)) + ' EUR' + (e.einheit ? ' / ' + escapeHtml(e.einheit) : '') + '</p>' : '') +
+          '</div>' +
+          '<div class="flex gap-1 shrink-0">' +
+            '<button onclick="_katalogEdit(\'' + e.id + '\')" class="text-amber-600 hover:bg-amber-50 p-1.5 rounded" title="Bearbeiten"><i data-lucide="edit-3" class="w-4 h-4"></i></button>' +
+            '<button onclick="_katalogDelete(\'' + e.id + '\', this)" class="text-rose-500 hover:bg-rose-50 p-1.5 rounded" title="Löschen"><i data-lucide="trash-2" class="w-4 h-4"></i></button>' +
+          '</div>' +
+        '</div>' +
+      '</div>').join('') + '</div>').join('');
+}
+function _katalogRefreshList() { const el = document.getElementById('katalogListBody'); if (el) { el.innerHTML = _katalogListBodyHtml(); if (window.lucide) lucide.createIcons(); } }
+function _katalogListHtml() {
+  return '<div class="p-4">' +
+    '<div class="flex items-center gap-2 mb-3">' +
+      '<input value="' + escapeAttr(_KATALOG.search || '') + '" oninput="_KATALOG.search=this.value;_katalogRefreshList()" placeholder="Suchen — Titel, Typ, Beschreibung …" class="flex-1 px-2.5 py-1.5 border border-ink-300 rounded-lg text-sm">' +
+      '<button onclick="_katalogNew()" class="px-3 py-1.5 bg-amber-600 hover:bg-amber-700 text-white rounded-lg text-sm font-bold inline-flex items-center gap-1 shrink-0"><i data-lucide="plus" class="w-4 h-4"></i> Neu</button>' +
+    '</div>' +
+    '<p class="text-[11px] text-ink-500 mb-2">' + _KATALOG.entries.length + ' Positionen · Die Angebots-KI übernimmt Titel + Beschreibung passender Einträge möglichst 1:1.</p>' +
+    '<div id="katalogListBody" class="max-h-[55vh] overflow-y-auto">' + _katalogListBodyHtml() + '</div>' +
+  '</div>';
+}
+function _katalogNew() { _KATALOG.editing = { id: null, titel: '', leistungstyp: '', beschreibung: '', einzelpreis: '', einheit: '', aktiv: true }; _katalogRender(); }
+function _katalogEdit(id) { const e = _KATALOG.entries.find(x => x.id === id); if (!e) return; _KATALOG.editing = Object.assign({}, e); _katalogRender(); }
+function _katalogCancelEdit() { _KATALOG.editing = null; _katalogRender(); }
+function _katalogEditHtml() {
+  const e = _KATALOG.editing || {};
+  const typen = Array.from(new Set(_KATALOG.entries.map(x => x.leistungstyp).filter(Boolean).concat(['Austausch', 'Reparatur', 'Wartung', 'Modernisierung', 'Prüfung', 'Sonstiges'])));
+  const datalist = '<datalist id="katalogTypen">' + typen.map(t => '<option value="' + escapeAttr(t) + '">').join('') + '</datalist>';
+  const inp = (id, val, ph, extra) => '<input id="' + id + '" value="' + escapeAttr(val == null ? '' : String(val)) + '" ' + (extra || '') + ' placeholder="' + escapeAttr(ph || '') + '" class="w-full mt-0.5 px-2.5 py-1.5 border border-ink-300 rounded-lg text-sm">';
+  return '<div class="p-4 space-y-3">' + datalist +
+    '<label class="block"><span class="text-[11px] font-semibold text-ink-600">Titel *</span>' + inp('katTitel', e.titel, 'z.B. Austausch Frequenzumrichter durch 6+ zertifiziertes Gerät') + '</label>' +
+    '<label class="block"><span class="text-[11px] font-semibold text-ink-600">Leistungstyp</span>' + inp('katTyp', e.leistungstyp, 'z.B. Austausch, Reparatur, Wartung', 'list="katalogTypen"') + '</label>' +
+    '<label class="block"><span class="text-[11px] font-semibold text-ink-600">Leistungsbeschreibung</span>' +
+      '<textarea id="katBeschr" rows="6" placeholder="* Demontage des defekten Geräts\n* Lieferung und Montage …\n* Parametrierung und Inbetriebnahme" class="w-full mt-0.5 px-2.5 py-1.5 border border-ink-300 rounded-lg text-sm">' + escapeHtml(e.beschreibung || '') + '</textarea>' +
+      '<span class="text-[10px] text-ink-400">Eine Zeile pro Leistungspunkt (mit * oder - beginnen = Aufzählung im PDF).</span></label>' +
+    '<div class="flex gap-2">' +
+      '<label class="flex-1"><span class="text-[11px] font-semibold text-ink-600">Richtpreis netto (EUR)</span>' + inp('katPreis', e.einzelpreis, 'optional', 'type="number" step="0.01"') + '</label>' +
+      '<label class="w-28"><span class="text-[11px] font-semibold text-ink-600">Einheit</span>' + inp('katEinheit', e.einheit, 'Stk') + '</label>' +
+    '</div>' +
+    '<label class="inline-flex items-center gap-2 text-sm"><input type="checkbox" id="katAktiv" ' + (e.aktiv !== false ? 'checked' : '') + '> aktiv (von der KI genutzt)</label>' +
+    '<div class="flex justify-between items-center pt-2 border-t border-ink-200">' +
+      '<button onclick="_katalogCancelEdit()" class="px-3 py-2 text-sm text-ink-600 hover:bg-ink-100 rounded-lg inline-flex items-center gap-1"><i data-lucide="arrow-left" class="w-4 h-4"></i> Zurück</button>' +
+      '<button onclick="_katalogSave(this)" class="px-4 py-2 text-sm font-bold bg-amber-600 hover:bg-amber-700 text-white rounded-lg inline-flex items-center gap-1"><i data-lucide="save" class="w-4 h-4"></i> Speichern</button>' +
+    '</div>' +
+  '</div>';
+}
+async function _katalogSave(btn) {
+  const e = _KATALOG.editing || {};
+  const g = id => (document.getElementById(id)?.value || '');
+  const titel = g('katTitel').trim();
+  if (!titel) return toast('Titel fehlt', 'warn', 3000);
+  const preisRaw = g('katPreis').trim();
+  const fields = {
+    titel, leistungstyp: g('katTyp').trim(), beschreibung: g('katBeschr'),
+    einheit: g('katEinheit').trim(), aktiv: !!(document.getElementById('katAktiv') && document.getElementById('katAktiv').checked),
+    updated_at: nowIso(),
+  };
+  if (preisRaw !== '') fields.einzelpreis = +String(preisRaw).replace(',', '.') || 0;
+  setBusy(btn, true, 'Speichern…');
+  try {
+    if (e.id) await airtableUpdate(ANGEBOTS_KATALOG_TABLE, e.id, fields);
+    else { fields.created_at = nowIso(); await airtableWrite(ANGEBOTS_KATALOG_TABLE, fields); }
+    await loadPositionskatalog(true);
+    _KATALOG.entries = _ANG_KATALOG_CACHE || [];
+    _KATALOG.editing = null;
+    _katalogRender();
+    toast('Position gespeichert ✓', 'success', 3000);
+  } catch (err) { setBusy(btn, false); toast('Speichern fehlgeschlagen: ' + err.message, 'error', 7000); }
+}
+async function _katalogDelete(id, btn) {
+  if (!confirm('Diese Katalog-Position löschen?')) return;
+  setBusy(btn, true);
+  try {
+    await airtableDelete(ANGEBOTS_KATALOG_TABLE, id);
+    await loadPositionskatalog(true);
+    _KATALOG.entries = _ANG_KATALOG_CACHE || [];
+    _katalogRender();
+    toast('Gelöscht', 'info', 2500);
+  } catch (e) { setBusy(btn, false); toast('Löschen fehlgeschlagen: ' + e.message, 'error', 6000); }
+}
+
 const ANGEBOTE_TABLE = 'Angebote';
 const ANGEBOTS_LERN_TABLE = 'Angebots_Lerntexte';
 
@@ -28241,6 +28418,9 @@ async function _angChatGenerateOffer(s, userText) {
     if (s._preishist?.byLeistung.size) console.log('[Preishistorie] ' + s._preishist.byLeistung.size + ' Referenz-Positionen von „' + kundeName + '"');
   }
   const preisRefBlock = _angPreisReferenzBlock(s._preishist);
+  // v2.46.300: Positionskatalog (kuratierte Standard-Positionen, Titel + Beschreibung 1:1)
+  const _katalog = await loadPositionskatalog().catch(() => []);
+  const katalogBlock = _angKatalogPromptBlock(_katalog);
   const sysPrompt =
     'Du erstellst SCHLANK STRUKTURIERTE Aufzug-Service-Angebote im Stil von Aufzugshandwerk GmbH (Referenz-Beispiel). ' +
     'WICHTIG: Das ANGEBOT ist sachlich-formular-artig (NICHT erzählerisch). ' +
@@ -28307,6 +28487,7 @@ async function _angChatGenerateOffer(s, userText) {
     stilBlock +
     regelnBlock +
     preisRefBlock +
+    katalogBlock +
     '\nTICKET-HINTERGRUND (bereits analysiert):\n' + (s.ticket_summary || '(keine Hintergrund-Analyse verfügbar)') + '\n\n' +
     'Antworte AUSSCHLIESSLICH mit gültigem JSON ohne Markdown-Codeblock:\n' +
     '{\n' +
@@ -40256,6 +40437,17 @@ async function renderSettingsPage() {
             <div class="min-w-0"><h3 class="font-semibold text-ink-900 text-base">Zentrale Kontakt-DB</h3><p class="text-[12px] text-ink-500">Getrennte Firma_/Kontakt_-Tabellen pro Mandant · Migration bestehender Kontakte</p></div>
           </div>
           <button onclick="openZdbAdmin()" class="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg text-sm font-bold inline-flex items-center gap-2 shrink-0"><i data-lucide="settings-2" class="w-4 h-4"></i> Öffnen</button>
+        </div>
+      </div>
+
+      <!-- ============ ANGEBOTS-POSITIONSKATALOG ============ -->
+      <div class="bg-white border-2 border-amber-300 rounded-2xl p-4 shadow-sm">
+        <div class="flex items-center justify-between gap-3 flex-wrap">
+          <div class="flex items-center gap-3 min-w-0">
+            <div class="w-10 h-10 rounded-xl bg-gradient-to-br from-amber-500 to-orange-600 flex items-center justify-center shrink-0"><i data-lucide="book-marked" class="w-5 h-5 text-white"></i></div>
+            <div class="min-w-0"><h3 class="font-semibold text-ink-900 text-base">Angebots-Positionskatalog</h3><p class="text-[12px] text-ink-500">Standard-Positionen (Titel + Leistungsbeschreibung) verwalten — die KI setzt sie direkt 1:1 ein</p></div>
+          </div>
+          <button onclick="openPositionskatalog()" class="px-4 py-2 bg-amber-600 hover:bg-amber-700 text-white rounded-lg text-sm font-bold inline-flex items-center gap-2 shrink-0"><i data-lucide="settings-2" class="w-4 h-4"></i> Öffnen</button>
         </div>
       </div>
 
