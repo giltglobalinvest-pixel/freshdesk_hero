@@ -788,7 +788,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.46.301';
+const APP_VERSION = 'v2.46.302';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -28421,6 +28421,11 @@ async function _angChatGenerateOffer(s, userText) {
   // v2.46.300: Positionskatalog (kuratierte Standard-Positionen, Titel + Beschreibung 1:1)
   const _katalog = await loadPositionskatalog().catch(() => []);
   const katalogBlock = _angKatalogPromptBlock(_katalog);
+  // v2.46.302: laufende Angebotsnummer EINMAL reservieren (aus dem Berichtskonverter),
+  // damit PDF-Nummer und BK-Archiv-Nummer übereinstimmen.
+  if (s.angebotNummer == null && APP_KEYS.bkAirtableBaseId) {
+    try { s.angebotNummer = await _bkNextAppAngebotNum(APP_KEYS.bkAirtableBaseId); } catch (_) { s.angebotNummer = null; }
+  }
   const sysPrompt =
     'Du erstellst SCHLANK STRUKTURIERTE Aufzug-Service-Angebote im Stil von Aufzugshandwerk GmbH (Referenz-Beispiel). ' +
     'WICHTIG: Das ANGEBOT ist sachlich-formular-artig (NICHT erzählerisch). ' +
@@ -28949,10 +28954,10 @@ async function angChatExecuteFinal(btn) {
     mailText = [c.anschreiben_anrede || 'Sehr geehrte Damen und Herren,', c.anschreiben_body].filter(Boolean).join('\n\n');
   } else {
     mailText = (c.anschreiben_anrede || 'Sehr geehrte Damen und Herren,') + '\n\n' +
-      'vielen Dank für Ihre Anfrage. Anbei erhalten Sie unser Angebot ANG-' + s.ticketId + ' als PDF.\n\n' +
+      'vielen Dank für Ihre Anfrage. Anbei erhalten Sie unser Angebot ANG-' + (s.angebotNummer != null ? s.angebotNummer : ('FDH-' + s.ticketId)) + ' als PDF.\n\n' +
       'Eine kurze Antwort auf diese E-Mail genügt uns als Auftragsbestätigung.';
   }
-  const pdfName = 'Angebot-ANG-' + s.ticketId + '.pdf';
+  const pdfName = 'Angebot-ANG-' + (s.angebotNummer != null ? s.angebotNummer : ('FDH-' + s.ticketId)) + '.pdf';
   const pdfKb = Math.round(pdfBlob.size / 1024);
   // v2.46.185: Ticket-Anhänge sammeln — auswählbar zum Mitsenden (z.B. TÜV-Mängelbericht)
   const ticketAtts = [];
@@ -29135,7 +29140,7 @@ async function angChatConfirmSend(btn) {
         if (sig && typeof appendSignatureHtml === 'function') bodyHtml = appendSignatureHtml(bodyHtml, sig);
       } catch (_) {}
     }
-    const pdfName = 'Angebot-ANG-' + s.ticketId + '.pdf';
+    const pdfName = 'Angebot-ANG-' + (s.angebotNummer != null ? s.angebotNummer : ('FDH-' + s.ticketId)) + '.pdf';
     const sendAtts = [{ blob: s._sendPdfBlob, name: pdfName }];
     // v2.46.185: ausgewählte Ticket-Anhänge (z.B. TÜV-Mängelbericht) laden + mitsenden
     const checked = Array.from(document.querySelectorAll('[data-send-att-idx]:checked'))
@@ -29229,7 +29234,7 @@ async function angChatConfirmSend(btn) {
     _angPersistState();  // v2.46.196: VERSENDET = gespeichert — das ist ab jetzt die Referenz-Version
     closeAngSendPreview();
     closeAngebotsChatModal();
-    toast('Angebot ANG-' + s.ticketId + ' mit PDF-Anhang versendet' + bkNote, 'success', 6000);
+    toast('Angebot ANG-' + (s.angebotNummer != null ? s.angebotNummer : ('FDH-' + s.ticketId)) + ' mit PDF-Anhang versendet' + bkNote, 'success', 6000);
     if (!APP_KEYS.bkAirtableBaseId) {
       toast('Hinweis: NICHT im Berichtskonverter gespeichert — Base-ID fehlt (Admin → Einstellungen → ERP-Block)', 'warn', 10000);
     } else if (bkError) {
@@ -29268,7 +29273,7 @@ async function angChatShowPdfOnly(btn) {
   const html = _renderAngebotHtml(ctx);
   const w = window.open('', '_blank');
   if (!w) { toast('Browser hat Popup blockiert', 'warn'); return; }
-  w.document.write('<!DOCTYPE html><html><head><meta charset="utf-8"><title>Angebot ANG-' + s.ticketId + '</title></head><body>' + html + '<script>setTimeout(function(){window.print();},400);<\/script></body></html>');
+  w.document.write('<!DOCTYPE html><html><head><meta charset="utf-8"><title>Angebot ANG-' + (s.angebotNummer != null ? s.angebotNummer : ('FDH-' + s.ticketId)) + '</title></head><body>' + html + '<script>setTimeout(function(){window.print();},400);<\/script></body></html>');
   w.document.close();
   toast('PDF-Druck-Dialog öffnet — Cmd+P → „Als PDF speichern"', 'success', 4000);
 }
@@ -30747,7 +30752,9 @@ async function _bkSaveAngebotToBK(chatState) {
   const rec = _fdhChatToBkRec(s);
   if (!rec) throw new Error('Mapper lieferte nichts');
   const account = s.account || {};
-  const angNum = await _bkNextAppAngebotNum(APP_KEYS.bkAirtableBaseId);
+  // v2.46.302: bereits reservierte Nummer verwenden (matcht die PDF-Nummer); sonst frisch ziehen
+  const angNum = (s.angebotNummer != null) ? s.angebotNummer : await _bkNextAppAngebotNum(APP_KEYS.bkAirtableBaseId);
+  s.angebotNummer = angNum;
   const fdUrl = account.domain ? ('https://' + account.domain + '.freshdesk.com/a/tickets/' + s.ticketId) : '';
   const fields = Object.assign({}, rec, {
     app_angebot_num:      angNum,
@@ -31562,7 +31569,7 @@ function _fdhChatToBkRec(chatState) {
     '$1\n\n'
   );
   return {
-    app_angebot_num:      'FDH-' + (s.ticketId || '?'),
+    app_angebot_num:      (s.angebotNummer != null ? s.angebotNummer : ('FDH-' + (s.ticketId || '?'))),
     firma:                firmaSlug,
     bearbeiter:           APP_KEYS.user?.name || '',
     angebot_typ:          'sonstiges',
