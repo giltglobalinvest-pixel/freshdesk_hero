@@ -622,6 +622,9 @@
         </span>
       </span>
       <span class="flex items-center gap-2 shrink-0">
+        <button id="agentModeBtn" onclick="toggleAgentMode()" class="font-semibold flex items-center gap-1 active:opacity-60 px-2 py-0.5 -my-0.5 rounded border border-ink-200 text-ink-400 transition" title="Agent-Modus: gibt DIESEN Tab für die Fernsteuerung durch den Harness-Angebots-Agent frei">
+          <i data-lucide="bot" class="w-3 h-3"></i> <span id="agentModeLabel">Agent aus</span>
+        </button>
         <button id="installAppBtn" onclick="promptInstallApp()" class="hidden text-emerald-600 font-semibold flex items-center gap-1 active:opacity-60 px-2 py-0.5 -my-0.5 rounded" title="Als App installieren">
           <i data-lucide="download" class="w-3 h-3"></i> App installieren
         </button>
@@ -791,7 +794,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.47.9';
+const APP_VERSION = 'v2.48.0';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -8116,7 +8119,51 @@ document.addEventListener('click', (e) => {
   if (!m.contains(e.target) && !e.target.closest('button[onclick="toggleMenu()"]')) closeMenu();
 });
 
+/* ============================================================
+   AGENT-MODUS — ausdrückliche Freigabe der Fernsteuerung
+   ============================================================
+   Der Harness-Angebots-Agent (~/bin/fdhero-browser-mcp.mjs) steuert die App
+   über das Chrome-DevTools-Protocol. Damit unmissverständlich ist, WELCHER Tab
+   gemeint ist, muss er hier freigegeben werden — der Agent verweigert die
+   Arbeit, solange kein Tab freigegeben ist.
+
+   Bewusst sessionStorage statt localStorage: die Freigabe gilt für GENAU
+   DIESEN Tab (localStorage wäre profilweit und damit mehrdeutig) und erlischt
+   automatisch, wenn der Tab geschlossen wird. */
+const AGENT_MODE_KEY = 'fdh_agent_tab';
+
+function isAgentMode() {
+  try { return sessionStorage.getItem(AGENT_MODE_KEY) === '1'; } catch (_) { return false; }
+}
+
+function toggleAgentMode() {
+  const on = !isAgentMode();
+  try {
+    if (on) sessionStorage.setItem(AGENT_MODE_KEY, '1');
+    else    sessionStorage.removeItem(AGENT_MODE_KEY);
+  } catch (_) {
+    return toast('Freigabe konnte nicht gespeichert werden (sessionStorage blockiert)', 'error');
+  }
+  renderAgentMode();
+  toast(
+    on ? 'Agent-Modus AN — der Angebots-Agent darf diesen Tab steuern' : 'Agent-Modus aus — Fernsteuerung gesperrt',
+    on ? 'success' : 'info'
+  );
+}
+
+function renderAgentMode() {
+  const btn = $('agentModeBtn');
+  const lbl = $('agentModeLabel');
+  if (!btn || !lbl) return;
+  const on = isAgentMode();
+  lbl.textContent = on ? 'Agent aktiv' : 'Agent aus';
+  btn.className = 'font-semibold flex items-center gap-1 active:opacity-60 px-2 py-0.5 -my-0.5 rounded border transition ' +
+    (on ? 'bg-emerald-600 text-white border-emerald-700 shadow-sm' : 'border-ink-200 text-ink-400 hover:text-ink-600');
+  if (window.lucide) lucide.createIcons();
+}
+
 function renderShellChrome() {
+  renderAgentMode();
   const u = APP_KEYS.user || {};
   const name = u.name || '–';
   $('menuUserName').textContent = name;
