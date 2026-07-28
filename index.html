@@ -622,7 +622,7 @@
         </span>
       </span>
       <span class="flex items-center gap-2 shrink-0">
-        <button id="agentModeBtn" onclick="toggleAgentMode()" class="font-semibold flex items-center gap-1 active:opacity-60 px-2 py-0.5 -my-0.5 rounded border border-ink-200 text-ink-400 transition" title="Agent-Modus: gibt DIESEN Tab für die Fernsteuerung durch den Harness-Angebots-Agent frei">
+        <button id="agentModeBtn" onclick="toggleAgentMode()" aria-pressed="false" style="border-color:#e2e8f0;color:#94a3b8" class="font-semibold flex items-center gap-1 active:opacity-60 px-2 py-0.5 -my-0.5 rounded border" title="Agent-Modus: gibt DIESEN Tab für die Fernsteuerung durch den Harness-Angebots-Agent frei">
           <i data-lucide="bot" class="w-3 h-3"></i> <span id="agentModeLabel">Agent aus</span>
         </button>
         <button id="installAppBtn" onclick="promptInstallApp()" class="hidden text-emerald-600 font-semibold flex items-center gap-1 active:opacity-60 px-2 py-0.5 -my-0.5 rounded" title="Als App installieren">
@@ -794,7 +794,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.48.0';
+const APP_VERSION = 'v2.48.1';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -8157,8 +8157,16 @@ function renderAgentMode() {
   if (!btn || !lbl) return;
   const on = isAgentMode();
   lbl.textContent = on ? 'Agent aktiv' : 'Agent aus';
-  btn.className = 'font-semibold flex items-center gap-1 active:opacity-60 px-2 py-0.5 -my-0.5 rounded border transition ' +
-    (on ? 'bg-emerald-600 text-white border-emerald-700 shadow-sm' : 'border-ink-200 text-ink-400 hover:text-ink-600');
+  // Farben bewusst INLINE statt über Tailwind-Klassen: die CDN-JIT erzeugt CSS für
+  // dynamisch hinzugefügte Klassen verzögert, dadurch hinkte die Farbe dem Zustand
+  // einen Klick hinterher — genau die Mehrdeutigkeit, die dieser Schalter beseitigen soll.
+  btn.style.backgroundColor = on ? '#059669' : 'transparent';  // emerald-600
+  btn.style.color           = on ? '#ffffff' : '#94a3b8';      // ink-400
+  btn.style.borderColor     = on ? '#047857' : '#e2e8f0';      // emerald-700 / ink-200
+  btn.setAttribute('aria-pressed', on ? 'true' : 'false');
+  btn.title = on
+    ? 'Agent-Modus AKTIV — der Harness-Angebots-Agent darf diesen Tab fernsteuern. Klicken zum Sperren.'
+    : 'Agent-Modus aus — Fernsteuerung gesperrt. Klicken, um DIESEN Tab freizugeben.';
   if (window.lucide) lucide.createIcons();
 }
 
