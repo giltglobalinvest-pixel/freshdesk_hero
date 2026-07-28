@@ -791,7 +791,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.47.8';
+const APP_VERSION = 'v2.47.9';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -29299,13 +29299,17 @@ async function angChatUserResponse(userText) {
     _angGenResultBubble();
   } catch (e) {
     _angGenPanelEnd();
+    // v2.47: den (evtl. mehrzeiligen/mit Sonderzeichen) Eingabetext NICHT mehr in ein
+    // inline-onclick einbauen — das war die Quelle des „Uncaught SyntaxError". Stattdessen merken.
+    s._lastFailedInput = userText;
     if (bar) bar.innerHTML = '<div class="bg-red-50 border border-red-200 rounded-xl p-3 text-sm text-red-800"><b>Fehler:</b> ' + escapeHtml(e.message || String(e)) + '</div>' +
-      '<button onclick="angChatUserResponse(\'' + escapeAttr(userText.replace(/\\/g, '').replace(/\'/g, '')) + '\')" class="w-full mt-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl px-3 py-2 text-xs font-semibold">Nochmal versuchen</button>' +
+      '<button onclick="_angRetryLast()" class="w-full mt-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl px-3 py-2 text-xs font-semibold">Nochmal versuchen</button>' +
       '<button onclick="_angGenCopyLog(this)" class="w-full mt-1.5 border border-ink-300 hover:bg-ink-50 text-ink-700 rounded-xl px-3 py-2 text-xs font-semibold inline-flex items-center justify-center gap-1"><i data-lucide="clipboard-list" class="w-3.5 h-3.5"></i> Protokoll kopieren (zur Analyse)</button>';
     if (window.lucide) lucide.createIcons();
     _angGenResultBubble();
   }
 }
+function _angRetryLast() { const s = window._ANG_CHAT; if (s && s._lastFailedInput != null) angChatUserResponse(s._lastFailedInput); }
 
 /* v2.46.82: Single-Shot KI-Call. KI bekommt:
    - Background-Ticket-Analyse (im Hintergrund vorbereitet)
@@ -29509,11 +29513,13 @@ async function _angChatGenerateOffer(s, userText) {
     }),
   });
   let data = await _angTlWrap('KI-Angebot (Sonnet 4.5)', () => _callModel(16000));
-  // v2.46.251: Bei echtem Token-Limit (stop_reason=max_tokens) EINMAL automatisch
-  // mit höherem Budget + Kürzungs-Hinweis nachfassen, statt den User „Nochmal
-  // versuchen" klicken zu lassen.
-  if (data?.stop_reason === 'max_tokens') {
-    console.warn('[Angebot-KI] Antwort bei max_tokens abgeschnitten — Auto-Retry mit 24000 + Kürzungs-Hinweis.');
+  // v2.46.251 / v2.47: EINMAL automatisch nachfassen (höheres Budget + Kürzungs-Hinweis),
+  // wenn die Antwort bei max_tokens abgeschnitten wurde ODER nicht als JSON parsbar ist
+  // (meist ebenfalls Trunkierung) — statt den User „Nochmal versuchen" klicken zu lassen.
+  let _needRetry = (data?.stop_reason === 'max_tokens');
+  if (!_needRetry) { try { parseAIJson((data?.content?.[0]?.text || '').trim()); } catch (_) { _needRetry = true; } }
+  if (_needRetry) {
+    console.warn('[Angebot-KI] Erste Antwort abgeschnitten/unparsbar (stop_reason=' + (data && data.stop_reason) + ') — Auto-Retry mit 24000 + Kürzungs-Hinweis.');
     const retryMsgs = messages.slice();
     retryMsgs[retryMsgs.length - 1] = {
       role: 'user',
@@ -29542,6 +29548,14 @@ async function _angChatGenerateOffer(s, userText) {
       if (m) { try { parsed = JSON.parse(m[0]); } catch (_2) {} }
     }
     if (!parsed) {
+      // v2.47: Roh-Antwort fürs Protokoll + Konsole festhalten (zur Ursachen-Analyse:
+      // Trunkierung? Markdown? Prosa statt JSON?). e1._aiRaw kommt aus parseAIJson.
+      const _rawForLog = (e1 && e1._aiRaw) || raw || '';
+      try {
+        const _tp = _angTlStart('KI-Antwort Parse-Fehler');
+        _angTlEnd(_tp, 'error', 'len=' + _rawForLog.length + ' stop=' + (data && data.stop_reason) + ' head=' + JSON.stringify(_rawForLog.slice(0, 160)) + ' tail=' + JSON.stringify(_rawForLog.slice(-160)));
+      } catch (_) {}
+      console.warn('[Angebot-KI] Roh-Antwort UNPARSBAR (len=' + _rawForLog.length + ', stop_reason=' + (data && data.stop_reason) + '):\n', _rawForLog);
       if (truncated) throw new Error('Angebot zu umfangreich — die KI-Antwort wurde trotz Retry abgeschnitten. Bitte in kleineren Schritten arbeiten (z.B. Positionen nacheinander) oder kürzere Beschreibungen anweisen.');
       throw new Error('KI-Antwort kein gültiges JSON (' + (e1.message || '').slice(0, 60) + ')');
     }
