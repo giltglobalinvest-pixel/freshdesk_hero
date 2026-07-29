@@ -622,9 +622,14 @@
         </span>
       </span>
       <span class="flex items-center gap-2 shrink-0">
-        <button id="agentModeBtn" onclick="toggleAgentMode()" aria-pressed="false" style="border-color:#e2e8f0;color:#94a3b8" class="font-semibold flex items-center gap-1 active:opacity-60 px-2 py-0.5 -my-0.5 rounded border" title="Agent-Modus: gibt DIESEN Tab für die Fernsteuerung durch den Harness-Angebots-Agent frei">
-          <i data-lucide="bot" class="w-3 h-3"></i> <span id="agentModeLabel">Agent aus</span>
-        </button>
+        <span id="agentControls" class="flex items-center gap-2 shrink-0">
+          <button id="agentStartBtn" onclick="starteAgentLauf(this)" class="hidden font-semibold items-center gap-1 active:opacity-60 px-2 py-0.5 -my-0.5 rounded border" style="background:#059669;color:#fff;border-color:#047857" title="Startet einen Lauf des Angebots-Agenten">
+            <i data-lucide="play" class="w-3 h-3"></i> <span id="agentStartLabel">Lauf starten</span>
+          </button>
+          <button id="agentModeBtn" onclick="toggleAgentMode()" aria-pressed="false" style="border-color:#e2e8f0;color:#94a3b8" class="font-semibold flex items-center gap-1 active:opacity-60 px-2 py-0.5 -my-0.5 rounded border" title="Agent-Modus: gibt DIESEN Tab für die Fernsteuerung durch den Harness-Angebots-Agent frei">
+            <i data-lucide="bot" class="w-3 h-3"></i> <span id="agentModeLabel">Agent aus</span>
+          </button>
+        </span>
         <button id="installAppBtn" onclick="promptInstallApp()" class="hidden text-emerald-600 font-semibold flex items-center gap-1 active:opacity-60 px-2 py-0.5 -my-0.5 rounded" title="Als App installieren">
           <i data-lucide="download" class="w-3 h-3"></i> App installieren
         </button>
@@ -794,7 +799,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.49.1';
+const APP_VERSION = 'v2.50.0';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -8192,8 +8197,41 @@ function markiereAgentFenster() {
   } catch (_) {}
 }
 
+/* Lauf des Angebots-Agenten aus der App heraus starten.
+   Der Aufruf geht an den lokalen Protokoll-Server (fdhero-protokoll, Port 4700),
+   NICHT direkt an Harness: Harness hat keinen Start-Endpunkt und schickt keine
+   CORS-Kopfzeilen. Der Protokoll-Server bildet die Harness-Submission nach und
+   erlaubt den Zugriff von dieser Seite ausdrücklich. */
+const AGENT_PROTOKOLL_URL = 'http://127.0.0.1:4700';
+
+async function starteAgentLauf(btn) {
+  const lbl = $('agentStartLabel');
+  if (btn) btn.disabled = true;
+  if (lbl) lbl.textContent = 'startet …';
+  try {
+    const res = await fetch(AGENT_PROTOKOLL_URL + '/api/start', { method: 'POST' });
+    const d = await res.json();
+    toast(d.meldung || (d.ok ? 'Lauf angestoßen' : 'Start nicht möglich'), d.ok ? 'success' : 'warn', d.ok ? 5000 : 9000);
+  } catch (_) {
+    // Häufigster Fall: Das Protokoll läuft nicht. Das ist kein App-Fehler,
+    // deshalb hier der konkrete Hinweis statt einer technischen Meldung.
+    toast('Das Agent-Protokoll ist nicht erreichbar. Bitte im Terminal „fdhero-protokoll" starten.', 'error', 9000);
+  } finally {
+    if (btn) btn.disabled = false;
+    if (lbl) lbl.textContent = 'Lauf starten';
+  }
+}
+
 function renderAgentMode() {
   markiereAgentFenster();
+  // Start-Knopf nur im gekoppelten Agent-Fenster: In einem fremden Fenster wäre
+  // er irreführend, weil der Lauf dort ohnehin keinen freigegebenen Tab fände.
+  const startBtn = $('agentStartBtn');
+  if (startBtn) {
+    const zeigen = istAgentFenster();
+    startBtn.classList.toggle('hidden', !zeigen);
+    startBtn.classList.toggle('flex', zeigen);
+  }
   const btn = $('agentModeBtn');
   const lbl = $('agentModeLabel');
   if (!btn || !lbl) return;
@@ -42281,11 +42319,11 @@ function showNewVersionBanner(newVersion) {
   const bar = $('versionBar');
   if (!bar) return;
   bar.className = 'update-banner text-white px-4 py-2 flex items-center justify-between text-xs gap-2';
-  // v2.49.1: Der Agent-Schalter lebt in dieser Leiste. Vor dem Überschreiben
-  // herausnehmen und danach wieder einhängen — sonst verschwindet ausgerechnet
-  // die Anzeige, an der man das verbundene Fenster erkennt, sobald ein Update
-  // ansteht (und renderAgentMode läuft danach wirkungslos ins Leere).
-  const agentBtn = $('agentModeBtn');
+  // v2.49.1: Die Agent-Bedienelemente leben in dieser Leiste. Vor dem
+  // Überschreiben herausnehmen und danach wieder einhängen — sonst verschwinden
+  // ausgerechnet Schalter und Start-Knopf, sobald ein Update ansteht (und
+  // renderAgentMode läuft danach wirkungslos ins Leere).
+  const agentBtn = $('agentControls');
   bar.innerHTML = `
     <span class="font-semibold truncate">Neue Version ${escapeHtml(newVersion)} verfügbar</span>
     <span class="flex items-center gap-2 shrink-0">
