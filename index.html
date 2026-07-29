@@ -794,7 +794,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.48.1';
+const APP_VERSION = 'v2.49.1';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -8127,36 +8127,97 @@ document.addEventListener('click', (e) => {
    gemeint ist, muss er hier freigegeben werden — der Agent verweigert die
    Arbeit, solange kein Tab freigegeben ist.
 
-   Bewusst sessionStorage statt localStorage: die Freigabe gilt für GENAU
-   DIESEN Tab (localStorage wäre profilweit und damit mehrdeutig) und erlischt
-   automatisch, wenn der Tab geschlossen wird. */
-const AGENT_MODE_KEY = 'fdh_agent_tab';
+   KOPPLUNG (v2.49.0): "fdhero-start" markiert das Agent-Fenster mit einem
+   Schlüssel in localStorage (fdh_agent_browser). Nur dort lässt sich der
+   Schalter betätigen. Vorher waren das Agent-Fenster und ein normales
+   Chrome-Fenster mit derselben App nicht zu unterscheiden — der Schalter wurde
+   im falschen Fenster aktiviert und der Agent fand keine Freigabe.
+
+   Der Freigabe-Zustand liegt seit v2.49.0 ebenfalls in localStorage: Das
+   Agent-Fenster ist ein eigenes Chrome-Profil, das nur diesem Zweck dient — die
+   Freigabe soll einen Neustart überleben statt bei jedem Öffnen zu erlöschen. */
+const AGENT_MODE_KEY    = 'fdh_agent_tab';
+const AGENT_BROWSER_KEY = 'fdh_agent_browser';
+
+function agentBrowserKey() {
+  try { return localStorage.getItem(AGENT_BROWSER_KEY) || ''; } catch (_) { return ''; }
+}
+
+function istAgentFenster() { return !!agentBrowserKey(); }
 
 function isAgentMode() {
-  try { return sessionStorage.getItem(AGENT_MODE_KEY) === '1'; } catch (_) { return false; }
+  if (!istAgentFenster()) return false;   // in einem fremden Fenster niemals aktiv
+  try { return localStorage.getItem(AGENT_MODE_KEY) === '1'; } catch (_) { return false; }
 }
 
 function toggleAgentMode() {
+  if (!istAgentFenster()) {
+    return toast('Dieses Fenster ist NICHT mit dem Agenten gekoppelt. Bitte die App über „fdhero-start" öffnen — nur jenes Fenster kann der Agent sehen.', 'warn', 8000);
+  }
   const on = !isAgentMode();
   try {
-    if (on) sessionStorage.setItem(AGENT_MODE_KEY, '1');
-    else    sessionStorage.removeItem(AGENT_MODE_KEY);
+    if (on) localStorage.setItem(AGENT_MODE_KEY, '1');
+    else    localStorage.removeItem(AGENT_MODE_KEY);
   } catch (_) {
-    return toast('Freigabe konnte nicht gespeichert werden (sessionStorage blockiert)', 'error');
+    return toast('Freigabe konnte nicht gespeichert werden (localStorage blockiert)', 'error');
   }
   renderAgentMode();
   toast(
-    on ? 'Agent-Modus AN — der Angebots-Agent darf diesen Tab steuern' : 'Agent-Modus aus — Fernsteuerung gesperrt',
+    on ? 'Agent-Modus AN — der Angebots-Agent darf dieses Fenster steuern' : 'Agent-Modus aus — Fernsteuerung gesperrt',
     on ? 'success' : 'info'
   );
 }
 
+/* Tab-Titel und Favicon des Agent-Fensters kennzeichnen.
+   Der Schalter allein reicht nicht: Zwischen mehreren Chrome-Fenstern mit
+   derselben App muss man SEHEN können, welches der Agent steuert — und zwar
+   in der Tab-Leiste, ohne die Seite anzuklicken. */
+const AGENT_TITEL_BASIS = 'Freshdesk Hero';
+
+function markiereAgentFenster() {
+  if (!istAgentFenster()) return;   // fremdes Fenster unverändert lassen
+  const on = isAgentMode();
+  document.title = (on ? '🟢 AGENT AKTIV · ' : '⚪️ Agent-Fenster · ') + AGENT_TITEL_BASIS;
+  try {
+    const farbe = on ? '#059669' : '#94a3b8';
+    const svg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">' +
+      '<rect width="64" height="64" rx="14" fill="' + farbe + '"/>' +
+      '<text x="32" y="46" font-size="38" text-anchor="middle">🤖</text></svg>';
+    document.querySelectorAll('link[rel~="icon"]').forEach(l => l.remove());
+    const l = document.createElement('link');
+    l.rel = 'icon';
+    l.type = 'image/svg+xml';
+    l.href = 'data:image/svg+xml,' + encodeURIComponent(svg);
+    document.head.appendChild(l);
+  } catch (_) {}
+}
+
 function renderAgentMode() {
+  markiereAgentFenster();
   const btn = $('agentModeBtn');
   const lbl = $('agentModeLabel');
   if (!btn || !lbl) return;
+  // Fremdes Fenster: Schalter unmissverständlich als wirkungslos kennzeichnen,
+  // statt ihn scheinbar bedienbar zu lassen.
+  if (!istAgentFenster()) {
+    lbl.textContent = 'Kein Agent-Fenster';
+    btn.style.backgroundColor = 'transparent';
+    btn.style.color           = '#cbd5e1';  // ink-300
+    btn.style.borderColor     = '#e2e8f0';  // ink-200
+    btn.style.textDecoration  = 'line-through';
+    btn.setAttribute('aria-pressed', 'false');
+    btn.title = 'Dieses Browser-Fenster ist nicht mit dem Agenten gekoppelt. Der Agent sieht nur das Fenster, das „fdhero-start" geöffnet hat — dort den Schalter setzen.';
+    if (window.lucide) lucide.createIcons();
+    return;
+  }
+  btn.style.textDecoration = 'none';
+
   const on = isAgentMode();
-  lbl.textContent = on ? 'Agent aktiv' : 'Agent aus';
+  // Kennung mit anzeigen: dieselben Zeichen stehen in fdhero-status,
+  // fdhero-check und im Protokoll — so lässt sich auf einen Blick vergleichen,
+  // ob App und Agent wirklich dasselbe Fenster meinen.
+  const kennung = agentBrowserKey().slice(0, 6);
+  lbl.textContent = (on ? 'Agent aktiv' : 'Agent aus') + ' · ' + kennung;
   // Farben bewusst INLINE statt über Tailwind-Klassen: die CDN-JIT erzeugt CSS für
   // dynamisch hinzugefügte Klassen verzögert, dadurch hinkte die Farbe dem Zustand
   // einen Klick hinterher — genau die Mehrdeutigkeit, die dieser Schalter beseitigen soll.
@@ -8164,9 +8225,10 @@ function renderAgentMode() {
   btn.style.color           = on ? '#ffffff' : '#94a3b8';      // ink-400
   btn.style.borderColor     = on ? '#047857' : '#e2e8f0';      // emerald-700 / ink-200
   btn.setAttribute('aria-pressed', on ? 'true' : 'false');
-  btn.title = on
-    ? 'Agent-Modus AKTIV — der Harness-Angebots-Agent darf diesen Tab fernsteuern. Klicken zum Sperren.'
-    : 'Agent-Modus aus — Fernsteuerung gesperrt. Klicken, um DIESEN Tab freizugeben.';
+  btn.title = (on
+    ? 'Agent-Modus AKTIV — der Harness-Angebots-Agent darf dieses Fenster fernsteuern. Klicken zum Sperren.'
+    : 'Agent-Modus aus — Fernsteuerung gesperrt. Klicken, um dieses Fenster freizugeben.'
+  ) + '\nGekoppelt über Schlüssel ' + agentBrowserKey();
   if (window.lucide) lucide.createIcons();
 }
 
@@ -42219,11 +42281,22 @@ function showNewVersionBanner(newVersion) {
   const bar = $('versionBar');
   if (!bar) return;
   bar.className = 'update-banner text-white px-4 py-2 flex items-center justify-between text-xs gap-2';
+  // v2.49.1: Der Agent-Schalter lebt in dieser Leiste. Vor dem Überschreiben
+  // herausnehmen und danach wieder einhängen — sonst verschwindet ausgerechnet
+  // die Anzeige, an der man das verbundene Fenster erkennt, sobald ein Update
+  // ansteht (und renderAgentMode läuft danach wirkungslos ins Leere).
+  const agentBtn = $('agentModeBtn');
   bar.innerHTML = `
     <span class="font-semibold truncate">Neue Version ${escapeHtml(newVersion)} verfügbar</span>
-    <button onclick="doHardReload()" class="bg-white/25 hover:bg-white/35 px-2.5 py-1 rounded font-semibold flex items-center gap-1 shrink-0">
-      <i data-lucide="download" class="w-3.5 h-3.5"></i> Jetzt aktualisieren
-    </button>`;
+    <span class="flex items-center gap-2 shrink-0">
+      <button onclick="doHardReload()" class="bg-white/25 hover:bg-white/35 px-2.5 py-1 rounded font-semibold flex items-center gap-1 shrink-0">
+        <i data-lucide="download" class="w-3.5 h-3.5"></i> Jetzt aktualisieren
+      </button>
+    </span>`;
+  if (agentBtn) {
+    bar.querySelector('span:last-child').appendChild(agentBtn);
+    try { renderAgentMode(); } catch (_) {}
+  }
   if (window.lucide) lucide.createIcons();
 }
 
@@ -42910,6 +42983,12 @@ window.addEventListener('unhandledrejection', (e) => {
 
 document.addEventListener('DOMContentLoaded', () => {
   if (window.lucide) lucide.createIcons();
+  // Sofort kennzeichnen — Agent-Fenster und Fremdfenster müssen schon am
+  // Login-Bildschirm unterscheidbar sein, nicht erst nach dem Anmelden.
+  // renderAgentMode() statt nur markiereAgentFenster(): sonst behält der
+  // Schalter seine statische Beschriftung "Agent aus" und täuscht in einem
+  // nicht gekoppelten Fenster Bereitschaft vor.
+  try { renderAgentMode(); } catch (_) {}
   $('loginForm').addEventListener('submit', async (e) => {
     e.preventDefault();
     const key = $('loginKey').value.trim();
