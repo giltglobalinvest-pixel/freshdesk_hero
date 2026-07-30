@@ -802,7 +802,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.50.10';
+const APP_VERSION = 'v2.50.11';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -17217,9 +17217,14 @@ function renderAssistantPreview() {
           <i data-lucide="alert-circle" class="w-3 h-3 inline"></i> Keine Signatur in Freshdesk hinterlegt für ${escapeHtml(ctx.me?.name || 'dich')} auf diesem Account. Setze sie in Freshdesk → Profile settings → Signature.
         </div>`;
       }
+      // v2.50.11: Signatur direkt HIER beim Versand bearbeiten (Name, Funktion, alles)
+      const _sigWer = (ctx.me && ctx.me.sender_name_override) || (ctx.me && ctx.me.name) || '';
       return `<details class="mt-2 bg-${meta.color}-50/40 border border-${meta.color}-200 rounded-lg" open>
-        <summary class="px-2 py-1.5 cursor-pointer text-[11px] font-semibold text-${meta.color}-800 inline-flex items-center gap-1.5"><i data-lucide="pen-line" class="w-3 h-3"></i> Signatur wird angehängt${ctx.me?.name ? ' (' + escapeHtml(ctx.me.name) + ')' : ''}</summary>
-        <div class="px-2 pb-2 pt-1 text-[11px] text-ink-700 leading-relaxed border-t border-${meta.color}-200 max-h-32 overflow-y-auto bg-white/60 rounded-b">${sig}</div>
+        <summary class="px-2 py-1.5 cursor-pointer text-[11px] font-semibold text-${meta.color}-800 inline-flex items-center gap-1.5"><i data-lucide="pen-line" class="w-3 h-3"></i> Signatur wird angehängt${_sigWer ? ' (' + escapeHtml(_sigWer) + ')' : ''}</summary>
+        <div class="px-2 pb-2 pt-1 border-t border-${meta.color}-200 bg-white/60 rounded-b">
+          <button onclick="event.preventDefault();openSignatureEditor('${escapeAttr(String(ctx.accountId || ''))}')" class="mb-1.5 text-[11px] font-semibold text-${meta.color}-800 underline inline-flex items-center gap-1"><i data-lucide="pencil" class="w-3 h-3"></i> Signatur bearbeiten (Name, Funktion, …)</button>
+          <div class="text-[11px] text-ink-700 leading-relaxed max-h-32 overflow-y-auto">${sig}</div>
+        </div>
       </details>`;
     };
 
@@ -19309,32 +19314,13 @@ async function _renderSigNameCard() {
         (cur ? '<button onclick="_sigNameClear(\'' + escapeAttr(a.id) + '\')" class="shrink-0 px-2 py-1.5 border border-ink-300 hover:bg-ink-50 text-ink-600 rounded-lg text-[12px]" title="Zurück auf den Freshdesk-Namen">×</button>' : '') +
       '</div>' +
       '<p id="sigPrev_' + escapeAttr(a.id) + '" class="text-[10px] text-ink-500 mt-1">' + _sigNamePreviewText(agentName, cur) + '</p>' +
-      // v2.50.9: komplette Signatur frei bearbeiten (Name, Funktion, alle Zeilen)
+      // v2.50.11: derselbe Editor wie beim Versand — eine Oberfläche, ein Verhalten
       (function () {
         const custom = _sigCustom(a.id);
-        const open = !!custom;
-        // v2.50.10: ECHTES Signatur-HTML aus Freshdesk (mit Logo/Links/Formatierung)
-        // direkt bearbeiten — vorher wurde es zu Text plattgemacht und das Logo ging verloren.
-        const startHtml = _sigSanitize(custom || rawSig);
-        return '<div class="mt-1.5">' +
-          '<button onclick="_sigToggleEditor(\'' + escapeAttr(a.id) + '\')" class="text-[11px] font-semibold text-emerald-700 inline-flex items-center gap-1"><i data-lucide="pencil" class="w-3 h-3"></i> ' +
+        return '<div class="mt-1.5 flex items-center gap-1.5 flex-wrap">' +
+          '<button onclick="openSignatureEditor(\'' + escapeAttr(a.id) + '\')" class="text-[11px] font-semibold text-emerald-700 inline-flex items-center gap-1"><i data-lucide="pencil" class="w-3 h-3"></i> ' +
             (custom ? 'Eigene Signatur bearbeiten' : 'Komplette Signatur bearbeiten') + '</button>' +
-          (custom ? '<span class="ml-1.5 text-[10px] font-bold text-emerald-700 bg-emerald-50 border border-emerald-200 rounded-full px-1.5 py-0.5">eigene Signatur aktiv</span>' : '') +
-          '<div id="sigEd_' + escapeAttr(a.id) + '" class="' + (open ? '' : 'hidden ') + 'mt-1.5">' +
-            '<p class="text-[10px] text-ink-400 mb-1">Direkt im Original bearbeiten — Logo, Links und Formatierung bleiben erhalten.</p>' +
-            '<div id="sigEdWys_' + escapeAttr(a.id) + '" contenteditable="true" class="w-full px-2 py-2 border border-ink-300 rounded-lg text-[13px] bg-white overflow-x-auto" style="min-height:90px">' +
-              (startHtml || '<p>—</p>') +
-            '</div>' +
-            '<div class="flex items-center gap-1.5 mt-1 flex-wrap">' +
-              '<button onclick="_sigWysSave(\'' + escapeAttr(a.id) + '\', this)" class="px-2.5 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-[12px] font-bold">Signatur speichern</button>' +
-              (custom ? '<button onclick="_sigCustomClear(\'' + escapeAttr(a.id) + '\')" class="px-2.5 py-1.5 border border-ink-300 hover:bg-ink-50 text-ink-600 rounded-lg text-[12px]">Freshdesk-Signatur nutzen</button>' : '') +
-              '<button onclick="_sigToggleSource(\'' + escapeAttr(a.id) + '\')" class="px-2 py-1.5 border border-ink-300 hover:bg-ink-50 text-ink-500 rounded-lg text-[11px] inline-flex items-center gap-1"><i data-lucide="code" class="w-3 h-3"></i> HTML-Quelltext</button>' +
-            '</div>' +
-            '<div id="sigEdSrcWrap_' + escapeAttr(a.id) + '" class="hidden mt-1.5">' +
-              '<textarea id="sigEdSrc_' + escapeAttr(a.id) + '" rows="8" class="w-full px-2 py-1.5 border border-ink-300 rounded-lg text-[11px] font-mono leading-relaxed resize-y">' + escapeHtml(startHtml) + '</textarea>' +
-              '<button onclick="_sigSrcApply(\'' + escapeAttr(a.id) + '\')" class="mt-1 px-2.5 py-1.5 bg-ink-100 hover:bg-ink-200 text-ink-700 rounded-lg text-[11px] font-bold">HTML übernehmen</button>' +
-            '</div>' +
-          '</div>' +
+          (custom ? '<span class="text-[10px] font-bold text-emerald-700 bg-emerald-50 border border-emerald-200 rounded-full px-1.5 py-0.5">eigene Signatur aktiv</span>' : '') +
         '</div>';
       })() +
     '</div>';
@@ -19389,6 +19375,91 @@ function _sigToggleEditor(accId) {
   const el = document.getElementById('sigEd_' + accId);
   if (el) el.classList.toggle('hidden');
 }
+/* === v2.50.11: Signatur-Editor als eigenes Fenster ========================
+   Aufrufbar direkt beim Versand (Assistent-Karte) und aus dem Profil. Lädt die
+   ECHTE Freshdesk-Signatur (HTML mit Logo) bzw. die bereits gespeicherte eigene
+   und lässt sie 1:1 bearbeiten. Eigener Overlay-Host, damit darunterliegende
+   Modals/Karten erhalten bleiben. */
+async function openSignatureEditor(accountId) {
+  const accId = String(accountId || '');
+  if (!accId) return toast('Kein Mandant erkannt', 'warn', 3000);
+  let host = document.getElementById('sigEditHost');
+  if (!host) { host = document.createElement('div'); host.id = 'sigEditHost'; document.body.appendChild(host); }
+  host.innerHTML =
+    '<div class="fixed inset-0 z-[85] flex items-end sm:items-center justify-center bg-black/50">' +
+      '<div class="bg-white w-full max-w-2xl sm:rounded-2xl rounded-t-2xl shadow-2xl p-6 text-center safe-bottom">' +
+        '<span class="spinner inline-block w-6 h-6 border-[2px] text-emerald-500"></span>' +
+        '<p class="text-sm text-ink-500 mt-2">Lade Signatur aus Freshdesk…</p>' +
+      '</div>' +
+    '</div>';
+  let me = null;
+  try { me = await fetchAgentMe(accId); } catch (_) {}
+  const acc = (APP_STATE.accounts || []).find(a => String(a.id) === accId);
+  const custom = _sigCustom(accId);
+  const rawSig = (me && (me.signature_raw || me.signature)) || '';
+  const startHtml = _sigSanitize(custom || rawSig);
+  host.innerHTML =
+    '<div class="fixed inset-0 z-[85] flex items-end sm:items-center justify-center bg-black/50" onclick="if(event.target===this)closeSignatureEditor()">' +
+      '<div class="bg-white w-full max-w-2xl sm:rounded-2xl rounded-t-2xl shadow-2xl flex flex-col safe-bottom" style="max-height:92vh">' +
+        '<div class="px-4 py-3 border-b border-ink-200 flex items-center justify-between gap-2 shrink-0">' +
+          '<div class="min-w-0">' +
+            '<h3 class="font-bold text-ink-900 inline-flex items-center gap-2"><i data-lucide="pen-line" class="w-4 h-4 text-emerald-600"></i> Signatur bearbeiten</h3>' +
+            '<p class="text-[11px] text-ink-500 truncate">' + escapeHtml((acc && acc.name) || accId) + (custom ? ' · eigene Signatur aktiv' : ' · aus Freshdesk') + '</p>' +
+          '</div>' +
+          '<button onclick="closeSignatureEditor()" class="w-9 h-9 rounded-lg hover:bg-ink-100 flex items-center justify-center"><i data-lucide="x" class="w-5 h-5 text-ink-700"></i></button>' +
+        '</div>' +
+        '<div class="flex-1 overflow-y-auto p-4 space-y-2">' +
+          (startHtml
+            ? '<p class="text-[11px] text-ink-500">Direkt im Original bearbeiten — Name, Funktion und alle weiteren Zeilen. Logo, Links und Formatierung bleiben erhalten.</p>' +
+              '<div id="sigEdWys_' + escapeAttr(accId) + '" contenteditable="true" class="w-full px-3 py-3 border border-ink-300 rounded-lg text-[13px] bg-white overflow-x-auto" style="min-height:150px">' + startHtml + '</div>' +
+              '<button onclick="_sigToggleSource(\'' + escapeAttr(accId) + '\')" class="text-[11px] text-ink-500 underline inline-flex items-center gap-1"><i data-lucide="code" class="w-3 h-3"></i> HTML-Quelltext anzeigen</button>' +
+              '<div id="sigEdSrcWrap_' + escapeAttr(accId) + '" class="hidden">' +
+                '<textarea id="sigEdSrc_' + escapeAttr(accId) + '" rows="9" class="w-full px-2 py-1.5 border border-ink-300 rounded-lg text-[11px] font-mono leading-relaxed resize-y">' + escapeHtml(startHtml) + '</textarea>' +
+                '<button onclick="_sigSrcApply(\'' + escapeAttr(accId) + '\')" class="mt-1 px-2.5 py-1.5 bg-ink-100 hover:bg-ink-200 text-ink-700 rounded-lg text-[11px] font-bold">HTML übernehmen</button>' +
+              '</div>'
+            : '<p class="text-[12px] text-amber-800 bg-amber-50 border border-amber-200 rounded-lg p-3">Für diesen Mandanten liefert Freshdesk keine Signatur. Du kannst hier eine eigene anlegen — sie wird dann beim Versand angehängt.</p>' +
+              '<div id="sigEdWys_' + escapeAttr(accId) + '" contenteditable="true" class="w-full px-3 py-3 border border-ink-300 rounded-lg text-[13px] bg-white" style="min-height:150px"><p>Mit freundlichen Grüßen</p><p><b>Name</b><br>Funktion</p></div>') +
+        '</div>' +
+        '<div class="px-4 py-3 border-t border-ink-200 flex gap-2 shrink-0 flex-wrap">' +
+          (custom ? '<button onclick="_sigEditorReset(\'' + escapeAttr(accId) + '\')" class="px-3 py-2.5 rounded-xl border border-ink-300 hover:bg-ink-50 text-ink-600 text-[12px] font-bold">Freshdesk-Signatur nutzen</button>' : '') +
+          '<div class="flex-1"></div>' +
+          '<button onclick="closeSignatureEditor()" class="px-3 py-2.5 rounded-xl border border-ink-300 text-ink-700 text-sm font-bold">Abbrechen</button>' +
+          '<button onclick="_sigEditorSave(\'' + escapeAttr(accId) + '\', this)" class="px-4 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white text-sm font-bold inline-flex items-center gap-1.5"><i data-lucide="check" class="w-4 h-4"></i> Übernehmen</button>' +
+        '</div>' +
+      '</div>' +
+    '</div>';
+  if (window.lucide) lucide.createIcons();
+}
+function closeSignatureEditor() { const h = document.getElementById('sigEditHost'); if (h) h.remove(); }
+/* Nach dem Speichern alle Stellen auffrischen, die die Signatur zeigen. */
+async function _sigEditorRefreshViews(accId) {
+  try {
+    if (typeof ASSISTANT_CTX !== 'undefined' && ASSISTANT_CTX && String(ASSISTANT_CTX.accountId) === String(accId)) {
+      ASSISTANT_CTX.me = await fetchAgentMe(accId).catch(() => ASSISTANT_CTX.me);
+      if (typeof renderAssistantPreview === 'function') renderAssistantPreview();
+    }
+  } catch (_) {}
+  try { if (document.getElementById('sigNameCard')) _renderSigNameCard(); } catch (_) {}
+}
+async function _sigEditorSave(accId, btn) {
+  const wys = document.getElementById('sigEdWys_' + accId);
+  if (!wys) return;
+  const html = _sigSanitize(wys.innerHTML).trim();
+  if (!html || !wys.textContent.trim()) return toast('Signatur ist leer.', 'warn', 4000);
+  _setSigCustom(accId, html);
+  if (btn) setBusy(btn, true, 'Übernehme…');
+  closeSignatureEditor();
+  await _sigEditorRefreshViews(accId);
+  toast('Signatur übernommen — wird ab sofort beim Versand verwendet.', 'success', 4000);
+}
+async function _sigEditorReset(accId) {
+  _setSigCustom(accId, '');
+  _setSigNameOverride(accId, '');
+  closeSignatureEditor();
+  await _sigEditorRefreshViews(accId);
+  toast('Zurück auf die Freshdesk-Signatur', 'info', 3000);
+}
+
 function _sigCustomClear(accId) {
   _setSigCustom(accId, '');
   toast('Zurück auf die Freshdesk-Signatur', 'info', 3000);
