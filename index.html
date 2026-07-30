@@ -799,7 +799,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.50.0';
+const APP_VERSION = 'v2.50.1';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -4300,6 +4300,33 @@ function parseAIJson(rawText) {
   };
   try { return JSON.parse(_escapeCtrlInStrings(s)); } catch (_) {}
 
+  // v2.50.1: UNESCAPTE ANFÜHRUNGSZEICHEN innerhalb von String-Werten reparieren —
+  // häufigste Ursache für „Expected ',' or '}' after property value" (die KI zitiert
+  // z.B. einen Protokolltext: "Der Hinweis "Fehler" wurde ..."). Heuristik: ein " im
+  // String beendet ihn nur, wenn danach (nach Whitespace) , } ] : oder Ende folgt —
+  // sonst ist es ein inneres Zitat und wird escaped.
+  const _escapeInnerQuotes = (str) => {
+    let out = '', inStr = false, esc = false;
+    for (let i = 0; i < str.length; i++) {
+      const c = str[i];
+      if (esc) { out += c; esc = false; continue; }
+      if (c === '\\') { out += c; esc = true; continue; }
+      if (c === '"') {
+        if (!inStr) { inStr = true; out += c; continue; }
+        let j = i + 1;
+        while (j < str.length && /\s/.test(str[j])) j++;
+        const nx = str[j];
+        if (nx === undefined || nx === ',' || nx === '}' || nx === ']' || nx === ':') { inStr = false; out += c; }
+        else out += '\\"';
+        continue;
+      }
+      out += c;
+    }
+    return out;
+  };
+  try { return JSON.parse(_escapeInnerQuotes(s)); } catch (_) {}
+  try { return JSON.parse(_escapeCtrlInStrings(_escapeInnerQuotes(s))); } catch (_) {}
+
   // 3. Suche das erste { bis zum letzten } im String
   const firstBrace = s.indexOf('{');
   const lastBrace  = s.lastIndexOf('}');
@@ -4307,13 +4334,17 @@ function parseAIJson(rawText) {
     const candidate = s.slice(firstBrace, lastBrace + 1);
     try { return JSON.parse(candidate); } catch (_) {}
     try { return JSON.parse(_escapeCtrlInStrings(candidate)); } catch (_) {}
+    try { return JSON.parse(_escapeInnerQuotes(candidate)); } catch (_) {}
+    try { return JSON.parse(_escapeCtrlInStrings(_escapeInnerQuotes(candidate))); } catch (_) {}
   }
 
   // 4. Abgeschnittenes JSON (max_tokens erreicht): String wahrscheinlich mitten
   // in einem Feld/Array abgebrochen. State-Machine schließt offene Strukturen
   // (v2.46.251: auch Arrays [ ] + abschließende Kommas/Doppelpunkte behandelt).
   if (firstBrace >= 0) {
-    let src = s.slice(firstBrace).replace(/```[\s\S]*$/, '');
+    // v2.50.1: innere Zitate zuerst reparieren — sonst verrutscht der String-State
+    // der Abbruch-Erkennung (ein unescaptes " öffnet/schließt fälschlich).
+    let src = _escapeInnerQuotes(s.slice(firstBrace).replace(/```[\s\S]*$/, ''));
     // Struktur-Zustand am Abbruch-Punkt ermitteln
     let inStr = false, esc = false;
     const stack = []; // '{' oder '['
@@ -10271,11 +10302,14 @@ async function processNewTicketAi(btn) {
     // JSON parsen — Markdown-Codefence tolerieren
     let json = raw.replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/i, '').trim();
     let plan;
-    try { plan = JSON.parse(json); }
-    catch (_) {
-      const m = json.match(/\{[\s\S]*\}/);
-      if (m) { try { plan = JSON.parse(m[0]); } catch (e2) { throw new Error('KI-Antwort ist kein gültiges JSON'); } }
-      else throw new Error('KI-Antwort ist kein gültiges JSON');
+    try { plan = parseAIJson(json); }   // v2.50.1: robuster Parser (mehrzeiliger Body)
+    catch (e1) {
+      try { plan = JSON.parse(json); }
+      catch (_) {
+        const m = json.match(/\{[\s\S]*\}/);
+        if (m) { try { plan = JSON.parse(m[0]); } catch (_2) {} }
+      }
+      if (!plan) { console.warn('[Neues-Ticket-KI] Roh-Antwort UNPARSBAR:\n', raw); throw new Error('KI-Antwort ist kein gültiges JSON'); }
     }
     NEW_TICKET_AI_PLAN = { accountId, plan, originalCmd: cmd, selfMode };
     renderNewTicketAiPreview();
@@ -11226,11 +11260,16 @@ async function _mfcAiGenerate(btn) {
       accountId: ctx.accountId,
     });
     const raw = (data?.content?.[0]?.text || '').trim().replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/i, '');
+    // v2.50.1: robuster Parser (mehrzeiliger Mail-Body mit Anführungszeichen)
     let obj;
-    try { obj = JSON.parse(raw); }
-    catch (_) {
-      const m = raw.match(/\{[\s\S]*\}/);
-      if (m) obj = JSON.parse(m[0]); else throw new Error('KI-Antwort ist kein gültiges JSON');
+    try { obj = parseAIJson(raw); }
+    catch (e1) {
+      try { obj = JSON.parse(raw); }
+      catch (_) {
+        const m = raw.match(/\{[\s\S]*\}/);
+        if (m) { try { obj = JSON.parse(m[0]); } catch (_2) {} }
+      }
+      if (!obj) { console.warn('[Marketing-KI] Roh-Antwort UNPARSBAR:\n', raw); throw new Error('KI-Antwort ist kein gültiges JSON'); }
     }
     document.getElementById('mfcSubject').value = obj.subject || '';
     document.getElementById('mfcBody').value = obj.body || '';
@@ -23643,10 +23682,13 @@ async function _rstExtractWithAi(ticket, preset) {
     });
     const raw = (data?.content?.[0]?.text || '').trim();
     const json = raw.replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/i, '').trim();
-    try { plan = JSON.parse(json); }
+    try { plan = parseAIJson(json); }   // v2.50.1: robuster Parser
     catch (_) {
-      const m = json.match(/\{[\s\S]*\}/);
-      if (m) plan = JSON.parse(m[0]);
+      try { plan = JSON.parse(json); }
+      catch (_2) {
+        const m = json.match(/\{[\s\S]*\}/);
+        if (m) plan = JSON.parse(m[0]);
+      }
     }
   } catch (e) {
     console.warn('KI-Extraktion fehlgeschlagen, Modal trotzdem öffnen:', e.message);
@@ -26476,11 +26518,14 @@ async function _angebotAiGenerate(ctx, inputs) {
   const raw = (data?.content?.[0]?.text || '').trim();
   const json = raw.replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/i, '').trim();
   let plan;
-  try { plan = JSON.parse(json); }
-  catch (_) {
-    const m = json.match(/\{[\s\S]*\}/);
-    if (m) plan = JSON.parse(m[0]);
-    else throw new Error('KI-Antwort ist kein gültiges JSON');
+  try { plan = parseAIJson(json); }   // v2.50.1: robuster Parser (mehrzeilige Textfelder)
+  catch (e1) {
+    try { plan = JSON.parse(json); }
+    catch (_) {
+      const m = json.match(/\{[\s\S]*\}/);
+      if (m) { try { plan = JSON.parse(m[0]); } catch (_2) {} }
+    }
+    if (!plan) { console.warn('[KI] Roh-Antwort UNPARSBAR:\n', raw); throw new Error('KI-Antwort ist kein gültiges JSON'); }
   }
   return plan;
 }
@@ -30680,11 +30725,20 @@ async function _stnGenerate(btn) {
       accountId: s.accountId,
     });
     const raw = (data?.content?.[0]?.text || '').trim().replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/i, '');
+    // v2.50.1: robuster Parser — der Brief-Body ist mehrzeilig und enthält oft
+    // Anführungszeichen; roher JSON.parse scheiterte daran („Expected ',' or '}'").
     let obj;
-    try { obj = JSON.parse(raw); }
-    catch (_) {
-      const m = raw.match(/\{[\s\S]*\}/);
-      if (m) obj = JSON.parse(m[0]); else throw new Error('KI-Antwort ist kein gültiges JSON');
+    try { obj = parseAIJson(raw); }
+    catch (e1) {
+      try { obj = JSON.parse(raw); }
+      catch (_) {
+        const m = raw.match(/\{[\s\S]*\}/);
+        if (m) { try { obj = JSON.parse(m[0]); } catch (_2) {} }
+      }
+      if (!obj) {
+        console.warn('[Stellungnahme] Roh-Antwort UNPARSBAR (len=' + raw.length + '):\n', raw);
+        throw new Error('KI-Antwort ist kein gültiges JSON — bitte „KI-Stellungnahme erzeugen" nochmal klicken (Details in der Konsole).');
+      }
     }
     s.result = {
       betreff: obj.betreff || '',
