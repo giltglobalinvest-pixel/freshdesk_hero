@@ -802,7 +802,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.50.11';
+const APP_VERSION = 'v2.50.12';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -4056,6 +4056,9 @@ async function loadAccounts() {
   if (last && (last === 'all' || APP_STATE.accounts.find(a => a.id === last))) APP_STATE.currentAccount = last;
   else if (APP_STATE.accounts.length === 1) APP_STATE.currentAccount = APP_STATE.accounts[0].id;
   else APP_STATE.currentAccount = 'all';
+  // v2.50.12: eigene Signaturen dieses Benutzers vorladen, damit sie beim
+  // Versand sofort greifen (auch auf einem frisch eingerichteten Gerät).
+  loadUserSignatures(true).catch(() => {});
 }
 
 /* === AccountAccess: per-User Zuweisung von Accounts mit eigenen API-Keys ============= */
@@ -4600,18 +4603,86 @@ function _setSigNameOverride(accountId, name) {
     else localStorage.removeItem(k);
   } catch (_) {}
 }
-/* v2.50.9: KOMPLETT eigene Signatur je Mandant (schlägt alles andere).
-   Damit sind Name, Funktion und jede weitere Zeile frei editierbar. */
+/* v2.50.12: Eigene Signatur PRO HERO-BENUTZER und Mandant — persistent in
+   Airtable, damit jeder User seine eigene Signatur hat (auch geräteübergreifend)
+   obwohl sich alle denselben Freshdesk-API-Zugang teilen. localStorage dient nur
+   noch als Sofort-Cache/Fallback. */
 const SIG_CUSTOM_KEY = 'fdh_sig_custom';
+const USER_SIG_TABLE = 'User_Signaturen';
+const USER_SIG_TYPES = {
+  user_key: 'singleLineText', user_email: 'singleLineText', user_name: 'singleLineText',
+  account_id: 'singleLineText', account_name: 'singleLineText',
+  signature_html: 'multilineText', updated_at: 'singleLineText', created_at: 'singleLineText',
+};
+/* Schlüssel des eingeloggten Hero-Users (api_key bevorzugt, sonst Email). */
+function _sigUserKey() {
+  const u = APP_KEYS.user || {};
+  return String(u.api_key || u.email || '').trim();
+}
+const USER_SIG_STATE = { byAccount: new Map(), loaded: false, loading: null };
+/* Alle Signaturen DIESES Users einmalig laden und cachen. */
+async function loadUserSignatures(force) {
+  if (!force && USER_SIG_STATE.loaded) return USER_SIG_STATE.byAccount;
+  if (USER_SIG_STATE.loading) return USER_SIG_STATE.loading;
+  const key = _sigUserKey();
+  USER_SIG_STATE.loading = (async () => {
+    const map = new Map();
+    if (key) {
+      try {
+        const recs = await airtableRead(USER_SIG_TABLE, {
+          filter: "{user_key}='" + escapeFormula(key) + "'", maxRecords: 100,
+        });
+        (recs || []).forEach(r => {
+          const f = r.fields || {};
+          if (f.account_id) map.set(String(f.account_id), { recordId: r.id, html: f.signature_html || '' });
+        });
+      } catch (e) { console.warn('[Signatur] Laden aus Airtable:', e.message); }
+    }
+    USER_SIG_STATE.byAccount = map; USER_SIG_STATE.loaded = true; USER_SIG_STATE.loading = null;
+    // Cache für den synchronen Zugriff spiegeln
+    try { map.forEach((v, accId) => { if (v.html) localStorage.setItem(SIG_CUSTOM_KEY + '_' + accId, v.html); }); } catch (_) {}
+    return map;
+  })();
+  return USER_SIG_STATE.loading;
+}
+/* Synchroner Zugriff (aus dem gespiegelten Cache) — von fetchAgentMe genutzt. */
 function _sigCustom(accountId) {
+  const rec = USER_SIG_STATE.byAccount.get(String(accountId));
+  if (rec) return String(rec.html || '').trim();
   try { return (localStorage.getItem(SIG_CUSTOM_KEY + '_' + accountId) || '').trim(); } catch (_) { return ''; }
 }
-function _setSigCustom(accountId, html) {
+/* Speichern: Airtable (pro User+Mandant) + Sofort-Cache. */
+async function _setSigCustom(accountId, html) {
+  const accId = String(accountId || '');
+  const val = html ? String(html) : '';
   try {
-    const k = SIG_CUSTOM_KEY + '_' + accountId;
-    if (html && String(html).trim()) localStorage.setItem(k, String(html));
-    else localStorage.removeItem(k);
+    const k = SIG_CUSTOM_KEY + '_' + accId;
+    if (val.trim()) localStorage.setItem(k, val); else localStorage.removeItem(k);
   } catch (_) {}
+  const key = _sigUserKey();
+  const prev = USER_SIG_STATE.byAccount.get(accId) || null;
+  if (val.trim()) USER_SIG_STATE.byAccount.set(accId, { recordId: prev && prev.recordId, html: val });
+  else USER_SIG_STATE.byAccount.delete(accId);
+  if (!key) { toast('Signatur nur lokal gespeichert (kein Benutzer-Schlüssel).', 'warn', 5000); return; }
+  const u = APP_KEYS.user || {};
+  const acc = (APP_STATE.accounts || []).find(a => String(a.id) === accId);
+  const fields = {
+    user_key: key, user_email: u.email || '', user_name: u.name || '',
+    account_id: accId, account_name: (acc && acc.name) || '',
+    signature_html: val, updated_at: nowIso(),
+  };
+  try {
+    if (prev && prev.recordId) {
+      await airtableUpdateWithAutoField(USER_SIG_TABLE, prev.recordId, fields, USER_SIG_TYPES);
+    } else {
+      fields.created_at = nowIso();
+      const rec = await airtableWriteWithAutoField(USER_SIG_TABLE, fields, USER_SIG_TYPES);
+      if (rec && rec.id && val.trim()) USER_SIG_STATE.byAccount.set(accId, { recordId: rec.id, html: val });
+    }
+  } catch (e) {
+    console.warn('[Signatur] Speichern in Airtable:', e.message);
+    toast('Signatur konnte nicht dauerhaft gespeichert werden: ' + String(e.message || e).slice(0, 120) + ' — gilt vorerst nur auf diesem Gerät.', 'error', 9000);
+  }
 }
 /* Freitext → versandfähiges HTML (Zeilenumbrüche werden zu <br>). Enthält der
    Text bereits HTML-Tags, wird er unverändert übernommen. */
@@ -19296,6 +19367,7 @@ async function _renderSigNameCard() {
   if (!host) return;
   const accs = APP_STATE.accounts || [];
   if (!accs.length) { host.innerHTML = '<p class="text-[11px] text-ink-400">Keine Mandanten geladen.</p>'; return; }
+  await loadUserSignatures().catch(() => {});   // v2.50.12: gespeicherte eigene Signaturen holen
   const mes = await Promise.all(accs.map(a => fetchAgentMe(a.id).catch(() => null)));
   if (!document.getElementById('sigNameCard')) return;
   host.innerHTML = accs.map((a, i) => {
@@ -19350,16 +19422,6 @@ function _sigSrcApply(accId) {
   wys.innerHTML = _sigSanitize(src.value);
   toast('HTML übernommen — jetzt noch „Signatur speichern".', 'info', 3500);
 }
-function _sigWysSave(accId, btn) {
-  const wys = document.getElementById('sigEdWys_' + accId);
-  if (!wys) return;
-  const html = _sigSanitize(wys.innerHTML).trim();
-  if (!html || !wys.textContent.trim()) return toast('Signatur ist leer — nutze „Freshdesk-Signatur nutzen" zum Zurücksetzen.', 'warn', 5000);
-  _setSigCustom(accId, html);
-  if (btn) { setBusy(btn, true, ''); setTimeout(() => setBusy(btn, false), 300); }
-  toast('Eigene Signatur gespeichert — wird ab sofort beim Versand verwendet.', 'success', 4000);
-  _renderSigNameCard();
-}
 /* Signatur-HTML → Text (nur noch für Diagnose/Fallback, nicht mehr im Editor). */
 function _sigHtmlToText(html) {
   const h = String(html || '');
@@ -19392,6 +19454,7 @@ async function openSignatureEditor(accountId) {
         '<p class="text-sm text-ink-500 mt-2">Lade Signatur aus Freshdesk…</p>' +
       '</div>' +
     '</div>';
+  await loadUserSignatures().catch(() => {});   // v2.50.12: eigene gespeicherte Signatur berücksichtigen
   let me = null;
   try { me = await fetchAgentMe(accId); } catch (_) {}
   const acc = (APP_STATE.accounts || []).find(a => String(a.id) === accId);
@@ -19446,22 +19509,22 @@ async function _sigEditorSave(accId, btn) {
   if (!wys) return;
   const html = _sigSanitize(wys.innerHTML).trim();
   if (!html || !wys.textContent.trim()) return toast('Signatur ist leer.', 'warn', 4000);
-  _setSigCustom(accId, html);
-  if (btn) setBusy(btn, true, 'Übernehme…');
+  if (btn) setBusy(btn, true, 'Speichere…');
+  await _setSigCustom(accId, html);       // v2.50.12: dauerhaft je Benutzer speichern
   closeSignatureEditor();
   await _sigEditorRefreshViews(accId);
-  toast('Signatur übernommen — wird ab sofort beim Versand verwendet.', 'success', 4000);
+  toast('Signatur gespeichert — gilt für dich auf allen Geräten und wird beim Versand angehängt.', 'success', 5000);
 }
 async function _sigEditorReset(accId) {
-  _setSigCustom(accId, '');
+  await _setSigCustom(accId, '');
   _setSigNameOverride(accId, '');
   closeSignatureEditor();
   await _sigEditorRefreshViews(accId);
   toast('Zurück auf die Freshdesk-Signatur', 'info', 3000);
 }
 
-function _sigCustomClear(accId) {
-  _setSigCustom(accId, '');
+async function _sigCustomClear(accId) {
+  await _setSigCustom(accId, '');
   toast('Zurück auf die Freshdesk-Signatur', 'info', 3000);
   _renderSigNameCard();
 }
