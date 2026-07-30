@@ -799,7 +799,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.50.1';
+const APP_VERSION = 'v2.50.2';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -30501,7 +30501,10 @@ async function openStellungnahmeModal(accountId, ticketId) {
       anlass: '',
       result: null,  // { betreff, anrede, body, schluss }
       sender_name:     me.name || '',
-      sender_email:    me.email || '',
+      // v2.50.2: Absender-Mail = MANDANT (wie in der Fußzeile), nicht die Login-Adresse
+      // des eingeloggten Users — sonst steht z.B. eine @flp-shop.com-Adresse auf dem
+      // Briefpapier von Aufzugshandwerk. Login-Mail nur als Notnagel.
+      sender_email:    profile.email || me.email || '',
       sender_titel:    lh?.default_sender_titel || '',
       sender_funktion: lh?.default_sender_funktion || '',
       logo_url:        _letterheadLogoUrl(lh),
@@ -30526,13 +30529,23 @@ function _renderStellungnahmeShell() {
   if (!s) return;
   const host = document.getElementById('subModalHost');
   if (!host) return;
+  // v2.50.2: Breite wächst auf Wide-Screens mit (vorher fix 940px → A4-Vorschau
+  // (794px) wurde beschnitten, weil links 460px Formular fest belegt sind).
+  // Als CSS-Regel statt Tailwind-Klasse: die CDN-JIT erzeugt arbitrary values
+  // mit min() verzögert, die Regel hier greift sofort und deterministisch.
+  if (!document.getElementById('stnWideStyle')) {
+    const stl = document.createElement('style'); stl.id = 'stnWideStyle';
+    stl.textContent = '@media (min-width:1280px){#stnPanel{width:min(96vw,1800px)!important;max-width:none!important}' +
+      '#stnForm{width:400px!important;flex:0 0 400px!important}}';  // schmaler → A4 (794px) passt auch bei 1280px Fensterbreite
+    document.head.appendChild(stl);
+  }
   const t = s.ticket;
   const reqName  = t.requester?.name || '';
   const reqEmail = t.requester?.email || '';
   const reqFirma = t.requester?.company?.name || '';
   host.innerHTML =
     '<div class="fixed inset-0 sm:inset-y-0 sm:right-0 sm:left-auto z-[60] flex items-end sm:items-stretch justify-center sm:justify-end bg-black/50 sm:bg-transparent sm:pointer-events-none">' +
-      '<div class="bg-white w-full max-w-md sm:w-[460px] xl:w-[940px] sm:max-w-none rounded-t-3xl sm:rounded-none shadow-2xl flex flex-col safe-bottom max-h-[96vh] sm:h-screen sm:max-h-screen sm:border-l sm:border-ink-200 sm:pointer-events-auto">' +
+      '<div id="stnPanel" class="bg-white w-full max-w-md sm:w-[460px] xl:w-[940px] sm:max-w-none rounded-t-3xl sm:rounded-none shadow-2xl flex flex-col safe-bottom max-h-[96vh] sm:h-screen sm:max-h-screen sm:border-l sm:border-ink-200 sm:pointer-events-auto">' +
         '<div class="safe-top px-4 py-3 border-b border-ink-200 flex items-center justify-between gap-2 shrink-0">' +
           '<div class="flex-1 min-w-0">' +
             '<h3 class="font-bold text-ink-900 inline-flex items-center gap-2"><i data-lucide="file-text" class="w-5 h-5 text-emerald-600"></i> Stellungnahme erstellen</h3>' +
@@ -30543,7 +30556,7 @@ function _renderStellungnahmeShell() {
         // Body: zwei Spalten auf XL
         '<div class="flex-1 overflow-hidden flex flex-col xl:flex-row min-h-0">' +
           // Linke Spalte: Formular
-          '<div class="flex-1 xl:w-[460px] xl:shrink-0 overflow-y-auto p-4 space-y-3 border-b xl:border-b-0 xl:border-r border-ink-200">' +
+          '<div id="stnForm" class="flex-1 xl:w-[460px] xl:shrink-0 overflow-y-auto p-4 space-y-3 border-b xl:border-b-0 xl:border-r border-ink-200">' +
             '<div class="bg-emerald-50 border border-emerald-200 rounded-xl p-2.5 text-[11px] text-emerald-900">' +
               '<b>Empfänger:</b> ' + escapeHtml(reqName || reqEmail || '?') + (reqFirma ? ' · ' + escapeHtml(reqFirma) : '') + '<br>' +
               '<b>Ticket:</b> #' + t.id + ' · ' + escapeHtml((t.subject || '').slice(0, 80)) +
@@ -30765,13 +30778,16 @@ function _buildStellungnahmeHtml(s) {
   const empfaengerEmail = t.requester?.email || '';
   const datum = new Date().toLocaleDateString('de-DE', { day: '2-digit', month: '2-digit', year: 'numeric' });
   const senderName = s.sender_name || '';
-  const senderEmail = s.sender_email || '';
+  // v2.50.2: Mandanten-Mail hat Vorrang (identisch zur Fußzeile)
+  const senderEmail = profile.email || s.sender_email || '';
   const bodyHtml = (r.body || '').split(/\n\n+/).map(p => '<p style="margin:0 0 10px;white-space:pre-line">' + escapeHtml(p) + '</p>').join('');
   return '<!doctype html><html><head><meta charset="utf-8"><title>Stellungnahme ' + escapeHtml(profile.firma || '') + '</title>' +
     '<style>' +
     '@page { size:A4; margin:0; }' +
     'body { font-family:"Helvetica Neue",Arial,sans-serif; font-size:11pt; color:#1f2937; margin:0; background:#e5e7eb; }' +
-    '.page { width:210mm; min-height:297mm; padding:25mm 22mm; background:#fff; margin:0 auto; box-shadow:0 2px 12px rgba(0,0,0,.08); position:relative; }' +
+    // v2.50.2: box-sizing FEHLTE — width:210mm + padding:22mm ergaben 254mm statt A4.
+    // Dadurch lief der Brief rechts aus der Vorschau UND aus dem A4-Druckbereich.
+    '.page { box-sizing:border-box; width:210mm; min-height:297mm; padding:25mm 22mm; background:#fff; margin:0 auto; box-shadow:0 2px 12px rgba(0,0,0,.08); position:relative; }' +
     '.header-row { display:flex; justify-content:space-between; align-items:flex-start; margin-bottom:25mm; gap:15mm; }' +
     '.logo-block { font-weight:bold; font-size:16pt; color:#111; }' +
     '.meta-block { font-size:9pt; color:#4b5563; text-align:right; }' +
