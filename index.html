@@ -799,7 +799,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.50.3';
+const APP_VERSION = 'v2.50.4';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -30594,6 +30594,21 @@ function _renderStellungnahmeShell() {
                 '<textarea id="stnBody" rows="10" oninput="_stnUpdateField(\'body\', this.value)" class="w-full px-3 py-2 border border-ink-300 rounded-lg text-[12px] leading-relaxed resize-y">' + escapeHtml(s.result.body || '') + '</textarea>' +
                 '<label class="text-xs font-bold text-ink-700 uppercase tracking-wider block">Schluss</label>' +
                 '<textarea id="stnSchluss" rows="3" oninput="_stnUpdateField(\'schluss\', this.value)" class="w-full px-3 py-2 border border-ink-300 rounded-lg text-[12px] resize-y">' + escapeHtml(s.result.schluss || '') + '</textarea>' +
+              '</div>' +
+              // v2.50.4: KI-Korrekturschleife (analog Angebots-Chat) — Anweisung in
+              // eigenen Worten, die KI überarbeitet den bestehenden Brief.
+              '<div class="border-t border-ink-200 pt-3 space-y-1.5">' +
+                '<p class="text-xs font-bold text-ink-700 uppercase tracking-wider inline-flex items-center gap-1"><i data-lucide="sparkles" class="w-3.5 h-3.5 text-emerald-600"></i> Anpassen mit KI</p>' +
+                '<textarea id="stnRefine" rows="2" placeholder="z.B. „kürzer und bestimmter", „Absatz zur Videoaufzeichnung raus", „freundlicher formulieren", „Frist 14 Tage ergänzen"" class="w-full px-3 py-2 border border-ink-300 rounded-lg text-[12px] resize-y" onkeydown="if(event.key===\'Enter\'&&(event.metaKey||event.ctrlKey)){event.preventDefault();_stnRefine(this)}"></textarea>' +
+                '<button onclick="_stnRefine(this)" class="w-full px-3 py-2 bg-emerald-50 hover:bg-emerald-100 border border-emerald-300 text-emerald-800 rounded-lg text-[12px] font-bold inline-flex items-center justify-center gap-1.5"><i data-lucide="wand-2" class="w-3.5 h-3.5"></i> Überarbeiten (Cmd+Enter)</button>' +
+                (s._refineLog && s._refineLog.length
+                  ? '<div class="text-[10px] text-ink-500 space-y-0.5 pt-1">' + s._refineLog.slice(-3).map(x => '<div class="inline-flex items-start gap-1"><span class="text-emerald-600">✓</span><span>' + escapeHtml(x) + '</span></div>').join('') + '</div>'
+                  : '') +
+              '</div>' +
+              // v2.50.4: Versand als Ticket-Antwort (analog Angebots-Versand)
+              '<div class="border-t border-ink-200 pt-3">' +
+                '<button onclick="_stnOpenSend()" class="w-full px-3 py-2.5 bg-brand-600 hover:bg-brand-700 text-white rounded-lg text-sm font-bold inline-flex items-center justify-center gap-1.5"><i data-lucide="send" class="w-4 h-4"></i> Als Antwort an Kunden senden</button>' +
+                '<p class="text-[10px] text-ink-400 text-center mt-1">Brief geht als PDF-Anhang in die Ticket-Antwort.</p>' +
               '</div>'
             ) : '<p class="text-[11px] text-ink-400 italic text-center">Klick auf „KI-Stellungnahme erzeugen" → Brief erscheint rechts in der Vorschau.</p>') +
           '</div>' +
@@ -30601,7 +30616,12 @@ function _renderStellungnahmeShell() {
           '<div class="flex-1 hidden xl:flex flex-col bg-ink-100 min-w-0">' +
             '<div class="px-3 py-2 bg-white border-b border-ink-200 flex items-center justify-between gap-2 shrink-0">' +
               '<p class="text-[11px] font-semibold text-ink-700">Vorschau auf Briefpapier</p>' +
-              (s.result ? '<button onclick="_stnPrintPdf()" class="text-[11px] bg-emerald-600 hover:bg-emerald-700 text-white px-3 py-1 rounded font-bold inline-flex items-center gap-1"><i data-lucide="printer" class="w-3 h-3"></i> Drucken / PDF</button>' : '') +
+              (s.result
+                ? '<div class="flex items-center gap-1.5">' +
+                    '<button onclick="_stnPrintPdf()" class="text-[11px] bg-emerald-600 hover:bg-emerald-700 text-white px-3 py-1 rounded font-bold inline-flex items-center gap-1"><i data-lucide="printer" class="w-3 h-3"></i> Drucken / PDF</button>' +
+                    '<button onclick="_stnOpenSend()" class="text-[11px] bg-brand-600 hover:bg-brand-700 text-white px-3 py-1 rounded font-bold inline-flex items-center gap-1" title="Stellungnahme als PDF-Anhang in die Ticket-Antwort senden"><i data-lucide="send" class="w-3 h-3"></i> An Kunden senden</button>' +
+                  '</div>'
+                : '') +
             '</div>' +
             '<iframe id="stnPreviewFrame" class="flex-1 w-full bg-white" sandbox="allow-same-origin allow-modals allow-popups allow-popups-to-escape-sandbox"></iframe>' +
           '</div>' +
@@ -30609,7 +30629,8 @@ function _renderStellungnahmeShell() {
         // Footer mit Mobile-Print-Button
         '<div class="border-t border-ink-200 p-3 flex gap-2 shrink-0 xl:hidden">' +
           '<button onclick="closeStellungnahmeModal()" class="flex-1 bg-ink-100 hover:bg-ink-200 text-ink-700 rounded-xl px-3 py-3 text-sm font-bold">Schließen</button>' +
-          (s.result ? '<button onclick="_stnPrintPdf()" class="flex-[2] bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl px-3 py-3 text-sm font-bold inline-flex items-center justify-center gap-1.5"><i data-lucide="printer" class="w-4 h-4"></i> Drucken / PDF</button>' : '') +
+          (s.result ? '<button onclick="_stnPrintPdf()" class="flex-1 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl px-3 py-3 text-sm font-bold inline-flex items-center justify-center gap-1.5"><i data-lucide="printer" class="w-4 h-4"></i> PDF</button>' : '') +
+          (s.result ? '<button onclick="_stnOpenSend()" class="flex-[2] bg-brand-600 hover:bg-brand-700 text-white rounded-xl px-3 py-3 text-sm font-bold inline-flex items-center justify-center gap-1.5"><i data-lucide="send" class="w-4 h-4"></i> Senden</button>' : '') +
         '</div>' +
       '</div>' +
     '</div>';
@@ -30680,6 +30701,189 @@ function _stnPrintPdf() {
   win.document.write(html);
   win.document.close();
   setTimeout(() => { try { win.focus(); win.print(); } catch (_) {} }, 400);
+}
+
+/* === v2.50.4: KI-Korrekturschleife (analog Angebots-Chat) ==================
+   Der User beschreibt die gewünschte Änderung; die KI überarbeitet den
+   BESTEHENDEN Brief (kein Neuschrieb) und gibt dasselbe JSON-Schema zurück. */
+async function _stnRefine(btn) {
+  const s = window._STN_CTX;
+  if (!s?.result) return;
+  const ta = document.getElementById('stnRefine');
+  const wunsch = (ta?.value || '').trim();
+  if (!wunsch) return toast('Bitte beschreiben, was geändert werden soll', 'warn', 3500);
+  setBusy(btn, true, 'Überarbeite…');
+  try {
+    const sysPrompt =
+      'Du überarbeitest eine bestehende geschäftliche Stellungnahme (Brief) auf Anweisung des Sachbearbeiters. ' +
+      'Antworte AUSSCHLIESSLICH mit JSON: {"betreff": "...", "anrede": "...", "body": "...", "schluss": "..."}\n' +
+      'REGELN:\n' +
+      '- Ändere NUR, was der User verlangt. Alles andere bleibt WORTGLEICH erhalten.\n' +
+      '- body: Absätze mit \\n\\n getrennt. KEIN Markdown, KEIN HTML.\n' +
+      '- schluss: Abschluss-Absatz VOR "Mit freundlichen Grüßen" (das wird automatisch angehängt, nicht selbst schreiben).\n' +
+      '- Sachlicher deutscher Geschäftsstil. Absender ist ' + (s.profile.firma || '') + '.';
+    const userPrompt =
+      'AKTUELLER BRIEF:\n' + JSON.stringify({
+        betreff: s.result.betreff || '', anrede: s.result.anrede || '',
+        body: s.result.body || '', schluss: s.result.schluss || '',
+      }, null, 1) +
+      '\n\nÄNDERUNGSWUNSCH DES SACHBEARBEITERS:\n' + wunsch +
+      '\n\nGib den vollständigen überarbeiteten Brief als JSON zurück.';
+    const data = await _callAnthropicWithRetry({
+      model: 'claude-sonnet-4-5-20250929', max_tokens: 2500,
+      system: sysPrompt, messages: [{ role: 'user', content: userPrompt }],
+    });
+    recordAiUsage({
+      model: 'claude-sonnet-4-5-20250929',
+      input_tokens: data?.usage?.input_tokens || 0, output_tokens: data?.usage?.output_tokens || 0,
+      feature: 'stellungnahme_refine', accountId: s.accountId,
+    });
+    const raw = (data?.content?.[0]?.text || '').trim().replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/i, '');
+    let obj;
+    try { obj = parseAIJson(raw); }
+    catch (e1) {
+      try { obj = JSON.parse(raw); } catch (_) { const m = raw.match(/\{[\s\S]*\}/); if (m) { try { obj = JSON.parse(m[0]); } catch (_2) {} } }
+      if (!obj) { console.warn('[Stellungnahme-Refine] Roh-Antwort UNPARSBAR:\n', raw); throw new Error('KI-Antwort ist kein gültiges JSON — bitte nochmal versuchen'); }
+    }
+    s.result = {
+      betreff: obj.betreff || s.result.betreff || '',
+      anrede:  obj.anrede  || s.result.anrede  || '',
+      body:    obj.body    || s.result.body    || '',
+      schluss: obj.schluss != null ? obj.schluss : (s.result.schluss || ''),
+    };
+    s._refineLog = (s._refineLog || []).concat(wunsch.slice(0, 90));
+    setBusy(btn, false);
+    _renderStellungnahmeShell();   // zeichnet Felder + Vorschau neu
+    toast('Brief überarbeitet ✓', 'success', 3000);
+  } catch (e) {
+    setBusy(btn, false);
+    toast('Überarbeiten fehlgeschlagen: ' + (e.message || e), 'error', 8000);
+  }
+}
+
+/* Brief als echtes PDF (A4) — rendert das Briefpapier-HTML in einem
+   Offscreen-Iframe und schneidet es an Leerraum in A4-Seiten (gleiche Technik
+   wie beim FLP-Angebot). */
+async function _stnBuildPdfBlob(s) {
+  await _flpEnsureLib('https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js');
+  await _flpEnsureLib('https://cdnjs.cloudflare.com/ajax/libs/pdf-lib/1.17.1/pdf-lib.min.js');
+  const frame = document.createElement('iframe');
+  frame.style.cssText = 'position:fixed;left:-10000px;top:0;width:794px;height:1123px;border:0;';
+  document.body.appendChild(frame);
+  try {
+    const doc = frame.contentDocument || frame.contentWindow.document;
+    doc.open(); doc.write(_buildStellungnahmeHtml(s)); doc.close();
+    await new Promise(r => setTimeout(r, 350));               // Layout/Bilder settlen lassen
+    const pageEl = doc.querySelector('.page') || doc.body;
+    frame.style.height = Math.max(pageEl.scrollHeight, 1123) + 'px';
+    await new Promise(r => setTimeout(r, 120));
+    const canvas = await window.html2canvas(pageEl, { scale: 2, useCORS: true, backgroundColor: '#FFFFFF' });
+    const { PDFDocument } = window.PDFLib;
+    const pdf = await PDFDocument.create();
+    const A4W = 595.28, A4H = 841.89;
+    const cw = canvas.width;
+    const pxPerPt = cw / A4W;                                  // Blatt füllt A4-Breite (Ränder stecken im HTML)
+    const pageH_px = Math.floor(A4H * pxPerPt);
+    const ctx2 = canvas.getContext('2d');
+    const step = Math.max(1, Math.floor(cw / 140));
+    const isBlank = (y) => {
+      const d = ctx2.getImageData(0, y, cw, 1).data;
+      for (let x = 0; x < cw; x += step) { const i = x * 4; if (d[i] < 236 || d[i + 1] < 236 || d[i + 2] < 236) return false; }
+      return true;
+    };
+    // Weißen Rand unten abschneiden — sonst erzeugt ein Rest von wenigen Pixeln
+    // (Blatt minimal höher als A4) eine komplett leere zweite Seite.
+    let ch = canvas.height;
+    while (ch > 1 && isBlank(ch - 1)) ch--;
+    ch = Math.min(canvas.height, ch + 2);
+    let start = 0;
+    while (start < ch) {
+      let end = Math.min(start + pageH_px, ch);
+      if (end < ch) {                                          // Seitenumbruch in eine Leerzeile legen
+        const limit = Math.max(start + Math.floor(pageH_px * 0.55), end - 180);
+        for (let y = end; y > limit; y--) { if (isBlank(y)) { end = y; break; } }
+      }
+      const sliceH = end - start;
+      const sc = document.createElement('canvas'); sc.width = cw; sc.height = sliceH;
+      sc.getContext('2d').drawImage(canvas, 0, start, cw, sliceH, 0, 0, cw, sliceH);
+      const png = await pdf.embedPng(sc.toDataURL('image/png'));
+      const page = pdf.addPage([A4W, A4H]);
+      const drawH = sliceH / pxPerPt;
+      page.drawImage(png, { x: 0, y: A4H - drawH, width: A4W, height: drawH });
+      start = end;
+    }
+    const bytes = await pdf.save();
+    return new Blob([bytes], { type: 'application/pdf' });
+  } finally { frame.remove(); }
+}
+
+/* === Versand als Ticket-Antwort (analog Angebots-Versand) ================== */
+function _stnCloseSend() { const h = document.getElementById('stnSendHost'); if (h) h.remove(); }
+function _stnOpenSend() {
+  const s = window._STN_CTX;
+  if (!s?.result) return;
+  const req = s.ticket.requester || {};
+  const empf = req.email || '';
+  // eigener Host — NICHT #subModalHost, sonst wird das Stellungnahme-Modal zerstört
+  let host = document.getElementById('stnSendHost');
+  if (!host) { host = document.createElement('div'); host.id = 'stnSendHost'; document.body.appendChild(host); }
+  const stdText = 'anbei erhalten Sie unsere Stellungnahme zum Vorgang „' + (s.result.betreff || s.ticket.subject || '') + '“ als PDF-Datei.\n\nFür Rückfragen stehen wir Ihnen gerne zur Verfügung.';
+  host.innerHTML =
+    '<div class="fixed inset-0 z-[75] flex items-end sm:items-center justify-center bg-black/50" onclick="if(event.target===this)_stnCloseSend()">' +
+      '<div class="bg-white w-full max-w-lg sm:rounded-2xl rounded-t-2xl shadow-2xl flex flex-col safe-bottom" style="max-height:92vh">' +
+        '<div class="px-4 py-3 border-b border-ink-200 flex items-center justify-between gap-2">' +
+          '<h3 class="font-bold text-ink-900 inline-flex items-center gap-2"><i data-lucide="send" class="w-4 h-4 text-brand-600"></i> Als Antwort senden</h3>' +
+          '<button onclick="_stnCloseSend()" class="w-9 h-9 rounded-lg hover:bg-ink-100 flex items-center justify-center"><i data-lucide="x" class="w-5 h-5 text-ink-700"></i></button>' +
+        '</div>' +
+        '<div class="flex-1 overflow-y-auto p-4 space-y-3">' +
+          '<div class="bg-ink-50 border border-ink-200 rounded-lg p-2.5 text-[11px] text-ink-700">' +
+            '<b>An:</b> ' + escapeHtml(req.name || empf || '?') + (empf ? ' &lt;' + escapeHtml(empf) + '&gt;' : '') + '<br>' +
+            '<b>Ticket:</b> #' + s.ticket.id + ' · ' + escapeHtml((s.ticket.subject || '').slice(0, 70)) + '<br>' +
+            '<b>Anhang:</b> Stellungnahme als PDF' +
+          '</div>' +
+          (empf ? '' : '<p class="text-[11px] text-amber-700 bg-amber-50 border border-amber-200 rounded p-2">Kein Empfänger am Ticket hinterlegt — Freshdesk versendet an den Ticket-Kontakt.</p>') +
+          '<label class="text-xs font-bold text-ink-700 uppercase tracking-wider block">Anrede</label>' +
+          '<input id="stnSendAnrede" type="text" value="' + escapeAttr(s.result.anrede || 'Sehr geehrte Damen und Herren,') + '" class="w-full px-3 py-2 border border-ink-300 rounded-lg text-sm">' +
+          '<label class="text-xs font-bold text-ink-700 uppercase tracking-wider block">Nachrichtentext</label>' +
+          '<textarea id="stnSendText" rows="6" class="w-full px-3 py-2 border border-ink-300 rounded-lg text-[13px] resize-y">' + escapeHtml(stdText) + '</textarea>' +
+          '<p class="text-[10px] text-ink-400">Der vollständige Brief ist als PDF angehängt — der Text hier ist nur die Mail-Begleitung.</p>' +
+        '</div>' +
+        '<div class="px-4 py-3 border-t border-ink-200 flex gap-2">' +
+          '<button onclick="_stnCloseSend()" class="flex-1 py-2.5 rounded-xl border border-ink-300 text-ink-700 font-bold">Abbrechen</button>' +
+          '<button onclick="_stnSendReply(this)" class="flex-[2] py-2.5 rounded-xl bg-brand-600 hover:bg-brand-700 text-white font-bold inline-flex items-center justify-center gap-1.5"><i data-lucide="send" class="w-4 h-4"></i> Jetzt senden</button>' +
+        '</div>' +
+      '</div>' +
+    '</div>';
+  if (window.lucide) lucide.createIcons();
+}
+async function _stnSendReply(btn) {
+  const s = window._STN_CTX;
+  if (!s?.result) return;
+  const anrede = (document.getElementById('stnSendAnrede')?.value || '').trim();
+  const text   = (document.getElementById('stnSendText')?.value || '').trim();
+  setBusy(btn, true, 'Baue PDF…');
+  try {
+    const blob = await _stnBuildPdfBlob(s);
+    const fname = 'Stellungnahme_Ticket-' + s.ticket.id + '.pdf';
+    const bodyHtml =
+      (anrede ? '<p>' + escapeHtml(anrede) + '</p>' : '') +
+      text.split(/\n\n+/).map(p => '<p>' + escapeHtml(p).replace(/\n/g, '<br>') + '</p>').join('') +
+      '<p>Mit freundlichen Grüßen<br>' +
+        escapeHtml(((s.sender_titel || '') + ' ' + (s.sender_name || '')).trim()) +
+        (s.sender_funktion ? '<br>' + escapeHtml(s.sender_funktion) : '') +
+        '<br>' + escapeHtml(s.profile.firma || '') +
+      '</p>';
+    setBusy(btn, true, 'Sende…');
+    await _fdPostMultipart(s.accountId, 'tickets/' + s.ticket.id + '/reply', { body: bodyHtml }, [{ blob, name: fname }]);
+    setBusy(btn, false);
+    _stnCloseSend();
+    closeStellungnahmeModal();
+    toast('Stellungnahme als Antwort versendet (PDF angehängt) ✓', 'success', 6000);
+    try { if (typeof openTicketDetail === 'function') openTicketDetail(s.accountId, s.ticket.id); } catch (_) {}
+  } catch (e) {
+    setBusy(btn, false);
+    toast('Senden fehlgeschlagen: ' + (e.message || e), 'error', 9000);
+  }
 }
 
 async function _stnGenerate(btn) {
