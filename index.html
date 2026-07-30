@@ -689,6 +689,9 @@
     <button onclick="navTo('angebote'); closeMenu();" class="w-full text-left px-3 py-2 text-sm hover:bg-ink-50 flex items-center gap-2">
       <i data-lucide="receipt" class="w-4 h-4 text-indigo-500"></i> Angebote
     </button>
+    <button onclick="navTo('stellungnahmen'); closeMenu();" class="w-full text-left px-3 py-2 text-sm hover:bg-ink-50 flex items-center gap-2">
+      <i data-lucide="file-text" class="w-4 h-4 text-emerald-500"></i> Stellungnahmen
+    </button>
     <button onclick="openPositionskatalog(); closeMenu();" class="w-full text-left px-3 py-2 text-sm hover:bg-ink-50 flex items-center gap-2">
       <i data-lucide="book-marked" class="w-4 h-4 text-amber-500"></i> Positionskatalog
     </button>
@@ -799,7 +802,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.50.4';
+const APP_VERSION = 'v2.50.5';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -7758,6 +7761,7 @@ function navTo(page) {
   else if (page === 'deals')     renderFn = renderDealsPage;
   else if (page === 'marketing') renderFn = renderMarketingPage;
   else if (page === 'angebote')  renderFn = renderAngebotePage;
+  else if (page === 'stellungnahmen') renderFn = renderStellungnahmenPage;
   else if (page === 'attachments') renderFn = renderAttachmentsPage;
   else if (page === 'lists')      renderFn = renderListsPage;
   else if (page === 'saved-searches') renderFn = renderSavedSearchesPage;
@@ -30471,7 +30475,7 @@ function closeAngebotsChatModal() {
    Infrastruktur wie das Angebote-Modul. User beschreibt Anlass + Tonfall,
    KI (Sonnet) generiert Anrede/Body/Schluss/Betreff aus Ticket-Kontext. Rechts
    Live-Preview als HTML-Brief auf Briefpapier, Download per Browser-Print. */
-async function openStellungnahmeModal(accountId, ticketId) {
+async function openStellungnahmeModal(accountId, ticketId, forcedRestore) {
   let host = document.getElementById('subModalHost');
   if (!host) { host = document.createElement('div'); host.id = 'subModalHost'; document.body.appendChild(host); }
   document.body.classList.add('ang-side-panel-open');
@@ -30509,7 +30513,27 @@ async function openStellungnahmeModal(accountId, ticketId) {
       sender_funktion: lh?.default_sender_funktion || '',
       logo_url:        _letterheadLogoUrl(lh),
     };
+    // v2.50.5: Aus dem Archiv geöffnet (Übersichtsseite) ODER zuletzt gespeicherte
+    // Stellungnahme dieses Tickets automatisch laden — nichts geht mehr verloren.
+    const prev = forcedRestore || await _stnLoadForTicket(accountId, ticketId);
+    if (prev && prev.f) {
+      const f = prev.f;
+      window._STN_CTX._recordId = prev.recordId || null;
+      window._STN_CTX.anlass  = f.anlass || '';
+      window._STN_CTX.tonfall = f.tonfall || 'sachlich';
+      window._STN_CTX._sent   = (f.status === 'Versendet');
+      window._STN_CTX.result  = {
+        betreff: f.betreff || '', anrede: f.anrede || '',
+        body: f.body || '', schluss: f.schluss || '',
+      };
+      if (f.sender_titel)    window._STN_CTX.sender_titel = f.sender_titel;
+      if (f.sender_funktion) window._STN_CTX.sender_funktion = f.sender_funktion;
+    }
     _renderStellungnahmeShell();
+    if (prev && prev.f) {
+      const wann = (prev.f.updated_at || prev.f.created_at || '').slice(0, 10);
+      toast('Gespeicherte Stellungnahme geladen' + (wann ? ' (Stand ' + wann + ')' : '') + (prev.f.status === 'Versendet' ? ' · bereits versendet' : ''), 'info', 5000);
+    }
   } catch (e) {
     closeStellungnahmeModal();
     toast('Fehler: ' + (e.message || e), 'error', 8000);
@@ -30685,6 +30709,69 @@ function _stnRefreshPreview() {
   } catch (_) {}
 }
 
+/* === v2.50.5: Stellungnahmen persistent (Airtable, App-Base) ===============
+   Jede erzeugte/überarbeitete Stellungnahme wird gespeichert (Upsert je
+   Datensatz). Beim Öffnen eines Tickets wird die zuletzt gespeicherte
+   automatisch geladen; die Übersichtsseite listet alle nach Titel sortiert
+   mit Suche. Tabelle wird bei Bedarf per Auto-Field angelegt. */
+const STELLUNGNAHMEN_TABLE = 'Stellungnahmen';
+const _STN_FIELD_SPECS = {
+  betreff: 'singleLineText', anrede: 'singleLineText', body: 'multilineText', schluss: 'multilineText',
+  anlass: 'multilineText', tonfall: 'singleLineText',
+  freshdesk_account_id: 'singleLineText', freshdesk_ticket_id: 'singleLineText', ticket_betreff: 'singleLineText',
+  mandant: 'singleLineText', empfaenger_name: 'singleLineText', empfaenger_email: 'singleLineText',
+  sender_name: 'singleLineText', sender_titel: 'singleLineText', sender_funktion: 'singleLineText',
+  status: 'singleLineText', created_by: 'singleLineText', created_at: 'singleLineText', updated_at: 'singleLineText',
+};
+function _stnFields(s, status) {
+  const req = (s.ticket && s.ticket.requester) || {};
+  return {
+    betreff: (s.result?.betreff || '').slice(0, 250),
+    anrede:  s.result?.anrede  || '',
+    body:    s.result?.body    || '',
+    schluss: s.result?.schluss || '',
+    anlass:  (s.anlass || '').slice(0, 2000),
+    tonfall: s.tonfall || '',
+    freshdesk_account_id: String(s.accountId || ''),
+    freshdesk_ticket_id:  String(s.ticketId || (s.ticket && s.ticket.id) || ''),
+    ticket_betreff: String((s.ticket && s.ticket.subject) || '').slice(0, 250),
+    mandant: (s.profile && s.profile.firma) || '',
+    empfaenger_name: req.name || '', empfaenger_email: req.email || '',
+    sender_name: s.sender_name || '', sender_titel: s.sender_titel || '', sender_funktion: s.sender_funktion || '',
+    status: status || 'Entwurf',
+    created_by: (APP_KEYS.user && APP_KEYS.user.email) || '',
+    updated_at: nowIso(),
+  };
+}
+/* Speichert (bzw. aktualisiert) die aktuelle Stellungnahme. Fehler sind
+   nicht-blockierend — der Brief bleibt im Modal nutzbar. */
+async function _stnSave(s, status) {
+  if (!s || !s.result) return null;
+  try {
+    const fields = _stnFields(s, status);
+    if (s._recordId) {
+      await airtableUpdate(STELLUNGNAHMEN_TABLE, s._recordId, fields);
+    } else {
+      fields.created_at = nowIso();
+      const rec = await airtableWriteWithAutoField(STELLUNGNAHMEN_TABLE, fields, _STN_FIELD_SPECS);
+      s._recordId = rec && rec.id;
+    }
+    return s._recordId;
+  } catch (e) { console.warn('[Stellungnahme] Speichern fehlgeschlagen:', e.message); return null; }
+}
+/* Zuletzt gespeicherte Stellungnahme zu einem Ticket laden. */
+async function _stnLoadForTicket(accountId, ticketId) {
+  try {
+    const recs = await airtableRead(STELLUNGNAHMEN_TABLE, {
+      filter: "AND({freshdesk_account_id}='" + escapeFormula(String(accountId)) + "',{freshdesk_ticket_id}='" + escapeFormula(String(ticketId)) + "')",
+      sort: [{ field: 'updated_at', direction: 'desc' }], maxRecords: 5,
+    });
+    if (!recs || !recs.length) return null;
+    const r = recs[0];
+    return { recordId: r.id, f: r.fields || {} };
+  } catch (e) { console.warn('[Stellungnahme] Laden fehlgeschlagen:', e.message); return null; }
+}
+
 function _stnPrintPdf() {
   const s = window._STN_CTX;
   if (!s?.result) return;
@@ -30754,6 +30841,7 @@ async function _stnRefine(btn) {
     s._refineLog = (s._refineLog || []).concat(wunsch.slice(0, 90));
     setBusy(btn, false);
     _renderStellungnahmeShell();   // zeichnet Felder + Vorschau neu
+    _stnSave(s, s._sent ? 'Versendet' : 'Entwurf');   // v2.50.5: Stand sichern
     toast('Brief überarbeitet ✓', 'success', 3000);
   } catch (e) {
     setBusy(btn, false);
@@ -30876,6 +30964,8 @@ async function _stnSendReply(btn) {
     setBusy(btn, true, 'Sende…');
     await _fdPostMultipart(s.accountId, 'tickets/' + s.ticket.id + '/reply', { body: bodyHtml }, [{ blob, name: fname }]);
     setBusy(btn, false);
+    s._sent = true;
+    await _stnSave(s, 'Versendet');   // v2.50.5: Status im Archiv festhalten
     _stnCloseSend();
     closeStellungnahmeModal();
     toast('Stellungnahme als Antwort versendet (PDF angehängt) ✓', 'success', 6000);
@@ -30964,11 +31054,108 @@ async function _stnGenerate(btn) {
       schluss: obj.schluss || '',
     };
     _renderStellungnahmeShell();
+    _stnSave(s, 'Entwurf');   // v2.50.5: sofort sichern → beim nächsten Öffnen des Tickets wieder da
     toast('Stellungnahme erzeugt — rechts in der Vorschau prüfen + anpassen.', 'success', 4500);
   } catch (e) {
     setBusy(btn, false);
     toast('KI-Fehler: ' + (e.message || e), 'error', 8000);
   }
+}
+
+/* === v2.50.5: Übersichtsseite „Stellungnahmen" (Menü) =====================
+   Alle gespeicherten Stellungnahmen, nach Titel (Betreff) sortiert, mit
+   Suche über Betreff/Kunde/Ticket/Mandant. Klick öffnet sie im Editor. */
+const STN_PAGE_STATE = { list: [], q: '', filterAcc: '', sort: 'titel' };
+async function renderStellungnahmenPage() {
+  setPageTitle('Stellungnahmen', 'Alle erstellten Stellungnahmen — suchen & weiterbearbeiten');
+  const host = $('pageContent');
+  if (!host) return;
+  host.innerHTML = '<div class="space-y-3 max-w-3xl mx-auto">' +
+    '<div class="bg-gradient-to-br from-emerald-50 to-teal-50 border border-emerald-200 rounded-xl p-3 text-[12px] text-emerald-900">' +
+      '<p class="font-bold inline-flex items-center gap-1 mb-1"><i data-lucide="file-text" class="w-4 h-4"></i> Stellungnahmen</p>' +
+      '<p>Alle mit Freshdesk Hero erstellten Stellungnahmen. Tippe auf eine, um sie zu öffnen, anzupassen oder zu versenden.</p>' +
+    '</div>' +
+    '<div class="bg-white rounded-xl border border-ink-200 p-2.5 space-y-2">' +
+      '<div class="flex items-center gap-2">' +
+        '<input id="stnPageSearch" type="search" value="' + escapeAttr(STN_PAGE_STATE.q || '') + '" placeholder="Suche: Titel, Kunde, Ticket, Mandant…" oninput="STN_PAGE_STATE.q=this.value;_renderStellungnahmenList()" class="flex-1 min-w-0 px-3 py-2 border border-ink-300 rounded-lg text-sm">' +
+        '<button onclick="renderStellungnahmenPage()" class="shrink-0 px-2.5 py-2 bg-white border border-ink-300 hover:bg-ink-50 text-ink-700 rounded-lg text-[12px] font-bold" title="Neu laden">↻</button>' +
+      '</div>' +
+      '<div class="flex items-center gap-2">' +
+        '<select id="stnPageMandant" onchange="STN_PAGE_STATE.filterAcc=this.value;_renderStellungnahmenList()" class="flex-1 min-w-0 px-2 py-2 border border-ink-300 rounded-lg text-[12px] bg-white"><option value="">Alle Mandanten</option></select>' +
+        '<select onchange="STN_PAGE_STATE.sort=this.value;_renderStellungnahmenList()" class="shrink-0 px-2 py-2 border border-ink-300 rounded-lg text-[12px] bg-white">' +
+          '<option value="titel"' + (STN_PAGE_STATE.sort === 'titel' ? ' selected' : '') + '>Nach Titel (A→Z)</option>' +
+          '<option value="neu"'   + (STN_PAGE_STATE.sort === 'neu'   ? ' selected' : '') + '>Neueste zuerst</option>' +
+        '</select>' +
+      '</div>' +
+    '</div>' +
+    '<div id="stnPageList"><div class="text-center py-10"><span class="spinner inline-block w-6 h-6 border-[2px] text-emerald-500"></span><p class="text-sm text-ink-500 mt-2">Lade Stellungnahmen…</p></div></div>' +
+  '</div>';
+  if (window.lucide) lucide.createIcons();
+  try {
+    const recs = await airtableRead(STELLUNGNAHMEN_TABLE, { maxRecords: 1000 });
+    STN_PAGE_STATE.list = (recs || []).map(r => ({ recordId: r.id, f: r.fields || {} }));
+  } catch (e) {
+    const l = document.getElementById('stnPageList');
+    if (l) l.innerHTML = '<div class="bg-white rounded-xl border border-dashed border-ink-300 p-6 text-center text-ink-500 text-sm">Noch keine Stellungnahmen gespeichert.<br><span class="text-[11px] text-ink-400">(Die Tabelle wird beim ersten Speichern automatisch angelegt.)</span></div>';
+    return;
+  }
+  // Mandanten-Filter befüllen
+  const sel = document.getElementById('stnPageMandant');
+  if (sel) {
+    const ids = Array.from(new Set(STN_PAGE_STATE.list.map(x => String(x.f.freshdesk_account_id || '')).filter(Boolean)));
+    sel.innerHTML = '<option value="">Alle Mandanten</option>' + ids.map(id => {
+      const acc = (APP_STATE.accounts || []).find(a => String(a.id) === id);
+      return '<option value="' + escapeAttr(id) + '"' + (STN_PAGE_STATE.filterAcc === id ? ' selected' : '') + '>' + escapeHtml((acc && acc.name) || id) + '</option>';
+    }).join('');
+  }
+  _renderStellungnahmenList();
+}
+function _renderStellungnahmenList() {
+  const host = document.getElementById('stnPageList');
+  if (!host) return;
+  const all = STN_PAGE_STATE.list || [];
+  const q = (STN_PAGE_STATE.q || '').trim().toLowerCase();
+  const fa = STN_PAGE_STATE.filterAcc || '';
+  const scoped = fa ? all.filter(x => String(x.f.freshdesk_account_id || '') === fa) : all;
+  let list = q ? scoped.filter(x => ['betreff', 'ticket_betreff', 'empfaenger_name', 'empfaenger_email', 'mandant', 'freshdesk_ticket_id', 'body']
+    .map(k => String(x.f[k] || '')).join(' ').toLowerCase().includes(q)) : scoped;
+  list = list.slice().sort((a, b) => STN_PAGE_STATE.sort === 'neu'
+    ? String(b.f.updated_at || b.f.created_at || '').localeCompare(String(a.f.updated_at || a.f.created_at || ''))
+    : String(a.f.betreff || '').localeCompare(String(b.f.betreff || ''), 'de', { sensitivity: 'base' }));
+  if (!all.length) {
+    host.innerHTML = '<div class="bg-white rounded-xl border border-dashed border-ink-300 p-6 text-center text-ink-500 text-sm">Noch keine Stellungnahmen erstellt.</div>';
+    return;
+  }
+  host.innerHTML =
+    '<p class="text-[11px] text-ink-500 mb-1.5">' + list.length + ((q || fa) ? ' / ' + all.length : '') + ' Stellungnahme(n)</p>' +
+    (list.length ? list.map(x => {
+      const f = x.f;
+      const versendet = f.status === 'Versendet';
+      return '<div class="bg-white rounded-xl border border-ink-200 hover:border-emerald-300 p-3 mb-2 cursor-pointer" onclick="_stnOpenFromList(\'' + escapeAttr(x.recordId) + '\')">' +
+        '<div class="flex items-start justify-between gap-2">' +
+          '<div class="min-w-0 flex-1">' +
+            '<p class="font-bold text-ink-900 text-sm truncate">' + escapeHtml(f.betreff || '(ohne Titel)') + '</p>' +
+            '<p class="text-[11px] text-ink-600 truncate">' + escapeHtml(f.empfaenger_name || f.empfaenger_email || '') + (f.mandant ? ' · ' + escapeHtml(f.mandant) : '') + '</p>' +
+            '<p class="text-[10px] text-ink-400">' + escapeHtml(String(f.updated_at || f.created_at || '').slice(0, 10)) + (f.freshdesk_ticket_id ? ' · Ticket #' + escapeHtml(String(f.freshdesk_ticket_id)) : '') + '</p>' +
+          '</div>' +
+          '<div class="text-right shrink-0">' +
+            '<span class="text-[10px] font-bold px-2 py-0.5 rounded-full ' + (versendet ? 'bg-emerald-100 text-emerald-700' : 'bg-ink-100 text-ink-600') + '">' + (versendet ? 'Versendet' : 'Entwurf') + '</span>' +
+            '<p class="text-[10px] text-emerald-600 font-semibold inline-flex items-center gap-0.5 mt-1">Öffnen <i data-lucide="arrow-right" class="w-3 h-3"></i></p>' +
+          '</div>' +
+        '</div>' +
+      '</div>';
+    }).join('') : '<div class="bg-white rounded-xl border border-dashed border-ink-300 p-6 text-center text-ink-500 text-sm">Keine Treffer' + (q ? ' für „' + escapeHtml(q) + '"' : '') + '.</div>');
+  if (window.lucide) lucide.createIcons();
+}
+async function _stnOpenFromList(recordId) {
+  const rec = (STN_PAGE_STATE.list || []).find(x => x.recordId === recordId);
+  if (!rec) return;
+  const f = rec.f;
+  const accountId = String(f.freshdesk_account_id || '');
+  const ticketId  = String(f.freshdesk_ticket_id || '');
+  if (!accountId || !ticketId) return toast('Zu dieser Stellungnahme fehlt der Ticket-/Mandanten-Bezug.', 'warn', 6000);
+  toast('Öffne Stellungnahme…', 'info', 2000);
+  openStellungnahmeModal(accountId, ticketId, { recordId: rec.recordId, f });
 }
 
 /* Baut das komplette HTML-Dokument für die Stellungnahme auf Briefpapier.
