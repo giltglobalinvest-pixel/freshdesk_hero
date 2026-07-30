@@ -802,7 +802,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.50.5';
+const APP_VERSION = 'v2.50.6';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -30503,6 +30503,8 @@ async function openStellungnahmeModal(accountId, ticketId, forcedRestore) {
       accountId, ticketId, ticket, profile, account,
       tonfall: 'sachlich',
       anlass: '',
+      vorgangsart: 'Anfrage',   // v2.50.6: Bezug (Anfrage/Reklamation/Auftrag/Rechnung/…)
+      vorgangsart_frei: '',
       result: null,  // { betreff, anrede, body, schluss }
       sender_name:     me.name || '',
       // v2.50.2: Absender-Mail = MANDANT (wie in der Fußzeile), nicht die Login-Adresse
@@ -30521,6 +30523,8 @@ async function openStellungnahmeModal(accountId, ticketId, forcedRestore) {
       window._STN_CTX._recordId = prev.recordId || null;
       window._STN_CTX.anlass  = f.anlass || '';
       window._STN_CTX.tonfall = f.tonfall || 'sachlich';
+      window._STN_CTX.vorgangsart      = f.vorgangsart || 'Anfrage';
+      window._STN_CTX.vorgangsart_frei = f.vorgangsart_frei || '';
       window._STN_CTX._sent   = (f.status === 'Versendet');
       window._STN_CTX.result  = {
         betreff: f.betreff || '', anrede: f.anrede || '',
@@ -30595,6 +30599,8 @@ function _renderStellungnahmeShell() {
               '<option value="entschuldigend"' + (s.tonfall === 'entschuldigend' ? ' selected' : '') + '>Entschuldigend / Kulant</option>' +
               '<option value="formal"' + (s.tonfall === 'formal' ? ' selected' : '') + '>Formal / Rechtssicher</option>' +
             '</select>' +
+            // v2.50.6: Bezug/Vorgangsart — vor dem Erzeugen hier, nach dem Erzeugen beim Titel
+            (!s.result ? _stnVorgangsartHtml(s) : '') +
             '<button onclick="_stnGenerate(this)" class="w-full px-3 py-2.5 bg-gradient-to-br from-emerald-600 to-brand-600 hover:opacity-90 text-white rounded-lg text-sm font-bold inline-flex items-center justify-center gap-1.5"><i data-lucide="wand-2" class="w-4 h-4"></i> KI-Stellungnahme erzeugen</button>' +
             // v2.46.148: Signatur-Block (Titel vor Namen + Funktion nach Namen)
             '<div class="border-t border-ink-200 pt-3 space-y-1.5">' +
@@ -30610,6 +30616,7 @@ function _renderStellungnahmeShell() {
             '</div>' +
             (s.result ? (
               '<div class="border-t border-ink-200 pt-3 space-y-2">' +
+                _stnVorgangsartHtml(s) +
                 '<label class="text-xs font-bold text-ink-700 uppercase tracking-wider block">Betreff</label>' +
                 '<input id="stnBetreff" type="text" value="' + escapeAttr(s.result.betreff || '') + '" oninput="_stnUpdateField(\'betreff\', this.value)" class="w-full px-3 py-2 border border-ink-300 rounded-lg text-sm">' +
                 '<label class="text-xs font-bold text-ink-700 uppercase tracking-wider block">Anrede</label>' +
@@ -30662,6 +30669,18 @@ function _renderStellungnahmeShell() {
   if (s.result) _stnRefreshPreview();
 }
 
+/* v2.50.6: Dropdown „Bezug / Vorgangsart" (+ Freitext bei „Sonstiges"). */
+function _stnVorgangsartHtml(s) {
+  const cur = s.vorgangsart || 'Anfrage';
+  return '<label class="text-xs font-bold text-ink-700 uppercase tracking-wider block">Bezug <span class="font-normal text-ink-500 normal-case">— worauf bezieht sich die Stellungnahme?</span></label>' +
+    '<select id="stnVorgangsart" onchange="_stnSetVorgangsart(this.value)" class="w-full px-3 py-2 border border-ink-300 rounded-lg text-sm bg-white">' +
+      STN_VORGANGSARTEN.map(v => '<option value="' + escapeAttr(v.key) + '"' + (v.key === cur ? ' selected' : '') + '>' + escapeHtml(v.key) + (v.key === 'Anfrage' ? ' (Standard)' : '') + '</option>').join('') +
+    '</select>' +
+    (cur === 'Sonstiges'
+      ? '<input id="stnVorgangsartFrei" type="text" value="' + escapeAttr(s.vorgangsart_frei || '') + '" oninput="_stnSetVorgangsartFrei(this.value)" placeholder="eigene Bezeichnung, z.B. „Begehungsprotokoll“" class="w-full mt-1 px-3 py-2 border border-ink-300 rounded-lg text-sm">'
+      : '');
+}
+
 function _stnUpdateField(field, value) {
   const s = window._STN_CTX;
   if (!s?.result) return;
@@ -30674,6 +30693,42 @@ function _stnUpdateCtx(field, value) {
   if (!s) return;
   s[field] = value;
   if (s.result) _stnRefreshPreview();
+}
+
+/* v2.50.6: Vorgangsart umschalten. Passt den Titel automatisch mit an, wenn er
+   noch dem Muster „… zur/zum <alte Vorgangsart> …" folgt — der Titel bleibt
+   aber jederzeit frei überschreibbar. */
+function _stnSetVorgangsart(v) {
+  const s = window._STN_CTX;
+  if (!s) return;
+  const alt = _stnVaLabel(s);
+  s.vorgangsart = v || 'Anfrage';
+  if (v !== 'Sonstiges') s.vorgangsart_frei = '';
+  const neu = _stnVaLabel(s);
+  _stnRetitle(s, alt, neu);
+  _renderStellungnahmeShell();
+  if (s.result) _stnSave(s, s._sent ? 'Versendet' : 'Entwurf');
+}
+function _stnSetVorgangsartFrei(txt) {
+  const s = window._STN_CTX;
+  if (!s) return;
+  const alt = _stnVaLabel(s);
+  s.vorgangsart_frei = txt || '';
+  const neu = _stnVaLabel(s);
+  _stnRetitle(s, alt, neu);
+  if (s.result) { _stnRefreshPreview(); const el = document.getElementById('stnBetreff'); if (el) el.value = s.result.betreff || ''; }
+}
+/* Ersetzt im Betreff „zur/zum <alt>" durch „zur/zum <neu>" (inkl. korrektem
+   Artikel). Passt der Titel nicht ins Muster, bleibt er unangetastet. */
+function _stnRetitle(s, alt, neu) {
+  if (!s.result || !alt || !neu || alt === neu) return;
+  const art = _stnVaMeta(s.vorgangsart).artikel;
+  const alleBegriffe = STN_VORGANGSARTEN.map(v => v.key).concat([alt]).filter(Boolean);
+  const esc = x => String(x).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const re = new RegExp('\\b(zur|zum)\\s+(' + alleBegriffe.map(esc).join('|') + ')\\b', 'i');
+  if (re.test(s.result.betreff || '')) {
+    s.result.betreff = s.result.betreff.replace(re, art + ' ' + neu);
+  }
 }
 
 async function _stnSaveSignatureAsDefault(btn) {
@@ -30714,10 +30769,32 @@ function _stnRefreshPreview() {
    Datensatz). Beim Öffnen eines Tickets wird die zuletzt gespeicherte
    automatisch geladen; die Übersichtsseite listet alle nach Titel sortiert
    mit Suche. Tabelle wird bei Bedarf per Auto-Field angelegt. */
+/* v2.50.6: Vorgangsart — worauf sich die Stellungnahme bezieht. Steuert den
+   Titel („Stellungnahme zur Reklamation …") UND die KI-Formulierung im Text
+   („Bezug nehmend auf Ihre Reklamation …"). artikel = zur/zum für den Titel. */
+const STN_VORGANGSARTEN = [
+  { key: 'Anfrage',          artikel: 'zur' },
+  { key: 'Reklamation',      artikel: 'zur' },
+  { key: 'Mängelanzeige',    artikel: 'zur' },
+  { key: 'Störungsmeldung',  artikel: 'zur' },
+  { key: 'Auftrag',          artikel: 'zum' },
+  { key: 'Rechnung',         artikel: 'zur' },
+  { key: 'Mahnung',          artikel: 'zur' },
+  { key: 'Kündigung',        artikel: 'zur' },
+  { key: 'Sonstiges',        artikel: 'zum' },
+];
+function _stnVaMeta(key) { return STN_VORGANGSARTEN.find(v => v.key === key) || STN_VORGANGSARTEN[0]; }
+/* Bei „Sonstiges" gilt der freie Text, sonst der Schlüssel. */
+function _stnVaLabel(s) {
+  const k = s.vorgangsart || 'Anfrage';
+  if (k === 'Sonstiges' && String(s.vorgangsart_frei || '').trim()) return String(s.vorgangsart_frei).trim();
+  return k;
+}
 const STELLUNGNAHMEN_TABLE = 'Stellungnahmen';
 const _STN_FIELD_SPECS = {
   betreff: 'singleLineText', anrede: 'singleLineText', body: 'multilineText', schluss: 'multilineText',
   anlass: 'multilineText', tonfall: 'singleLineText',
+  vorgangsart: 'singleLineText', vorgangsart_frei: 'singleLineText',
   freshdesk_account_id: 'singleLineText', freshdesk_ticket_id: 'singleLineText', ticket_betreff: 'singleLineText',
   mandant: 'singleLineText', empfaenger_name: 'singleLineText', empfaenger_email: 'singleLineText',
   sender_name: 'singleLineText', sender_titel: 'singleLineText', sender_funktion: 'singleLineText',
@@ -30732,6 +30809,8 @@ function _stnFields(s, status) {
     schluss: s.result?.schluss || '',
     anlass:  (s.anlass || '').slice(0, 2000),
     tonfall: s.tonfall || '',
+    vorgangsart: s.vorgangsart || 'Anfrage',
+    vorgangsart_frei: s.vorgangsart_frei || '',
     freshdesk_account_id: String(s.accountId || ''),
     freshdesk_ticket_id:  String(s.ticketId || (s.ticket && s.ticket.id) || ''),
     ticket_betreff: String((s.ticket && s.ticket.subject) || '').slice(0, 250),
@@ -30814,6 +30893,7 @@ async function _stnRefine(btn) {
         betreff: s.result.betreff || '', anrede: s.result.anrede || '',
         body: s.result.body || '', schluss: s.result.schluss || '',
       }, null, 1) +
+      '\n\nBEZUG: Der Brief bezieht sich auf eine(n) „' + _stnVaLabel(s) + '" des Kunden — Betreff und Einstieg müssen dazu passen (nicht pauschal „Anfrage").' +
       '\n\nÄNDERUNGSWUNSCH DES SACHBEARBEITERS:\n' + wunsch +
       '\n\nGib den vollständigen überarbeiteten Brief als JSON zurück.';
     const data = await _callAnthropicWithRetry({
@@ -31010,7 +31090,11 @@ async function _stnGenerate(btn) {
       '- schluss: kurzer Abschluss-Absatz vor "Mit freundlichen Grüßen" (welches automatisch angehängt wird, nicht selbst schreiben)\n' +
       'Tonfall: ' + tonfallHinweis + '\n' +
       'Absender ist ' + (s.profile.firma || '') + '. KEIN Markdown, KEIN HTML, KEINE Auszeichnungen.';
+    const _va = _stnVaLabel(s);
     const userPrompt =
+      'BEZUG: Die Stellungnahme bezieht sich auf eine(n) „' + _va + '" des Kunden. ' +
+      'Formuliere Betreff und Einstieg entsprechend (z.B. Betreff „Stellungnahme ' + _stnVaMeta(s.vorgangsart).artikel + ' ' + _va + ' …", Einstieg „Bezug nehmend auf Ihre/-n ' + _va + ' vom …"). ' +
+      'Verwende NICHT pauschal das Wort „Anfrage", wenn hier etwas anderes steht.\n\n' +
       'Anlass / Vorgang vom Sachbearbeiter (in eigenen Worten):\n' + s.anlass + '\n\n' +
       'Empfänger:\n' + (t.requester?.company?.name ? 'Firma: ' + t.requester.company.name + '\n' : '') +
       (t.requester?.name ? 'Name: ' + t.requester.name + '\n' : '') +
