@@ -802,7 +802,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.50.8';
+const APP_VERSION = 'v2.50.9';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -4600,6 +4600,27 @@ function _setSigNameOverride(accountId, name) {
     else localStorage.removeItem(k);
   } catch (_) {}
 }
+/* v2.50.9: KOMPLETT eigene Signatur je Mandant (schlägt alles andere).
+   Damit sind Name, Funktion und jede weitere Zeile frei editierbar. */
+const SIG_CUSTOM_KEY = 'fdh_sig_custom';
+function _sigCustom(accountId) {
+  try { return (localStorage.getItem(SIG_CUSTOM_KEY + '_' + accountId) || '').trim(); } catch (_) { return ''; }
+}
+function _setSigCustom(accountId, html) {
+  try {
+    const k = SIG_CUSTOM_KEY + '_' + accountId;
+    if (html && String(html).trim()) localStorage.setItem(k, String(html));
+    else localStorage.removeItem(k);
+  } catch (_) {}
+}
+/* Freitext → versandfähiges HTML (Zeilenumbrüche werden zu <br>). Enthält der
+   Text bereits HTML-Tags, wird er unverändert übernommen. */
+function _sigTextToHtml(txt) {
+  const t = String(txt || '').trim();
+  if (!t) return '';
+  if (/<[a-z][\s\S]*>/i.test(t)) return t;
+  return escapeHtml(t).replace(/\n/g, '<br>');
+}
 /* Ersetzt den Agent-Namen im Signatur-HTML durch den gewünschten Namen. */
 function _applySigName(sig, agentName, newName) {
   const s = String(sig || '');
@@ -4613,8 +4634,16 @@ function _applySigName(sig, agentName, newName) {
    Änderung wirkt dadurch sofort, ohne Cache-Invalidierung. */
 function _agentMeWithSigName(me, accountId) {
   if (!me) return me;
-  const override = _sigNameOverride(accountId);
   const rawSig = (me.signature_raw != null) ? me.signature_raw : me.signature;
+  // v2.50.9: Eigene Signatur hat Vorrang — dann sind Name, Funktion und alle
+  // weiteren Zeilen frei bestimmt und es wird nichts mehr ersetzt.
+  const custom = _sigCustom(accountId);
+  if (custom) {
+    return Object.assign({}, me, {
+      signature: _sigTextToHtml(custom), signature_raw: rawSig, signature_custom: true,
+    });
+  }
+  const override = _sigNameOverride(accountId);
   if (!override) return Object.assign({}, me, { signature: rawSig, signature_raw: rawSig });
   return Object.assign({}, me, {
     signature: _applySigName(rawSig, me.name, override),
@@ -19239,9 +19268,9 @@ function renderProfilePage() {
       <div class="bg-white rounded-2xl border border-ink-200 p-4">
         <div class="flex items-center gap-2 mb-1">
           <i data-lucide="pen-line" class="w-4 h-4 text-emerald-600"></i>
-          <h3 class="font-semibold text-ink-900 text-sm">Absender-Name in der Signatur</h3>
+          <h3 class="font-semibold text-ink-900 text-sm">Email-Signatur</h3>
         </div>
-        <p class="text-[11px] text-ink-500 mb-2">Beim Versand hängt Freshdesk Hero die Signatur des API-Zugangs an. Hier kannst du den darin enthaltenen Namen je Mandant überschreiben — gilt für alle Emails, die du aus der App sendest.</p>
+        <p class="text-[11px] text-ink-500 mb-2">Beim Versand hängt Freshdesk Hero die Signatur des API-Zugangs an. Hier kannst du je Mandant nur den <b>Namen</b> ersetzen — oder die <b>komplette Signatur</b> frei bearbeiten (Name, Funktion, Kontaktzeilen). Gilt für alle Emails, die du aus der App sendest.</p>
         <div id="sigNameCard"><div class="text-center py-4"><span class="spinner inline-block w-5 h-5 border-[2px] text-emerald-500"></span></div></div>
       </div>
 
@@ -19280,9 +19309,64 @@ async function _renderSigNameCard() {
         (cur ? '<button onclick="_sigNameClear(\'' + escapeAttr(a.id) + '\')" class="shrink-0 px-2 py-1.5 border border-ink-300 hover:bg-ink-50 text-ink-600 rounded-lg text-[12px]" title="Zurück auf den Freshdesk-Namen">×</button>' : '') +
       '</div>' +
       '<p id="sigPrev_' + escapeAttr(a.id) + '" class="text-[10px] text-ink-500 mt-1">' + _sigNamePreviewText(agentName, cur) + '</p>' +
+      // v2.50.9: komplette Signatur frei bearbeiten (Name, Funktion, alle Zeilen)
+      (function () {
+        const custom = _sigCustom(a.id);
+        const open = !!custom;
+        const startwert = custom || _sigHtmlToText(rawSig);
+        return '<div class="mt-1.5">' +
+          '<button onclick="_sigToggleEditor(\'' + escapeAttr(a.id) + '\')" class="text-[11px] font-semibold text-emerald-700 inline-flex items-center gap-1"><i data-lucide="pencil" class="w-3 h-3"></i> ' +
+            (custom ? 'Eigene Signatur bearbeiten' : 'Komplette Signatur bearbeiten') + '</button>' +
+          (custom ? '<span class="ml-1.5 text-[10px] font-bold text-emerald-700 bg-emerald-50 border border-emerald-200 rounded-full px-1.5 py-0.5">eigene Signatur aktiv</span>' : '') +
+          '<div id="sigEd_' + escapeAttr(a.id) + '" class="' + (open ? '' : 'hidden ') + 'mt-1.5">' +
+            '<textarea id="sigEdTa_' + escapeAttr(a.id) + '" rows="6" oninput="_sigEditorPreview(\'' + escapeAttr(a.id) + '\')" placeholder="Mit freundlichen Grüßen&#10;Patrizio Fontanarosa&#10;Mitglied der Geschäftsführung&#10;&#10;Aufzugshandwerk GmbH · Tel. 0711 …" class="w-full px-2 py-1.5 border border-ink-300 rounded-lg text-[12px] font-mono leading-relaxed resize-y">' + escapeHtml(startwert) + '</textarea>' +
+            '<p class="text-[10px] text-ink-400 mt-0.5">Zeilenumbrüche werden übernommen. HTML ist erlaubt — dann wird es unverändert verwendet.</p>' +
+            '<div class="flex items-center gap-1.5 mt-1">' +
+              '<button onclick="_sigCustomSave(\'' + escapeAttr(a.id) + '\', this)" class="px-2.5 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-[12px] font-bold">Signatur speichern</button>' +
+              (custom ? '<button onclick="_sigCustomClear(\'' + escapeAttr(a.id) + '\')" class="px-2.5 py-1.5 border border-ink-300 hover:bg-ink-50 text-ink-600 rounded-lg text-[12px]">Freshdesk-Signatur nutzen</button>' : '') +
+            '</div>' +
+            '<p class="text-[10px] font-bold text-ink-500 uppercase tracking-wider mt-2">Vorschau</p>' +
+            '<div id="sigEdPrev_' + escapeAttr(a.id) + '" class="border border-ink-200 rounded-lg p-2 bg-ink-50 text-[12px] overflow-x-auto">' + (_sigTextToHtml(startwert) || '<span class="text-ink-400">—</span>') + '</div>' +
+          '</div>' +
+        '</div>';
+      })() +
     '</div>';
   }).join('');
   if (window.lucide) lucide.createIcons();
+}
+/* Signatur-HTML → editierbarer Text (Zeilenumbrüche erhalten). */
+function _sigHtmlToText(html) {
+  const h = String(html || '');
+  if (!h) return '';
+  if (!/<[a-z][\s\S]*>/i.test(h)) return h;
+  return h.replace(/<br\s*\/?>/gi, '\n')
+          .replace(/<\/(p|div|tr|li|h[1-6])>/gi, '\n')
+          .replace(/<[^>]+>/g, '')
+          .replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"')
+          .replace(/\n{3,}/g, '\n\n').trim();
+}
+function _sigToggleEditor(accId) {
+  const el = document.getElementById('sigEd_' + accId);
+  if (el) el.classList.toggle('hidden');
+}
+function _sigEditorPreview(accId) {
+  const ta = document.getElementById('sigEdTa_' + accId);
+  const prev = document.getElementById('sigEdPrev_' + accId);
+  if (ta && prev) prev.innerHTML = _sigTextToHtml(ta.value) || '<span class="text-ink-400">—</span>';
+}
+function _sigCustomSave(accId, btn) {
+  const ta = document.getElementById('sigEdTa_' + accId);
+  if (!ta) return;
+  if (!ta.value.trim()) return toast('Signatur ist leer — nutze „Freshdesk-Signatur nutzen" zum Zurücksetzen.', 'warn', 5000);
+  _setSigCustom(accId, ta.value);
+  if (btn) { setBusy(btn, true, ''); setTimeout(() => setBusy(btn, false), 300); }
+  toast('Eigene Signatur gespeichert — wird ab sofort beim Versand verwendet.', 'success', 4000);
+  _renderSigNameCard();
+}
+function _sigCustomClear(accId) {
+  _setSigCustom(accId, '');
+  toast('Zurück auf die Freshdesk-Signatur', 'info', 3000);
+  _renderSigNameCard();
 }
 function _sigNamePreviewText(agentName, name) {
   const n = String(name || '').trim();
