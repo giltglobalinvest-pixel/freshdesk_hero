@@ -802,7 +802,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.50.7';
+const APP_VERSION = 'v2.50.8';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -4577,19 +4577,65 @@ async function fetchContact(accountId, contactId) {
    Holt den Freshdesk-Agent-Record des eingeloggten Users (= „mich" auf diesem Account)
    und liefert die persönliche Signatur. Caching pro Account, 10 min TTL. */
 const AGENT_ME_CACHE = {};
+
+/* === v2.50.8: Absender-Name in der Signatur überschreiben ==================
+   Beim Versand hängt die App die Freshdesk-Signatur des API-Agenten an. Der
+   darin enthaltene Name war bisher fix. Hier kann pro Mandant (oder global)
+   ein abweichender Name hinterlegt werden; er wird beim Anhängen ersetzt.
+   Zentral in fetchAgentMe angewandt → gilt für ALLE Versandwege. */
+const SIG_NAME_KEY = 'fdh_sig_name';
+function _sigNameOverride(accountId) {
+  try {
+    if (accountId) {
+      const perAcc = localStorage.getItem(SIG_NAME_KEY + '_' + accountId);
+      if (perAcc && perAcc.trim()) return perAcc.trim();
+    }
+    return (localStorage.getItem(SIG_NAME_KEY) || '').trim();
+  } catch (_) { return ''; }
+}
+function _setSigNameOverride(accountId, name) {
+  try {
+    const k = accountId ? (SIG_NAME_KEY + '_' + accountId) : SIG_NAME_KEY;
+    if (name && String(name).trim()) localStorage.setItem(k, String(name).trim());
+    else localStorage.removeItem(k);
+  } catch (_) {}
+}
+/* Ersetzt den Agent-Namen im Signatur-HTML durch den gewünschten Namen. */
+function _applySigName(sig, agentName, newName) {
+  const s = String(sig || '');
+  const an = String(agentName || '').trim();
+  const nn = String(newName || '').trim();
+  if (!s || !an || !nn || an === nn) return s;
+  const esc = an.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return s.replace(new RegExp(esc, 'g'), nn);
+}
+/* Wendet den Override zur LESEZEIT an (Cache hält das Original) — eine
+   Änderung wirkt dadurch sofort, ohne Cache-Invalidierung. */
+function _agentMeWithSigName(me, accountId) {
+  if (!me) return me;
+  const override = _sigNameOverride(accountId);
+  const rawSig = (me.signature_raw != null) ? me.signature_raw : me.signature;
+  if (!override) return Object.assign({}, me, { signature: rawSig, signature_raw: rawSig });
+  return Object.assign({}, me, {
+    signature: _applySigName(rawSig, me.name, override),
+    signature_raw: rawSig,
+    sender_name_override: override,
+  });
+}
+
 async function fetchAgentMe(accountId) {
   if (!accountId) return null;
   const cached = AGENT_ME_CACHE[accountId];
-  if (cached && cached.expires > Date.now()) return cached.data;
+  if (cached && cached.expires > Date.now()) return _agentMeWithSigName(cached.data, accountId);
   try {
     const data = await proxyJson('/freshdesk/' + encodeURIComponent(accountId) + '/api/v2/agents/me');
     // Freshdesk liefert manchmal {contact: {signature: ...}, ...}, manchmal direkt {signature}
     const sig = (data?.signature || data?.contact?.signature || '').trim();
     const name = data?.contact?.name || data?.name || '';
     const email = data?.contact?.email || data?.email || '';
-    const me = { id: data?.id || null, name, email, signature: sig, raw: data };
+    const me = { id: data?.id || null, name, email, signature: sig, signature_raw: sig, raw: data };
     AGENT_ME_CACHE[accountId] = { data: me, expires: Date.now() + 10 * 60 * 1000 };
-    return me;
+    return _agentMeWithSigName(me, accountId);
   } catch (e) {
     console.warn('agents/me fehlgeschlagen für', accountId, e.message);
     // Negative cache mit kurzer TTL — verhindert Endlos-Retries pro Render
@@ -19189,6 +19235,16 @@ function renderProfilePage() {
           </button>`;
       })()}
 
+      <!-- v2.50.8: Absender-Name in der Email-Signatur je Mandant überschreiben -->
+      <div class="bg-white rounded-2xl border border-ink-200 p-4">
+        <div class="flex items-center gap-2 mb-1">
+          <i data-lucide="pen-line" class="w-4 h-4 text-emerald-600"></i>
+          <h3 class="font-semibold text-ink-900 text-sm">Absender-Name in der Signatur</h3>
+        </div>
+        <p class="text-[11px] text-ink-500 mb-2">Beim Versand hängt Freshdesk Hero die Signatur des API-Zugangs an. Hier kannst du den darin enthaltenen Namen je Mandant überschreiben — gilt für alle Emails, die du aus der App sendest.</p>
+        <div id="sigNameCard"><div class="text-center py-4"><span class="spinner inline-block w-5 h-5 border-[2px] text-emerald-500"></span></div></div>
+      </div>
+
       <button onclick="logout()" class="w-full bg-red-50 border border-red-200 hover:bg-red-100 text-red-700 rounded-xl py-3 font-medium flex items-center justify-center gap-2">
         <i data-lucide="log-out" class="w-4 h-4"></i> Abmelden
       </button>
@@ -19196,6 +19252,62 @@ function renderProfilePage() {
       <p class="text-[10px] text-center text-ink-400 mt-2">Project-ID: ${escapeHtml(APP_CONFIG.PROJECT_ID)}</p>
     </div>`;
   if (window.lucide) lucide.createIcons();
+  _renderSigNameCard();
+}
+
+/* v2.50.8: Karte „Absender-Name in der Signatur" — pro Mandant der aktuelle
+   Agent-Name aus Freshdesk + Eingabefeld für den gewünschten Namen + Vorschau. */
+async function _renderSigNameCard() {
+  const host = document.getElementById('sigNameCard');
+  if (!host) return;
+  const accs = APP_STATE.accounts || [];
+  if (!accs.length) { host.innerHTML = '<p class="text-[11px] text-ink-400">Keine Mandanten geladen.</p>'; return; }
+  const mes = await Promise.all(accs.map(a => fetchAgentMe(a.id).catch(() => null)));
+  if (!document.getElementById('sigNameCard')) return;
+  host.innerHTML = accs.map((a, i) => {
+    const me = mes[i];
+    const agentName = (me && me.name) || '';
+    const cur = _sigNameOverride(a.id);
+    const rawSig = (me && (me.signature_raw || me.signature)) || '';
+    const hatName = !!(agentName && rawSig && rawSig.indexOf(agentName) >= 0);
+    return '<div class="border-t border-ink-100 pt-2.5 mt-2.5 first:border-0 first:pt-0 first:mt-0">' +
+      '<p class="text-[11px] font-bold text-ink-700">' + escapeHtml(a.name || a.id) + '</p>' +
+      '<p class="text-[10px] text-ink-400 mb-1">Signatur-Name aus Freshdesk: <b>' + escapeHtml(agentName || '—') + '</b>' +
+        (rawSig ? (hatName ? '' : ' · <span class="text-amber-600">Name kommt in der Signatur nicht wörtlich vor — Ersetzen greift hier nicht</span>') : ' · <span class="text-amber-600">keine Signatur hinterlegt</span>') + '</p>' +
+      '<div class="flex items-center gap-1.5">' +
+        '<input id="sigName_' + escapeAttr(a.id) + '" type="text" value="' + escapeAttr(cur) + '" placeholder="' + escapeAttr(agentName || 'Name wie er erscheinen soll') + '" oninput="_sigNamePreview(\'' + escapeAttr(a.id) + '\')" class="flex-1 min-w-0 px-2 py-1.5 border border-ink-300 rounded-lg text-sm">' +
+        '<button onclick="_sigNameSave(\'' + escapeAttr(a.id) + '\', this)" class="shrink-0 px-2.5 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-[12px] font-bold">Speichern</button>' +
+        (cur ? '<button onclick="_sigNameClear(\'' + escapeAttr(a.id) + '\')" class="shrink-0 px-2 py-1.5 border border-ink-300 hover:bg-ink-50 text-ink-600 rounded-lg text-[12px]" title="Zurück auf den Freshdesk-Namen">×</button>' : '') +
+      '</div>' +
+      '<p id="sigPrev_' + escapeAttr(a.id) + '" class="text-[10px] text-ink-500 mt-1">' + _sigNamePreviewText(agentName, cur) + '</p>' +
+    '</div>';
+  }).join('');
+  if (window.lucide) lucide.createIcons();
+}
+function _sigNamePreviewText(agentName, name) {
+  const n = String(name || '').trim();
+  if (!n) return 'Aktuell: Signatur unverändert (' + escapeHtml(agentName || 'Freshdesk-Name') + ')';
+  return 'In der Signatur erscheint: <b>' + escapeHtml(n) + '</b> statt ' + escapeHtml(agentName || '–');
+}
+function _sigNamePreview(accId) {
+  const inp = document.getElementById('sigName_' + accId);
+  const prev = document.getElementById('sigPrev_' + accId);
+  if (!inp || !prev) return;
+  const me = (AGENT_ME_CACHE[accId] && AGENT_ME_CACHE[accId].data) || null;
+  prev.innerHTML = _sigNamePreviewText(me && me.name, inp.value);
+}
+function _sigNameSave(accId, btn) {
+  const inp = document.getElementById('sigName_' + accId);
+  if (!inp) return;
+  _setSigNameOverride(accId, inp.value);
+  if (btn) { setBusy(btn, true, ''); setTimeout(() => setBusy(btn, false), 300); }
+  toast(inp.value.trim() ? 'Absender-Name gespeichert: ' + inp.value.trim() : 'Absender-Name zurückgesetzt', 'success', 3000);
+  _renderSigNameCard();
+}
+function _sigNameClear(accId) {
+  _setSigNameOverride(accId, '');
+  toast('Zurück auf den Freshdesk-Namen', 'info', 2500);
+  _renderSigNameCard();
 }
 
 /* Eigenes-Profil-Bearbeiten-Modal — User kann Name/Email/Telefon + pro Account
