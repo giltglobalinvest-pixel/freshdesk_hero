@@ -802,7 +802,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.50.6';
+const APP_VERSION = 'v2.50.7';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -30835,8 +30835,16 @@ async function _stnSave(s, status) {
       const rec = await airtableWriteWithAutoField(STELLUNGNAHMEN_TABLE, fields, _STN_FIELD_SPECS);
       s._recordId = rec && rec.id;
     }
+    s._saveError = null;
     return s._recordId;
-  } catch (e) { console.warn('[Stellungnahme] Speichern fehlgeschlagen:', e.message); return null; }
+  } catch (e) {
+    // v2.50.7: Fehler NICHT mehr verschlucken — sonst bleibt das Archiv still leer.
+    console.warn('[Stellungnahme] Speichern fehlgeschlagen:', e.message);
+    s._saveError = e.message || String(e);
+    const kurz = String(e.message || e).slice(0, 160);
+    toast('Stellungnahme konnte nicht gespeichert werden: ' + kurz + ' — Text bleibt im Fenster erhalten.', 'error', 9000);
+    return null;
+  }
 }
 /* Zuletzt gespeicherte Stellungnahme zu einem Ticket laden. */
 async function _stnLoadForTicket(accountId, ticketId) {
