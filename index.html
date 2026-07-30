@@ -799,7 +799,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.50.2';
+const APP_VERSION = 'v2.50.3';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -31117,8 +31117,11 @@ function _renderAngebotHtmlLegacy(ctx, opts) {
   const empfaengerEmail = req.email || '';
   const empfaengerFirma = req.company?.name || '';
   const senderName = APP_KEYS.user?.name || '';
-  const senderEmail = APP_KEYS.user?.email || profile.email;
-  const senderTel = APP_KEYS.user?.phone || profile.tel;
+  // v2.50.3: Mail/Tel = MANDANT (wie in der Fußzeile) — nicht die Login-Adresse des
+  // eingeloggten Users; sonst steht z.B. @flp-shop.com auf Aufzugshandwerk-Briefpapier.
+  // Der NAME bleibt der des Bearbeiters (Ansprechpartner/Signatur).
+  const senderEmail = profile.email || APP_KEYS.user?.email;
+  const senderTel = profile.tel || APP_KEYS.user?.phone;
   // Briefkopf-Stil
   const css =
     '<style>' +
@@ -31293,8 +31296,11 @@ function _renderAngebotHtmlV2(ctx, opts) {
   const empfaengerEmail = req.email || '';
   const empfaengerFirma = req.company?.name || '';
   const senderName  = APP_KEYS.user?.name || '';
-  const senderEmail = APP_KEYS.user?.email || profile.email;
-  const senderTel   = APP_KEYS.user?.phone || profile.tel;
+  // v2.50.3: Mail/Tel = MANDANT (wie in der Fußzeile) — nicht die Login-Adresse des
+  // eingeloggten Users; sonst steht z.B. @flp-shop.com auf Aufzugshandwerk-Briefpapier.
+  // Der NAME bleibt der des Bearbeiters (Ansprechpartner/Signatur).
+  const senderEmail = profile.email || APP_KEYS.user?.email;
+  const senderTel   = profile.tel || APP_KEYS.user?.phone;
   const standort     = ctx.standort || '';
   const fabriknummer = ctx.fabriknummer || '';
   // CSS-Block (geteilt zwischen allen Seiten)
