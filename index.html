@@ -802,7 +802,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.50.9';
+const APP_VERSION = 'v2.50.10';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -19313,20 +19313,27 @@ async function _renderSigNameCard() {
       (function () {
         const custom = _sigCustom(a.id);
         const open = !!custom;
-        const startwert = custom || _sigHtmlToText(rawSig);
+        // v2.50.10: ECHTES Signatur-HTML aus Freshdesk (mit Logo/Links/Formatierung)
+        // direkt bearbeiten — vorher wurde es zu Text plattgemacht und das Logo ging verloren.
+        const startHtml = _sigSanitize(custom || rawSig);
         return '<div class="mt-1.5">' +
           '<button onclick="_sigToggleEditor(\'' + escapeAttr(a.id) + '\')" class="text-[11px] font-semibold text-emerald-700 inline-flex items-center gap-1"><i data-lucide="pencil" class="w-3 h-3"></i> ' +
             (custom ? 'Eigene Signatur bearbeiten' : 'Komplette Signatur bearbeiten') + '</button>' +
           (custom ? '<span class="ml-1.5 text-[10px] font-bold text-emerald-700 bg-emerald-50 border border-emerald-200 rounded-full px-1.5 py-0.5">eigene Signatur aktiv</span>' : '') +
           '<div id="sigEd_' + escapeAttr(a.id) + '" class="' + (open ? '' : 'hidden ') + 'mt-1.5">' +
-            '<textarea id="sigEdTa_' + escapeAttr(a.id) + '" rows="6" oninput="_sigEditorPreview(\'' + escapeAttr(a.id) + '\')" placeholder="Mit freundlichen Grüßen&#10;Patrizio Fontanarosa&#10;Mitglied der Geschäftsführung&#10;&#10;Aufzugshandwerk GmbH · Tel. 0711 …" class="w-full px-2 py-1.5 border border-ink-300 rounded-lg text-[12px] font-mono leading-relaxed resize-y">' + escapeHtml(startwert) + '</textarea>' +
-            '<p class="text-[10px] text-ink-400 mt-0.5">Zeilenumbrüche werden übernommen. HTML ist erlaubt — dann wird es unverändert verwendet.</p>' +
-            '<div class="flex items-center gap-1.5 mt-1">' +
-              '<button onclick="_sigCustomSave(\'' + escapeAttr(a.id) + '\', this)" class="px-2.5 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-[12px] font-bold">Signatur speichern</button>' +
-              (custom ? '<button onclick="_sigCustomClear(\'' + escapeAttr(a.id) + '\')" class="px-2.5 py-1.5 border border-ink-300 hover:bg-ink-50 text-ink-600 rounded-lg text-[12px]">Freshdesk-Signatur nutzen</button>' : '') +
+            '<p class="text-[10px] text-ink-400 mb-1">Direkt im Original bearbeiten — Logo, Links und Formatierung bleiben erhalten.</p>' +
+            '<div id="sigEdWys_' + escapeAttr(a.id) + '" contenteditable="true" class="w-full px-2 py-2 border border-ink-300 rounded-lg text-[13px] bg-white overflow-x-auto" style="min-height:90px">' +
+              (startHtml || '<p>—</p>') +
             '</div>' +
-            '<p class="text-[10px] font-bold text-ink-500 uppercase tracking-wider mt-2">Vorschau</p>' +
-            '<div id="sigEdPrev_' + escapeAttr(a.id) + '" class="border border-ink-200 rounded-lg p-2 bg-ink-50 text-[12px] overflow-x-auto">' + (_sigTextToHtml(startwert) || '<span class="text-ink-400">—</span>') + '</div>' +
+            '<div class="flex items-center gap-1.5 mt-1 flex-wrap">' +
+              '<button onclick="_sigWysSave(\'' + escapeAttr(a.id) + '\', this)" class="px-2.5 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-[12px] font-bold">Signatur speichern</button>' +
+              (custom ? '<button onclick="_sigCustomClear(\'' + escapeAttr(a.id) + '\')" class="px-2.5 py-1.5 border border-ink-300 hover:bg-ink-50 text-ink-600 rounded-lg text-[12px]">Freshdesk-Signatur nutzen</button>' : '') +
+              '<button onclick="_sigToggleSource(\'' + escapeAttr(a.id) + '\')" class="px-2 py-1.5 border border-ink-300 hover:bg-ink-50 text-ink-500 rounded-lg text-[11px] inline-flex items-center gap-1"><i data-lucide="code" class="w-3 h-3"></i> HTML-Quelltext</button>' +
+            '</div>' +
+            '<div id="sigEdSrcWrap_' + escapeAttr(a.id) + '" class="hidden mt-1.5">' +
+              '<textarea id="sigEdSrc_' + escapeAttr(a.id) + '" rows="8" class="w-full px-2 py-1.5 border border-ink-300 rounded-lg text-[11px] font-mono leading-relaxed resize-y">' + escapeHtml(startHtml) + '</textarea>' +
+              '<button onclick="_sigSrcApply(\'' + escapeAttr(a.id) + '\')" class="mt-1 px-2.5 py-1.5 bg-ink-100 hover:bg-ink-200 text-ink-700 rounded-lg text-[11px] font-bold">HTML übernehmen</button>' +
+            '</div>' +
           '</div>' +
         '</div>';
       })() +
@@ -19334,7 +19341,40 @@ async function _renderSigNameCard() {
   }).join('');
   if (window.lucide) lucide.createIcons();
 }
-/* Signatur-HTML → editierbarer Text (Zeilenumbrüche erhalten). */
+/* Signatur-HTML absichern: Skripte/Event-Handler raus, Rest (Logo, Links,
+   Tabellen, Inline-Styles) bleibt unangetastet. */
+function _sigSanitize(html) {
+  return String(html || '')
+    .replace(/<script[\s\S]*?<\/script>/gi, '')
+    .replace(/\son\w+\s*=\s*"[^"]*"/gi, '')
+    .replace(/\son\w+\s*=\s*'[^']*'/gi, '');
+}
+function _sigToggleSource(accId) {
+  const wrap = document.getElementById('sigEdSrcWrap_' + accId);
+  const wys = document.getElementById('sigEdWys_' + accId);
+  const src = document.getElementById('sigEdSrc_' + accId);
+  if (!wrap || !wys || !src) return;
+  if (wrap.classList.contains('hidden')) src.value = wys.innerHTML;   // aktuellen Stand spiegeln
+  wrap.classList.toggle('hidden');
+}
+function _sigSrcApply(accId) {
+  const wys = document.getElementById('sigEdWys_' + accId);
+  const src = document.getElementById('sigEdSrc_' + accId);
+  if (!wys || !src) return;
+  wys.innerHTML = _sigSanitize(src.value);
+  toast('HTML übernommen — jetzt noch „Signatur speichern".', 'info', 3500);
+}
+function _sigWysSave(accId, btn) {
+  const wys = document.getElementById('sigEdWys_' + accId);
+  if (!wys) return;
+  const html = _sigSanitize(wys.innerHTML).trim();
+  if (!html || !wys.textContent.trim()) return toast('Signatur ist leer — nutze „Freshdesk-Signatur nutzen" zum Zurücksetzen.', 'warn', 5000);
+  _setSigCustom(accId, html);
+  if (btn) { setBusy(btn, true, ''); setTimeout(() => setBusy(btn, false), 300); }
+  toast('Eigene Signatur gespeichert — wird ab sofort beim Versand verwendet.', 'success', 4000);
+  _renderSigNameCard();
+}
+/* Signatur-HTML → Text (nur noch für Diagnose/Fallback, nicht mehr im Editor). */
 function _sigHtmlToText(html) {
   const h = String(html || '');
   if (!h) return '';
@@ -19348,20 +19388,6 @@ function _sigHtmlToText(html) {
 function _sigToggleEditor(accId) {
   const el = document.getElementById('sigEd_' + accId);
   if (el) el.classList.toggle('hidden');
-}
-function _sigEditorPreview(accId) {
-  const ta = document.getElementById('sigEdTa_' + accId);
-  const prev = document.getElementById('sigEdPrev_' + accId);
-  if (ta && prev) prev.innerHTML = _sigTextToHtml(ta.value) || '<span class="text-ink-400">—</span>';
-}
-function _sigCustomSave(accId, btn) {
-  const ta = document.getElementById('sigEdTa_' + accId);
-  if (!ta) return;
-  if (!ta.value.trim()) return toast('Signatur ist leer — nutze „Freshdesk-Signatur nutzen" zum Zurücksetzen.', 'warn', 5000);
-  _setSigCustom(accId, ta.value);
-  if (btn) { setBusy(btn, true, ''); setTimeout(() => setBusy(btn, false), 300); }
-  toast('Eigene Signatur gespeichert — wird ab sofort beim Versand verwendet.', 'success', 4000);
-  _renderSigNameCard();
 }
 function _sigCustomClear(accId) {
   _setSigCustom(accId, '');
