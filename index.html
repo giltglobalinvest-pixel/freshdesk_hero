@@ -802,7 +802,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.56.0';
+const APP_VERSION = 'v2.57.0';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -889,6 +889,7 @@ let APP_STATE = {
     type:        null,        // string = specific type, null = alle
     responderId: null,        // number = specific agent, 'unassigned', null = alle
     visibility:  'active',    // 'active' (verbirgt Wiedervorlage) | 'wiedervorlage' | 'all'
+    sort:        'activity_desc', // v2.57.0: 'activity_desc'|'created_desc'|'created_asc'
   },
   wiedervorlageMap: new Map(),
   multiSelect: {
@@ -7841,6 +7842,16 @@ async function ensureTypesLoaded(accountId) {
   }
 }
 
+/* Sortierung der Ticket-Liste (v2.57.0) — eine Stelle für alle Wege. */
+function _fdhTicketsSortieren(list) {
+  const s = APP_STATE.filters?.sort || 'activity_desc';
+  const arr = list;
+  if (s === 'created_desc')      arr.sort((a, b) => new Date(b.created_at || 0) - new Date(a.created_at || 0));
+  else if (s === 'created_asc')  arr.sort((a, b) => new Date(a.created_at || 0) - new Date(b.created_at || 0));
+  else                           arr.sort((a, b) => new Date(b.updated_at || 0) - new Date(a.updated_at || 0));
+  return arr;
+}
+
 async function fetchTicketsAllAccounts(opts = {}) {
   const all = APP_STATE.accounts;
   if (!all.length) return [];
@@ -7859,7 +7870,7 @@ async function fetchTicketsAllAccounts(opts = {}) {
       perAccount[acc.id] = 0;
     }
   });
-  merged.sort((a, b) => new Date(b.updated_at || 0) - new Date(a.updated_at || 0));
+  _fdhTicketsSortieren(merged);
   Object.defineProperty(merged, '_perAccount', { value: perAccount, enumerable: false });
   return merged;
 }
@@ -8521,7 +8532,84 @@ function renderShellChrome() {
 }
 
 /* ===================== TICKETS PAGE ===================== */
+/* === Gespeicherte Ansichten (v2.57.0) ======================================
+   Benannte Filter+Sortier-Kombinationen wie die Freshdesk-Ansichten („Alle
+   ungelösten Tickets"). Gespeichert im localStorage UND — wenn die User-Tabelle
+   ein Feld ansichten_json hat — am Benutzer (geräteübergreifend). */
+function _fdhAnsichtenLesen() {
+  try { return JSON.parse(localStorage.getItem('fdh_ansichten_v1') || '[]') || []; }
+  catch (_) { return []; }
+}
+function _fdhAnsichtenSchreiben(liste) {
+  try { localStorage.setItem('fdh_ansichten_v1', JSON.stringify(liste)); } catch (_) {}
+  // Geräteübergreifend: still versuchen, am User-Record zu speichern.
+  const uid = APP_KEYS.user?.id;
+  if (uid) airtableUpdate('User', uid, { ansichten_json: JSON.stringify(liste) }).catch(() => {});
+}
+let _fdhAnsichtenSyncGeholt = false;
+async function _fdhAnsichtenSync() {
+  if (_fdhAnsichtenSyncGeholt || !APP_KEYS.user?.api_key) return;
+  _fdhAnsichtenSyncGeholt = true;
+  try {
+    const recs = await airtableRead('User', { filter: "{api_key}='" + escapeFormula(APP_KEYS.user.api_key) + "'" });
+    const roh = recs?.[0]?.fields?.ansichten_json;
+    if (!APP_KEYS.user.id && recs?.[0]?.id) APP_KEYS.user.id = recs[0].id;
+    if (roh) {
+      const remote = JSON.parse(roh);
+      if (Array.isArray(remote) && remote.length) {
+        localStorage.setItem('fdh_ansichten_v1', JSON.stringify(remote));
+      }
+    }
+  } catch (_) { /* Feld existiert nicht → localStorage bleibt die Quelle */ }
+}
+function _fdhAnsichtAktiv(a) {
+  const f = APP_STATE.filters;
+  const g = a.filters || {};
+  return ['status', 'groupId', 'type', 'responderId', 'visibility'].every(k => (g[k] ?? null) === (f[k] ?? null)) &&
+    ((a.sort || 'activity_desc') === (f.sort || 'activity_desc'));
+}
+function ansichtAnwenden(id) {
+  const a = _fdhAnsichtenLesen().find(x => x.id === id);
+  if (!a) return;
+  APP_STATE.filters = { status: 'all', groupId: null, type: null, responderId: null, visibility: 'active', ...(a.filters || {}), sort: a.sort || 'activity_desc' };
+  renderTicketsPage();
+}
+function ansichtSpeichernDialog() {
+  const name = (prompt('Name der Ansicht (aktuelle Filter + Sortierung werden gespeichert):') || '').trim();
+  if (!name) return;
+  const liste = _fdhAnsichtenLesen();
+  const f = APP_STATE.filters;
+  liste.push({
+    id: 'a' + Date.now().toString(36),
+    name: name.slice(0, 40),
+    filters: { status: f.status, groupId: f.groupId, type: f.type, responderId: f.responderId, visibility: f.visibility },
+    sort: f.sort || 'activity_desc',
+    start: false,
+  });
+  _fdhAnsichtenSchreiben(liste);
+  toast('Ansicht „' + name + '" gespeichert', 'success', 3500);
+  renderTicketsPage();
+}
+function ansichtenVerwalten() {
+  const liste = _fdhAnsichtenLesen();
+  const optionen = [{ value: 'neu', label: '+ Aktuelle Filter als Ansicht speichern', icon: 'plus' }];
+  liste.forEach(a => {
+    optionen.push({ value: 'start:' + a.id, label: (a.start ? '⭐ ' : '☆ ') + a.name + ' als Start-Ansicht', icon: 'star', sub: a.start ? 'ist Start-Ansicht — erneut tippen schaltet aus' : 'wird beim Öffnen der Tickets angewendet' });
+    optionen.push({ value: 'del:' + a.id, label: '🗑 ' + a.name + ' löschen', icon: 'trash-2' });
+  });
+  openFilterPicker('Ansichten verwalten', '__ansicht__', optionen);
+}
+
 async function renderTicketsPage() {
+  // Einmal je Sitzung: Ansichten vom User-Record holen und Start-Ansicht anwenden.
+  if (!window._fdhStartAnsichtOk) {
+    window._fdhStartAnsichtOk = true;
+    await _fdhAnsichtenSync().catch(() => {});
+    const start = _fdhAnsichtenLesen().find(a => a.start);
+    if (start) {
+      APP_STATE.filters = { status: 'all', groupId: null, type: null, responderId: null, visibility: 'active', ...(start.filters || {}), sort: start.sort || 'activity_desc' };
+    }
+  }
   setPageTitle('Tickets', '');
   setActiveNav('tickets');
   const acc = APP_STATE.currentAccount;
@@ -8593,11 +8681,21 @@ async function renderTicketsPage() {
             </button>`;
           // v2.46.45: View-Toggle + Vollbild ZUERST in der Filter-Zeile — sofort sichtbar,
           // nicht erst am Ende nach langem Rechts-Scrollen.
+          let html0 = '';
+          // Gespeicherte Ansichten als Chips ganz vorn (v2.57.0)
+          const ansichten = _fdhAnsichtenLesen();
+          ansichten.forEach(a => {
+            const aktiv = _fdhAnsichtAktiv(a);
+            html0 += `<button onclick="ansichtAnwenden('${escapeAttr(a.id)}')" class="shrink-0 px-2.5 py-1 rounded-md text-[11px] font-semibold inline-flex items-center gap-1 border ${aktiv ? 'bg-violet-600 text-white border-violet-600 shadow-sm' : 'bg-violet-50 text-violet-700 border-violet-200 active:bg-violet-100'}">
+              ${a.start ? '⭐ ' : ''}${escapeHtml(a.name)}
+            </button>`;
+          });
+          html0 += `<button onclick="ansichtenVerwalten()" title="Ansichten speichern und verwalten" class="shrink-0 px-2 py-1 rounded-md text-[11px] font-medium bg-white text-violet-700 border border-violet-200 inline-flex items-center gap-1"><i data-lucide="bookmark-plus" class="w-3.5 h-3.5"></i>${ansichten.length ? '' : ' Ansicht speichern'}</button>`;
           const tvMode = TICKETS_VIEW_MODE || 'list';
           const tvNext = tvMode === 'stack' ? 'list' : 'stack';
           const tvIcon = tvMode === 'stack' ? 'layers' : 'list';
           const tvLabel = tvMode === 'stack' ? 'Karten' : 'Liste';
-          let html = `<button onclick="setTicketsViewMode('${tvNext}')" class="shrink-0 px-2.5 py-1 rounded-md text-[11px] font-semibold bg-white text-ink-700 border border-ink-300 inline-flex items-center gap-1 shadow-sm" title="Ansicht: ${tvLabel} (klick um zu wechseln)"><i data-lucide="${tvIcon}" class="w-3.5 h-3.5"></i>${tvLabel}</button>`;
+          let html = html0 + `<button onclick="setTicketsViewMode('${tvNext}')" class="shrink-0 px-2.5 py-1 rounded-md text-[11px] font-semibold bg-white text-ink-700 border border-ink-300 inline-flex items-center gap-1 shadow-sm" title="Ansicht: ${tvLabel} (klick um zu wechseln)"><i data-lucide="${tvIcon}" class="w-3.5 h-3.5"></i>${tvLabel}</button>`;
           html += `<button onclick="enterTicketsStackFullscreen()" class="shrink-0 px-2.5 py-1 rounded-md text-[11px] font-semibold bg-brand-500 text-white border border-brand-500 inline-flex items-center gap-1 shadow-sm" title="Direkt in Vollbild-Karten-Modus"><i data-lucide="maximize" class="w-3.5 h-3.5"></i>Vollbild</button>`;
           // v2.46.48: Neues KI-Ticket erstellen
           html += `<button onclick="openNewTicketAiModal()" class="shrink-0 px-2.5 py-1 rounded-md text-[11px] font-semibold bg-emerald-500 text-white border border-emerald-500 inline-flex items-center gap-1 shadow-sm" title="Neues Ticket per KI erstellen (Sprach- oder Text-Eingabe)"><i data-lucide="sparkles" class="w-3.5 h-3.5"></i>+ KI</button>`;
@@ -8606,6 +8704,8 @@ async function renderTicketsPage() {
           html += `<button onclick="toggleUnassignedFilter()" title="${unassignedActive ? 'Unzugewiesen-Filter ausschalten' : 'Nur Tickets ohne Bearbeiter zeigen'}" class="shrink-0 px-2.5 py-1 rounded-md text-[11px] font-semibold inline-flex items-center gap-1 border ${unassignedActive ? 'bg-amber-500 text-white border-amber-500 shadow-sm' : 'bg-amber-50 text-amber-700 border-amber-200 active:bg-amber-100'}">
               <i data-lucide="user-x" class="w-3 h-3"></i> Unzugewiesen
             </button>`;
+          const sortLabels = { activity_desc:'Aktivität ↓', created_desc:'Erstellt ↓', created_asc:'Erstellt ↑' };
+          html += chip((f.sort || 'activity_desc') !== 'activity_desc', 'Sortiert', sortLabels[f.sort] || 'Aktivität ↓', "openFilterSort()");
           const statusLabels = { open:'Offen', pending:'Wartet', resolved:'Gelöst', closed:'Geschlossen', all:'alle' };
           const statusActive = f.status && f.status !== 'all';
           html += chip(statusActive, 'Status', statusLabels[f.status] || 'alle', "openFilterStatus()");
@@ -8652,6 +8752,7 @@ async function renderTicketsPage() {
       ? Promise.allSettled(APP_STATE.accounts.flatMap(a => [ensureAgentsLoaded(a.id), ensureGroupsLoaded(a.id), ensureTypesLoaded(a.id)]))
       : Promise.all([ensureAgentsLoaded(acc), ensureGroupsLoaded(acc), ensureTypesLoaded(acc)]);
     const [tickets] = await Promise.all([ticketsPromise, cachesPromise]);
+    _fdhTicketsSortieren(tickets);
     // Pagination-State erfassen
     const accsRelevant = acc === 'all' ? APP_STATE.accounts.map(a => a.id) : [acc];
     if (acc === 'all' && tickets._perAccount) {
@@ -8948,6 +9049,14 @@ function openFilterGroup() {
     ...cache.groups.slice().sort((a, b) => a.name.localeCompare(b.name, 'de')).map(g => ({
       value: g.id, label: g.name, icon: 'users', sub: g.description || ''
     })),
+  ]);
+}
+
+function openFilterSort() {
+  openFilterPicker('Sortieren nach', 'sort', [
+    { value: 'activity_desc', label: 'Letzte Aktivität (neueste zuerst)', icon: 'clock' },
+    { value: 'created_desc', label: 'Erstellungsdatum (neueste zuerst)', icon: 'calendar-arrow-down' },
+    { value: 'created_asc', label: 'Erstellungsdatum (älteste zuerst)', icon: 'calendar-arrow-up' },
   ]);
 }
 
@@ -9967,6 +10076,38 @@ async function applyFilterByIndex(idx) {
     await bulkExecute(items, async ({ accountId, ticketId }) => {
       await proxyJson('/freshdesk/' + encodeURIComponent(accountId) + '/api/v2/tickets/' + ticketId, { method: 'PUT', body: JSON.stringify({ status: opt.value }) });
     }, 'Status gesetzt', 'setze Status');
+    return;
+  }
+  if (key === '__ansicht__') {
+    const v = String(opt.value || '');
+    if (v === 'neu') { ansichtSpeichernDialog(); return; }
+    const liste = _fdhAnsichtenLesen();
+    if (v.startsWith('del:')) {
+      const id = v.slice(4);
+      _fdhAnsichtenSchreiben(liste.filter(x => x.id !== id));
+      toast('Ansicht gelöscht', 'success', 3000);
+      renderTicketsPage();
+      return;
+    }
+    if (v.startsWith('start:')) {
+      const id = v.slice(6);
+      liste.forEach(x => { x.start = (x.id === id) ? !x.start : false; });
+      _fdhAnsichtenSchreiben(liste);
+      renderTicketsPage();
+      return;
+    }
+    return;
+  }
+  if (key === 'sort') {
+    // Sortieren braucht kein Neuladen — lokale Liste umsortieren und rendern.
+    APP_STATE.filters.sort = opt.value || 'activity_desc';
+    if (APP_STATE.pageState?.tickets?.length) {
+      _fdhTicketsSortieren(APP_STATE.pageState.tickets);
+      refreshTicketsListFromCache();
+      renderTicketsPage();
+    } else {
+      renderTicketsPage();
+    }
     return;
   }
   // Normaler Filter
