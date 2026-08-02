@@ -802,7 +802,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.62.1';
+const APP_VERSION = 'v2.63.0';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -4687,6 +4687,37 @@ async function loadUserSignatures(force) {
         });
       } catch (e) { console.warn('[Signatur] Laden aus Airtable:', e.message); }
     }
+    // v2.63.0 (Betreiber): Ohne eigene Signatur → Fallback auf die HERO-Signatur
+    // des Masters (des Benutzers, über dessen Schlüssel dieser Account läuft).
+    // Irgendeine Signatur muss her — nur die Freshdesk-Signatur bleibt tabu.
+    try {
+      if (key) {
+        const accRecs = await airtableRead(ACCESS_TABLE, {
+          filter: "{user_api_key}='" + escapeFormula(key) + "'", maxRecords: 100,
+        });
+        const masterJeAccount = {};
+        (accRecs || []).forEach(r => {
+          const f = r.fields || {};
+          const roh = String(f.freshdesk_api_key || '').trim();
+          if (f.account_id && roh.startsWith('VON:')) masterJeAccount[String(f.account_id)] = roh.slice(4).trim();
+        });
+        const offen = Object.entries(masterJeAccount).filter(([accId]) => !map.has(accId) || !map.get(accId).html);
+        const masterKeys = [...new Set(offen.map(([, mk]) => mk).filter(Boolean))];
+        if (masterKeys.length) {
+          const mf = 'OR(' + masterKeys.map(mk => "{user_key}='" + escapeFormula(mk) + "'").join(',') + ')';
+          const mrecs = await airtableRead(USER_SIG_TABLE, { filter: mf, maxRecords: 200 });
+          const masterSig = {};
+          (mrecs || []).forEach(r => {
+            const f = r.fields || {};
+            if (f.user_key && f.account_id) masterSig[f.user_key + '|' + f.account_id] = f.signature_html || '';
+          });
+          for (const [accId, mk] of offen) {
+            const html = masterSig[mk + '|' + accId];
+            if (html && html.trim()) map.set(accId, { recordId: null, html, vonMaster: true });
+          }
+        }
+      }
+    } catch (e) { console.warn('[Signatur] Master-Fallback:', e.message); }
     USER_SIG_STATE.byAccount = map; USER_SIG_STATE.loaded = true; USER_SIG_STATE.loading = null;
     // Cache für den synchronen Zugriff spiegeln
     try { map.forEach((v, accId) => { if (v.html) localStorage.setItem(SIG_CUSTOM_KEY + '_' + accId, v.html); }); } catch (_) {}
