@@ -802,7 +802,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.65.2';
+const APP_VERSION = 'v2.66.0';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -13956,6 +13956,19 @@ function _detailReplyComposer(ticket) {
       </div>
       <p class="text-[11px] text-ink-600 mb-2 leading-snug">Sag oder tippe was zu tun ist — Antworten, Notizen, Weiterleitungen, Zuweisungen, Status, Ausblenden. Auch mehrere Aktionen in einem Satz. Jeder Schritt wird einzeln bestätigt.</p>
       <textarea id="detailAssistInput" rows="4" placeholder="z.B. „Antworte: Wir liefern bis Freitag" / „Notiz: mit Lager abstimmen" / „Weise Sandra zu und auf Gelöst setzen" / „Bei mir 3 Tage ausblenden"" class="w-full px-3 py-2 border border-brand-200 bg-white rounded-lg text-sm focus:ring-2 focus:ring-brand-500/30 focus:border-brand-500 resize-y"></textarea>
+      <div class="mt-1.5">
+        <button type="button" onclick="const b = document.getElementById('detailCcBccZeile'); b.classList.toggle('hidden'); this.textContent = b.classList.contains('hidden') ? '+ Cc/Bcc' : '− Cc/Bcc';" class="text-[11px] font-semibold text-brand-600 hover:underline">+ Cc/Bcc</button>
+        <div id="detailCcBccZeile" class="hidden grid sm:grid-cols-2 gap-2 mt-1.5">
+          <div>
+            <label class="text-[10px] uppercase tracking-wider font-semibold text-ink-500">Cc <span class="normal-case font-normal">(mehrere mit Komma)</span></label>
+            <input id="detailReplyCc" type="text" placeholder="kollege@firma.de" class="mt-0.5 w-full px-2.5 py-1.5 border border-ink-200 bg-white rounded-lg text-xs">
+          </div>
+          <div>
+            <label class="text-[10px] uppercase tracking-wider font-semibold text-ink-500">Bcc</label>
+            <input id="detailReplyBcc" type="text" class="mt-0.5 w-full px-2.5 py-1.5 border border-ink-200 bg-white rounded-lg text-xs">
+          </div>
+        </div>
+      </div>
       <div class="flex gap-2 mt-2">
         ${speechAvailable ? `
           <button id="detailAssistMicBtn" type="button" onclick="toggleDetailAssistVoice()" class="px-3 py-2.5 bg-gradient-to-br from-purple-500 to-brand-600 text-white rounded-lg text-sm font-semibold inline-flex items-center gap-1.5 active:opacity-80 shrink-0">
@@ -14132,7 +14145,13 @@ async function sendDetailDirectReply(btnEl, accountId, ticketId) {
   const _qText = _q.quelle === 'eigene' ? 'Hero-Signatur (eigene, ' + _q.len + ' Zeichen)'
     : _q.quelle === 'master' ? 'Hero-Signatur (vom Master, ' + _q.len + ' Zeichen)'
     : 'KEINE Signatur — geht ohne raus';
-  if (!confirm('Diesen Text 1:1 als Antwort an den Kunden senden?\n\nSignatur: ' + _qText)) return;
+  const _mailListe = (id) => String(document.getElementById(id)?.value || '').split(',').map(s => s.trim()).filter(s => /@/.test(s));
+  const _cc = _mailListe('detailReplyCc');
+  const _bcc = _mailListe('detailReplyBcc');
+  if (!confirm('Diesen Text 1:1 als Antwort an den Kunden senden?' +
+    (_cc.length ? '\nCc: ' + _cc.join(', ') : '') +
+    (_bcc.length ? '\nBcc: ' + _bcc.join(', ') : '') +
+    '\n\nSignatur: ' + _qText)) return;
   if (DETAIL_ASSIST_REC) { try { DETAIL_ASSIST_REC.stop(); } catch (_) {} DETAIL_ASSIST_REC = null; }
   setBusy(btnEl, true, 'Sende…');
   try {
@@ -14148,9 +14167,14 @@ async function sendDetailDirectReply(btnEl, accountId, ticketId) {
         _sigAngehaengt = sig.length;
       }
     } catch (_) {}
-    _sigLog('versand-antwort', { acc: String(accountId), ticket: ticketId, quelle: _q.quelle, angehaengt: _sigAngehaengt });
+    _sigLog('versand-antwort', { acc: String(accountId), ticket: ticketId, quelle: _q.quelle, angehaengt: _sigAngehaengt, cc: _cc.length, bcc: _bcc.length });
     const base = '/freshdesk/' + encodeURIComponent(accountId) + '/api/v2/tickets/' + ticketId;
-    await proxyJson(base + '/reply', { method: 'POST', body: JSON.stringify({ body: bodyHtml }) });
+    const replyPayload = { body: bodyHtml };
+    if (_cc.length) replyPayload.cc_emails = _cc;
+    if (_bcc.length) replyPayload.bcc_emails = _bcc;
+    await proxyJson(base + '/reply', { method: 'POST', body: JSON.stringify(replyPayload) });
+    const _ccF = document.getElementById('detailReplyCc'); if (_ccF) _ccF.value = '';
+    const _bccF = document.getElementById('detailReplyBcc'); if (_bccF) _bccF.value = '';
     if (ta) ta.value = '';
     setBusy(btnEl, false);
     toast('Antwort gesendet ✓', 'success', 3000);
