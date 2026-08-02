@@ -802,7 +802,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.59.1';
+const APP_VERSION = 'v2.60.0';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -14103,6 +14103,99 @@ function _fdhDetailAktionsleiste(t) {
       </span>
     </div>`;
 }
+/* Individuelle Ticketfelder je Account (v2.60.0): Freshdesk liefert sie über
+   GET /ticket_fields — Labels, Typen, Auswahllisten, Reihenfolge, Pflicht.
+   Die Sidebar zeigt damit je Konto exakt die dort konfigurierten Felder. */
+async function ensureTicketFieldsLoaded(accountId) {
+  APP_STATE.ticketFieldsCache = APP_STATE.ticketFieldsCache || {};
+  if (APP_STATE.ticketFieldsCache[accountId]) return APP_STATE.ticketFieldsCache[accountId];
+  try {
+    const felder = await proxyJson('/freshdesk/' + encodeURIComponent(accountId) + '/api/v2/ticket_fields');
+    const nutzbar = (Array.isArray(felder) ? felder : [])
+      .filter(f => f && f.default !== true)
+      .sort((a, b) => (a.position || 0) - (b.position || 0));
+    APP_STATE.ticketFieldsCache[accountId] = nutzbar;
+    return nutzbar;
+  } catch (e) {
+    // Kein Admin-Recht am Key o. ä. — Sidebar zeigt dann nur die Standardfelder.
+    APP_STATE.ticketFieldsCache[accountId] = [];
+    return [];
+  }
+}
+function _fdhCfWert(t, feld) {
+  const cf = t.custom_fields || {};
+  if (feld.name in cf) return cf[feld.name];
+  const kurz = String(feld.name || '').replace(/^cf_/, '');
+  return (kurz in cf) ? cf[kurz] : null;
+}
+function _fdhCfKey(t, feld) {
+  const cf = t.custom_fields || {};
+  if (feld.name in cf) return feld.name;
+  const kurz = String(feld.name || '').replace(/^cf_/, '');
+  return (kurz in cf) ? kurz : feld.name;
+}
+function _fdhCustomFeldHtml(t, feld) {
+  const wert = _fdhCfWert(t, feld);
+  const basis = 'w-full px-2 py-1.5 border border-ink-200 rounded-lg text-[12.5px] bg-white';
+  const on = `onchange="fdhCustomFeldSpeichern(this, '${escapeAttr(t._accountId)}', ${t.id}, '${escapeAttr(feld.name)}', '${escapeAttr(feld.type || '')}')"`;
+  const typ = String(feld.type || '');
+  let eingabe;
+  if (/checkbox/.test(typ)) {
+    eingabe = `<label class="inline-flex items-center gap-2 text-[12.5px] text-ink-700"><input type="checkbox" ${wert ? 'checked' : ''} ${on} class="w-4 h-4 accent-brand-500"> ja</label>`;
+  } else if (/dropdown/.test(typ)) {
+    let optionen = [];
+    if (Array.isArray(feld.choices)) optionen = feld.choices.map(c => (c && typeof c === 'object') ? (c.value ?? c.label ?? '') : c);
+    else if (feld.choices && typeof feld.choices === 'object') optionen = Object.keys(feld.choices);
+    eingabe = `<select ${on} class="${basis}">
+      <option value="" ${wert == null || wert === '' ? 'selected' : ''}>—</option>
+      ${optionen.filter(o => o !== '' && o != null).map(o => `<option value="${escapeAttr(o)}" ${String(wert) === String(o) ? 'selected' : ''}>${escapeHtml(o)}</option>`).join('')}
+    </select>`;
+  } else if (/date/.test(typ)) {
+    const d = wert ? String(wert).slice(0, 10) : '';
+    eingabe = `<input type="date" value="${escapeAttr(d)}" ${on} class="${basis}">`;
+  } else if (/number|decimal/.test(typ)) {
+    eingabe = `<input type="number" value="${escapeAttr(wert ?? '')}" ${on} class="${basis}">`;
+  } else if (/paragraph/.test(typ)) {
+    eingabe = `<textarea rows="2" ${on} class="${basis}">${escapeHtml(wert ?? '')}</textarea>`;
+  } else {
+    eingabe = `<input type="text" value="${escapeAttr(wert ?? '')}" ${on} class="${basis}">`;
+  }
+  return `
+    <div>
+      <p class="text-[10px] uppercase tracking-wider font-semibold text-ink-500 mb-1">${escapeHtml(feld.label_for_agents || feld.label || feld.name)}${feld.required_for_agents ? ' <span class="text-red-500">*</span>' : ''}</p>
+      ${eingabe}
+    </div>`;
+}
+async function fdhCustomFeldSpeichern(el, accountId, ticketId, feldName, typ) {
+  let wert;
+  if (el.type === 'checkbox') wert = el.checked;
+  else if (el.type === 'number') wert = el.value === '' ? null : Number(el.value);
+  else wert = el.value === '' ? null : el.value;
+  const felder = APP_STATE.ticketFieldsCache?.[accountId] || [];
+  const feld = felder.find(f => f.name === feldName) || { name: feldName };
+  const key = CURRENT_TICKET && CURRENT_TICKET.id === ticketId ? _fdhCfKey(CURRENT_TICKET, feld) : feldName;
+  el.disabled = true;
+  try {
+    await proxyJson('/freshdesk/' + encodeURIComponent(accountId) + '/api/v2/tickets/' + ticketId, {
+      method: 'PUT', body: JSON.stringify({ custom_fields: { [key]: wert } }) });
+    if (CURRENT_TICKET && CURRENT_TICKET.id === ticketId) {
+      CURRENT_TICKET.custom_fields = CURRENT_TICKET.custom_fields || {};
+      CURRENT_TICKET.custom_fields[key] = wert;
+    }
+    toast('Gespeichert: ' + (feld.label_for_agents || feld.label || feldName), 'success', 2500);
+  } catch (e) {
+    toast('Speichern fehlgeschlagen: ' + e.message, 'error', 6000);
+  }
+  el.disabled = false;
+}
+async function _fdhCustomFelderNachladen(t) {
+  const ziel = document.getElementById('fdhCustomFelder');
+  if (!ziel) return;
+  const felder = await ensureTicketFieldsLoaded(t._accountId);
+  if (!felder.length) { ziel.innerHTML = ''; return; }
+  ziel.innerHTML = felder.map(f => _fdhCustomFeldHtml(t, f)).join('');
+}
+
 function _fdhDetailSidebar(t) {
   const status = FD_STATUS[t.status] || { label: 'Status ' + t.status };
   const slaZeile = (icon, label, iso) => {
@@ -14132,6 +14225,7 @@ function _fdhDetailSidebar(t) {
         ${eigenschaft('Gruppe', _groupBadgeDropdown(t))}
         ${eigenschaft('Bearbeiter', _assigneeBadgeDropdown(t))}
         ${eigenschaft('Typ', _typeBadgeDropdown(t))}
+        <div id="fdhCustomFelder" class="space-y-3.5"><p class="text-[11px] text-ink-400 italic">Individuelle Felder werden geladen …</p></div>
       </div>
     </div>`;
 }
@@ -14381,6 +14475,7 @@ function renderTicketDetailBody(ticket) {
       tmp.innerHTML = _fdhDetailSidebar(ticket);
       const sb = tmp.firstElementChild;
       if (sb) { sb.classList.remove('hidden'); flex.appendChild(sb); }
+      _fdhCustomFelderNachladen(ticket);
     } catch (_) { /* Layout-Umbau darf das Detail nie verhindern */ }
   })();
   if (window.lucide) lucide.createIcons();
