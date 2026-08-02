@@ -802,7 +802,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.65.0';
+const APP_VERSION = 'v2.65.1';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -4589,7 +4589,9 @@ async function fetchTicketDetail(accountId, ticketId) {
   const path = '/freshdesk/' + encodeURIComponent(accountId) +
     '/api/v2/tickets/' + ticketId + '?include=conversations,requester';
   const t = await proxyJson(path);
-  if (t) _cacheTicket({ ...t, _accountId: accountId });
+  // v2.65.1: Konto-Kennung IMMER am Ticket — ohne sie brechen Signatur,
+  // Agenten-/Gruppen-Namen und Custom-Felder in allen Reload-Pfaden.
+  if (t) { t._accountId = accountId; _cacheTicket({ ...t }); }
   return t;
 }
 
@@ -14517,6 +14519,17 @@ function _fdhDetailSidebar(t) {
 }
 
 function renderTicketDetailBody(ticket) {
+  // Schutz (v2.65.1): Manche Aufrufer liefern das Ticket ohne _accountId —
+  // dann bricht alles Konto-Abhängige (Signatur, Gruppen-/Agenten-Namen,
+  // Custom-Felder). Hier rekonstruieren statt still kaputtgehen.
+  if (!ticket._accountId) {
+    if (CURRENT_TICKET && CURRENT_TICKET.id === ticket.id && CURRENT_TICKET._accountId) {
+      ticket._accountId = CURRENT_TICKET._accountId;
+    } else if (APP_STATE.currentAccount && APP_STATE.currentAccount !== 'all') {
+      ticket._accountId = APP_STATE.currentAccount;
+    }
+    _sigLog && _sigLog('render-accountId-rekonstruiert', { ticket: ticket.id, acc: String(ticket._accountId || 'FEHLT') });
+  }
   const status = FD_STATUS[ticket.status] || { label: 'Status ' + ticket.status, cls: 'bg-ink-100 text-ink-600 border-ink-200' };
   const req    = ticket.requester || {};
   const conversations = (ticket.conversations || []).slice().sort((a, b) => new Date(a.created_at || 0) - new Date(b.created_at || 0));
