@@ -802,7 +802,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.61.0';
+const APP_VERSION = 'v2.62.0';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -4733,6 +4733,18 @@ async function _setSigCustom(accountId, html) {
     toast('Signatur konnte nicht dauerhaft gespeichert werden: ' + String(e.message || e).slice(0, 120) + ' — gilt vorerst nur auf diesem Gerät.', 'error', 9000);
   }
 }
+/* Platzhalter in Signaturen (v2.62.0): {{name}}, {{email}}, {{firma}} werden
+   beim Versand mit dem angemeldeten Hero-Benutzer und dem Konto gefüllt —
+   eine Vorlage funktioniert damit für alle Firmen und Benutzer. */
+function _sigPlatzhalter(txt, accountId, me) {
+  const u = APP_KEYS.user || {};
+  const acc = (APP_STATE.accounts || []).find(a => String(a.id) === String(accountId));
+  return String(txt || '')
+    .replace(/\{\{\s*name\s*\}\}/gi, u.name || (me && me.name) || '')
+    .replace(/\{\{\s*email\s*\}\}/gi, u.email || (me && me.email) || '')
+    .replace(/\{\{\s*firma\s*\}\}/gi, (acc && acc.name) || '');
+}
+
 /* Freitext → versandfähiges HTML (Zeilenumbrüche werden zu <br>). Enthält der
    Text bereits HTML-Tags, wird er unverändert übernommen. */
 function _sigTextToHtml(txt) {
@@ -4760,7 +4772,7 @@ function _agentMeWithSigName(me, accountId) {
   const custom = _sigCustom(accountId);
   if (custom) {
     return Object.assign({}, me, {
-      signature: _sigTextToHtml(custom), signature_raw: rawSig, signature_custom: true,
+      signature: _sigTextToHtml(_sigPlatzhalter(custom, accountId, me)), signature_raw: rawSig, signature_custom: true,
     });
   }
   // v2.61.0 (Entscheidung Betreiber): Die FRESHDESK-Signatur wird nicht mehr
@@ -34640,6 +34652,15 @@ async function openUserModal(user) {
     .filter(u => (u.role || '').toLowerCase() !== 'ki' && u.api_key && u.api_key !== userKey); } catch (_) {}
   // Bestehende AccountAccess-Einträge für diesen User laden (falls Edit)
   let existingAccess = isEdit ? await loadAccessForUser(user.api_key) : [];
+  // Signaturen des BEARBEITETEN Users je Account (v2.62.0) — Pflege wandert
+  // hierher, weil hier die Firmen unterschieden werden.
+  const sigByAccount = {};
+  if (isEdit && user.api_key) {
+    try {
+      const sigRecs = await airtableRead(USER_SIG_TABLE, { filter: "{user_key}='" + escapeFormula(user.api_key) + "'", maxRecords: 100 });
+      (sigRecs || []).forEach(r => { const f = r.fields || {}; if (f.account_id) sigByAccount[String(f.account_id)] = { recordId: r.id, html: f.signature_html || '' }; });
+    } catch (_) {}
+  }
   const accessByAccountId = {};
   existingAccess.forEach(a => { accessByAccountId[a.account_id] = a; });
   const allAccounts = (APP_STATE.accounts || []).slice().sort((a, b) => (a.name || '').localeCompare(b.name || '', 'de'));
@@ -34742,6 +34763,9 @@ async function openUserModal(user) {
                               ${alleUser.map(u => `<option value="${escapeAttr(u.api_key)}" ${fsRoh === 'VON:' + u.api_key ? 'selected' : ''}>${escapeHtml(u.name || u.api_key)}</option>`).join('')}
                             </select>`;
                           })() : ''}
+                          <label class="text-[10px] uppercase font-semibold text-emerald-800 block mt-1.5">E-Mail-Signatur für diese Firma (HTML erlaubt)</label>
+                          <textarea class="access-signatur mt-1 w-full px-2 py-1.5 border border-emerald-200 bg-white rounded text-xs font-mono" rows="4" placeholder="z. B. Mit freundlichen Grüßen&#10;{{name}}&#10;{{firma}}">${escapeHtml(sigByAccount[acc.id]?.html || '')}</textarea>
+                          <p class="text-[10px] text-ink-500 mt-0.5">Platzhalter: <code>{{name}}</code> <code>{{email}}</code> <code>{{firma}}</code> — werden beim Versand automatisch gefüllt. Ersetzt die Freshdesk-Signatur vollständig.</p>
                         </div>
                       </div>`;
                   }).join('')}
@@ -34769,7 +34793,7 @@ async function openUserModal(user) {
   });
 
   // Submit-Logik separat — wird von „Anlegen/Speichern"-Button direkt gerufen
-  USER_MODAL_CTX = { isEdit, user };
+  USER_MODAL_CTX = { isEdit, user, sigByAccount, allAccounts };
 }
 
 let USER_MODAL_CTX = null;
@@ -34778,6 +34802,8 @@ async function submitUserForm() {
   const ctx = USER_MODAL_CTX;
   if (!ctx) return;
   const { isEdit, user } = ctx;
+  const sigByAccount = ctx.sigByAccount || {};
+  const allAccounts = ctx.allAccounts || (APP_STATE.accounts || []);
   const errEl = $('usrFormError'); errEl.classList.add('hidden');
   const btn = $('usrSubmitBtn'); setBusy(btn, true, 'Speichere…');
   try {
@@ -34824,6 +34850,26 @@ async function submitUserForm() {
       } else {
         await removeAccountAccess(finalUserKey, accId);
         removedAccess++;
+      }
+      // Signatur je Firma für den BEARBEITETEN Benutzer sichern (v2.62.0)
+      const sigNeu = row.querySelector('.access-signatur')?.value ?? '';
+      const sigAlt = (typeof sigByAccount === 'object' && sigByAccount[accId]) ? sigByAccount[accId] : null;
+      if ((sigAlt ? sigAlt.html : '') !== sigNeu) {
+        const accObj = allAccounts.find(x => x.id === accId);
+        const sigFields = {
+          user_key: finalUserKey, user_email: '', user_name: userFields.name,
+          account_id: accId, account_name: accObj?.name || '',
+          signature_html: sigNeu, updated_at: nowIso(),
+        };
+        try {
+          if (sigAlt && sigAlt.recordId) {
+            await airtableUpdateWithAutoField(USER_SIG_TABLE, sigAlt.recordId, sigFields, USER_SIG_TYPES);
+          } else if (sigNeu.trim()) {
+            sigFields.created_at = nowIso();
+            await airtableWriteWithAutoField(USER_SIG_TABLE, sigFields, USER_SIG_TYPES);
+          }
+          if (APP_KEYS.user && finalUserKey === APP_KEYS.user.api_key) loadUserSignatures(true).catch(() => {});
+        } catch (e) { console.warn('[Signatur] Speichern für User fehlgeschlagen:', e.message); }
       }
     }
     closeModal();
