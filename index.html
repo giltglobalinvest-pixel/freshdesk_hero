@@ -802,7 +802,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.58.2';
+const APP_VERSION = 'v2.59.0';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -14056,6 +14056,86 @@ async function setDetailTicketStatus(selEl, accountId, ticketId) {
   }
 }
 
+/* === Freshdesk-Stil fürs Ticket-Detail (v2.59.0) ===========================
+   Aktionsleiste wie das Original (Antworten · Notiz · Schließen · ‹ ›) und am
+   Desktop die Eigenschaften-Sidebar rechts (SLA, Tags, Priorität, Status,
+   Gruppe, Bearbeiter, Typ) — alle Bausteine sind die bestehenden Dropdowns. */
+function _fdhDetailNachbarn(ticket) {
+  const liste = APP_STATE.pageState?.tickets || [];
+  const idx = liste.findIndex(t => t.id === ticket.id && t._accountId === ticket._accountId);
+  return {
+    idx,
+    gesamt: liste.length,
+    vor: idx > 0 ? liste[idx - 1] : null,
+    nach: (idx >= 0 && idx < liste.length - 1) ? liste[idx + 1] : null,
+  };
+}
+async function _fdhTicketSchliessen(accountId, ticketId, btn) {
+  if (!confirm('Ticket #' + ticketId + ' schließen?')) return;
+  if (btn) setBusy(btn, true, 'Schließe…');
+  try {
+    await proxyJson('/freshdesk/' + encodeURIComponent(accountId) + '/api/v2/tickets/' + ticketId, {
+      method: 'PUT', body: JSON.stringify({ status: 5 }) });
+    patchTicketInList(accountId, ticketId, { status: 5 });
+    if (CURRENT_TICKET && CURRENT_TICKET.id === ticketId) CURRENT_TICKET.status = 5;
+    toast('Ticket geschlossen', 'success', 3500);
+    renderTicketDetailBody(CURRENT_TICKET);
+  } catch (e) {
+    if (btn) setBusy(btn, false);
+    toast('Schließen fehlgeschlagen: ' + e.message, 'error', 6000);
+  }
+}
+function _fdhDetailAktionsleiste(t) {
+  const nb = _fdhDetailNachbarn(t);
+  const knopf = (label, icon, onclick, primaer) => `
+    <button onclick="${onclick}" class="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[12.5px] font-semibold border ${primaer ? 'bg-brand-500 text-white border-brand-500 hover:bg-brand-600' : 'bg-white text-ink-700 border-ink-200 hover:bg-ink-50'}">
+      <i data-lucide="${icon}" class="w-3.5 h-3.5"></i>${label}
+    </button>`;
+  return `
+    <div class="max-w-6xl mx-auto mb-3 bg-white border border-ink-200 rounded-xl px-3 py-2 flex items-center gap-2 flex-wrap">
+      ${knopf('Antworten', 'reply', `openDirectReplyComposer('${escapeAttr(t._accountId)}', ${t.id})`, true)}
+      ${knopf('Notiz', 'sticky-note', `openQuickNoteSheet('${escapeAttr(t._accountId)}', ${t.id})`, false)}
+      ${t.status !== 5 ? knopf('Schließen', 'check-circle-2', `_fdhTicketSchliessen('${escapeAttr(t._accountId)}', ${t.id}, this)`, false) : ''}
+      <span class="ml-auto inline-flex items-center gap-1">
+        ${nb.idx >= 0 ? `<span class="text-[11px] text-ink-400 mr-1">${nb.idx + 1} von ${nb.gesamt}</span>` : ''}
+        <button ${nb.vor ? `onclick="openTicketDetail('${escapeAttr(nb.vor?._accountId || '')}', ${nb.vor?.id || 0})"` : 'disabled'} class="w-8 h-8 rounded-lg border border-ink-200 flex items-center justify-center ${nb.vor ? 'hover:bg-ink-50 text-ink-700' : 'text-ink-300'}" title="Voriges Ticket"><i data-lucide="chevron-left" class="w-4 h-4"></i></button>
+        <button ${nb.nach ? `onclick="openTicketDetail('${escapeAttr(nb.nach?._accountId || '')}', ${nb.nach?.id || 0})"` : 'disabled'} class="w-8 h-8 rounded-lg border border-ink-200 flex items-center justify-center ${nb.nach ? 'hover:bg-ink-50 text-ink-700' : 'text-ink-300'}" title="Nächstes Ticket"><i data-lucide="chevron-right" class="w-4 h-4"></i></button>
+      </span>
+    </div>`;
+}
+function _fdhDetailSidebar(t) {
+  const status = FD_STATUS[t.status] || { label: 'Status ' + t.status };
+  const slaZeile = (icon, label, iso) => {
+    if (!iso) return '';
+    const ueber = new Date(iso).getTime() < Date.now() && (t.status === 2 || t.status === 3);
+    return `
+      <div class="flex items-start gap-2 text-[12px] ${ueber ? 'text-red-600' : 'text-ink-600'}">
+        <i data-lucide="${icon}" class="w-3.5 h-3.5 mt-0.5 shrink-0"></i>
+        <div><p class="font-medium">${label}${ueber ? ' — überfällig' : ''}</p><p class="${ueber ? 'text-red-500' : 'text-ink-500'}">${escapeHtml(fmtDate(iso))}</p></div>
+      </div>`;
+  };
+  const tags = (t.tags || []);
+  const eigenschaft = (label, inner) => `
+    <div><p class="text-[10px] uppercase tracking-wider font-semibold text-ink-500 mb-1">${label}</p>${inner}</div>`;
+  return `
+    <div class="hidden lg:block w-80 shrink-0 space-y-3 lg:sticky lg:top-2">
+      <div class="bg-white rounded-2xl border border-ink-200 p-4 space-y-3">
+        <p class="font-bold text-ink-900 text-lg">${escapeHtml(status.label)}</p>
+        ${slaZeile('corner-up-left', 'Erste Antwort fällig', t.fr_due_by)}
+        ${slaZeile('timer', 'Lösung fällig', t.due_by)}
+      </div>
+      <div class="bg-white rounded-2xl border border-ink-200 p-4 space-y-3.5">
+        <p class="text-[11px] uppercase tracking-wider font-bold text-ink-700">Eigenschaften</p>
+        ${tags.length ? eigenschaft('Tags', `<div class="flex flex-wrap gap-1">${tags.map(x => `<span class="text-[11px] bg-ink-50 border border-ink-200 rounded px-1.5 py-0.5">${escapeHtml(x)}</span>`).join('')}</div>`) : ''}
+        ${eigenschaft('Priorität', _prioBadgeDropdown(t))}
+        ${eigenschaft('Status', _statusBadgeDropdown(t))}
+        ${eigenschaft('Gruppe', _groupBadgeDropdown(t))}
+        ${eigenschaft('Bearbeiter', _assigneeBadgeDropdown(t))}
+        ${eigenschaft('Typ', _typeBadgeDropdown(t))}
+      </div>
+    </div>`;
+}
+
 function renderTicketDetailBody(ticket) {
   const status = FD_STATUS[ticket.status] || { label: 'Status ' + ticket.status, cls: 'bg-ink-100 text-ink-600 border-ink-200' };
   const req    = ticket.requester || {};
@@ -14151,7 +14231,7 @@ function renderTicketDetailBody(ticket) {
                 </span>
               </div>`}
           </div>
-          <div class="grid grid-cols-3 gap-2">
+          <div class="grid grid-cols-3 gap-2 lg:hidden">
             ${_detailFieldDropdown('Zugewiesen', assigneeName || 'niemand', assigneeName ? 'text-ink-900' : 'text-amber-700', _detailAssigneeSelectInner(ticket), 'detailAssignee')}
             ${_detailFieldDropdown('Gruppe', groupName || 'keine', groupName ? 'text-ink-900' : 'text-ink-500', _detailGroupSelectInner(ticket), 'detailGroup')}
             ${_detailFieldDropdown('Typ', ticket.type || 'keiner', ticket.type ? 'text-ink-900' : 'text-ink-500', _detailTypeSelectInner(ticket), 'detailType')}
@@ -14281,6 +14361,8 @@ function renderTicketDetailBody(ticket) {
       <!-- Direkter Antwort-Compose -->
       ${_detailReplyComposer(ticket)}
 
+    </div>
+    ${_fdhDetailSidebar(ticket)}
     </div>`;
   if (window.lucide) lucide.createIcons();
 
