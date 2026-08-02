@@ -802,7 +802,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.63.1';
+const APP_VERSION = 'v2.64.0';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -13903,7 +13903,29 @@ function _detailReplyComposer(ticket) {
           <p class="text-ink-500 italic pt-1">Mehrere Aktionen kombinierbar: „Antworte und weise Sandra zu und auf Gelöst"</p>
         </div>
       </details>
+      <div class="mt-3 border-t border-ink-100 pt-2.5">
+        <div class="flex items-center justify-between gap-2">
+          <p class="text-[10px] uppercase tracking-wider font-semibold text-ink-400">Signatur — wird bei Antworten automatisch angehängt</p>
+          <button type="button" onclick="openSignatureEditor('${escapeAttr(String(accId || ''))}')" class="text-[10px] font-semibold text-brand-600 hover:underline inline-flex items-center gap-1"><i data-lucide="pencil" class="w-3 h-3"></i> bearbeiten</button>
+        </div>
+        <div id="detailSigVorschau" class="mt-1.5 text-[12px] leading-snug text-ink-700 bg-ink-50/60 border border-ink-100 rounded-lg px-3 py-2 max-h-40 overflow-auto"><span class="text-ink-400 italic">Signatur wird geladen …</span></div>
+      </div>
     </div>`;
+}
+
+/* Aktuell gültige Signatur (inkl. Master-Fallback und gefüllten Platzhaltern)
+   unter dem Assistent-Block anzeigen — man sieht, was rausgeht. */
+async function _fdhSigVorschauFuellen(accountId) {
+  const ziel = document.getElementById('detailSigVorschau');
+  if (!ziel) return;
+  try {
+    const me = await fetchAgentMe(accountId);
+    const sig = me?.signature || '';
+    if (sig) ziel.innerHTML = sig;
+    else ziel.innerHTML = '<span class="text-amber-700">Keine Signatur hinterlegt — Antworten gehen ohne Signatur raus. Pflegen unter Benutzer → Account-Zugriff, oder hier über „bearbeiten".</span>';
+  } catch (_) {
+    ziel.innerHTML = '<span class="text-ink-400 italic">Signatur konnte nicht geladen werden.</span>';
+  }
 }
 
 let DETAIL_ASSIST_REC = null;
@@ -14604,6 +14626,7 @@ function renderTicketDetailBody(ticket) {
       ${_detailReplyComposer(ticket)}
 
     </div>`;
+  _fdhSigVorschauFuellen(ticket._accountId);
   // Freshdesk-Layout (v2.59.1): Zweispaltig per DOM-Umbau NACH dem Rendern —
   // so können unbalancierte divs im Alt-Template die Sidebar nicht verschieben.
   (function () {
