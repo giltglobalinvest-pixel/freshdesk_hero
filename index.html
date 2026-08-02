@@ -802,7 +802,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.58.0';
+const APP_VERSION = 'v2.58.1';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -9389,9 +9389,9 @@ function _renderTicketListFd(tickets) {
                 ${showAccount ? `<span class="text-ink-300">•</span><span>${escapeHtml(t._accountName)}</span>` : ''}
               </p>
             </div>
-            <div class="shrink-0 flex flex-col items-start gap-1.5 pt-0.5" onclick="event.stopPropagation()">
+            <div class="shrink-0 sm:w-72 flex flex-col items-start gap-1.5 pt-0.5" onclick="event.stopPropagation()">
               ${_prioBadgeDropdown(t)}
-              <span class="inline-flex items-center gap-1">${_groupBadgeDropdown(t)}<span class="text-ink-300 text-[11px]">/</span>${_assigneeBadgeDropdown(t)}</span>
+              <span class="inline-flex items-center gap-1 flex-wrap">${_groupBadgeDropdown(t)}<span class="text-ink-300 text-[11px]">/</span>${_assigneeBadgeDropdown(t)}</span>
               ${_statusBadgeDropdown(t)}
             </div>
           </div>`;
