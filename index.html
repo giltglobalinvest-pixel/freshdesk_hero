@@ -802,7 +802,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.64.4';
+const APP_VERSION = 'v2.65.0';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -4679,11 +4679,14 @@ async function loadUserSignatures(force) {
   const key = _sigUserKey();
   USER_SIG_STATE.loading = (async () => {
     const map = new Map();
+    _sigLog('laden-start', { key: String(key).slice(0, 10), force: !!force });
     if (key) {
       try {
         const recs = await airtableRead(USER_SIG_TABLE, {
           filter: "{user_key}='" + escapeFormula(key) + "'", maxRecords: 100,
         });
+        _sigLog('laden-airtable', { records: (recs || []).length,
+          details: (recs || []).map(r => (r.fields?.account_id || '?') + ':' + String(r.fields?.signature_html || '').length) });
         (recs || []).forEach(r => {
           const f = r.fields || {};
           // Leere Einträge (fehlgeschlagene alte Speicherversuche) zählen nicht —
@@ -4694,7 +4697,7 @@ async function loadUserSignatures(force) {
             map.set('__leer__' + String(f.account_id), { recordId: r.id, html: '' });
           }
         });
-      } catch (e) { console.warn('[Signatur] Laden aus Airtable:', e.message); }
+      } catch (e) { console.warn('[Signatur] Laden aus Airtable:', e.message); _sigLog('laden-FEHLER', { fehler: String(e.message || e).slice(0, 120) }); }
     }
     // v2.63.0 (Betreiber): Ohne eigene Signatur → Fallback auf die HERO-Signatur
     // des Masters (des Benutzers, über dessen Schlüssel dieser Account läuft).
@@ -4788,6 +4791,47 @@ async function _setSigCustom(accountId, html) {
     toast('Signatur konnte nicht dauerhaft gespeichert werden: ' + String(e.message || e).slice(0, 120) + ' — gilt vorerst nur auf diesem Gerät.', 'error', 9000);
   }
 }
+/* === Signatur-Protokoll (v2.65.0) ==========================================
+   Jeder relevante Signatur-Vorgang wird hier festgehalten — einsehbar über
+   das 🧾-Protokoll an der Signatur-Vorschau, mit Kopieren-Knopf. */
+const _FDH_SIG_LOG = [];
+function _sigLog(art, daten) {
+  const e = { zeit: new Date().toLocaleTimeString('de-DE') + '.' + String(Date.now() % 1000).padStart(3, '0'), art, ...(daten || {}) };
+  _FDH_SIG_LOG.unshift(e);
+  if (_FDH_SIG_LOG.length > 200) _FDH_SIG_LOG.pop();
+  try { console.debug('[sig]', art, daten); } catch (_) {}
+}
+function _sigQuelleFuer(accountId) {
+  const rec = USER_SIG_STATE.byAccount.get(String(accountId));
+  const html = _sigCustom(accountId);
+  if (!html) return { quelle: 'keine', len: 0 };
+  return { quelle: rec && rec.vonMaster ? 'master' : 'eigene', len: html.length };
+}
+function _sigQuelleBadge(q) {
+  if (q.quelle === 'eigene') return '<span class="text-[10px] font-bold text-emerald-700 bg-emerald-50 border border-emerald-200 rounded px-1.5 py-0.5">🟢 aus Hero (eigene, ' + q.len + ' Z.)</span>';
+  if (q.quelle === 'master') return '<span class="text-[10px] font-bold text-blue-700 bg-blue-50 border border-blue-200 rounded px-1.5 py-0.5">🔵 aus Hero (Master, ' + q.len + ' Z.)</span>';
+  return '<span class="text-[10px] font-bold text-red-700 bg-red-50 border border-red-200 rounded px-1.5 py-0.5">🔴 keine Signatur</span>';
+}
+function openSigProtokoll() {
+  let host = document.getElementById('subModalHost');
+  if (!host) { host = document.createElement('div'); host.id = 'subModalHost'; document.body.appendChild(host); }
+  const zeilen = _FDH_SIG_LOG.map(e => JSON.stringify(e)).join('\n');
+  host.innerHTML = `
+    <div class="fixed inset-0 z-[70] flex items-end sm:items-center justify-center bg-black/40" onclick="if(event.target===this)this.remove()">
+      <div class="bg-white w-full max-w-2xl rounded-t-2xl sm:rounded-2xl shadow-2xl flex flex-col safe-bottom" style="max-height:85vh">
+        <div class="px-4 py-3 border-b border-ink-200 flex items-center justify-between">
+          <h3 class="font-bold text-ink-900">🧾 Signatur-Protokoll (${_FDH_SIG_LOG.length})</h3>
+          <div class="flex items-center gap-2">
+            <button onclick="navigator.clipboard.writeText(document.getElementById('sigLogText').textContent).then(()=>toast('Protokoll kopiert','success',2500))" class="px-3 py-1.5 bg-brand-500 text-white rounded-lg text-xs font-semibold inline-flex items-center gap-1"><i data-lucide="copy" class="w-3.5 h-3.5"></i> Kopieren</button>
+            <button onclick="this.closest('.fixed').remove()" class="w-9 h-9 rounded-lg hover:bg-ink-100 flex items-center justify-center"><i data-lucide="x" class="w-5 h-5 text-ink-700"></i></button>
+          </div>
+        </div>
+        <pre id="sigLogText" class="flex-1 overflow-auto p-4 text-[10.5px] font-mono leading-relaxed text-ink-800 whitespace-pre-wrap">${escapeHtml(zeilen || 'Noch keine Einträge.')}</pre>
+      </div>
+    </div>`;
+  if (window.lucide) lucide.createIcons();
+}
+
 /* Platzhalter in Signaturen (v2.62.0): {{name}}, {{email}}, {{firma}} werden
    beim Versand mit dem angemeldeten Hero-Benutzer und dem Konto gefüllt —
    eine Vorlage funktioniert damit für alle Firmen und Benutzer. */
@@ -13937,9 +13981,13 @@ function _detailReplyComposer(ticket) {
         </div>
       </details>
       <div class="mt-3 border-t border-ink-100 pt-2.5">
-        <div class="flex items-center justify-between gap-2">
+        <div class="flex items-center justify-between gap-2 flex-wrap">
           <p class="text-[10px] uppercase tracking-wider font-semibold text-ink-400">Signatur — wird bei Antworten automatisch angehängt</p>
-          <button type="button" onclick="openSignatureEditor('${escapeAttr(String(accId || ''))}')" class="text-[10px] font-semibold text-brand-600 hover:underline inline-flex items-center gap-1"><i data-lucide="pencil" class="w-3 h-3"></i> bearbeiten</button>
+          <span class="inline-flex items-center gap-2">
+            <span id="detailSigQuelle"></span>
+            <button type="button" onclick="openSigProtokoll()" class="text-[10px] font-semibold text-ink-500 hover:underline inline-flex items-center gap-1" title="Signatur-Protokoll mit Kopieren-Funktion">🧾 Protokoll</button>
+            <button type="button" onclick="openSignatureEditor('${escapeAttr(String(accId || ''))}')" class="text-[10px] font-semibold text-brand-600 hover:underline inline-flex items-center gap-1"><i data-lucide="pencil" class="w-3 h-3"></i> bearbeiten</button>
+          </span>
         </div>
         <div id="detailSigVorschau" class="mt-1.5 text-[12px] leading-snug text-ink-700 bg-ink-50/60 border border-ink-100 rounded-lg px-3 py-2 max-h-40 overflow-auto"><span class="text-ink-400 italic">Signatur wird geladen …</span></div>
       </div>
@@ -13951,6 +13999,7 @@ function _detailReplyComposer(ticket) {
 async function _fdhSigVorschauFuellen(accountId) {
   const ziel = document.getElementById('detailSigVorschau');
   if (!ziel) return;
+  const kopf = document.getElementById('detailSigQuelle');
   try {
     const me = await fetchAgentMe(accountId);
     let sig = me?.signature || '';
@@ -13958,6 +14007,9 @@ async function _fdhSigVorschauFuellen(accountId) {
       const roh = _sigCustom(accountId);
       if (roh) sig = _sigTextToHtml(_sigPlatzhalter(roh, accountId, me));
     }
+    const q = _sigQuelleFuer(accountId);
+    _sigLog('vorschau', { acc: String(accountId), quelle: q.quelle, len: q.len, agentsMeOk: !!me });
+    if (kopf) kopf.innerHTML = _sigQuelleBadge(q);
     if (sig) { ziel.innerHTML = sig; return; }
     // Nichts gefunden → Airtable DIREKT befragen und den Grund offenlegen.
     let diag = 'user=' + String(_sigUserKey()).slice(0, 10) + ' · cache=' + USER_SIG_STATE.byAccount.size;
@@ -13973,7 +14025,8 @@ async function _fdhSigVorschauFuellen(accountId) {
         USER_SIG_STATE.byAccount.set(String(accountId), { recordId: recs[0].id, html });
         try { localStorage.setItem(SIG_CUSTOM_KEY + '_' + accountId, html); } catch (_) {}
       }
-    } catch (e) { diag += ' · airtable-FEHLER: ' + String(e.message || e).slice(0, 80); }
+      _sigLog('vorschau-direktabruf', { acc: String(accountId), filter: "user_key+account_id", gefunden: recs?.length || 0, len: html.length });
+    } catch (e) { diag += ' · airtable-FEHLER: ' + String(e.message || e).slice(0, 80); _sigLog('vorschau-direktabruf-FEHLER', { acc: String(accountId), fehler: String(e.message || e).slice(0, 120) }); }
     if (direkt) { ziel.innerHTML = _sigTextToHtml(_sigPlatzhalter(direkt, accountId, me)); return; }
     ziel.innerHTML = '<span class="text-amber-700">Keine Signatur hinterlegt — Antworten gehen ohne Signatur raus. Pflegen unter Benutzer → Account-Zugriff, oder hier über „bearbeiten".</span>' +
       '<span class="block text-[10px] text-ink-400 mt-1 font-mono">' + escapeHtml(diag) + '</span>' +
@@ -14057,20 +14110,27 @@ async function sendDetailDirectReply(btnEl, accountId, ticketId) {
   const ta = $('detailAssistInput');
   const raw = (ta?.value || '').trim();
   if (!raw) return toast('Bitte etwas eingeben oder sprechen', 'warn');
-  if (!confirm('Diesen Text 1:1 als Antwort an den Kunden senden? (Ohne KI-Bearbeitung — Signatur wird automatisch angehängt)')) return;
+  const _q = _sigQuelleFuer(accountId);
+  const _qText = _q.quelle === 'eigene' ? 'Hero-Signatur (eigene, ' + _q.len + ' Zeichen)'
+    : _q.quelle === 'master' ? 'Hero-Signatur (vom Master, ' + _q.len + ' Zeichen)'
+    : 'KEINE Signatur — geht ohne raus';
+  if (!confirm('Diesen Text 1:1 als Antwort an den Kunden senden?\n\nSignatur: ' + _qText)) return;
   if (DETAIL_ASSIST_REC) { try { DETAIL_ASSIST_REC.stop(); } catch (_) {} DETAIL_ASSIST_REC = null; }
   setBusy(btnEl, true, 'Sende…');
   try {
     let bodyHtml = (typeof textToHtmlForFreshdesk === 'function')
       ? textToHtmlForFreshdesk(raw)
       : raw.split(/\n{2,}/).map(p => '<p>' + escapeHtml(p).replace(/\n/g, '<br>') + '</p>').join('');
+    let _sigAngehaengt = 0;
     try {
       const me = await fetchAgentMe(accountId);
       const sig = me?.signature || '';
       if (sig && typeof appendSignatureHtml === 'function') {
         bodyHtml = appendSignatureHtml(bodyHtml, sig);
+        _sigAngehaengt = sig.length;
       }
     } catch (_) {}
+    _sigLog('versand-antwort', { acc: String(accountId), ticket: ticketId, quelle: _q.quelle, angehaengt: _sigAngehaengt });
     const base = '/freshdesk/' + encodeURIComponent(accountId) + '/api/v2/tickets/' + ticketId;
     await proxyJson(base + '/reply', { method: 'POST', body: JSON.stringify({ body: bodyHtml }) });
     if (ta) ta.value = '';
@@ -14263,6 +14323,7 @@ async function fdhWeiterleiten(btn, accountId, ticketId) {
   try {
     let sig = '';
     try { const me = await fetchAgentMe(accountId); sig = me?.signature || ''; } catch (_) {}
+    _sigLog('versand-weiterleitung', { acc: String(accountId), ticket: ticketId, quelle: _sigQuelleFuer(accountId).quelle, angehaengt: sig.length });
     const body = textToHtmlForFreshdesk(text) + (sig ? '<br><br>' + sig : '');
     const payload = { body, to_emails: an, include_original_attachments: mitAnhaengen };
     if (cc.length) payload.cc_emails = cc;
