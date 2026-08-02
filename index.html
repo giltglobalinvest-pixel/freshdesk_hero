@@ -802,7 +802,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.64.1';
+const APP_VERSION = 'v2.64.2';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -4671,6 +4671,9 @@ function _sigUserKey() {
 const USER_SIG_STATE = { byAccount: new Map(), loaded: false, loading: null };
 /* Alle Signaturen DIESES Users einmalig laden und cachen. */
 async function loadUserSignatures(force) {
+  // Boot-Reihenfolge-Schutz: Lief der erste Load VOR dem Login (key leer),
+  // ist die Map leer obwohl loaded=true — dann einmal neu versuchen.
+  if (!force && USER_SIG_STATE.loaded && !USER_SIG_STATE.byAccount.size && _sigUserKey()) force = true;
   if (!force && USER_SIG_STATE.loaded) return USER_SIG_STATE.byAccount;
   if (USER_SIG_STATE.loading) return USER_SIG_STATE.loading;
   const key = _sigUserKey();
@@ -4815,6 +4818,7 @@ function _agentMeWithSigName(me, accountId) {
 
 async function fetchAgentMe(accountId) {
   if (!accountId) return null;
+  try { await loadUserSignatures(); } catch (_) {}
   const cached = AGENT_ME_CACHE[accountId];
   if (cached && cached.expires > Date.now()) return _agentMeWithSigName(cached.data, accountId);
   try {
@@ -34995,7 +34999,10 @@ async function submitUserForm() {
             await airtableWriteWithAutoField(USER_SIG_TABLE, sigFields, USER_SIG_TYPES);
           }
           if (APP_KEYS.user && finalUserKey === APP_KEYS.user.api_key) loadUserSignatures(true).catch(() => {});
-        } catch (e) { console.warn('[Signatur] Speichern für User fehlgeschlagen:', e.message); }
+        } catch (e) {
+          console.warn('[Signatur] Speichern für User fehlgeschlagen:', e.message);
+          toast('Signatur für ' + (accObj?.name || accId) + ' NICHT gespeichert: ' + String(e.message || e).slice(0, 140), 'error', 9000);
+        }
       }
     }
     closeModal();
