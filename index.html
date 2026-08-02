@@ -802,7 +802,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.60.0';
+const APP_VERSION = 'v2.60.1';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -14137,7 +14137,7 @@ function _fdhCfKey(t, feld) {
 function _fdhCustomFeldHtml(t, feld) {
   const wert = _fdhCfWert(t, feld);
   const basis = 'w-full px-2 py-1.5 border border-ink-200 rounded-lg text-[12.5px] bg-white';
-  const on = `onchange="fdhCustomFeldSpeichern(this, '${escapeAttr(t._accountId)}', ${t.id}, '${escapeAttr(feld.name)}', '${escapeAttr(feld.type || '')}')"`;
+  const on = `onchange="fdhCustomFeldMerken(this, ${t.id}, '${escapeAttr(feld.name)}')"`;
   const typ = String(feld.type || '');
   let eingabe;
   if (/checkbox/.test(typ)) {
@@ -14166,29 +14166,52 @@ function _fdhCustomFeldHtml(t, feld) {
       ${eingabe}
     </div>`;
 }
-async function fdhCustomFeldSpeichern(el, accountId, ticketId, feldName, typ) {
+let _fdhCfPending = { ticketId: null, werte: {} };
+function fdhCustomFeldMerken(el, ticketId, feldName) {
+  if (_fdhCfPending.ticketId !== ticketId) _fdhCfPending = { ticketId, werte: {} };
   let wert;
   if (el.type === 'checkbox') wert = el.checked;
   else if (el.type === 'number') wert = el.value === '' ? null : Number(el.value);
   else wert = el.value === '' ? null : el.value;
+  _fdhCfPending.werte[feldName] = wert;
+  el.classList.add('ring-1', 'ring-brand-400', 'border-brand-400');
+  const btn = document.getElementById('fdhCfAktualisieren');
+  if (btn) {
+    btn.disabled = false;
+    const n = Object.keys(_fdhCfPending.werte).length;
+    btn.textContent = 'Aktualisieren (' + n + ')';
+  }
+}
+async function fdhCfAktualisieren(btn, accountId, ticketId) {
+  if (_fdhCfPending.ticketId !== ticketId || !Object.keys(_fdhCfPending.werte).length) return;
   const felder = APP_STATE.ticketFieldsCache?.[accountId] || [];
-  const feld = felder.find(f => f.name === feldName) || { name: feldName };
-  const key = CURRENT_TICKET && CURRENT_TICKET.id === ticketId ? _fdhCfKey(CURRENT_TICKET, feld) : feldName;
-  el.disabled = true;
+  const custom = {};
+  for (const [name, wert] of Object.entries(_fdhCfPending.werte)) {
+    const feld = felder.find(f => f.name === name) || { name };
+    const key = CURRENT_TICKET && CURRENT_TICKET.id === ticketId ? _fdhCfKey(CURRENT_TICKET, feld) : name;
+    custom[key] = wert;
+  }
+  setBusy(btn, true, 'Speichere…');
   try {
     await proxyJson('/freshdesk/' + encodeURIComponent(accountId) + '/api/v2/tickets/' + ticketId, {
-      method: 'PUT', body: JSON.stringify({ custom_fields: { [key]: wert } }) });
+      method: 'PUT', body: JSON.stringify({ custom_fields: custom }) });
     if (CURRENT_TICKET && CURRENT_TICKET.id === ticketId) {
-      CURRENT_TICKET.custom_fields = CURRENT_TICKET.custom_fields || {};
-      CURRENT_TICKET.custom_fields[key] = wert;
+      CURRENT_TICKET.custom_fields = { ...(CURRENT_TICKET.custom_fields || {}), ...custom };
     }
-    toast('Gespeichert: ' + (feld.label_for_agents || feld.label || feldName), 'success', 2500);
+    _fdhCfPending = { ticketId: null, werte: {} };
+    setBusy(btn, false);
+    btn.disabled = true;
+    btn.textContent = 'Aktualisiert ✓';
+    setTimeout(() => { if (btn.isConnected) btn.textContent = 'Aktualisieren'; }, 2500);
+    document.querySelectorAll('#fdhCustomFelder .ring-brand-400').forEach(e => e.classList.remove('ring-1', 'ring-brand-400', 'border-brand-400'));
+    toast(Object.keys(custom).length + ' Feld' + (Object.keys(custom).length === 1 ? '' : 'er') + ' gespeichert', 'success', 3000);
   } catch (e) {
-    toast('Speichern fehlgeschlagen: ' + e.message, 'error', 6000);
+    setBusy(btn, false);
+    toast('Aktualisieren fehlgeschlagen: ' + e.message, 'error', 6000);
   }
-  el.disabled = false;
 }
 async function _fdhCustomFelderNachladen(t) {
+  _fdhCfPending = { ticketId: null, werte: {} };
   const ziel = document.getElementById('fdhCustomFelder');
   if (!ziel) return;
   const felder = await ensureTicketFieldsLoaded(t._accountId);
@@ -14226,6 +14249,7 @@ function _fdhDetailSidebar(t) {
         ${eigenschaft('Bearbeiter', _assigneeBadgeDropdown(t))}
         ${eigenschaft('Typ', _typeBadgeDropdown(t))}
         <div id="fdhCustomFelder" class="space-y-3.5"><p class="text-[11px] text-ink-400 italic">Individuelle Felder werden geladen …</p></div>
+        <button id="fdhCfAktualisieren" disabled onclick="fdhCfAktualisieren(this, '${escapeAttr(t._accountId)}', ${t.id})" class="w-full mt-1 py-2.5 rounded-lg text-sm font-semibold bg-brand-500 text-white disabled:bg-ink-100 disabled:text-ink-400">Aktualisieren</button>
       </div>
     </div>`;
 }
