@@ -802,7 +802,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.58.1';
+const APP_VERSION = 'v2.58.2';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -8601,6 +8601,8 @@ function ansichtenVerwalten() {
 }
 
 async function renderTicketsPage() {
+  // KI-Benutzer für Filter/Zuweisen-Dropdowns — gecacht, kostet nur beim ersten Mal.
+  await _fdhKiUsersLaden().catch(() => {});
   // Einmal je Sitzung: Ansichten vom User-Record holen und Start-Ansicht anwenden.
   if (!window._fdhStartAnsichtOk) {
     window._fdhStartAnsichtOk = true;
@@ -9065,7 +9067,7 @@ function openFilterAssignee() {
   const acc = APP_STATE.currentAccount;
   if (acc === 'all') return;
   const cache = APP_STATE.agentsCache?.[acc] || { agents: [] };
-  const kis = (APP_STATE.kiUsers || []).filter(k => k.vonByAccount && k.vonByAccount[acc]);
+  const kis = (APP_STATE.kiUsers || []);
   openFilterPicker('Zuweisung filtern', 'responderId', [
     { value: null, label: 'alle', icon: 'list' },
     { value: 'unassigned', label: 'unzugewiesen', icon: 'user-x' },
