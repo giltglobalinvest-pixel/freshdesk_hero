@@ -108,7 +108,10 @@
   .email-body a:active { color: #075985; }
   .email-body strong, .email-body b { font-weight: 600; }
   .email-body em, .email-body i { font-style: italic; }
-  .email-body img { max-width: 100% !important; height: auto !important; display: inline-block; border-radius: 6px; margin: 0.25em 0; }
+  .email-body img { max-width: 100% !important; display: inline-block; border-radius: 6px; margin: 0.25em 0; }
+  /* Höhe nur bei Bildern OHNE eigene Maße normalisieren — Signatur-Logos mit
+     height:40px sollen im Verlauf so klein bleiben wie beim Empfänger. */
+  .email-body img:not([style*="height"]):not([height]) { height: auto !important; }
   .email-body blockquote { border-left: 3px solid #cbd5e1; padding-left: 0.75em; margin: 0.5em 0; color: #475569; }
   .email-body table { border-collapse: collapse; margin: 0.5em 0; max-width: 100%; }
   .email-body td, .email-body th { padding: 0.25em 0.5em; border: 1px solid #e2e8f0; vertical-align: top; }
@@ -802,7 +805,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.66.0';
+const APP_VERSION = 'v2.66.1';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -4856,7 +4859,12 @@ function _sigBilderBegrenzen(html) {
     t.content.querySelectorAll('img').forEach(img => {
       const stil = String(img.getAttribute('style') || '');
       const hatBreite = img.hasAttribute('width') || /(^|;)\s*(max-)?width\s*:/i.test(stil);
-      if (!hatBreite) img.setAttribute('style', (stil ? stil.replace(/;?\s*$/, '; ') : '') + 'max-width:280px; height:auto;');
+      const hatHoehe = img.hasAttribute('height') || /(^|;)\s*height\s*:/i.test(stil);
+      if (hatBreite) return;
+      // Eigene Höhe (z. B. height:40px beim Logo) respektieren — nur eine
+      // Sicherheits-Maximalbreite ergänzen; sonst zusätzlich height:auto.
+      const zusatz = hatHoehe ? 'max-width:280px;' : 'max-width:280px; height:auto;';
+      img.setAttribute('style', (stil ? stil.replace(/;?\s*$/, '; ') : '') + zusatz);
     });
     return t.innerHTML;
   } catch (_) { return html; }
