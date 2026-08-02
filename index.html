@@ -802,7 +802,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.57.0';
+const APP_VERSION = 'v2.58.0';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -3582,8 +3582,8 @@ function openKnowledgeSuggestionModal(accountId, ticketId) {
   let host = document.getElementById('subModalHost');
   if (!host) { host = document.createElement('div'); host.id = 'subModalHost'; document.body.appendChild(host); }
   host.innerHTML = `
-    <div class="fixed inset-0 z-[60] flex items-end justify-center bg-black/40" onclick="if(event.target===this)closeKnowledgeSuggestionModal()">
-      <div class="bg-white w-full max-w-2xl rounded-t-2xl shadow-2xl flex flex-col safe-bottom" style="max-height:92vh">
+    <div class="fixed inset-0 z-[60] flex items-end sm:items-center justify-center bg-black/40" onclick="if(event.target===this)closeKnowledgeSuggestionModal()">
+      <div class="bg-white w-full max-w-2xl rounded-t-2xl sm:rounded-2xl shadow-2xl flex flex-col safe-bottom" style="max-height:92vh">
         <div class="px-4 py-3 border-b border-ink-200 flex items-center justify-between gap-2">
           <div class="min-w-0">
             <h3 class="font-bold text-ink-900 inline-flex items-center gap-2"><i data-lucide="lightbulb" class="w-4 h-4 text-amber-500"></i> Vorschlag aus Team-Historie</h3>
@@ -8692,9 +8692,10 @@ async function renderTicketsPage() {
           });
           html0 += `<button onclick="ansichtenVerwalten()" title="Ansichten speichern und verwalten" class="shrink-0 px-2 py-1 rounded-md text-[11px] font-medium bg-white text-violet-700 border border-violet-200 inline-flex items-center gap-1"><i data-lucide="bookmark-plus" class="w-3.5 h-3.5"></i>${ansichten.length ? '' : ' Ansicht speichern'}</button>`;
           const tvMode = TICKETS_VIEW_MODE || 'list';
-          const tvNext = tvMode === 'stack' ? 'list' : 'stack';
-          const tvIcon = tvMode === 'stack' ? 'layers' : 'list';
-          const tvLabel = tvMode === 'stack' ? 'Karten' : 'Liste';
+          const tvReihe = ['list', 'fd', 'stack'];
+          const tvNext = tvReihe[(tvReihe.indexOf(tvMode) + 1) % tvReihe.length];
+          const tvIcon = tvMode === 'stack' ? 'layers' : (tvMode === 'fd' ? 'panel-top' : 'list');
+          const tvLabel = tvMode === 'stack' ? 'Karten' : (tvMode === 'fd' ? 'Freshdesk' : 'Liste');
           let html = html0 + `<button onclick="setTicketsViewMode('${tvNext}')" class="shrink-0 px-2.5 py-1 rounded-md text-[11px] font-semibold bg-white text-ink-700 border border-ink-300 inline-flex items-center gap-1 shadow-sm" title="Ansicht: ${tvLabel} (klick um zu wechseln)"><i data-lucide="${tvIcon}" class="w-3.5 h-3.5"></i>${tvLabel}</button>`;
           html += `<button onclick="enterTicketsStackFullscreen()" class="shrink-0 px-2.5 py-1 rounded-md text-[11px] font-semibold bg-brand-500 text-white border border-brand-500 inline-flex items-center gap-1 shadow-sm" title="Direkt in Vollbild-Karten-Modus"><i data-lucide="maximize" class="w-3.5 h-3.5"></i>Vollbild</button>`;
           // v2.46.48: Neues KI-Ticket erstellen
@@ -8969,8 +8970,8 @@ function openFilterPicker(title, key, options) {
   }
   const currentValue = APP_STATE.filters[key];
   host.innerHTML = `
-    <div class="fixed inset-0 z-[60] flex items-end justify-center bg-black/40" onclick="if(event.target===this)closeFilterPicker()">
-      <div class="bg-white w-full max-w-md rounded-t-2xl shadow-2xl flex flex-col safe-bottom" style="max-height:80vh">
+    <div class="fixed inset-0 z-[60] flex items-end sm:items-center justify-center bg-black/40" onclick="if(event.target===this)closeFilterPicker()">
+      <div class="bg-white w-full max-w-md rounded-t-2xl sm:rounded-2xl shadow-2xl flex flex-col safe-bottom" style="max-height:80vh">
         <div class="px-4 py-3 border-b border-ink-200 flex items-center justify-between">
           <h3 class="font-bold text-ink-900">${escapeHtml(title)}</h3>
           <button onclick="closeFilterPicker()" class="w-9 h-9 rounded-lg hover:bg-ink-100 flex items-center justify-center">
@@ -9103,15 +9104,19 @@ function _statusBadgeDropdown(t) {
 function _assigneeBadgeDropdown(t) {
   const cache = APP_STATE.agentsCache?.[t._accountId];
   const agents = (cache?.agents || []).slice().sort((a, b) => (a.name || '').localeCompare(b.name || '', 'de'));
-  const currentName = getAgentFirstName(t._accountId, t.responder_id);
+  const kiTagName = _fdhKiAusTags(t.tags);
+  const kis = (APP_STATE.kiUsers || []).filter(k => k.vonByAccount && k.vonByAccount[t._accountId]);
+  const currentName = kiTagName ? (_fdhKiIconFuer(kiTagName) + ' ' + kiTagName) : getAgentFirstName(t._accountId, t.responder_id);
   const hasOne = !!currentName;
   const badgeCls = hasOne ? 'bg-ink-100 text-ink-700' : 'bg-amber-50 text-amber-700 border border-amber-200';
   return `
     <span class="relative inline-flex items-center" onclick="event.stopPropagation()">
       <span class="text-[10px] uppercase tracking-wider px-1.5 py-0.5 rounded font-semibold ${badgeCls} pointer-events-none inline-flex items-center gap-1"><i data-lucide="user" class="w-2.5 h-2.5"></i>${escapeHtml(currentName || 'unzugewiesen')} <i data-lucide="chevron-down" class="w-2.5 h-2.5"></i></span>
       <select data-account-id="${escapeAttr(t._accountId)}" data-ticket-id="${t.id}" onchange="cardChangeAssignee(this)" class="absolute inset-0 opacity-0 cursor-pointer w-full">
-        <option value="" ${!t.responder_id ? 'selected' : ''}>— unzugewiesen —</option>
-        ${agents.map(a => `<option value="${a.id}" ${a.id === t.responder_id ? 'selected' : ''}>${escapeHtml(a.name)}</option>`).join('')}
+        <option value="" ${!t.responder_id && !kiTagName ? 'selected' : ''}>— unzugewiesen —</option>
+        ${kis.length ? `<optgroup label="Hero-Benutzer (ohne Freshdesk-Lizenz)">${kis.map(k =>
+          `<option value="ki:${escapeAttr(k.api_key)}" ${kiTagName === k.name ? 'selected' : ''}>${(k.role || '').toLowerCase() === 'ki' ? '\u{1F916}' : '\u{1F464}'} ${escapeHtml(k.name)}</option>`).join('')}</optgroup>` : ''}
+        ${agents.map(a => `<option value="${a.id}" ${a.id === t.responder_id && !kiTagName ? 'selected' : ''}>${escapeHtml(a.name)}</option>`).join('')}
       </select>
     </span>`;
 }
@@ -9130,6 +9135,22 @@ function _groupBadgeDropdown(t) {
         ${groups.map(g => `<option value="${g.id}" ${g.id === t.group_id ? 'selected' : ''}>${escapeHtml(g.name)}</option>`).join('')}
       </select>
     </span>`;
+}
+
+const FDH_PRIO = { 1: { label: 'Niedrig', punkt: '#84cc16' }, 2: { label: 'Mittel', punkt: '#3b82f6' }, 3: { label: 'Hoch', punkt: '#f97316' }, 4: { label: 'Dringend', punkt: '#ef4444' } };
+function _prioBadgeDropdown(t) {
+  const p = FDH_PRIO[t.priority] || FDH_PRIO[1];
+  return `
+    <span class="relative inline-flex items-center" onclick="event.stopPropagation()">
+      <span class="text-[12px] px-1.5 py-0.5 rounded font-medium text-ink-700 pointer-events-none inline-flex items-center gap-1.5"><span class="w-2.5 h-2.5 rounded-sm inline-block" style="background:${p.punkt}"></span>${escapeHtml(p.label)} <i data-lucide="chevron-down" class="w-3 h-3 opacity-60"></i></span>
+      <select data-account-id="${escapeAttr(t._accountId)}" data-ticket-id="${t.id}" onchange="cardChangePriority(this)" class="absolute inset-0 opacity-0 cursor-pointer w-full">
+        ${[1, 2, 3, 4].map(v => `<option value="${v}" ${t.priority === v ? 'selected' : ''}>${FDH_PRIO[v].label}</option>`).join('')}
+      </select>
+    </span>`;
+}
+async function cardChangePriority(sel) {
+  const v = parseInt(sel.value, 10) || 1;
+  await _cardSetField(sel, 'priority', v, 'Priorität: ' + (FDH_PRIO[v]?.label || v), 'Priorität');
 }
 
 function _typeBadgeDropdown(t) {
@@ -9323,6 +9344,66 @@ async function cardChangeType(sel) {
   await _cardSetField(sel, 'type', v, v ? 'Typ: ' + v : 'Typ entfernt', 'Typ');
 }
 
+/* Freshdesk-Stil-Zeile (v2.58.0): Avatar + Neu-Badge + großer Betreff + Meta
+   (Absender · Alter · Fälligkeit der ersten Antwort) und rechts gestapelt
+   Priorität / Gruppe+Bearbeiter / Status — alles direkt änderbar. */
+function _fdhSlaText(t) {
+  if (!(t.status === 2 || t.status === 3)) return '';
+  const due = t.fr_due_by || t.due_by;
+  if (!due) return '';
+  const diffH = Math.round((new Date(due).getTime() - Date.now()) / 3600000);
+  if (isNaN(diffH)) return '';
+  if (diffH >= 0) {
+    const wert = diffH >= 48 ? Math.round(diffH / 24) + ' Tagen' : diffH + ' Stunden';
+    return `<span class="inline-flex items-center gap-1 text-ink-500"><i data-lucide="corner-up-left" class="w-3.5 h-3.5"></i>Erste Antwort fällig in ${wert}</span>`;
+  }
+  const wert = -diffH >= 48 ? Math.round(-diffH / 24) + ' Tagen' : (-diffH) + ' Stunden';
+  return `<span class="inline-flex items-center gap-1 text-red-600 font-medium"><i data-lucide="alarm-clock" class="w-3.5 h-3.5"></i>Antwort überfällig seit ${wert}</span>`;
+}
+const _FDH_AVATAR_FARBEN = ['#dbeafe', '#fce7f3', '#fef3c7', '#dcfce7', '#ede9fe', '#ffedd5', '#cffafe'];
+function _renderTicketListFd(tickets) {
+  const showAccount = APP_STATE.currentAccount === 'all';
+  $('ticketList').innerHTML = `
+    <div class="space-y-2">
+      ${tickets.map(t => {
+        const requester = getRequesterDisplay(t);
+        const wer = requester.name || requester.email || '?';
+        const initiale = (wer || '?').trim().charAt(0).toUpperCase();
+        let hash = 0; for (let i = 0; i < wer.length; i++) hash = (hash * 31 + wer.charCodeAt(i)) | 0;
+        const farbe = _FDH_AVATAR_FARBEN[Math.abs(hash) % _FDH_AVATAR_FARBEN.length];
+        const neu = t.status === 2 && !t.responder_id && !_fdhKiAusTags(t.tags);
+        const sla = _fdhSlaText(t);
+        const sel = msIsSelected(t._accountId, t.id);
+        return `
+          <div onclick="openTicketDetail('${escapeAttr(t._accountId)}', ${t.id})" class="bg-white border ${sel ? 'border-brand-400 ring-1 ring-brand-300' : 'border-ink-200'} rounded-xl px-4 py-3.5 flex items-start gap-4 cursor-pointer hover:border-ink-300 transition-colors">
+            <input type="checkbox" ${sel ? 'checked' : ''} onclick="event.stopPropagation(); if(!msIsActive()) APP_STATE.multiSelect.active = true; msToggle('${escapeAttr(t._accountId)}', ${t.id}); renderTicketList(APP_STATE.pageState.tickets);" class="mt-3 w-4 h-4 accent-brand-500 shrink-0">
+            <span class="w-11 h-11 rounded-full flex items-center justify-center shrink-0 font-semibold text-ink-700 text-base mt-1" style="background:${farbe}">${escapeHtml(initiale)}</span>
+            <div class="flex-1 min-w-0">
+              ${neu ? '<span class="inline-block text-[11px] font-semibold bg-emerald-50 text-emerald-700 border border-emerald-200 rounded px-1.5 py-0.5 mb-1">Neu</span>' : ''}
+              <p class="font-semibold text-ink-900 text-[15px] leading-snug">${escapeHtml(t.subject || '(ohne Betreff)')} <span class="text-ink-400 font-normal">#${t.id}</span></p>
+              <p class="text-[12.5px] text-ink-500 mt-1 flex items-center gap-2 flex-wrap">
+                <span class="inline-flex items-center gap-1"><i data-lucide="mail" class="w-3.5 h-3.5"></i>${escapeHtml(wer)}</span>
+                <span class="text-ink-300">•</span>
+                <span>vor ${escapeHtml(relTime(t.created_at) || '?')} Erstellt</span>
+                ${sla ? '<span class="text-ink-300">•</span>' + sla : ''}
+                ${showAccount ? `<span class="text-ink-300">•</span><span>${escapeHtml(t._accountName)}</span>` : ''}
+              </p>
+            </div>
+            <div class="shrink-0 flex flex-col items-start gap-1.5 pt-0.5" onclick="event.stopPropagation()">
+              ${_prioBadgeDropdown(t)}
+              <span class="inline-flex items-center gap-1">${_groupBadgeDropdown(t)}<span class="text-ink-300 text-[11px]">/</span>${_assigneeBadgeDropdown(t)}</span>
+              ${_statusBadgeDropdown(t)}
+            </div>
+          </div>`;
+      }).join('')}
+    </div>
+    ${APP_STATE.pageState?.hasMore ? `
+      <button onclick="loadMoreTickets(this)" class="w-full bg-white border border-brand-300 rounded-2xl py-3 text-sm font-semibold text-brand-600 hover:bg-brand-50 mt-2 inline-flex items-center justify-center gap-2 active:opacity-70">
+        <i data-lucide="chevron-down" class="w-4 h-4"></i> Weitere ${TICKETS_PER_PAGE} laden
+      </button>` : ''}`;
+  if (window.lucide) lucide.createIcons();
+}
+
 function renderTicketList(tickets) {
   // Client-Filter LIVE bei jedem Render — so verschwinden Tickets, die sich gerade
   // geändert haben (Status via Card-Swipe / KI-Regel / extern in Freshdesk geändert),
@@ -9351,6 +9432,9 @@ function renderTicketList(tickets) {
     // Responder (Unzugewiesen / spezifischer Agent)
     if (filters.responderId === 'unassigned') {
       tickets = tickets.filter(t => !t.responder_id);
+    } else if (typeof filters.responderId === 'string' && filters.responderId.startsWith('ki:')) {
+      const kiTag = _fdhKiTag(filters.responderId.slice(3));
+      tickets = tickets.filter(t => Array.isArray(t.tags) && t.tags.includes(kiTag));
     } else if (filters.responderId && APP_STATE.currentAccount && APP_STATE.currentAccount !== 'all') {
       tickets = tickets.filter(t => t.responder_id === filters.responderId);
     }
@@ -9371,11 +9455,7 @@ function renderTicketList(tickets) {
   // (statt nur bei fetchTickets), damit lokal gepatchte Tickets (patchTicketInList etc.)
   // sofort an die richtige Position rutschen — vorher: Reihenfolge blieb stale nach Card-Aktionen.
   if (Array.isArray(tickets) && tickets.length > 1) {
-    tickets = tickets.slice().sort((a, b) => {
-      const ta = new Date(a.updated_at || a.created_at || 0).getTime();
-      const tb = new Date(b.updated_at || b.created_at || 0).getTime();
-      return tb - ta;
-    });
+    tickets = _fdhTicketsSortieren(tickets.slice());
   }
   if (!tickets.length) {
     // v2.46.8: Auch im leeren Zustand „Mehr laden"-Button zeigen wenn der Server noch mehr
@@ -9406,6 +9486,11 @@ function renderTicketList(tickets) {
   // v2.46.16: Stack-View-Dispatcher (Tinder-Style)
   if (TICKETS_VIEW_MODE === 'stack') {
     _renderTicketStack(tickets);
+    return;
+  }
+  // v2.58.0: Freshdesk-Stil (Desktop-Zeilen wie das Original)
+  if (TICKETS_VIEW_MODE === 'fd') {
+    _renderTicketListFd(tickets);
     return;
   }
   const showAccount = APP_STATE.currentAccount === 'all';
@@ -9904,8 +9989,8 @@ function showBulkErrorsModal(failures, total, labelOne) {
     groups[key].push(f);
   });
   host.innerHTML = `
-    <div class="fixed inset-0 z-[60] flex items-end justify-center bg-black/40" onclick="if(event.target===this)closeBulkErrorsModal()">
-      <div class="bg-white w-full max-w-md rounded-t-2xl shadow-2xl flex flex-col safe-bottom" style="max-height:80vh">
+    <div class="fixed inset-0 z-[60] flex items-end sm:items-center justify-center bg-black/40" onclick="if(event.target===this)closeBulkErrorsModal()">
+      <div class="bg-white w-full max-w-md rounded-t-2xl sm:rounded-2xl shadow-2xl flex flex-col safe-bottom" style="max-height:80vh">
         <div class="px-4 py-3 border-b border-ink-200 flex items-center justify-between">
           <div>
             <h3 class="font-bold text-ink-900">${failures.length} Fehler</h3>
@@ -9976,8 +10061,8 @@ function bulkWiedervorlage() {
   let host = document.getElementById('subModalHost');
   if (!host) { host = document.createElement('div'); host.id = 'subModalHost'; document.body.appendChild(host); }
   host.innerHTML = `
-    <div class="fixed inset-0 z-[60] flex items-end justify-center bg-black/40" onclick="if(event.target===this)closeWiedervorlagePicker()">
-      <div class="bg-white w-full max-w-md rounded-t-2xl shadow-2xl flex flex-col safe-bottom" style="max-height:80vh">
+    <div class="fixed inset-0 z-[60] flex items-end sm:items-center justify-center bg-black/40" onclick="if(event.target===this)closeWiedervorlagePicker()">
+      <div class="bg-white w-full max-w-md rounded-t-2xl sm:rounded-2xl shadow-2xl flex flex-col safe-bottom" style="max-height:80vh">
         <div class="px-4 py-3 border-b border-ink-200 flex items-center justify-between">
           <div><h3 class="font-bold text-ink-900">${items.length} Tickets auf Wiedervorlage</h3><p class="text-[11px] text-ink-500">Frist auswählen</p></div>
           <button onclick="closeWiedervorlagePicker()" class="w-9 h-9 rounded-lg hover:bg-ink-100 flex items-center justify-center"><i data-lucide="x" class="w-5 h-5 text-ink-700"></i></button>
@@ -10308,8 +10393,8 @@ function openStackStatusPicker(accountId, ticketId) {
   let host = document.getElementById('subModalHost');
   if (!host) { host = document.createElement('div'); host.id = 'subModalHost'; document.body.appendChild(host); }
   host.innerHTML =
-    '<div class="fixed inset-0 z-[60] flex items-end justify-center bg-black/40" onclick="if(event.target===this)closeStackPicker()">' +
-      '<div class="bg-white w-full max-w-md rounded-t-2xl shadow-2xl p-4 safe-bottom space-y-2">' +
+    '<div class="fixed inset-0 z-[60] flex items-end sm:items-center justify-center bg-black/40" onclick="if(event.target===this)closeStackPicker()">' +
+      '<div class="bg-white w-full max-w-md rounded-t-2xl sm:rounded-2xl shadow-2xl p-4 safe-bottom space-y-2">' +
         '<p class="text-[11px] uppercase tracking-wider text-ink-500 font-semibold text-center pb-1">Status wählen</p>' +
         options.map(o =>
           '<button onclick="_setTicketStatusFromStack(\'' + escapeAttr(accountId) + '\', ' + ticketId + ', ' + o.id + ')" class="w-full bg-' + o.color + '-50 hover:bg-' + o.color + '-100 border border-' + o.color + '-200 text-' + o.color + '-800 rounded-lg px-3 py-3 text-sm font-semibold inline-flex items-center gap-2">' +
@@ -10344,8 +10429,8 @@ async function openStackGroupPicker(accountId, ticketId) {
   let host = document.getElementById('subModalHost');
   if (!host) { host = document.createElement('div'); host.id = 'subModalHost'; document.body.appendChild(host); }
   host.innerHTML =
-    '<div class="fixed inset-0 z-[60] flex items-end justify-center bg-black/40" onclick="if(event.target===this)closeStackPicker()">' +
-      '<div class="bg-white w-full max-w-md rounded-t-2xl shadow-2xl p-4 safe-bottom flex flex-col" style="max-height:80vh">' +
+    '<div class="fixed inset-0 z-[60] flex items-end sm:items-center justify-center bg-black/40" onclick="if(event.target===this)closeStackPicker()">' +
+      '<div class="bg-white w-full max-w-md rounded-t-2xl sm:rounded-2xl shadow-2xl p-4 safe-bottom flex flex-col" style="max-height:80vh">' +
         '<p class="text-[11px] uppercase tracking-wider text-ink-500 font-semibold text-center pb-2 shrink-0">Gruppe wählen</p>' +
         '<div class="flex-1 overflow-y-auto space-y-1.5">' +
           '<button onclick="_setTicketGroupFromStack(\'' + escapeAttr(accountId) + '\', ' + ticketId + ', null)" class="w-full bg-ink-50 hover:bg-ink-100 border border-ink-200 text-ink-700 rounded-lg px-3 py-2.5 text-sm font-medium text-left">— keine Gruppe —</button>' +
@@ -10386,8 +10471,8 @@ async function openStackAssigneePicker(accountId, ticketId) {
   let host = document.getElementById('subModalHost');
   if (!host) { host = document.createElement('div'); host.id = 'subModalHost'; document.body.appendChild(host); }
   host.innerHTML =
-    '<div class="fixed inset-0 z-[60] flex items-end justify-center bg-black/40" onclick="if(event.target===this)closeStackPicker()">' +
-      '<div class="bg-white w-full max-w-md rounded-t-2xl shadow-2xl p-4 safe-bottom flex flex-col" style="max-height:80vh">' +
+    '<div class="fixed inset-0 z-[60] flex items-end sm:items-center justify-center bg-black/40" onclick="if(event.target===this)closeStackPicker()">' +
+      '<div class="bg-white w-full max-w-md rounded-t-2xl sm:rounded-2xl shadow-2xl p-4 safe-bottom flex flex-col" style="max-height:80vh">' +
         '<p class="text-[11px] uppercase tracking-wider text-ink-500 font-semibold text-center pb-2 shrink-0">Bearbeiter wählen</p>' +
         '<div class="flex-1 overflow-y-auto space-y-1.5">' +
           '<button onclick="_setTicketAssigneeFromStack(\'' + escapeAttr(accountId) + '\', ' + ticketId + ', null)" class="w-full bg-ink-50 hover:bg-ink-100 border border-ink-200 text-ink-700 rounded-lg px-3 py-2.5 text-sm font-medium text-left">— unzugewiesen —</button>' +
@@ -10447,7 +10532,7 @@ async function openStackAiModal(accountId, ticketId) {
   window._STACK_AI_PREV_CURRENT = CURRENT_TICKET;
   CURRENT_TICKET = ticket;
   host.innerHTML =
-    '<div class="fixed inset-0 z-[60] flex items-end justify-center bg-black/50" onclick="if(event.target===this)closeStackAiModal()">' +
+    '<div class="fixed inset-0 z-[60] flex items-end sm:items-center justify-center bg-black/50" onclick="if(event.target===this)closeStackAiModal()">' +
       '<div class="bg-white w-full max-w-md rounded-t-3xl shadow-2xl flex flex-col safe-bottom" style="max-height:90vh">' +
         '<div class="px-4 py-3 border-b border-ink-200 flex items-center justify-between gap-2 shrink-0">' +
           '<h3 class="font-bold text-ink-900 inline-flex items-center gap-2"><i data-lucide="sparkles" class="w-5 h-5 text-purple-600"></i> KI-Assistent</h3>' +
@@ -10589,7 +10674,7 @@ async function openNewTicketAiModal() {
       '</select>'
     : '<input type="hidden" id="newTicketAiAccount" value="' + escapeAttr(preselect) + '">';
   host.innerHTML =
-    '<div class="fixed inset-0 z-[60] flex items-end justify-center bg-black/50" onclick="if(event.target===this)closeNewTicketAiModal()">' +
+    '<div class="fixed inset-0 z-[60] flex items-end sm:items-center justify-center bg-black/50" onclick="if(event.target===this)closeNewTicketAiModal()">' +
       '<div class="bg-white w-full max-w-md rounded-t-3xl shadow-2xl flex flex-col safe-bottom" style="max-height:92vh">' +
         '<div class="px-4 py-3 border-b border-ink-200 flex items-center justify-between gap-2 shrink-0">' +
           '<h3 class="font-bold text-ink-900 inline-flex items-center gap-2"><i data-lucide="sparkles" class="w-5 h-5 text-emerald-600"></i> Neues Ticket per KI</h3>' +
@@ -10937,7 +11022,7 @@ async function openQuickSummaryModal(accountId, ticketId) {
   let host = document.getElementById('subModalHost');
   if (!host) { host = document.createElement('div'); host.id = 'subModalHost'; document.body.appendChild(host); }
   host.innerHTML =
-    '<div class="fixed inset-0 z-[60] flex items-end justify-center bg-black/50" onclick="if(event.target===this)closeQuickSummaryModal()">' +
+    '<div class="fixed inset-0 z-[60] flex items-end sm:items-center justify-center bg-black/50" onclick="if(event.target===this)closeQuickSummaryModal()">' +
       '<div class="bg-white w-full max-w-md rounded-t-3xl shadow-2xl flex flex-col safe-bottom" style="max-height:88vh">' +
         '<div class="px-4 py-3 border-b border-ink-200 flex items-center justify-between gap-2 shrink-0">' +
           '<h3 class="font-bold text-ink-900 inline-flex items-center gap-2"><i data-lucide="sparkles" class="w-5 h-5 text-brand-600"></i> KI-Zusammenfassung</h3>' +
@@ -11005,7 +11090,7 @@ async function openQuickContactModal(accountId, ticketId) {
   const reqEmail = cached?.email || ticket?.requester?.email || ticket?.email || '';
   const initial = (reqName || reqEmail || '?').trim().charAt(0).toUpperCase();
   host.innerHTML =
-    '<div class="fixed inset-0 z-[60] flex items-end justify-center bg-black/50" onclick="if(event.target===this)closeQuickContactModal()">' +
+    '<div class="fixed inset-0 z-[60] flex items-end sm:items-center justify-center bg-black/50" onclick="if(event.target===this)closeQuickContactModal()">' +
       '<div class="bg-white w-full max-w-md rounded-t-3xl shadow-2xl flex flex-col safe-bottom" style="max-height:88vh">' +
         '<div class="px-4 py-3 border-b border-ink-200 flex items-center justify-between gap-2 shrink-0">' +
           '<h3 class="font-bold text-ink-900 inline-flex items-center gap-2"><i data-lucide="user" class="w-5 h-5 text-brand-600"></i> Kontakt</h3>' +
@@ -11151,7 +11236,7 @@ async function openMarketingFromContactModal(accountId, recipientEmail, recipien
   let host = document.getElementById('subModalHost');
   if (!host) { host = document.createElement('div'); host.id = 'subModalHost'; document.body.appendChild(host); }
   host.innerHTML =
-    '<div class="fixed inset-0 z-[70] flex items-end justify-center bg-black/60">' +
+    '<div class="fixed inset-0 z-[70] flex items-end sm:items-center justify-center bg-black/60">' +
       '<div class="bg-white w-full max-w-md rounded-t-3xl shadow-2xl p-8 text-center safe-bottom">' +
         '<div class="spinner inline-block w-7 h-7 border-[3px] text-orange-500"></div>' +
         '<p class="text-sm text-ink-500 mt-2">Lade Vorlagen…</p>' +
@@ -11166,7 +11251,7 @@ async function openMarketingFromContactModal(accountId, recipientEmail, recipien
     const responses = cannedData?.responses || [];
     if (!configs.length) {
       host.innerHTML =
-        '<div class="fixed inset-0 z-[70] flex items-end justify-center bg-black/60">' +
+        '<div class="fixed inset-0 z-[70] flex items-end sm:items-center justify-center bg-black/60">' +
           '<div class="bg-white w-full max-w-md rounded-t-3xl shadow-2xl p-6 safe-bottom">' +
             '<h3 class="font-bold mb-2 text-ink-900">Keine Absender-Adressen</h3>' +
             '<p class="text-sm text-ink-600 mb-4">Keine Email-Configs in Freshdesk gefunden.</p>' +
@@ -11198,7 +11283,7 @@ function _renderMarketingFromContactModal(accountId, recipientEmail, recipientNa
     return '<option value="' + c.id + '"' + (c.id === primaryCfg?.id ? ' selected' : '') + '>' + escapeHtml(label) + '</option>';
   }).join('');
   host.innerHTML =
-    '<div class="fixed inset-0 z-[70] flex items-end justify-center bg-black/60" onclick="if(event.target===this)closeMarketingFromContactModal()">' +
+    '<div class="fixed inset-0 z-[70] flex items-end sm:items-center justify-center bg-black/60" onclick="if(event.target===this)closeMarketingFromContactModal()">' +
       '<div class="bg-white w-full max-w-md rounded-t-3xl shadow-2xl flex flex-col safe-bottom" style="max-height:94vh">' +
         '<div class="safe-top px-4 py-3 border-b border-ink-200 flex items-center justify-between gap-2 shrink-0">' +
           '<h3 class="font-bold text-ink-900 inline-flex items-center gap-2"><i data-lucide="megaphone" class="w-5 h-5 text-orange-600"></i> Marketing-Email</h3>' +
@@ -11871,7 +11956,7 @@ async function openTicketContentModal(accountId, ticketId) {
   let host = document.getElementById('subModalHost');
   if (!host) { host = document.createElement('div'); host.id = 'subModalHost'; document.body.appendChild(host); }
   host.innerHTML =
-    '<div class="fixed inset-0 z-[60] flex items-end justify-center bg-black/50" onclick="if(event.target===this)closeTicketContentModal()">' +
+    '<div class="fixed inset-0 z-[60] flex items-end sm:items-center justify-center bg-black/50" onclick="if(event.target===this)closeTicketContentModal()">' +
       '<div class="bg-white w-full max-w-2xl rounded-t-3xl shadow-2xl flex flex-col safe-bottom" style="max-height:92vh">' +
         '<div class="px-4 py-3 border-b border-ink-200 flex items-center justify-between gap-2 shrink-0">' +
           '<h3 class="font-bold text-ink-900 inline-flex items-center gap-2 truncate">' +
@@ -12479,8 +12564,8 @@ function openCardActionsSheet(accountId, ticketId) {
     </button>`;
 
   host.innerHTML = `
-    <div class="fixed inset-0 z-[60] flex items-end justify-center bg-black/40" onclick="if(event.target===this)closeCardActionsSheet()">
-      <div class="bg-white w-full max-w-md rounded-t-2xl shadow-2xl flex flex-col safe-bottom" style="max-height:90vh">
+    <div class="fixed inset-0 z-[60] flex items-end sm:items-center justify-center bg-black/40" onclick="if(event.target===this)closeCardActionsSheet()">
+      <div class="bg-white w-full max-w-md rounded-t-2xl sm:rounded-2xl shadow-2xl flex flex-col safe-bottom" style="max-height:90vh">
         <div class="px-4 py-3 border-b border-ink-200 flex items-center justify-between">
           <div class="flex-1 min-w-0">
             <p class="text-[10px] text-ink-500 uppercase tracking-wider">Ticket #${ticketId}</p>
@@ -12653,8 +12738,8 @@ function openWiedervorlagePicker(accountId, ticketId, fromList = false) {
     document.body.appendChild(host);
   }
   host.innerHTML = `
-    <div class="fixed inset-0 z-[60] flex items-end justify-center bg-black/40" onclick="if(event.target===this)closeWiedervorlagePicker()">
-      <div class="bg-white w-full max-w-md rounded-t-2xl shadow-2xl flex flex-col safe-bottom" style="max-height:80vh">
+    <div class="fixed inset-0 z-[60] flex items-end sm:items-center justify-center bg-black/40" onclick="if(event.target===this)closeWiedervorlagePicker()">
+      <div class="bg-white w-full max-w-md rounded-t-2xl sm:rounded-2xl shadow-2xl flex flex-col safe-bottom" style="max-height:80vh">
         <div class="px-4 py-3 border-b border-ink-200 flex items-center justify-between">
           <div>
             <h3 class="font-bold text-ink-900">Auf Wiedervorlage</h3>
@@ -12763,8 +12848,8 @@ function openQuickNoteSheet(accountId, ticketId) {
   if (!host) { host = document.createElement('div'); host.id = 'subModalHost'; document.body.appendChild(host); }
   const speechAvailable = !!(window.SpeechRecognition || window.webkitSpeechRecognition);
   host.innerHTML = `
-    <div class="fixed inset-0 z-[60] flex items-end justify-center bg-black/40" onclick="if(event.target===this)closeQuickNoteSheet()">
-      <div class="bg-white w-full max-w-md rounded-t-2xl shadow-2xl flex flex-col safe-bottom">
+    <div class="fixed inset-0 z-[60] flex items-end sm:items-center justify-center bg-black/40" onclick="if(event.target===this)closeQuickNoteSheet()">
+      <div class="bg-white w-full max-w-md rounded-t-2xl sm:rounded-2xl shadow-2xl flex flex-col safe-bottom">
         <div class="px-4 py-3 border-b border-ink-200 flex items-center justify-between">
           <div>
             <h3 class="font-bold text-ink-900 inline-flex items-center gap-1.5"><i data-lucide="sticky-note" class="w-4 h-4 text-amber-600"></i> Schnell-Notiz</h3>
@@ -12878,8 +12963,8 @@ function openMyNotesPopup(accountId, ticketId) {
     ? ('Ticket #' + ticketId + ' · ' + manualCount + ' eigene' + (otherCount ? ' + ' + otherCount + ' KI' : ''))
     : ('Ticket #' + ticketId + ' · ' + otherCount + ' KI-Eintrag' + (otherCount === 1 ? '' : 'e'));
   host.innerHTML = `
-    <div class="fixed inset-0 z-[60] flex items-end justify-center bg-black/40" onclick="if(event.target===this)closeMyNotesPopup()">
-      <div class="bg-white w-full max-w-md rounded-t-2xl shadow-2xl flex flex-col safe-bottom" style="max-height:80vh">
+    <div class="fixed inset-0 z-[60] flex items-end sm:items-center justify-center bg-black/40" onclick="if(event.target===this)closeMyNotesPopup()">
+      <div class="bg-white w-full max-w-md rounded-t-2xl sm:rounded-2xl shadow-2xl flex flex-col safe-bottom" style="max-height:80vh">
         <div class="px-4 py-3 border-b border-ink-200 flex items-center justify-between">
           <div>
             <h3 class="font-bold text-ink-900 inline-flex items-center gap-1.5"><i data-lucide="sticky-note" class="w-4 h-4 text-amber-600"></i> Notizen &amp; KI-Aktivität</h3>
@@ -14282,8 +14367,8 @@ async function openAssigneeModal(accountId, ticketId, currentResponderId, fromLi
     document.body.appendChild(host);
   }
   host.innerHTML = `
-    <div class="fixed inset-0 z-[60] flex items-end justify-center bg-black/40" onclick="if(event.target===this)closeAssigneeModal()">
-      <div class="bg-white w-full max-w-md rounded-t-2xl shadow-2xl flex flex-col safe-bottom" style="max-height:80vh">
+    <div class="fixed inset-0 z-[60] flex items-end sm:items-center justify-center bg-black/40" onclick="if(event.target===this)closeAssigneeModal()">
+      <div class="bg-white w-full max-w-md rounded-t-2xl sm:rounded-2xl shadow-2xl flex flex-col safe-bottom" style="max-height:80vh">
         <div class="px-4 py-3 border-b border-ink-200 flex items-center justify-between">
           <div>
             <h3 class="font-bold text-ink-900">Ticket #${ticketId} zuweisen</h3>
@@ -14497,8 +14582,8 @@ async function openGroupModal(accountId, ticketId, currentGroupId, fromList = fa
     document.body.appendChild(host);
   }
   host.innerHTML = `
-    <div class="fixed inset-0 z-[60] flex items-end justify-center bg-black/40" onclick="if(event.target===this)closeGroupModal()">
-      <div class="bg-white w-full max-w-md rounded-t-2xl shadow-2xl flex flex-col safe-bottom" style="max-height:80vh">
+    <div class="fixed inset-0 z-[60] flex items-end sm:items-center justify-center bg-black/40" onclick="if(event.target===this)closeGroupModal()">
+      <div class="bg-white w-full max-w-md rounded-t-2xl sm:rounded-2xl shadow-2xl flex flex-col safe-bottom" style="max-height:80vh">
         <div class="px-4 py-3 border-b border-ink-200 flex items-center justify-between">
           <div>
             <h3 class="font-bold text-ink-900">Ticket #${ticketId} → Gruppe</h3>
@@ -14610,8 +14695,8 @@ async function openTypeModal(accountId, ticketId, currentType, fromList = false)
     document.body.appendChild(host);
   }
   host.innerHTML = `
-    <div class="fixed inset-0 z-[60] flex items-end justify-center bg-black/40" onclick="if(event.target===this)closeTypeModal()">
-      <div class="bg-white w-full max-w-md rounded-t-2xl shadow-2xl flex flex-col safe-bottom" style="max-height:80vh">
+    <div class="fixed inset-0 z-[60] flex items-end sm:items-center justify-center bg-black/40" onclick="if(event.target===this)closeTypeModal()">
+      <div class="bg-white w-full max-w-md rounded-t-2xl sm:rounded-2xl shadow-2xl flex flex-col safe-bottom" style="max-height:80vh">
         <div class="px-4 py-3 border-b border-ink-200 flex items-center justify-between">
           <div>
             <h3 class="font-bold text-ink-900">Ticket #${ticketId} → Typ</h3>
@@ -14726,8 +14811,8 @@ function openStatusModal(accountId, ticketId, currentStatus, fromList = false) {
   if (!host) { host = document.createElement('div'); host.id = 'subModalHost'; document.body.appendChild(host); }
   const curLbl = (FD_STATUS[currentStatus] || {}).label || '–';
   host.innerHTML = `
-    <div class="fixed inset-0 z-[60] flex items-end justify-center bg-black/40" onclick="if(event.target===this)closeStatusModal()">
-      <div class="bg-white w-full max-w-md rounded-t-2xl shadow-2xl safe-bottom">
+    <div class="fixed inset-0 z-[60] flex items-end sm:items-center justify-center bg-black/40" onclick="if(event.target===this)closeStatusModal()">
+      <div class="bg-white w-full max-w-md rounded-t-2xl sm:rounded-2xl shadow-2xl safe-bottom">
         <div class="px-4 py-3 border-b border-ink-200 flex items-center justify-between">
           <div>
             <h3 class="font-bold text-ink-900">Ticket #${ticketId} → Status</h3>
@@ -16251,8 +16336,8 @@ async function openDirectReplyComposer(accountId, ticketId) {
   let host = document.getElementById('subModalHost');
   if (!host) { host = document.createElement('div'); host.id = 'subModalHost'; document.body.appendChild(host); }
   host.innerHTML = `
-    <div class="fixed inset-0 z-[60] flex items-end justify-center bg-black/40" onclick="if(event.target===this)closeDirectReplyComposer()">
-      <div class="bg-white w-full max-w-2xl rounded-t-2xl shadow-2xl flex flex-col safe-bottom" style="max-height:92vh">
+    <div class="fixed inset-0 z-[60] flex items-end sm:items-center justify-center bg-black/40" onclick="if(event.target===this)closeDirectReplyComposer()">
+      <div class="bg-white w-full max-w-2xl rounded-t-2xl sm:rounded-2xl shadow-2xl flex flex-col safe-bottom" style="max-height:92vh">
         <div class="px-4 py-3 border-b border-ink-200 flex items-center justify-between gap-2">
           <div class="min-w-0">
             <h3 class="font-bold text-ink-900 inline-flex items-center gap-2"><i data-lucide="languages" class="w-4 h-4 text-emerald-600"></i> Direkt antworten</h3>
@@ -19936,7 +20021,7 @@ async function openSignatureEditor(accountId) {
   if (!host) { host = document.createElement('div'); host.id = 'sigEditHost'; document.body.appendChild(host); }
   host.innerHTML =
     '<div class="fixed inset-0 z-[85] flex items-end sm:items-center justify-center bg-black/50">' +
-      '<div class="bg-white w-full max-w-2xl sm:rounded-2xl rounded-t-2xl shadow-2xl p-6 text-center safe-bottom">' +
+      '<div class="bg-white w-full max-w-2xl sm:rounded-2xl rounded-t-2xl sm:rounded-2xl shadow-2xl p-6 text-center safe-bottom">' +
         '<span class="spinner inline-block w-6 h-6 border-[2px] text-emerald-500"></span>' +
         '<p class="text-sm text-ink-500 mt-2">Lade Signatur aus Freshdesk…</p>' +
       '</div>' +
@@ -19950,7 +20035,7 @@ async function openSignatureEditor(accountId) {
   const startHtml = _sigSanitize(custom || rawSig);
   host.innerHTML =
     '<div class="fixed inset-0 z-[85] flex items-end sm:items-center justify-center bg-black/50" onclick="if(event.target===this)closeSignatureEditor()">' +
-      '<div class="bg-white w-full max-w-2xl sm:rounded-2xl rounded-t-2xl shadow-2xl flex flex-col safe-bottom" style="max-height:92vh">' +
+      '<div class="bg-white w-full max-w-2xl sm:rounded-2xl rounded-t-2xl sm:rounded-2xl shadow-2xl flex flex-col safe-bottom" style="max-height:92vh">' +
         '<div class="px-4 py-3 border-b border-ink-200 flex items-center justify-between gap-2 shrink-0">' +
           '<div class="min-w-0">' +
             '<h3 class="font-bold text-ink-900 inline-flex items-center gap-2"><i data-lucide="pen-line" class="w-4 h-4 text-emerald-600"></i> Signatur bearbeiten</h3>' +
@@ -20050,8 +20135,8 @@ function openMyProfileEditModal() {
   let host = document.getElementById('subModalHost');
   if (!host) { host = document.createElement('div'); host.id = 'subModalHost'; document.body.appendChild(host); }
   host.innerHTML = `
-    <div class="fixed inset-0 z-[60] flex items-end justify-center bg-black/40" onclick="if(event.target===this)closeMyProfileEditModal()">
-      <div class="bg-white w-full max-w-md rounded-t-2xl shadow-2xl flex flex-col safe-bottom" style="max-height:92vh">
+    <div class="fixed inset-0 z-[60] flex items-end sm:items-center justify-center bg-black/40" onclick="if(event.target===this)closeMyProfileEditModal()">
+      <div class="bg-white w-full max-w-md rounded-t-2xl sm:rounded-2xl shadow-2xl flex flex-col safe-bottom" style="max-height:92vh">
         <div class="px-4 py-3 border-b border-ink-200 flex items-center justify-between gap-2">
           <h3 class="font-bold text-ink-900 inline-flex items-center gap-2"><i data-lucide="user-cog" class="w-4 h-4 text-brand-600"></i> Mein Profil</h3>
           <button onclick="closeMyProfileEditModal()" class="w-9 h-9 rounded-lg hover:bg-ink-100 flex items-center justify-center">
@@ -21737,8 +21822,8 @@ function openTaskActionSheet(recordId) {
   var host = document.getElementById('subModalHost');
   if (!host) { host = document.createElement('div'); host.id = 'subModalHost'; document.body.appendChild(host); }
   host.innerHTML =
-    '<div class="fixed inset-0 z-[60] flex items-end justify-center bg-black/40" onclick="if(event.target===this)closeTaskActionSheet()">' +
-      '<div class="bg-white w-full max-w-md rounded-t-2xl shadow-2xl flex flex-col safe-bottom" style="max-height:90vh">' +
+    '<div class="fixed inset-0 z-[60] flex items-end sm:items-center justify-center bg-black/40" onclick="if(event.target===this)closeTaskActionSheet()">' +
+      '<div class="bg-white w-full max-w-md rounded-t-2xl sm:rounded-2xl shadow-2xl flex flex-col safe-bottom" style="max-height:90vh">' +
         '<div class="px-4 py-3 border-b border-ink-200 flex items-center justify-between gap-2">' +
           '<h3 class="font-bold text-ink-900 inline-flex items-center gap-2 truncate"><i data-lucide="phone-call" class="w-4 h-4 text-emerald-600 shrink-0"></i><span class="truncate">' + escapeHtml(task.title || 'Aufgabe') + '</span></h3>' +
           '<button onclick="closeTaskActionSheet()" class="w-9 h-9 rounded-lg hover:bg-ink-100 flex items-center justify-center shrink-0"><i data-lucide="x" class="w-5 h-5 text-ink-700"></i></button>' +
@@ -21820,8 +21905,8 @@ function openTaskRightActionSheet(ref) {
   var host = document.getElementById('subModalHost');
   if (!host) { host = document.createElement('div'); host.id = 'subModalHost'; document.body.appendChild(host); }
   host.innerHTML =
-    '<div class="fixed inset-0 z-[60] flex items-end justify-center bg-black/40" onclick="if(event.target===this)closeTaskActionSheet()">' +
-      '<div class="bg-white w-full max-w-md rounded-t-2xl shadow-2xl p-4 safe-bottom space-y-2">' +
+    '<div class="fixed inset-0 z-[60] flex items-end sm:items-center justify-center bg-black/40" onclick="if(event.target===this)closeTaskActionSheet()">' +
+      '<div class="bg-white w-full max-w-md rounded-t-2xl sm:rounded-2xl shadow-2xl p-4 safe-bottom space-y-2">' +
         '<p class="text-[11px] uppercase tracking-wider text-ink-500 font-semibold text-center pb-1">Was tun?</p>' +
         '<button onclick="taskTicketComplete(\'' + escapeAttr(ref) + '\'); closeTaskActionSheet()" class="w-full bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg px-3 py-3 text-sm font-semibold inline-flex items-center justify-center gap-2"><i data-lucide="check" class="w-4 h-4"></i> Erledigt</button>' +
         '<div class="grid grid-cols-3 gap-1.5">' +
@@ -21855,8 +21940,8 @@ function _openTaskAiMiniLegacy(recordId) {
   var host = document.getElementById('subModalHost');
   if (!host) { host = document.createElement('div'); host.id = 'subModalHost'; document.body.appendChild(host); }
   host.innerHTML =
-    '<div class="fixed inset-0 z-[60] flex items-end justify-center bg-black/40" onclick="if(event.target===this)closeTaskAiMini()">' +
-      '<div class="bg-white w-full max-w-md rounded-t-2xl shadow-2xl flex flex-col safe-bottom" style="max-height:90vh">' +
+    '<div class="fixed inset-0 z-[60] flex items-end sm:items-center justify-center bg-black/40" onclick="if(event.target===this)closeTaskAiMini()">' +
+      '<div class="bg-white w-full max-w-md rounded-t-2xl sm:rounded-2xl shadow-2xl flex flex-col safe-bottom" style="max-height:90vh">' +
         '<div class="px-4 py-3 border-b border-ink-200 flex items-center justify-between gap-2">' +
           '<h3 class="font-bold text-ink-900 inline-flex items-center gap-2"><i data-lucide="sparkles" class="w-4 h-4 text-purple-600"></i> KI für Aufgabe</h3>' +
           '<button onclick="closeTaskAiMini()" class="w-9 h-9 rounded-lg hover:bg-ink-100 flex items-center justify-center"><i data-lucide="x" class="w-5 h-5 text-ink-700"></i></button>' +
@@ -22074,8 +22159,8 @@ function openNewAufgabeModal(prefill) {
     '<input type="hidden" id="newAufRelFsId" value="">';
 
   host.innerHTML =
-    '<div class="fixed inset-0 z-[60] flex items-end justify-center bg-black/40" onclick="if(event.target===this)closeNewAufgabeModal()">' +
-      '<div class="bg-white w-full max-w-md rounded-t-2xl shadow-2xl flex flex-col safe-bottom" style="max-height:92vh">' +
+    '<div class="fixed inset-0 z-[60] flex items-end sm:items-center justify-center bg-black/40" onclick="if(event.target===this)closeNewAufgabeModal()">' +
+      '<div class="bg-white w-full max-w-md rounded-t-2xl sm:rounded-2xl shadow-2xl flex flex-col safe-bottom" style="max-height:92vh">' +
         '<div class="px-4 py-3 border-b border-ink-200 flex items-center justify-between gap-2">' +
           '<h3 class="font-bold text-ink-900 inline-flex items-center gap-2"><i data-lucide="check-square" class="w-4 h-4 text-emerald-600"></i> Neue Aufgabe</h3>' +
           '<button onclick="closeNewAufgabeModal()" class="w-9 h-9 rounded-lg hover:bg-ink-100 flex items-center justify-center"><i data-lucide="x" class="w-5 h-5 text-ink-700"></i></button>' +
@@ -23413,7 +23498,7 @@ function openDealHidePicker(accountId, dealId, fromDetail) {
     { d: 30,    label: '30 Tage' },
   ];
   host.innerHTML =
-    '<div class="fixed inset-0 z-[60] flex items-end justify-center bg-black/50" onclick="if(event.target===this)closeDealHidePicker()">' +
+    '<div class="fixed inset-0 z-[60] flex items-end sm:items-center justify-center bg-black/50" onclick="if(event.target===this)closeDealHidePicker()">' +
       '<div class="bg-white w-full max-w-md rounded-t-3xl shadow-2xl flex flex-col safe-bottom">' +
         '<div class="px-4 py-3 border-b border-ink-200 flex items-center justify-between gap-2">' +
           '<h3 class="font-bold text-ink-900 inline-flex items-center gap-2"><i data-lucide="eye-off" class="w-5 h-5 text-amber-600"></i> Deal #' + dealId + ' ausblenden</h3>' +
@@ -23456,7 +23541,7 @@ function openDealActionMenu(accountId, dealId) {
     '</button>';
   }
   host.innerHTML =
-    '<div class="fixed inset-0 z-[60] flex items-end justify-center bg-black/50" onclick="if(event.target===this)closeDealActionMenu()">' +
+    '<div class="fixed inset-0 z-[60] flex items-end sm:items-center justify-center bg-black/50" onclick="if(event.target===this)closeDealActionMenu()">' +
       '<div class="bg-white w-full max-w-md rounded-t-3xl shadow-2xl safe-bottom">' +
         '<div class="px-4 py-3 border-b border-ink-200">' +
           '<h3 class="font-bold text-ink-900 truncate">' + escapeHtml(firma) + '</h3>' +
@@ -23622,7 +23707,7 @@ async function openDealNoteAiModal(accountId, dealId) {
   const dealName = deal?.name || ('#' + dealId);
   const speechAvailable = !!(window.SpeechRecognition || window.webkitSpeechRecognition);
   host.innerHTML =
-    '<div class="fixed inset-0 z-[60] flex items-end justify-center bg-black/50" onclick="if(event.target===this)closeDealNoteAiModal()">' +
+    '<div class="fixed inset-0 z-[60] flex items-end sm:items-center justify-center bg-black/50" onclick="if(event.target===this)closeDealNoteAiModal()">' +
       '<div class="bg-white w-full max-w-md rounded-t-3xl shadow-2xl flex flex-col safe-bottom" style="max-height:92vh">' +
         '<div class="px-4 py-3 border-b border-ink-200 flex items-center justify-between gap-2 shrink-0">' +
           '<h3 class="font-bold text-ink-900 inline-flex items-center gap-2"><i data-lucide="sparkles" class="w-5 h-5 text-purple-600"></i> KI-Notiz zum Deal</h3>' +
@@ -23766,7 +23851,7 @@ async function openDealToTicketModal(accountId, dealId) {
     return '<option value="' + escapeAttr(a.id) + '"' + (a.id === accountId ? ' selected' : '') + '>' + escapeHtml(a.name) + '</option>';
   }).join('');
   host.innerHTML =
-    '<div class="fixed inset-0 z-[60] flex items-end justify-center bg-black/50" onclick="if(event.target===this)closeDealToTicketModal()">' +
+    '<div class="fixed inset-0 z-[60] flex items-end sm:items-center justify-center bg-black/50" onclick="if(event.target===this)closeDealToTicketModal()">' +
       '<div class="bg-white w-full max-w-md rounded-t-3xl shadow-2xl flex flex-col safe-bottom" style="max-height:92vh">' +
         '<div class="px-4 py-3 border-b border-ink-200 flex items-center justify-between gap-2 shrink-0">' +
           '<h3 class="font-bold text-ink-900 inline-flex items-center gap-2"><i data-lucide="send" class="w-5 h-5 text-brand-600"></i> Ticket an Mitarbeiter</h3>' +
@@ -23987,7 +24072,7 @@ async function openDealEmailModal(accountId, dealId) {
     // Wir lassen das modal trotzdem auf — User kann Empfänger eingeben
   }
   host.innerHTML =
-    '<div class="fixed inset-0 z-[60] flex items-end justify-center bg-black/50">' +
+    '<div class="fixed inset-0 z-[60] flex items-end sm:items-center justify-center bg-black/50">' +
       '<div class="bg-white w-full max-w-md rounded-t-3xl shadow-2xl p-8 text-center safe-bottom">' +
         '<div class="spinner inline-block w-7 h-7 border-[3px] text-orange-500"></div>' +
         '<p class="text-sm text-ink-500 mt-2">Lade Vorlagen + Email-Adressen…</p>' +
@@ -24002,7 +24087,7 @@ async function openDealEmailModal(accountId, dealId) {
     const responses = cannedData?.responses || [];
     if (!configs.length) {
       host.innerHTML =
-        '<div class="fixed inset-0 z-[60] flex items-end justify-center bg-black/50">' +
+        '<div class="fixed inset-0 z-[60] flex items-end sm:items-center justify-center bg-black/50">' +
           '<div class="bg-white w-full max-w-md rounded-t-3xl shadow-2xl p-6 safe-bottom">' +
             '<h3 class="font-bold mb-2 text-ink-900">Keine Absender-Adressen</h3>' +
             '<p class="text-sm text-ink-600 mb-4">Es konnten keine Email-Configs aus Freshdesk geladen werden. Prüfe ob mind. eine Support-Email-Adresse im Account aktiv ist.</p>' +
@@ -24036,7 +24121,7 @@ function _renderDealEmailModal(accountId, dealId, deal, contact, responses, conf
     return '<option value="' + c.id + '"' + (c.id === primaryCfg?.id ? ' selected' : '') + '>' + escapeHtml(label) + '</option>';
   }).join('');
   host.innerHTML =
-    '<div class="fixed inset-0 z-[60] flex items-end justify-center bg-black/50" onclick="if(event.target===this)closeDealEmailModal()">' +
+    '<div class="fixed inset-0 z-[60] flex items-end sm:items-center justify-center bg-black/50" onclick="if(event.target===this)closeDealEmailModal()">' +
       '<div class="bg-white w-full max-w-md rounded-t-3xl shadow-2xl flex flex-col safe-bottom" style="max-height:94vh">' +
         '<div class="safe-top px-4 py-3 border-b border-ink-200 flex items-center justify-between gap-2 shrink-0">' +
           '<h3 class="font-bold text-ink-900 inline-flex items-center gap-2"><i data-lucide="mail" class="w-5 h-5 text-orange-600"></i> Email-Vorlage senden</h3>' +
@@ -24235,7 +24320,7 @@ async function openTicketEmailModal(accountId, ticketId) {
   let host = document.getElementById('subModalHost');
   if (!host) { host = document.createElement('div'); host.id = 'subModalHost'; document.body.appendChild(host); }
   host.innerHTML =
-    '<div class="fixed inset-0 z-[60] flex items-end justify-center bg-black/50">' +
+    '<div class="fixed inset-0 z-[60] flex items-end sm:items-center justify-center bg-black/50">' +
       '<div class="bg-white w-full max-w-md rounded-t-3xl shadow-2xl p-8 text-center safe-bottom">' +
         '<div class="spinner inline-block w-7 h-7 border-[3px] text-orange-500"></div>' +
         '<p class="text-sm text-ink-500 mt-2">Lade Vorlagen + Ticket-Daten…</p>' +
@@ -24257,7 +24342,7 @@ async function openTicketEmailModal(accountId, ticketId) {
     const responses = cannedData?.responses || [];
     if (!configs.length) {
       host.innerHTML =
-        '<div class="fixed inset-0 z-[60] flex items-end justify-center bg-black/50">' +
+        '<div class="fixed inset-0 z-[60] flex items-end sm:items-center justify-center bg-black/50">' +
           '<div class="bg-white w-full max-w-md rounded-t-3xl shadow-2xl p-6 safe-bottom">' +
             '<h3 class="font-bold mb-2 text-ink-900">Keine Absender-Adressen</h3>' +
             '<p class="text-sm text-ink-600 mb-4">Es konnten keine Email-Configs aus Freshdesk geladen werden.</p>' +
@@ -24310,7 +24395,7 @@ function _renderTicketEmailModal(accountId, ticketId, ticket, responses, configs
     return '<option value="' + c.id + '"' + (c.id === primaryCfg?.id ? ' selected' : '') + '>' + escapeHtml(label) + '</option>';
   }).join('');
   host.innerHTML =
-    '<div class="fixed inset-0 z-[60] flex items-end justify-center bg-black/50" onclick="if(event.target===this)closeTicketEmailModal()">' +
+    '<div class="fixed inset-0 z-[60] flex items-end sm:items-center justify-center bg-black/50" onclick="if(event.target===this)closeTicketEmailModal()">' +
       '<div class="bg-white w-full max-w-md rounded-t-3xl shadow-2xl flex flex-col safe-bottom" style="max-height:94vh">' +
         '<div class="safe-top px-4 py-3 border-b border-ink-200 flex items-center justify-between gap-2 shrink-0">' +
           '<h3 class="font-bold text-ink-900 inline-flex items-center gap-2"><i data-lucide="mail" class="w-5 h-5 text-orange-600"></i> Email-Vorlage senden</h3>' +
@@ -24475,7 +24560,7 @@ async function openRestructureTitleModal(accountId, ticketId) {
   if (!host) { host = document.createElement('div'); host.id = 'subModalHost'; document.body.appendChild(host); }
   const preset = getTitleFormatPreset(accountId);
   host.innerHTML =
-    '<div class="fixed inset-0 z-[60] flex items-end justify-center bg-black/50">' +
+    '<div class="fixed inset-0 z-[60] flex items-end sm:items-center justify-center bg-black/50">' +
       '<div class="bg-white w-full max-w-md rounded-t-3xl shadow-2xl p-8 text-center safe-bottom">' +
         '<div class="spinner inline-block w-7 h-7 border-[3px] text-sky-500"></div>' +
         '<p class="text-sm text-ink-500 mt-2">Lade Ticket-Daten + KI-Analyse…</p>' +
@@ -24562,7 +24647,7 @@ function _renderRestructureTitleModal(accountId, ticketId, ticket, preset, extra
     ? '<p class="text-[11px] text-ink-500">Preset „' + escapeHtml(preset.label) + '" — keine zusätzlichen Felder. Der Titel wird nur als „ANFRAGE ' + ticketId + '" geschrieben.</p>'
     : '<p class="text-[11px] text-ink-500">Preset: <b>' + escapeHtml(preset.label) + '</b></p>';
   host.innerHTML =
-    '<div class="fixed inset-0 z-[60] flex items-end justify-center bg-black/50" onclick="if(event.target===this)closeRestructureTitleModal()">' +
+    '<div class="fixed inset-0 z-[60] flex items-end sm:items-center justify-center bg-black/50" onclick="if(event.target===this)closeRestructureTitleModal()">' +
       '<div class="bg-white w-full max-w-md rounded-t-3xl shadow-2xl flex flex-col safe-bottom" style="max-height:92vh">' +
         '<div class="safe-top px-4 py-3 border-b border-ink-200 flex items-center justify-between gap-2 shrink-0">' +
           '<h3 class="font-bold text-ink-900 inline-flex items-center gap-2"><i data-lucide="text-cursor-input" class="w-5 h-5 text-sky-600"></i> Titel strukturieren</h3>' +
@@ -24707,7 +24792,7 @@ async function openNewEmailAiModal() {
       '</select>'
     : '<input type="hidden" id="newEmailAccount" value="' + escapeAttr(preselect) + '">';
   host.innerHTML =
-    '<div class="fixed inset-0 z-50 flex items-end justify-center bg-black/50" onclick="if(event.target===this)closeNewEmailAiModal()">' +
+    '<div class="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/50" onclick="if(event.target===this)closeNewEmailAiModal()">' +
       '<div class="bg-white w-full max-w-md rounded-t-3xl shadow-2xl flex flex-col safe-bottom" style="max-height:94vh">' +
         '<div class="safe-top px-4 py-3 border-b border-ink-200 flex items-center justify-between gap-2 shrink-0">' +
           '<h3 class="font-bold text-ink-900 inline-flex items-center gap-2"><i data-lucide="pen-line" class="w-5 h-5 text-orange-600"></i> Neue Email schreiben</h3>' +
@@ -27170,7 +27255,7 @@ async function openAngebotsModalForm(accountId, ticketId) {
   const profile = getAngebotsProfile(account);
   document.body.style.overflow = 'hidden';
   host.innerHTML =
-    '<div class="fixed inset-0 z-[60] flex items-end justify-center bg-black/50">' +
+    '<div class="fixed inset-0 z-[60] flex items-end sm:items-center justify-center bg-black/50">' +
       '<div class="bg-white w-full max-w-md rounded-t-3xl shadow-2xl p-8 text-center safe-bottom">' +
         '<div class="spinner inline-block w-7 h-7 border-[3px] text-indigo-500"></div>' +
         '<p class="text-sm text-ink-500 mt-2">Lade Ticket-Daten…</p>' +
@@ -27213,7 +27298,7 @@ function _renderAngebotsKontextModal(accountId, ticketId, ticket, profile, anlag
   const desc = htmlToText(ticket.description_text || ticket.description || '').slice(0, 600);
   const autoAnlass = desc.split('\n').filter(l => l.trim()).slice(0, 4).join(' ').slice(0, 400);
   host.innerHTML =
-    '<div class="fixed inset-0 z-[60] flex items-end justify-center bg-black/50" onclick="if(event.target===this)closeAngebotsModal()">' +
+    '<div class="fixed inset-0 z-[60] flex items-end sm:items-center justify-center bg-black/50" onclick="if(event.target===this)closeAngebotsModal()">' +
       '<div class="bg-white w-full max-w-md rounded-t-3xl shadow-2xl flex flex-col safe-bottom" style="max-height:94vh">' +
         '<div class="safe-top px-4 py-3 border-b border-ink-200 flex items-center justify-between gap-2 shrink-0">' +
           '<h3 class="font-bold text-ink-900 inline-flex items-center gap-2"><i data-lucide="file-text" class="w-5 h-5 text-indigo-600"></i> Angebot erstellen</h3>' +
@@ -28467,8 +28552,8 @@ function _mbAufzugActions() {
       '<button onclick="_mbAufzugActionsClose();angebotSaveDraft(this)" class="w-full py-3 rounded-xl border border-ink-300 active:bg-ink-100 text-ink-700 text-[14px] font-bold inline-flex items-center justify-center gap-2"><i data-lucide="save" class="w-4 h-4"></i> Als Entwurf speichern</button>'
     : '<p class="text-center text-[13px] text-ink-500 py-2">Noch keine Positionen — füge welche über „aus Katalog" oder die KI hinzu.</p>';
   host.innerHTML =
-    '<div class="fixed inset-0 z-[74] flex items-end justify-center bg-black/50" onclick="if(event.target===this)_mbAufzugActionsClose()">' +
-      '<div class="bg-white w-full max-w-lg rounded-t-2xl shadow-2xl safe-bottom">' +
+    '<div class="fixed inset-0 z-[74] flex items-end sm:items-center justify-center bg-black/50" onclick="if(event.target===this)_mbAufzugActionsClose()">' +
+      '<div class="bg-white w-full max-w-lg rounded-t-2xl sm:rounded-2xl shadow-2xl safe-bottom">' +
         '<div class="px-4 py-3 border-b border-ink-200 flex items-center justify-between"><h3 class="font-bold text-ink-900">Angebot</h3><button onclick="_mbAufzugActionsClose()" class="w-9 h-9 rounded-lg hover:bg-ink-100 flex items-center justify-center"><i data-lucide="x" class="w-5 h-5 text-ink-700"></i></button></div>' +
         '<div class="p-4 space-y-2.5">' + planBtns + bkBtn +
           '<button onclick="_mbAufzugActionsClose();angChatPreviewBkPdf(this)" class="w-full py-2.5 rounded-xl text-[13px] font-semibold text-indigo-600 inline-flex items-center justify-center gap-1.5"><i data-lucide="external-link" class="w-4 h-4"></i> PDF in neuem Tab öffnen</button>' +
@@ -28516,8 +28601,8 @@ function _mbEditFlp(i) {
   if (!host) { host = document.createElement('div'); host.id = 'mbEditHost'; document.body.appendChild(host); }
   const fld = (label, id, val, type, extra) => '<div><label class="text-[10px] font-bold text-ink-500 uppercase tracking-wider">' + label + '</label><input id="' + id + '" ' + (type ? ('type="' + type + '" ') : '') + (extra || '') + ' value="' + escapeAttr(val == null ? '' : String(val)) + '" class="w-full px-2 py-2 border border-ink-300 rounded-lg text-sm"></div>';
   host.innerHTML =
-    '<div class="fixed inset-0 z-[74] flex items-end justify-center bg-black/50" onclick="if(event.target===this)_mbEditFlpClose()">' +
-      '<div class="bg-white w-full max-w-lg rounded-t-2xl shadow-2xl flex flex-col safe-bottom" style="max-height:92vh">' +
+    '<div class="fixed inset-0 z-[74] flex items-end sm:items-center justify-center bg-black/50" onclick="if(event.target===this)_mbEditFlpClose()">' +
+      '<div class="bg-white w-full max-w-lg rounded-t-2xl sm:rounded-2xl shadow-2xl flex flex-col safe-bottom" style="max-height:92vh">' +
         '<div class="px-4 py-3 border-b border-ink-200 flex items-center justify-between"><h3 class="font-bold text-ink-900">Position ' + (i + 1) + '</h3><button onclick="_mbEditFlpClose()" class="w-9 h-9 rounded-lg hover:bg-ink-100 flex items-center justify-center"><i data-lucide="x" class="w-5 h-5 text-ink-700"></i></button></div>' +
         '<div class="p-4 space-y-2.5 overflow-y-auto">' +
           fld('Bezeichnung', 'mbf_bez', p.bezeichnung, '', 'placeholder="Artikelname"') +
@@ -28720,7 +28805,7 @@ function _angPosRender() {
   const rows = (s._posEdit || []).map((p, i) => _angPosRowHtml(p, i)).join('');
   host.innerHTML =
     '<div class="fixed inset-0 z-[72] flex items-end sm:items-center justify-center bg-black/50" onclick="if(event.target===this)_angPosClose()">' +
-      '<div class="bg-white w-full max-w-lg sm:rounded-2xl rounded-t-2xl shadow-2xl flex flex-col safe-bottom" style="max-height:92vh">' +
+      '<div class="bg-white w-full max-w-lg sm:rounded-2xl rounded-t-2xl sm:rounded-2xl shadow-2xl flex flex-col safe-bottom" style="max-height:92vh">' +
         '<div class="px-4 py-3 border-b border-ink-200 flex items-center justify-between gap-2">' +
           '<h3 class="font-bold text-ink-900 inline-flex items-center gap-2"><i data-lucide="list" class="w-4 h-4 text-indigo-600"></i> Positionen bearbeiten</h3>' +
           '<button onclick="_angPosClose()" class="w-9 h-9 rounded-lg hover:bg-ink-100 flex items-center justify-center"><i data-lucide="x" class="w-5 h-5 text-ink-700"></i></button>' +
@@ -28784,7 +28869,7 @@ function openAngStammdatenEditor() {
   if (!host) { host = document.createElement('div'); host.id = 'subModalHost2'; document.body.appendChild(host); }
   host.innerHTML =
     '<div class="fixed inset-0 z-[70] flex items-end sm:items-center justify-center bg-black/50" onclick="if(event.target===this)closeAngStammdatenEditor()">' +
-      '<div class="bg-white w-full max-w-lg sm:rounded-2xl rounded-t-2xl shadow-2xl flex flex-col safe-bottom" style="max-height:90vh">' +
+      '<div class="bg-white w-full max-w-lg sm:rounded-2xl rounded-t-2xl sm:rounded-2xl shadow-2xl flex flex-col safe-bottom" style="max-height:90vh">' +
         '<div class="px-4 py-3 border-b border-ink-200 flex items-center justify-between gap-2">' +
           '<h3 class="font-bold text-ink-900 inline-flex items-center gap-2"><i data-lucide="user-circle" class="w-4 h-4 text-indigo-600"></i> Stammdaten bearbeiten</h3>' +
           '<button onclick="closeAngStammdatenEditor()" class="w-9 h-9 rounded-lg hover:bg-ink-100 flex items-center justify-center"><i data-lucide="x" class="w-5 h-5 text-ink-700"></i></button>' +
@@ -29063,7 +29148,7 @@ async function openErpAnlagePicker(firmaSlug, prefillQuery, triggerBtn) {
   if (!host) { host = document.createElement('div'); host.id = 'subModalHost3'; document.body.appendChild(host); }
   host.innerHTML =
     '<div class="fixed inset-0 z-[80] flex items-end sm:items-center justify-center bg-black/50" onclick="if(event.target===this)closeErpAnlagePicker()">' +
-      '<div class="bg-white w-full max-w-xl sm:rounded-2xl rounded-t-2xl shadow-2xl flex flex-col safe-bottom" style="max-height:88vh">' +
+      '<div class="bg-white w-full max-w-xl sm:rounded-2xl rounded-t-2xl sm:rounded-2xl shadow-2xl flex flex-col safe-bottom" style="max-height:88vh">' +
         '<div class="px-4 py-3 border-b border-ink-200 flex items-center justify-between gap-2 shrink-0">' +
           '<h3 class="font-bold text-ink-900 inline-flex items-center gap-2"><i data-lucide="database" class="w-4 h-4 text-emerald-600"></i> Anlage aus ERP wählen</h3>' +
           '<button onclick="closeErpAnlagePicker()" class="w-9 h-9 rounded-lg hover:bg-ink-100 flex items-center justify-center"><i data-lucide="x" class="w-5 h-5 text-ink-700"></i></button>' +
@@ -29350,7 +29435,7 @@ function openErpAnlageCreate(prefillFabrik) {
   if (!host) { host = document.createElement('div'); host.id = 'subModalHost4'; document.body.appendChild(host); }
   host.innerHTML =
     '<div class="fixed inset-0 z-[90] flex items-end sm:items-center justify-center bg-black/50" onclick="if(event.target===this)closeErpAnlageCreate()">' +
-      '<div class="bg-white w-full max-w-xl sm:rounded-2xl rounded-t-2xl shadow-2xl flex flex-col safe-bottom" style="max-height:92vh">' +
+      '<div class="bg-white w-full max-w-xl sm:rounded-2xl rounded-t-2xl sm:rounded-2xl shadow-2xl flex flex-col safe-bottom" style="max-height:92vh">' +
         '<div class="px-4 py-3 border-b border-ink-200 flex items-center justify-between gap-2 shrink-0">' +
           '<h3 class="font-bold text-ink-900 inline-flex items-center gap-2"><i data-lucide="plus-circle" class="w-4 h-4 text-emerald-600"></i> Anlage im ERP anlegen</h3>' +
           '<button onclick="closeErpAnlageCreate()" class="w-9 h-9 rounded-lg hover:bg-ink-100 flex items-center justify-center"><i data-lucide="x" class="w-5 h-5 text-ink-700"></i></button>' +
@@ -31008,7 +31093,7 @@ async function angChatExecuteFinal(btn) {
   if (!host) { host = document.createElement('div'); host.id = 'subModalHost2'; document.body.appendChild(host); }
   host.innerHTML =
     '<div class="fixed inset-0 z-[70] flex items-end sm:items-center justify-center bg-black/50" onclick="if(event.target===this)closeAngSendPreview()">' +
-      '<div class="bg-white w-full max-w-xl sm:rounded-2xl rounded-t-2xl shadow-2xl flex flex-col safe-bottom" style="max-height:90vh">' +
+      '<div class="bg-white w-full max-w-xl sm:rounded-2xl rounded-t-2xl sm:rounded-2xl shadow-2xl flex flex-col safe-bottom" style="max-height:90vh">' +
         '<div class="px-4 py-3 border-b border-ink-200 flex items-center justify-between gap-2 shrink-0">' +
           '<h3 class="font-bold text-ink-900 inline-flex items-center gap-2"><i data-lucide="send" class="w-4 h-4 text-indigo-600"></i> Angebot senden — Vorschau</h3>' +
           '<button onclick="closeAngSendPreview()" class="w-9 h-9 rounded-lg hover:bg-ink-100 flex items-center justify-center"><i data-lucide="x" class="w-5 h-5 text-ink-700"></i></button>' +
@@ -31851,7 +31936,7 @@ function _stnOpenSend() {
   const stdText = 'anbei erhalten Sie unsere Stellungnahme zum Vorgang „' + (s.result.betreff || s.ticket.subject || '') + '“ als PDF-Datei.\n\nFür Rückfragen stehen wir Ihnen gerne zur Verfügung.';
   host.innerHTML =
     '<div class="fixed inset-0 z-[75] flex items-end sm:items-center justify-center bg-black/50" onclick="if(event.target===this)_stnCloseSend()">' +
-      '<div class="bg-white w-full max-w-lg sm:rounded-2xl rounded-t-2xl shadow-2xl flex flex-col safe-bottom" style="max-height:92vh">' +
+      '<div class="bg-white w-full max-w-lg sm:rounded-2xl rounded-t-2xl sm:rounded-2xl shadow-2xl flex flex-col safe-bottom" style="max-height:92vh">' +
         '<div class="px-4 py-3 border-b border-ink-200 flex items-center justify-between gap-2">' +
           '<h3 class="font-bold text-ink-900 inline-flex items-center gap-2"><i data-lucide="send" class="w-4 h-4 text-brand-600"></i> Als Antwort senden</h3>' +
           '<button onclick="_stnCloseSend()" class="w-9 h-9 rounded-lg hover:bg-ink-100 flex items-center justify-center"><i data-lucide="x" class="w-5 h-5 text-ink-700"></i></button>' +
@@ -32199,7 +32284,7 @@ function _renderAngebotsVorschauModal(ctx) {
   plan.konditionen = k;
   if (typeof plan.mwst_satz !== 'number') plan.mwst_satz = profile.default_mwst || 19;
   host.innerHTML =
-    '<div class="fixed inset-0 z-[60] flex items-end justify-center bg-black/50">' +
+    '<div class="fixed inset-0 z-[60] flex items-end sm:items-center justify-center bg-black/50">' +
       '<div class="bg-white w-full max-w-2xl rounded-t-3xl shadow-2xl flex flex-col safe-bottom" style="max-height:96vh">' +
         '<div class="safe-top px-4 py-3 border-b border-ink-200 flex items-center justify-between gap-2 shrink-0">' +
           '<h3 class="font-bold text-ink-900 inline-flex items-center gap-2"><i data-lucide="file-text" class="w-5 h-5 text-indigo-600"></i> Angebot ' + escapeHtml(angebotsnr) + '</h3>' +
@@ -32907,7 +32992,7 @@ function openAngebotsLernUploadModal(accountId) {
   if (!host) { host = document.createElement('div'); host.id = 'subModalHost'; document.body.appendChild(host); }
   document.body.style.overflow = 'hidden';
   host.innerHTML =
-    '<div class="fixed inset-0 z-[60] flex items-end justify-center bg-black/50" onclick="if(event.target===this)closeAngebotsLernUploadModal()">' +
+    '<div class="fixed inset-0 z-[60] flex items-end sm:items-center justify-center bg-black/50" onclick="if(event.target===this)closeAngebotsLernUploadModal()">' +
       '<div class="bg-white w-full max-w-md rounded-t-3xl shadow-2xl flex flex-col safe-bottom" style="max-height:92vh">' +
         '<div class="safe-top px-4 py-3 border-b border-ink-200 flex items-center justify-between gap-2 shrink-0">' +
           '<h3 class="font-bold text-ink-900 inline-flex items-center gap-2"><i data-lucide="upload-cloud" class="w-5 h-5 text-indigo-600"></i> KI-Lernmaterial hinzufügen</h3>' +
@@ -36105,7 +36190,7 @@ function _rtOpenEditor(recordId) {
   if (!host) { host = document.createElement('div'); host.id = 'subModalHost'; document.body.appendChild(host); }
   host.innerHTML =
     '<div class="fixed inset-0 z-[60] flex items-end sm:items-center justify-center bg-black/40" onclick="if(event.target===this)_rtCloseEditor()">' +
-      '<div class="bg-white w-full max-w-2xl sm:rounded-2xl rounded-t-2xl shadow-2xl flex flex-col safe-bottom" style="max-height:92vh">' +
+      '<div class="bg-white w-full max-w-2xl sm:rounded-2xl rounded-t-2xl sm:rounded-2xl shadow-2xl flex flex-col safe-bottom" style="max-height:92vh">' +
         '<div class="px-4 py-3 border-b border-ink-200 flex items-center justify-between gap-2">' +
           '<h3 class="font-bold text-ink-900 inline-flex items-center gap-2"><i data-lucide="clipboard-list" class="w-4 h-4 text-rose-600"></i> ' + (t ? 'Vorlage bearbeiten' : 'Neue Vorlage') + '</h3>' +
           '<button onclick="_rtCloseEditor()" class="w-9 h-9 rounded-lg hover:bg-ink-100 flex items-center justify-center"><i data-lucide="x" class="w-5 h-5 text-ink-700"></i></button>' +
@@ -36213,7 +36298,7 @@ async function openReplyTemplatePicker(stepIdx, accountId) {
   if (!host) { host = document.createElement('div'); host.id = 'subModalHost'; document.body.appendChild(host); }
   host.innerHTML =
     '<div class="fixed inset-0 z-[70] flex items-end sm:items-center justify-center bg-black/40" onclick="if(event.target===this)closeReplyTemplatePicker()">' +
-      '<div class="bg-white w-full max-w-lg sm:rounded-2xl rounded-t-2xl shadow-2xl flex flex-col safe-bottom" style="max-height:80vh">' +
+      '<div class="bg-white w-full max-w-lg sm:rounded-2xl rounded-t-2xl sm:rounded-2xl shadow-2xl flex flex-col safe-bottom" style="max-height:80vh">' +
         '<div class="px-4 py-3 border-b border-ink-200 flex items-center justify-between gap-2">' +
           '<h3 class="font-bold text-ink-900 inline-flex items-center gap-2"><i data-lucide="clipboard-list" class="w-4 h-4 text-rose-600"></i> Vorlage wählen</h3>' +
           '<button onclick="closeReplyTemplatePicker()" class="w-9 h-9 rounded-lg hover:bg-ink-100 flex items-center justify-center"><i data-lucide="x" class="w-5 h-5 text-ink-700"></i></button>' +
@@ -36754,7 +36839,7 @@ function _renderPhoneCallModal() {
   let host = document.getElementById('subModalHost');
   if (!host) { host = document.createElement('div'); host.id = 'subModalHost'; document.body.appendChild(host); }
   host.innerHTML =
-    '<div class="fixed inset-0 z-[70] flex items-end justify-center bg-black/60" onclick="if(event.target===this)_closePhoneCallModal()">' +
+    '<div class="fixed inset-0 z-[70] flex items-end sm:items-center justify-center bg-black/60" onclick="if(event.target===this)_closePhoneCallModal()">' +
       '<div class="bg-white w-full max-w-2xl rounded-t-3xl shadow-2xl flex flex-col safe-bottom" style="max-height:96vh">' +
         '<div class="safe-top px-4 py-3 border-b border-ink-200 flex items-center justify-between gap-2 shrink-0">' +
           '<div class="min-w-0">' +
@@ -37118,7 +37203,7 @@ async function _openSaveSearchModal() {
     return '<option value="' + escapeAttr(t.recordId) + '">' + escapeHtml(label) + '</option>';
   }).join('');
   host.innerHTML =
-    '<div class="fixed inset-0 z-[70] flex items-end justify-center bg-black/60" onclick="if(event.target===this)_closeSaveSearchModal()">' +
+    '<div class="fixed inset-0 z-[70] flex items-end sm:items-center justify-center bg-black/60" onclick="if(event.target===this)_closeSaveSearchModal()">' +
       '<div class="bg-white w-full max-w-md rounded-t-3xl shadow-2xl flex flex-col safe-bottom" style="max-height:90vh">' +
         '<div class="safe-top px-4 py-3 border-b border-ink-200 flex items-center justify-between gap-2 shrink-0">' +
           '<h3 class="font-bold text-ink-900 inline-flex items-center gap-2"><i data-lucide="bookmark-plus" class="w-5 h-5 text-amber-600"></i> Suche speichern</h3>' +
@@ -37254,7 +37339,7 @@ async function _openPhoneScriptEditor(recordId) {
   let host = document.getElementById('subModalHost');
   if (!host) { host = document.createElement('div'); host.id = 'subModalHost'; document.body.appendChild(host); }
   host.innerHTML =
-    '<div class="fixed inset-0 z-[70] flex items-end justify-center bg-black/60" onclick="if(event.target===this)_closePhsEditor()">' +
+    '<div class="fixed inset-0 z-[70] flex items-end sm:items-center justify-center bg-black/60" onclick="if(event.target===this)_closePhsEditor()">' +
       '<div class="bg-white w-full max-w-2xl rounded-t-3xl shadow-2xl flex flex-col safe-bottom" style="max-height:94vh">' +
         '<div class="safe-top px-4 py-3 border-b border-ink-200 flex items-center justify-between gap-2 shrink-0">' +
           '<h3 class="font-bold text-ink-900 inline-flex items-center gap-2"><i data-lucide="phone-outgoing" class="w-5 h-5 text-purple-600"></i> ' + (recordId ? 'Vorlage bearbeiten' : 'Neue Vorlage anlegen') + '</h3>' +
@@ -37639,7 +37724,7 @@ async function _openAttachmentPicker(accountId, alreadyPickedRecordIds, onPicked
   let host = document.getElementById('attPickerHost');
   if (!host) { host = document.createElement('div'); host.id = 'attPickerHost'; document.body.appendChild(host); }
   host.innerHTML =
-    '<div class="fixed inset-0 z-[80] flex items-end justify-center bg-black/60" onclick="if(event.target===this)_closeAttPicker()">' +
+    '<div class="fixed inset-0 z-[80] flex items-end sm:items-center justify-center bg-black/60" onclick="if(event.target===this)_closeAttPicker()">' +
       '<div class="bg-white w-full max-w-lg rounded-t-3xl shadow-2xl flex flex-col safe-bottom" style="max-height:90vh">' +
         '<div class="safe-top px-4 py-3 border-b border-ink-200 flex items-center justify-between gap-2 shrink-0">' +
           '<h3 class="font-bold text-ink-900 inline-flex items-center gap-2"><i data-lucide="paperclip" class="w-5 h-5 text-orange-600"></i> Aus Bibliothek wählen</h3>' +
@@ -40271,7 +40356,7 @@ async function _openSaveToListModal() {
   let host = document.getElementById('subModalHost');
   if (!host) { host = document.createElement('div'); host.id = 'subModalHost'; document.body.appendChild(host); }
   host.innerHTML =
-    '<div class="fixed inset-0 z-[70] flex items-end justify-center bg-black/60" onclick="if(event.target===this)_closeSaveToListModal()">' +
+    '<div class="fixed inset-0 z-[70] flex items-end sm:items-center justify-center bg-black/60" onclick="if(event.target===this)_closeSaveToListModal()">' +
       '<div class="bg-white w-full max-w-md rounded-t-3xl shadow-2xl flex flex-col safe-bottom" style="max-height:90vh">' +
         '<div class="safe-top px-4 py-3 border-b border-ink-200 flex items-center justify-between gap-2 shrink-0">' +
           '<h3 class="font-bold text-ink-900 inline-flex items-center gap-2"><i data-lucide="bookmark-plus" class="w-5 h-5 text-orange-600"></i> Als Liste speichern</h3>' +
@@ -40630,7 +40715,7 @@ async function _openBulkMarketing() {
   let host = document.getElementById('subModalHost');
   if (!host) { host = document.createElement('div'); host.id = 'subModalHost'; document.body.appendChild(host); }
   host.innerHTML =
-    '<div class="fixed inset-0 z-[70] flex items-end justify-center bg-black/60">' +
+    '<div class="fixed inset-0 z-[70] flex items-end sm:items-center justify-center bg-black/60">' +
       '<div class="bg-white w-full max-w-lg rounded-t-3xl shadow-2xl p-8 text-center safe-bottom">' +
         '<div class="spinner inline-block w-7 h-7 border-[3px] text-orange-500"></div>' +
         '<p class="text-sm text-ink-500 mt-2">Lade Vorlagen + Absender…</p>' +
@@ -40682,7 +40767,7 @@ function _renderBulkMarketingModal() {
     return '<option value="' + c.id + '"' + (c.id === primaryCfg?.id ? ' selected' : '') + '>' + escapeHtml(label) + '</option>';
   }).join('');
   host.innerHTML =
-    '<div class="fixed inset-0 z-[70] flex items-end justify-center bg-black/60" onclick="if(event.target===this)_bulkClose()">' +
+    '<div class="fixed inset-0 z-[70] flex items-end sm:items-center justify-center bg-black/60" onclick="if(event.target===this)_bulkClose()">' +
       '<div class="bg-white w-full max-w-2xl rounded-t-3xl shadow-2xl flex flex-col safe-bottom" style="max-height:94vh">' +
         '<div class="safe-top px-4 py-3 border-b border-ink-200 flex items-center justify-between gap-2 shrink-0">' +
           '<h3 class="font-bold text-ink-900 inline-flex items-center gap-2"><i data-lucide="megaphone" class="w-5 h-5 text-orange-600"></i> Massenversand · ' + ctx.contacts.length + ' Empfänger · ' + escapeHtml(acc?.name || ctx.accountId) + '</h3>' +
