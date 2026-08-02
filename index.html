@@ -802,7 +802,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.50.12';
+const APP_VERSION = 'v2.51.0';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -16425,6 +16425,29 @@ function fmtFileSize(bytes) {
   return (bytes / 1024 / 1024).toFixed(1) + ' MB';
 }
 
+/* v2.51.0: Anhänge je Ticket ausblendbar — die Ticket-Vorbereitung (KI) markiert
+   in einer privaten Notiz, welche Anhänge zu ANDEREN Anlagen gehören:
+   [FDH:ANHAENGE-AUSBLENDEN] datei1.pdf | datei2.jpg
+   Die Dateien bleiben am Ticket (nichts wird gelöscht), sie rutschen nur in
+   einen Aufklapper. Groß-/Kleinschreibung egal. */
+function _fdhVersteckteAnhaenge(ticket) {
+  const namen = new Set();
+  try {
+    (ticket.conversations || []).forEach(c => {
+      if (!c.private) return;
+      const txt = htmlToText(c.body_text || c.body || '');
+      txt.split('\n').forEach(z => {
+        const i = z.indexOf('[FDH:ANHAENGE-AUSBLENDEN]');
+        if (i < 0) return;
+        z.slice(i + '[FDH:ANHAENGE-AUSBLENDEN]'.length).split('|')
+          .map(s => s.trim()).filter(Boolean)
+          .forEach(n => namen.add(n.toLowerCase()));
+      });
+    });
+  } catch (_) {}
+  return namen;
+}
+
 function renderSummaryBody(ticket, summary) {
   const req = ticket.requester || {};
   const contact = SUMMARY_CTX?.contact || null;
@@ -16543,17 +16566,25 @@ function renderSummaryBody(ticket, summary) {
 
       <!-- Anhänge -->
       ${attachments.length ? (() => {
-        const imageCount = attachments.filter(_isImageAttachment).length;
+        const versteckt = _fdhVersteckteAnhaenge(ticket);
+        const sichtbar = attachments.filter(a => !versteckt.has(String(a.name || '').toLowerCase()));
+        const verborgen = attachments.filter(a => versteckt.has(String(a.name || '').toLowerCase()));
+        const imageCount = sichtbar.filter(_isImageAttachment).length;
         return `
           <div class="bg-white border border-ink-200 rounded-2xl p-4">
             <div class="flex items-center gap-2 mb-3">
               <i data-lucide="paperclip" class="w-4 h-4 text-ink-700"></i>
-              <h3 class="font-semibold text-ink-900 text-sm">Anhänge (${attachments.length})</h3>
+              <h3 class="font-semibold text-ink-900 text-sm">Anhänge (${sichtbar.length}${verborgen.length ? ' + ' + verborgen.length + ' ausgeblendet' : ''})</h3>
               <span class="ml-auto text-[10px] text-ink-400">${imageCount ? imageCount + ' Bild' + (imageCount === 1 ? '' : 'er') + ' · tippen für Vorschau' : 'tippen zum Öffnen'}</span>
             </div>
             <div class="space-y-1.5">
-              ${attachments.map(a => _renderAttachmentItem(a)).join('')}
+              ${sichtbar.map(a => _renderAttachmentItem(a)).join('')}
             </div>
+            ${verborgen.length ? `
+              <details class="mt-2">
+                <summary class="text-[11px] text-ink-400 cursor-pointer select-none">🙈 ${verborgen.length} ${verborgen.length === 1 ? 'Anhang' : 'Anhänge'} ausgeblendet (andere Anlage) — anzeigen</summary>
+                <div class="space-y-1.5 mt-2 opacity-60">${verborgen.map(a => _renderAttachmentItem(a)).join('')}</div>
+              </details>` : ''}
           </div>`;
       })() : ''}
 
