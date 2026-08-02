@@ -802,7 +802,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.55.0';
+const APP_VERSION = 'v2.56.0';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -4461,6 +4461,9 @@ function buildSearchQuery(filters, opts = {}) {
   if (!opts.skipAccountSpecific) {
     if (filters.groupId) parts.push('group_id:' + filters.groupId);
     if (filters.responderId === 'unassigned') parts.push('agent_id:null');
+    else if (typeof filters.responderId === 'string' && filters.responderId.startsWith('ki:')) {
+      parts.push("tag:'" + _fdhKiTag(filters.responderId.slice(3)).replace(/'/g, "") + "'");
+    }
     else if (filters.responderId) parts.push('agent_id:' + filters.responderId);
   }
   if (filters.type) parts.push("type:'" + String(filters.type).replace(/'/g, "\\'") + "'");
@@ -4541,6 +4544,9 @@ async function fetchTicketsForAccount(accountId, opts = {}) {
     }
     if (filters && filters.responderId === 'unassigned') {
       list = list.filter(t => !t.responder_id);
+    } else if (filters && typeof filters.responderId === 'string' && filters.responderId.startsWith('ki:')) {
+      const kiTag = _fdhKiTag(filters.responderId.slice(3));
+      list = list.filter(t => Array.isArray(t.tags) && t.tags.includes(kiTag));
     } else if (filters && filters.responderId) {
       list = list.filter(t => t.responder_id === filters.responderId);
     }
@@ -8611,6 +8617,7 @@ async function renderTicketsPage() {
             const groupLabel = f.groupId ? (getGroupName(acc, f.groupId) || ('#' + f.groupId)) : 'alle';
             html += chip(!!f.groupId, 'Gruppe', groupLabel, "openFilterGroup()");
             const respLabel = f.responderId === 'unassigned' ? 'unzugewiesen'
+              : (typeof f.responderId === 'string' && f.responderId.startsWith('ki:')) ? ('\u{1F916} ' + f.responderId.slice(3))
               : (f.responderId ? (getAgentName(acc, f.responderId) || ('#' + f.responderId)) : 'alle');
             html += chip(!!f.responderId, 'Wer', respLabel, "openFilterAssignee()");
           }
@@ -8948,9 +8955,15 @@ function openFilterAssignee() {
   const acc = APP_STATE.currentAccount;
   if (acc === 'all') return;
   const cache = APP_STATE.agentsCache?.[acc] || { agents: [] };
+  const kis = (APP_STATE.kiUsers || []).filter(k => k.vonByAccount && k.vonByAccount[acc]);
   openFilterPicker('Zuweisung filtern', 'responderId', [
     { value: null, label: 'alle', icon: 'list' },
     { value: 'unassigned', label: 'unzugewiesen', icon: 'user-x' },
+    ...kis.map(k => ({
+      value: 'ki:' + k.name,
+      label: ((k.role || '').toLowerCase() === 'ki' ? '\u{1F916} ' : '\u{1F464} ') + k.name,
+      icon: 'bot', sub: 'ohne eigene Freshdesk-Lizenz'
+    })),
     ...cache.agents.slice().sort((a, b) => a.name.localeCompare(b.name, 'de')).map(a => ({
       value: a.id, label: a.name, icon: 'user', sub: a.email || ''
     })),
@@ -9106,43 +9119,87 @@ async function cardChangeStatus(sel) {
   const lbl = (FD_STATUS[v] || {}).label || ('Status ' + v);
   await _cardSetField(sel, 'status', v, 'Status: ' + lbl, 'Status');
 }
+/* Tag-Helfer: KI:<Name> im Tag-Array ersetzt/entfernt — das Tag steckt in den
+   Listendaten und macht die KI-Zuweisung auf Karten sichtbar und filterbar. */
+function _fdhKiTag(name) { return ('KI:' + String(name || '')).slice(0, 32); }
+function _fdhTagsOhneKi(tags) { return (tags || []).filter(t => !String(t).startsWith('KI:')); }
+function _fdhKiAusTags(tags) {
+  const t = (tags || []).find(x => String(x).startsWith('KI:'));
+  return t ? String(t).slice(3) : null;
+}
+function _fdhKiIconFuer(name) {
+  const u = (APP_STATE.kiUsers || []).find(k => k.name === name);
+  return u && (u.role || '').toLowerCase() !== 'ki' ? '\u{1F464}' : '\u{1F916}';
+}
+function _fdhTicketAusCache(accountId, ticketId) {
+  const liste = APP_STATE.pageState?.tickets || [];
+  return liste.find(t => t.id === ticketId && t._accountId === accountId) ||
+    (CURRENT_TICKET && CURRENT_TICKET.id === ticketId ? CURRENT_TICKET : null);
+}
+
+/* Zentrale KI-Zuweisung: Freshdesk bekommt den Master als Bearbeiter, die
+   Wahrheit steht als Tag KI:<Name> + Marker-Notiz im Ticket (Betreiber 02.08.).
+   Wird vom Detail-Dropdown UND vom Zuweisen-Modal gerufen. */
+async function _fdhKiZuweisen(accountId, ticketId, kiKey) {
+  await _fdhKiUsersLaden().catch(() => {});
+  const ki = (APP_STATE.kiUsers || []).find(k => k.api_key === kiKey);
+  if (!ki) { toast('KI-Mitarbeiter nicht gefunden — Benutzerliste neu laden.', 'error'); return false; }
+  const masterKey = ki.vonByAccount?.[accountId] || '';
+  const masterName = (APP_STATE.heroUserNames || {})[masterKey] || '';
+  const cache = APP_STATE.agentsCache?.[accountId];
+  const fdMaster = masterName ? (cache?.agents || []).find(a =>
+    String(a.name || '').toLowerCase() === masterName.toLowerCase()) : null;
+  try {
+    let alteTags = _fdhTicketAusCache(accountId, ticketId)?.tags;
+    if (!Array.isArray(alteTags)) {
+      try { const voll = await proxyJson('/freshdesk/' + encodeURIComponent(accountId) + '/api/v2/tickets/' + ticketId); alteTags = voll?.tags || []; }
+      catch (_) { alteTags = []; }
+    }
+    const tags = _fdhTagsOhneKi(alteTags).concat([_fdhKiTag(ki.name)]);
+    const body = { tags };
+    if (fdMaster) body.responder_id = fdMaster.id;
+    await proxyJson('/freshdesk/' + encodeURIComponent(accountId) + '/api/v2/tickets/' + ticketId, {
+      method: 'PUT', body: JSON.stringify(body) });
+    patchTicketInList(accountId, ticketId, { ...(fdMaster ? { responder_id: fdMaster.id } : {}), tags });
+    if (CURRENT_TICKET && CURRENT_TICKET.id === ticketId) CURRENT_TICKET.tags = tags;
+    const kiIcon = (ki.role || '').toLowerCase() === 'ki' ? '\u{1F916}' : '\u{1F464}';
+    const notiz = kiIcon + ' Zugewiesen an ' + ki.name + (masterName ? ' (arbeitet \u00fcber ' + masterName + ')' : '') + '.\n[FDH:ZUGEWIESEN] ' + ki.name;
+    await proxyJson('/freshdesk/' + encodeURIComponent(accountId) + '/api/v2/tickets/' + ticketId + '/notes', {
+      method: 'POST', body: JSON.stringify({ body: textToHtmlForFreshdesk(notiz), private: true }) });
+    if (CURRENT_TICKET && CURRENT_TICKET.id === ticketId) {
+      CURRENT_TICKET.conversations = CURRENT_TICKET.conversations || [];
+      CURRENT_TICKET.conversations.push({ private: true, body_text: notiz, created_at: new Date().toISOString() });
+    }
+    toast(kiIcon + ' Zugewiesen an ' + ki.name + (fdMaster ? ' \u00b7 Freshdesk: ' + masterName : ' (Freshdesk-Master nicht gefunden \u2014 nur Hero-Zuweisung)'), 'success', 5000);
+    setRegelStopp(accountId, ticketId, 'manual_assign').catch(() => {});
+    return true;
+  } catch (e) {
+    toast('Zuweisung fehlgeschlagen: ' + e.message, 'error', 6000);
+    return false;
+  }
+}
+
 async function cardChangeAssignee(sel) {
   const accountId = sel.dataset.accountId;
   if (sel.value && sel.value.startsWith('ki:')) {
-    // Virtueller Benutzer: Freshdesk bekommt den Master als Bearbeiter, die
-    // Wahrheit steht als Marker-Notiz im Ticket (Entscheidung Betreiber 02.08.).
-    const kiKey = sel.value.slice(3);
-    const ticketId = parseInt(sel.dataset.ticketId, 10);
-    await _fdhKiUsersLaden().catch(() => {});
-    const ki = (APP_STATE.kiUsers || []).find(k => k.api_key === kiKey);
-    if (!ki) return toast('KI-Mitarbeiter nicht gefunden — Benutzerliste neu laden.', 'error');
-    const masterKey = ki.vonByAccount?.[accountId] || '';
-    const masterName = (APP_STATE.heroUserNames || {})[masterKey] || '';
-    const cache = APP_STATE.agentsCache?.[accountId];
-    const fdMaster = masterName ? (cache?.agents || []).find(a =>
-      String(a.name || '').toLowerCase() === masterName.toLowerCase()) : null;
-    try {
-      if (fdMaster) {
-        await proxyJson('/freshdesk/' + encodeURIComponent(accountId) + '/api/v2/tickets/' + ticketId, {
-          method: 'PUT', body: JSON.stringify({ responder_id: fdMaster.id }) });
-        patchTicketInList(accountId, ticketId, { responder_id: fdMaster.id });
-      }
-      const kiIcon = (ki.role || '').toLowerCase() === 'ki' ? '\u{1F916}' : '\u{1F464}';
-      const notiz = kiIcon + ' Zugewiesen an ' + ki.name + (masterName ? ' (arbeitet \u00fcber ' + masterName + ')' : '') + '.\n[FDH:ZUGEWIESEN] ' + ki.name;
-      await proxyJson('/freshdesk/' + encodeURIComponent(accountId) + '/api/v2/tickets/' + ticketId + '/notes', {
-        method: 'POST', body: JSON.stringify({ body: textToHtmlForFreshdesk(notiz), private: true }) });
-      if (CURRENT_TICKET && CURRENT_TICKET.id === ticketId) {
-        CURRENT_TICKET.conversations = CURRENT_TICKET.conversations || [];
-        CURRENT_TICKET.conversations.push({ private: true, body_text: notiz, created_at: new Date().toISOString() });
-      }
-      toast(kiIcon + ' Zugewiesen an ' + ki.name + (fdMaster ? ' \u00b7 Freshdesk: ' + masterName : ' (Freshdesk-Master nicht gefunden \u2014 nur Hero-Zuweisung)'), 'success', 5000);
-      if (ticketId) setRegelStopp(accountId, ticketId, 'manual_assign').catch(() => {});
-    } catch (e) {
-      toast('Zuweisung fehlgeschlagen: ' + e.message, 'error', 6000);
-    }
+    const ok = await _fdhKiZuweisen(accountId, parseInt(sel.dataset.ticketId, 10), sel.value.slice(3));
+    if (ok) refreshTicketsListFromCache();
     return;
   }
   const v = sel.value ? parseInt(sel.value, 10) : null;
+  const ticketId = parseInt(sel.dataset.ticketId, 10);
+  // Normale Zuweisung räumt ein eventuelles KI-Tag ab — sonst klebt die
+  // 🤖-Anzeige, obwohl längst ein Mensch übernommen hat.
+  const alte = _fdhTicketAusCache(accountId, ticketId);
+  if (alte && _fdhKiAusTags(alte.tags)) {
+    const tags = _fdhTagsOhneKi(alte.tags);
+    try {
+      await proxyJson('/freshdesk/' + encodeURIComponent(accountId) + '/api/v2/tickets/' + ticketId, {
+        method: 'PUT', body: JSON.stringify({ tags }) });
+      patchTicketInList(accountId, ticketId, { tags });
+      if (CURRENT_TICKET && CURRENT_TICKET.id === ticketId) CURRENT_TICKET.tags = tags;
+    } catch (_) {}
+  }
   const name = v ? (getAgentName(accountId, v) || ('#' + v)) : null;
   await _cardSetField(sel, 'responder_id', v, v ? 'Zugewiesen an ' + name : 'Zuweisung entfernt', 'Zuweisung');
 }
@@ -11913,7 +11970,8 @@ function _renderTicketStackCard(t, isTop) {
   const descTxt = _rawDesc.slice(0, 600);
   // Group + Assignee
   const groupName = getGroupName(accountId, t.group_id) || '';
-  const assigneeName = getAgentFirstName(accountId, t.responder_id) || '';
+  const _kiTagName = _fdhKiAusTags(t.tags);
+  const assigneeName = _kiTagName ? (_fdhKiIconFuer(_kiTagName) + ' ' + _kiTagName) : (getAgentFirstName(accountId, t.responder_id) || '');
   // Account-Info
   const acc = (APP_STATE.accounts || []).find(x => x.id === accountId);
   const accountName = acc ? acc.name : '';
@@ -14121,7 +14179,20 @@ function renderAssigneeList(filter) {
     .filter(a => !f || a.name.toLowerCase().includes(f) || (a.email||'').toLowerCase().includes(f))
     .sort((a, b) => a.name.localeCompare(b.name, 'de'));
 
+  const kiHier = (APP_STATE.kiUsers || []).filter(k => k.vonByAccount && k.vonByAccount[ASSIGNEE_CTX.accountId])
+    .filter(k => !f || (k.name || '').toLowerCase().includes(f));
   $('assigneeList').innerHTML = `
+    ${kiHier.length ? `<p class="px-4 pt-3 pb-1 text-[10px] uppercase tracking-wider font-semibold text-violet-700">Hero-Benutzer (ohne eigene Freshdesk-Lizenz)</p>` : ''}
+    ${kiHier.map(k => `
+      <button onclick="assignKiAndClose('${escapeAttr(k.api_key)}')" class="w-full text-left px-4 py-3 active:bg-ink-50 border-b border-ink-100 flex items-center gap-3">
+        <span class="w-9 h-9 rounded-full bg-gradient-to-br from-violet-400 to-violet-600 flex items-center justify-center shrink-0 text-white text-base">
+          ${(k.role || '').toLowerCase() === 'ki' ? '\u{1F916}' : '\u{1F464}'}
+        </span>
+        <div class="flex-1 min-w-0">
+          <p class="font-medium text-ink-900 text-sm truncate">${escapeHtml(k.name)}</p>
+          <p class="text-[11px] text-ink-500 truncate">arbeitet \u00fcber ${escapeHtml((APP_STATE.heroUserNames || {})[k.vonByAccount[ASSIGNEE_CTX.accountId]] || 'Master')}</p>
+        </div>
+      </button>`).join('')}
     <button onclick="assignAndClose(null)" class="w-full text-left px-4 py-3 active:bg-ink-50 border-b border-ink-100 flex items-center gap-3 ${!currentId ? 'bg-brand-50' : ''}">
       <span class="w-9 h-9 rounded-full bg-amber-100 flex items-center justify-center shrink-0">
         <i data-lucide="user-x" class="w-4 h-4 text-amber-700"></i>
@@ -14224,16 +14295,30 @@ function refreshTicketsListFromCache() {
   renderTicketList(APP_STATE.pageState.tickets);
 }
 
+async function assignKiAndClose(kiKey) {
+  if (!ASSIGNEE_CTX) return;
+  const { accountId, ticketId } = ASSIGNEE_CTX;
+  const list = $('assigneeList');
+  if (list) list.innerHTML = `<div class="text-center py-8 text-sm text-ink-500"><span class="spinner inline-block w-4 h-4 border-[2px] text-brand-500"></span> Weise zu\u2026</div>`;
+  const ok = await _fdhKiZuweisen(accountId, ticketId, kiKey);
+  closeAssigneeModal();
+  if (ok) refreshTicketsListFromCache();
+}
+
 async function assignAndClose(agentId) {
   if (!ASSIGNEE_CTX) return;
   const { accountId, ticketId, fromList } = ASSIGNEE_CTX;
   const list = $('assigneeList');
   if (list) list.innerHTML = `<div class="text-center py-8 text-sm text-ink-500"><span class="spinner inline-block w-4 h-4 border-[2px] text-brand-500"></span> Speichere…</div>`;
   try {
+    const alteZuw = _fdhTicketAusCache(accountId, ticketId);
+    const putBody = { responder_id: agentId };
+    if (alteZuw && _fdhKiAusTags(alteZuw.tags)) putBody.tags = _fdhTagsOhneKi(alteZuw.tags);
     await proxyJson('/freshdesk/' + encodeURIComponent(accountId) + '/api/v2/tickets/' + ticketId, {
       method: 'PUT',
-      body: JSON.stringify({ responder_id: agentId })
+      body: JSON.stringify(putBody)
     });
+    if (putBody.tags) patchTicketInList(accountId, ticketId, { tags: putBody.tags });
     closeAssigneeModal();
     toast(agentId ? 'Zugewiesen an ' + getAgentName(accountId, agentId) + ' · Regeln gestoppt' : 'Zuweisung entfernt', 'success');
     // Lokale Cache-Synchronisation (Detail + Übersicht)
@@ -16573,6 +16658,8 @@ function _fdhKiUsersLaden(erzwingen) {
 /* Letzter [FDH:ZUGEWIESEN]-Marker aus den privaten Notizen — überschreibt die
    Bearbeiter-Anzeige (Freshdesk zeigt den Master, Hero den echten Bearbeiter). */
 function _fdhZugewiesenKI(ticket) {
+  const ausTag = _fdhKiAusTags(ticket && ticket.tags);
+  if (ausTag) return ausTag;
   let name = null;
   try {
     (ticket.conversations || []).forEach(c => {
@@ -21018,7 +21105,8 @@ function _renderTaskTicketCard(t) {
   var accountColor = acc ? acc.color : '#cbd5e1';
   var myAgentId = APP_STATE.currentUserAgentId || null;
   var showAssignee = t.responder_id && t.responder_id !== myAgentId;
-  var assigneeName = getAgentFirstName(accountId, t.responder_id) || '';
+  var _kiTagName = _fdhKiAusTags(t.tags);
+  var assigneeName = _kiTagName ? (_fdhKiIconFuer(_kiTagName) + ' ' + _kiTagName) : (getAgentFirstName(accountId, t.responder_id) || '');
 
   var ticketRef = accountId + '|' + ticketId;
   var repairingNow = TASK_REPAIR_IN_PROGRESS && TASK_REPAIR_IN_PROGRESS.has(ticketRef);
@@ -21165,7 +21253,8 @@ function _renderTaskTicketCardFresh(t) {
   var accountColor = acc ? acc.color : '#cbd5e1';
   var myAgentId = APP_STATE.currentUserAgentId || null;
   var showAssignee = t.responder_id && t.responder_id !== myAgentId;
-  var assigneeName = getAgentFirstName(accountId, t.responder_id) || '';
+  var _kiTagName = _fdhKiAusTags(t.tags);
+  var assigneeName = _kiTagName ? (_fdhKiIconFuer(_kiTagName) + ' ' + _kiTagName) : (getAgentFirstName(accountId, t.responder_id) || '');
 
   var ticketRef = accountId + '|' + ticketId;
   var repairingNow = TASK_REPAIR_IN_PROGRESS && TASK_REPAIR_IN_PROGRESS.has(ticketRef);
