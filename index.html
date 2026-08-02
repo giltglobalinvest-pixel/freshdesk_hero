@@ -802,7 +802,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.54.0';
+const APP_VERSION = 'v2.55.0';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -3974,22 +3974,42 @@ async function loadAccounts() {
   // (KI-Mitarbeiter, Rolle „ki") tragen statt eines eigenen Keys den Verweis
   // VON:<login_key_des_masters> — sie arbeiten unter dessen Freshdesk-Identität,
   // ohne eigene Freshdesk-Lizenz. Die ehrliche Zurechnung führt Hero.
+  const _vonCache = {};
+  const _vonLaden = async (masterKey, accountId) => {
+    const ck = masterKey + '|' + accountId;
+    if (!(ck in _vonCache)) {
+      try {
+        const mf = "AND({user_api_key}='" + escapeFormula(masterKey) + "',{account_id}='" + escapeFormula(accountId) + "')";
+        const mrecs = await airtableRead(ACCESS_TABLE, { filter: mf });
+        _vonCache[ck] = (mrecs && mrecs[0] && mrecs[0].fields) || null;
+      } catch (_) { _vonCache[ck] = null; }
+    }
+    return _vonCache[ck];
+  };
   for (const r of accessRecs) {
-    const raw = String(r.fields.freshdesk_api_key || '').trim();
-    if (!raw.startsWith('VON:')) continue;
-    const masterKey = raw.slice(4).trim();
-    r.fields._von_master = masterKey;
-    r.fields.freshdesk_api_key = '';
-    if (!masterKey || masterKey === userKey) continue;
-    try {
-      const mf = "AND({user_api_key}='" + escapeFormula(masterKey) + "',{account_id}='" + escapeFormula((r.fields.account_id || '').trim()) + "')";
-      const mrecs = await airtableRead(ACCESS_TABLE, { filter: mf });
-      const m = mrecs && mrecs[0];
-      if (m?.fields?.freshdesk_api_key) r.fields.freshdesk_api_key = m.fields.freshdesk_api_key;
-      if (!String(r.fields.freshsales_api_key || '').trim() && m?.fields?.freshsales_api_key) {
-        r.fields.freshsales_api_key = m.fields.freshsales_api_key;
+    const aid = (r.fields.account_id || '').trim();
+    const fdRaw = String(r.fields.freshdesk_api_key || '').trim();
+    const fsRaw = String(r.fields.freshsales_api_key || '').trim();
+    // Freshdesk-Verweis: Key des Masters übernehmen (nie dessen eigenen Verweis — keine Ketten)
+    if (fdRaw.startsWith('VON:')) {
+      const mk = fdRaw.slice(4).trim();
+      r.fields._von_master = mk;
+      r.fields.freshdesk_api_key = '';
+      if (mk && mk !== userKey && aid) {
+        const m = await _vonLaden(mk, aid);
+        if (m?.freshdesk_api_key && !String(m.freshdesk_api_key).startsWith('VON:')) r.fields.freshdesk_api_key = m.freshdesk_api_key;
+        if (!fsRaw && m?.freshsales_api_key && !String(m.freshsales_api_key).startsWith('VON:')) r.fields.freshsales_api_key = m.freshsales_api_key;
       }
-    } catch (_) { /* Master nicht lesbar → wie ohne Key */ }
+    }
+    // Freshsales-Verweis: eigener Master möglich, unabhängig vom Freshdesk-Master
+    if (fsRaw.startsWith('VON:')) {
+      const mk2 = fsRaw.slice(4).trim();
+      r.fields.freshsales_api_key = '';
+      if (mk2 && mk2 !== userKey && aid) {
+        const m2 = await _vonLaden(mk2, aid);
+        if (m2?.freshsales_api_key && !String(m2.freshsales_api_key).startsWith('VON:')) r.fields.freshsales_api_key = m2.freshsales_api_key;
+      }
+    }
   }
 
   // Schritt 2: Account-Records laden — Admin sieht alle, normale User nur eigene + zugewiesene
@@ -33953,6 +33973,7 @@ function renderUsersList(recs, vonKeys) {
             <div class="flex-1 min-w-0">
               <p class="font-semibold text-ink-900 text-sm truncate">${escapeHtml(name)}</p>
               <p class="text-[11px] text-ink-500">${escapeHtml(f.role || 'user')} ${active?'· aktiv':'· inaktiv'}</p>
+              ${isKi ? `<p class="text-[10px] mt-0.5 text-ink-400" data-kollege="${escapeAttr(name)}">Steuerzentrale wird geprüft …</p>` : ''}
             </div>
             ${isAdmin ? '<span class="text-[10px] uppercase tracking-wider bg-brand-100 text-brand-700 px-1.5 py-0.5 rounded font-semibold">Admin</span>' : ''}
             ${isKi ? '<span class="text-[10px] uppercase tracking-wider bg-violet-100 text-violet-700 px-1.5 py-0.5 rounded font-semibold">🤖 virtuell</span>' : ''}
@@ -33966,6 +33987,29 @@ function renderUsersList(recs, vonKeys) {
       }).join('')}
     </div>`;
   if (window.lucide) lucide.createIcons();
+
+  // Verbindungs-Check (v2.55.0): Kennt die Steuerzentrale den Namen? Nur für
+  // KI-Benutzer — die Kopplung läuft über exakte Namensgleichheit, deshalb
+  // ist die Rückmeldung hier der Tippfehler-Schutz beim Anlegen.
+  document.querySelectorAll('[data-kollege]').forEach(async (el) => {
+    const name = el.dataset.kollege;
+    try {
+      const res = await fetch(fdhSteuerUrl() + '/api/kollege?name=' + encodeURIComponent(name), { signal: AbortSignal.timeout(6000) });
+      const d = await res.json();
+      if (d.ok && d.gefunden) {
+        const firmen = [...new Set((d.klone || []).map(k => k.firma))].join(', ');
+        const bot = d.bot && d.bot.benutzername
+          ? ` · <a href="https://t.me/${escapeAttr(d.bot.benutzername)}" target="_blank" rel="noopener" class="text-brand-600 hover:underline">@${escapeHtml(d.bot.benutzername)}</a>` : '';
+        el.innerHTML = `<span class="text-emerald-600 font-semibold">🟢 verbunden</span> <span class="text-ink-500">· ${escapeHtml(firmen)}</span>${bot}`;
+      } else if (d.ok) {
+        el.innerHTML = `<span class="text-amber-600 font-semibold">🟠 in der Steuerzentrale unbekannt</span> <span class="text-ink-500">· Name exakt wie dort schreiben</span>`;
+      } else {
+        el.textContent = 'Steuerzentrale: ' + (d.fehler || 'Fehler');
+      }
+    } catch (_) {
+      el.innerHTML = `<span class="text-ink-400">⚪ Steuerzentrale nicht erreichbar (läuft sie auf diesem Rechner?)</span>`;
+    }
+  });
 }
 
 async function openUserModal(user) {
@@ -34069,10 +34113,18 @@ async function openUserModal(user) {
                             <option value="">— eigener Key (Feld oben) —</option>
                             ${alleUser.map(u => `<option value="${escapeAttr(u.api_key)}" ${fdKey === 'VON:' + u.api_key ? 'selected' : ''}>${escapeHtml(u.name || u.api_key)}</option>`).join('')}
                           </select>
-                          ${acc.freshsales_domain ? `
+                          ${acc.freshsales_domain ? (() => {
+                            const fsRoh = ac?.freshsales_api_key || '';
+                            const fsFeld = fsRoh.startsWith('VON:') ? '' : fsRoh;
+                            return `
                             <label class="text-[10px] uppercase font-semibold text-purple-800 block mt-1.5">Freshsales-API-Key (optional)</label>
-                            <input type="password" class="access-fs-key mt-1 w-full px-2 py-1.5 border border-purple-200 bg-white rounded text-xs font-mono" value="${escapeAttr(ac?.freshsales_api_key || '')}" placeholder="leer = Account-Default nutzen">
-                          ` : ''}
+                            <input type="password" class="access-fs-key mt-1 w-full px-2 py-1.5 border border-purple-200 bg-white rounded text-xs font-mono" value="${escapeAttr(fsFeld)}" placeholder="leer = Account-Default nutzen">
+                            <label class="text-[10px] uppercase font-semibold text-violet-800 block mt-1.5">— oder Freshsales-Schlüssel von (Master)</label>
+                            <select class="access-von-master-fs mt-1 w-full px-2 py-1.5 border border-violet-200 bg-white rounded text-xs">
+                              <option value="">— eigener Key (Feld oben) / Account-Default —</option>
+                              ${alleUser.map(u => `<option value="${escapeAttr(u.api_key)}" ${fsRoh === 'VON:' + u.api_key ? 'selected' : ''}>${escapeHtml(u.name || u.api_key)}</option>`).join('')}
+                            </select>`;
+                          })() : ''}
                         </div>
                       </div>`;
                   }).join('')}
@@ -34147,7 +34199,8 @@ async function submitUserForm() {
       const enabled = row.querySelector('.access-toggle')?.checked;
       const vonMaster = row.querySelector('.access-von-master')?.value.trim() || '';
       const fdKey = vonMaster ? ('VON:' + vonMaster) : (row.querySelector('.access-fd-key')?.value.trim() || '');
-      const fsKey = row.querySelector('.access-fs-key')?.value.trim() || '';
+      const vonMasterFs = row.querySelector('.access-von-master-fs')?.value.trim() || '';
+      const fsKey = vonMasterFs ? ('VON:' + vonMasterFs) : (row.querySelector('.access-fs-key')?.value.trim() || '');
       if (enabled) {
         await upsertAccountAccess(finalUserKey, accId, fdKey, fsKey);
         createdAccess++;
