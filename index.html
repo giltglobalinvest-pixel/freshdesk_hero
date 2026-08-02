@@ -802,7 +802,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.53.0';
+const APP_VERSION = 'v2.54.0';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -9028,8 +9028,8 @@ function _detailAssigneeSelectInner(t) {
   return `
     <select data-account-id="${escapeAttr(t._accountId)}" data-ticket-id="${t.id}" onchange="cardChangeAssignee(this)" class="absolute inset-0 opacity-0 cursor-pointer w-full">
       <option value="" ${!t.responder_id && !kiMarker ? 'selected' : ''}>— niemand —</option>
-      ${kis.length ? `<optgroup label="🤖 KI-Mitarbeiter (virtuell)">${kis.map(k =>
-        `<option value="ki:${escapeAttr(k.api_key)}" ${kiMarker === k.name ? 'selected' : ''}>🤖 ${escapeHtml(k.name)}</option>`).join('')}</optgroup>` : ''}
+      ${kis.length ? `<optgroup label="Hero-Benutzer (ohne eigene Freshdesk-Lizenz)">${kis.map(k =>
+        `<option value="ki:${escapeAttr(k.api_key)}" ${kiMarker === k.name ? 'selected' : ''}>${(k.role || '').toLowerCase() === 'ki' ? '\u{1F916}' : '\u{1F464}'} ${escapeHtml(k.name)}</option>`).join('')}</optgroup>` : ''}
       ${agents.map(a => `<option value="${a.id}" ${a.id === t.responder_id && !kiMarker ? 'selected' : ''}>${escapeHtml(a.name)}</option>`).join('')}
     </select>`;
 }
@@ -9107,14 +9107,15 @@ async function cardChangeAssignee(sel) {
           method: 'PUT', body: JSON.stringify({ responder_id: fdMaster.id }) });
         patchTicketInList(accountId, ticketId, { responder_id: fdMaster.id });
       }
-      const notiz = '\u{1F916} Zugewiesen an ' + ki.name + (masterName ? ' (arbeitet \u00fcber ' + masterName + ')' : '') + '.\n[FDH:ZUGEWIESEN] ' + ki.name;
+      const kiIcon = (ki.role || '').toLowerCase() === 'ki' ? '\u{1F916}' : '\u{1F464}';
+      const notiz = kiIcon + ' Zugewiesen an ' + ki.name + (masterName ? ' (arbeitet \u00fcber ' + masterName + ')' : '') + '.\n[FDH:ZUGEWIESEN] ' + ki.name;
       await proxyJson('/freshdesk/' + encodeURIComponent(accountId) + '/api/v2/tickets/' + ticketId + '/notes', {
         method: 'POST', body: JSON.stringify({ body: textToHtmlForFreshdesk(notiz), private: true }) });
       if (CURRENT_TICKET && CURRENT_TICKET.id === ticketId) {
         CURRENT_TICKET.conversations = CURRENT_TICKET.conversations || [];
         CURRENT_TICKET.conversations.push({ private: true, body_text: notiz, created_at: new Date().toISOString() });
       }
-      toast('\u{1F916} Zugewiesen an ' + ki.name + (fdMaster ? ' \u00b7 Freshdesk: ' + masterName : ' (Freshdesk-Master nicht gefunden \u2014 nur Hero-Zuweisung)'), 'success', 5000);
+      toast(kiIcon + ' Zugewiesen an ' + ki.name + (fdMaster ? ' \u00b7 Freshdesk: ' + masterName : ' (Freshdesk-Master nicht gefunden \u2014 nur Hero-Zuweisung)'), 'success', 5000);
       if (ticketId) setRegelStopp(accountId, ticketId, 'manual_assign').catch(() => {});
     } catch (e) {
       toast('Zuweisung fehlgeschlagen: ' + e.message, 'error', 6000);
@@ -13754,7 +13755,9 @@ function renderTicketDetailBody(ticket) {
   const req    = ticket.requester || {};
   const conversations = (ticket.conversations || []).slice().sort((a, b) => new Date(a.created_at || 0) - new Date(b.created_at || 0));
   const _kiZu = _fdhZugewiesenKI(ticket);
-  const assigneeName = _kiZu ? ('\u{1F916} ' + _kiZu) : getAgentName(ticket._accountId, ticket.responder_id);
+  const _kiZuUser = _kiZu ? (APP_STATE.kiUsers || []).find(k => k.name === _kiZu) : null;
+  const _kiIcon = _kiZuUser && (_kiZuUser.role || '').toLowerCase() !== 'ki' ? '\u{1F464}' : '\u{1F916}';
+  const assigneeName = _kiZu ? (_kiIcon + ' ' + _kiZu) : getAgentName(ticket._accountId, ticket.responder_id);
   const groupName    = getGroupName(ticket._accountId, ticket.group_id);
 
   // Telefonnummern für die Detail-Ansicht — requester + im Text gefunden, dedupliziert.
@@ -16523,18 +16526,22 @@ function _fdhKiUsersLaden(erzwingen) {
       const alle = userRecs.map(r => ({ id: r.id, ...(r.fields || {}) }));
       const nameByKey = {};
       alle.forEach(u => { if (u.api_key) nameByKey[u.api_key] = u.name || u.api_key; });
-      const kis = alle.filter(u => (u.role || '').toLowerCase() === 'ki' && (u.status || 'aktiv') !== 'inaktiv');
-      for (const k of kis) {
-        k.vonByAccount = {};
-        try {
-          const recs = await airtableRead(ACCESS_TABLE, { filter: "{user_api_key}='" + escapeFormula(k.api_key) + "'" });
-          recs.forEach(r => {
-            const raw = String(r.fields?.freshdesk_api_key || '').trim();
-            const aid = (r.fields?.account_id || '').trim();
-            if (aid && raw.startsWith('VON:')) k.vonByAccount[aid] = raw.slice(4).trim();
-          });
-        } catch (_) {}
-      }
+      // ALLE aktiven Benutzer prüfen: Wer je Account über einen Master-Schlüssel
+      // (VON:) arbeitet, hat dort keine eigene Freshdesk-Identität und wird über
+      // den Marker-Weg zuweisbar — Menschen (👤) genauso wie KI (🤖).
+      const aktive = alle.filter(u => (u.status || 'aktiv') !== 'inaktiv' && u.api_key);
+      let vonRecs = [];
+      try { vonRecs = await airtableRead(ACCESS_TABLE, { filter: "LEFT({freshdesk_api_key},4)='VON:'" }); } catch (_) {}
+      const vonByUser = {};
+      vonRecs.forEach(r => {
+        const uk = (r.fields?.user_api_key || '').trim();
+        const aid = (r.fields?.account_id || '').trim();
+        const raw = String(r.fields?.freshdesk_api_key || '').trim();
+        if (!uk || !aid) return;
+        (vonByUser[uk] = vonByUser[uk] || {})[aid] = raw.slice(4).trim();
+      });
+      const kis = aktive.filter(u => (u.role || '').toLowerCase() === 'ki' || vonByUser[u.api_key]);
+      kis.forEach(k => { k.vonByAccount = vonByUser[k.api_key] || {}; });
       APP_STATE.kiUsers = kis;
       APP_STATE.heroUserNames = nameByKey;
       return kis;
@@ -16574,7 +16581,8 @@ async function _fdhMentionWecken(accountId, ticketId, ticket, text) {
   if (!treffer.length) return;
   await _fdhKiUsersLaden().catch(() => {});
   const norm = (s) => String(s || '').toLowerCase().replace(/[\s_-]+/g, '');
-  const kiNamen = (APP_STATE.kiUsers || []).map(k => k.name).filter(Boolean);
+  const kiNamen = (APP_STATE.kiUsers || []).filter(k => (k.role || '').toLowerCase() === 'ki')
+    .map(k => k.name).filter(Boolean);
   const zuWecken = treffer.filter(t => /_ai$/i.test(t) || kiNamen.some(n => norm(n) === norm(t)));
   if (!zuWecken.length) return;
   const acc = (APP_STATE.accounts || []).find(a => a.id === accountId) || null;
@@ -33911,13 +33919,18 @@ async function renderUsersPage() {
   if (window.lucide) lucide.createIcons();
   try {
     const recs = await fetchUsers();
-    renderUsersList(recs);
+    let vonKeys = new Set();
+    try {
+      const vr = await airtableRead(ACCESS_TABLE, { filter: "LEFT({freshdesk_api_key},4)='VON:'" });
+      vr.forEach(r => { const k = (r.fields?.user_api_key || '').trim(); if (k) vonKeys.add(k); });
+    } catch (_) {}
+    renderUsersList(recs, vonKeys);
   } catch (e) {
     $('usersList').innerHTML = `<div class="bg-red-50 border border-red-200 rounded-2xl p-4 text-sm text-red-800">${escapeHtml(e.message)}</div>`;
   }
 }
 
-function renderUsersList(recs) {
+function renderUsersList(recs, vonKeys) {
   if (!recs.length) {
     $('usersList').innerHTML = `<div class="bg-white rounded-2xl border border-ink-200 p-6 text-center text-sm text-ink-500">Noch keine Benutzer.</div>`;
     return;
@@ -33930,6 +33943,7 @@ function renderUsersList(recs) {
         const role = (f.role || '').toLowerCase();
         const isAdmin = role === 'admin' || f.is_admin === true;
         const isKi = role === 'ki';
+        const ueberMaster = !!(vonKeys && vonKeys.has((f.api_key || '').trim()));
         const active = (f.status || '').toLowerCase() === 'aktiv';
         return `
           <div class="bg-white rounded-2xl border border-ink-200 p-3 flex items-center gap-3">
@@ -33942,6 +33956,7 @@ function renderUsersList(recs) {
             </div>
             ${isAdmin ? '<span class="text-[10px] uppercase tracking-wider bg-brand-100 text-brand-700 px-1.5 py-0.5 rounded font-semibold">Admin</span>' : ''}
             ${isKi ? '<span class="text-[10px] uppercase tracking-wider bg-violet-100 text-violet-700 px-1.5 py-0.5 rounded font-semibold">🤖 virtuell</span>' : ''}
+            ${!isKi && ueberMaster ? '<span class="text-[10px] uppercase tracking-wider bg-amber-100 text-amber-700 px-1.5 py-0.5 rounded font-semibold">👤 über Master</span>' : ''}
             <button onclick='openWhatsAppInvite(${JSON.stringify({ id:r.id, ...f }).replace(/'/g, "&#39;")})' class="text-ink-500 hover:text-emerald-600 p-2" title="Per WhatsApp einladen / Login-Daten schicken">
               <i data-lucide="message-circle" class="w-4 h-4"></i>
             </button>
@@ -34049,7 +34064,7 @@ async function openUserModal(user) {
                         <div class="access-key-block mt-2 ${hasAccess ? '' : 'hidden'}">
                           <label class="text-[10px] uppercase font-semibold text-purple-800 block">Freshdesk-API-Key für diesen User</label>
                           <input type="password" class="access-fd-key mt-1 w-full px-2 py-1.5 border border-purple-200 bg-white rounded text-xs font-mono" value="${escapeAttr(fdKeyFeld)}" placeholder="${fdKeyFeld ? '•••••• gespeichert (zum Ändern überschreiben)' : 'Eigener API-Key des Users'}">
-                          <label class="text-[10px] uppercase font-semibold text-violet-800 block mt-1.5">— oder Schlüssel von (Master, für 🤖 ohne eigene Lizenz)</label>
+                          <label class="text-[10px] uppercase font-semibold text-violet-800 block mt-1.5">— oder Schlüssel von (Master — für Benutzer ohne eigene Freshdesk-Lizenz, 👤 wie 🤖)</label>
                           <select class="access-von-master mt-1 w-full px-2 py-1.5 border border-violet-200 bg-white rounded text-xs">
                             <option value="">— eigener Key (Feld oben) —</option>
                             ${alleUser.map(u => `<option value="${escapeAttr(u.api_key)}" ${fdKey === 'VON:' + u.api_key ? 'selected' : ''}>${escapeHtml(u.name || u.api_key)}</option>`).join('')}
