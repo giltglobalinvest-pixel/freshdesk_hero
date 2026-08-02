@@ -802,7 +802,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.62.0';
+const APP_VERSION = 'v2.62.1';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -34765,7 +34765,10 @@ async function openUserModal(user) {
                           })() : ''}
                           <label class="text-[10px] uppercase font-semibold text-emerald-800 block mt-1.5">E-Mail-Signatur für diese Firma (HTML erlaubt)</label>
                           <textarea class="access-signatur mt-1 w-full px-2 py-1.5 border border-emerald-200 bg-white rounded text-xs font-mono" rows="4" placeholder="z. B. Mit freundlichen Grüßen&#10;{{name}}&#10;{{firma}}">${escapeHtml(sigByAccount[acc.id]?.html || '')}</textarea>
-                          <p class="text-[10px] text-ink-500 mt-0.5">Platzhalter: <code>{{name}}</code> <code>{{email}}</code> <code>{{firma}}</code> — werden beim Versand automatisch gefüllt. Ersetzt die Freshdesk-Signatur vollständig.</p>
+                          <div class="flex items-center justify-between mt-0.5 gap-2">
+                            <p class="text-[10px] text-ink-500">Platzhalter: <code>{{name}}</code> <code>{{email}}</code> <code>{{firma}}</code> — werden beim Versand gefüllt. Ersetzt die Freshdesk-Signatur vollständig.</p>
+                            <button type="button" onclick="fdhSigAusFreshdesk(this, '${escapeAttr(acc.id)}')" class="shrink-0 text-[10px] font-semibold text-brand-600 hover:underline inline-flex items-center gap-1"><i data-lucide="download" class="w-3 h-3"></i> Aus Freshdesk übernehmen</button>
+                          </div>
                         </div>
                       </div>`;
                   }).join('')}
@@ -34794,6 +34797,34 @@ async function openUserModal(user) {
 
   // Submit-Logik separat — wird von „Anlegen/Speichern"-Button direkt gerufen
   USER_MODAL_CTX = { isEdit, user, sigByAccount, allAccounts };
+}
+
+/* Einmaliger Signatur-Import (v2.62.1): kopiert die Freshdesk-Signatur des
+   Benutzers in das Hero-Feld — verwendet wird beim Versand IMMER nur die
+   Hero-Signatur; das hier ist reine Tipparbeit-Ersparnis. */
+async function fdhSigAusFreshdesk(btn, accountId) {
+  const name = (document.getElementById('usrName')?.value || '').trim();
+  if (!name) return toast('Erst einen Namen eintragen — der Abgleich läuft über den Namen.', 'warn', 5000);
+  const zeile = btn.closest('[data-access-row]');
+  const ziel = zeile?.querySelector('.access-signatur');
+  if (!ziel) return;
+  setBusy(btn, true, 'Lade…');
+  try {
+    await ensureAgentsLoaded(accountId);
+    const agents = APP_STATE.agentsCache?.[accountId]?.agents || [];
+    const treffer = agents.find(a => String(a.name || '').toLowerCase() === name.toLowerCase());
+    if (!treffer) { setBusy(btn, false); return toast('Kein Freshdesk-Agent namens „' + name + '" in diesem Konto.', 'warn', 6000); }
+    const voll = await proxyJson('/freshdesk/' + encodeURIComponent(accountId) + '/api/v2/agents/' + treffer.id);
+    const sig = (voll?.signature || voll?.contact?.signature || '').trim();
+    setBusy(btn, false);
+    if (!sig) return toast('Dieser Agent hat in Freshdesk keine Signatur hinterlegt.', 'warn', 6000);
+    ziel.value = sig;
+    ziel.classList.add('ring-1', 'ring-emerald-400');
+    toast('Freshdesk-Signatur übernommen — prüfen und den Benutzer speichern.', 'success', 6000);
+  } catch (e) {
+    setBusy(btn, false);
+    toast('Übernehmen fehlgeschlagen: ' + e.message, 'error', 6000);
+  }
 }
 
 let USER_MODAL_CTX = null;
