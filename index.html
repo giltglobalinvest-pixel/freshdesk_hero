@@ -802,7 +802,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.64.0';
+const APP_VERSION = 'v2.64.1';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -4828,7 +4828,15 @@ async function fetchAgentMe(accountId) {
     return _agentMeWithSigName(me, accountId);
   } catch (e) {
     console.warn('agents/me fehlgeschlagen für', accountId, e.message);
-    // Negative cache mit kurzer TTL — verhindert Endlos-Retries pro Render
+    // v2.64.1: Die HERO-Signatur hängt nicht an Freshdesk — auch wenn agents/me
+    // scheitert (Rate-Limit, Proxy), bleibt sie verfügbar. Nur ohne Hero-Signatur
+    // wird kurz negativ gecacht.
+    const heroSig = _sigCustom(accountId);
+    if (heroSig) {
+      const me = { id: null, name: APP_KEYS.user?.name || '', email: APP_KEYS.user?.email || '', signature: '', signature_raw: '' };
+      AGENT_ME_CACHE[accountId] = { data: me, expires: Date.now() + 60 * 1000 };
+      return _agentMeWithSigName(me, accountId);
+    }
     AGENT_ME_CACHE[accountId] = { data: null, expires: Date.now() + 60 * 1000 };
     return null;
   }
@@ -13920,7 +13928,11 @@ async function _fdhSigVorschauFuellen(accountId) {
   if (!ziel) return;
   try {
     const me = await fetchAgentMe(accountId);
-    const sig = me?.signature || '';
+    let sig = me?.signature || '';
+    if (!sig) {
+      const roh = _sigCustom(accountId);
+      if (roh) sig = _sigTextToHtml(_sigPlatzhalter(roh, accountId, me));
+    }
     if (sig) ziel.innerHTML = sig;
     else ziel.innerHTML = '<span class="text-amber-700">Keine Signatur hinterlegt — Antworten gehen ohne Signatur raus. Pflegen unter Benutzer → Account-Zugriff, oder hier über „bearbeiten".</span>';
   } catch (_) {
