@@ -802,7 +802,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.51.0';
+const APP_VERSION = 'v2.53.0';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -1223,7 +1223,7 @@ async function airtableWrite(table, fields) {
   const res = await fetch(url, {
     method: 'POST',
     headers: { 'Authorization': 'Bearer ' + APP_KEYS.airtableWriteKey, 'Content-Type': 'application/json' },
-    body: JSON.stringify({ fields }),
+    body: JSON.stringify({ fields, typecast: true }),
   });
   if (!res.ok) {
     const t = await res.text(); throw new Error('Airtable write fehlgeschlagen (' + res.status + '): ' + t.slice(0, 200));
@@ -1236,7 +1236,7 @@ async function airtableUpdate(table, id, fields) {
   const res = await fetch(url, {
     method: 'PATCH',
     headers: { 'Authorization': 'Bearer ' + APP_KEYS.airtableWriteKey, 'Content-Type': 'application/json' },
-    body: JSON.stringify({ fields }),
+    body: JSON.stringify({ fields, typecast: true }),
   });
   if (!res.ok) { const t = await res.text(); throw new Error('Airtable update fehlgeschlagen: ' + t.slice(0, 200)); }
   return res.json();
@@ -3969,6 +3969,28 @@ async function loadAccounts() {
     const aid = (r.fields.account_id || '').trim();
     if (aid) accessByAccountId[aid] = r;
   });
+
+  // Schritt 1b (v2.53.0): „Schlüssel von"-Verweise auflösen. Virtuelle Benutzer
+  // (KI-Mitarbeiter, Rolle „ki") tragen statt eines eigenen Keys den Verweis
+  // VON:<login_key_des_masters> — sie arbeiten unter dessen Freshdesk-Identität,
+  // ohne eigene Freshdesk-Lizenz. Die ehrliche Zurechnung führt Hero.
+  for (const r of accessRecs) {
+    const raw = String(r.fields.freshdesk_api_key || '').trim();
+    if (!raw.startsWith('VON:')) continue;
+    const masterKey = raw.slice(4).trim();
+    r.fields._von_master = masterKey;
+    r.fields.freshdesk_api_key = '';
+    if (!masterKey || masterKey === userKey) continue;
+    try {
+      const mf = "AND({user_api_key}='" + escapeFormula(masterKey) + "',{account_id}='" + escapeFormula((r.fields.account_id || '').trim()) + "')";
+      const mrecs = await airtableRead(ACCESS_TABLE, { filter: mf });
+      const m = mrecs && mrecs[0];
+      if (m?.fields?.freshdesk_api_key) r.fields.freshdesk_api_key = m.fields.freshdesk_api_key;
+      if (!String(r.fields.freshsales_api_key || '').trim() && m?.fields?.freshsales_api_key) {
+        r.fields.freshsales_api_key = m.fields.freshsales_api_key;
+      }
+    } catch (_) { /* Master nicht lesbar → wie ohne Key */ }
+  }
 
   // Schritt 2: Account-Records laden — Admin sieht alle, normale User nur eigene + zugewiesene
   const filterParts = [];
@@ -9001,10 +9023,14 @@ function _detailFieldDropdown(label, displayValue, valueColorCls, selectInnerHtm
 function _detailAssigneeSelectInner(t) {
   const cache = APP_STATE.agentsCache?.[t._accountId];
   const agents = (cache?.agents || []).slice().sort((a, b) => (a.name || '').localeCompare(b.name || '', 'de'));
+  const kiMarker = _fdhZugewiesenKI(t);
+  const kis = (APP_STATE.kiUsers || []).filter(k => k.vonByAccount && k.vonByAccount[t._accountId]);
   return `
     <select data-account-id="${escapeAttr(t._accountId)}" data-ticket-id="${t.id}" onchange="cardChangeAssignee(this)" class="absolute inset-0 opacity-0 cursor-pointer w-full">
-      <option value="" ${!t.responder_id ? 'selected' : ''}>— niemand —</option>
-      ${agents.map(a => `<option value="${a.id}" ${a.id === t.responder_id ? 'selected' : ''}>${escapeHtml(a.name)}</option>`).join('')}
+      <option value="" ${!t.responder_id && !kiMarker ? 'selected' : ''}>— niemand —</option>
+      ${kis.length ? `<optgroup label="🤖 KI-Mitarbeiter (virtuell)">${kis.map(k =>
+        `<option value="ki:${escapeAttr(k.api_key)}" ${kiMarker === k.name ? 'selected' : ''}>🤖 ${escapeHtml(k.name)}</option>`).join('')}</optgroup>` : ''}
+      ${agents.map(a => `<option value="${a.id}" ${a.id === t.responder_id && !kiMarker ? 'selected' : ''}>${escapeHtml(a.name)}</option>`).join('')}
     </select>`;
 }
 
@@ -9061,8 +9087,41 @@ async function cardChangeStatus(sel) {
   await _cardSetField(sel, 'status', v, 'Status: ' + lbl, 'Status');
 }
 async function cardChangeAssignee(sel) {
-  const v = sel.value ? parseInt(sel.value, 10) : null;
   const accountId = sel.dataset.accountId;
+  if (sel.value && sel.value.startsWith('ki:')) {
+    // Virtueller Benutzer: Freshdesk bekommt den Master als Bearbeiter, die
+    // Wahrheit steht als Marker-Notiz im Ticket (Entscheidung Betreiber 02.08.).
+    const kiKey = sel.value.slice(3);
+    const ticketId = parseInt(sel.dataset.ticketId, 10);
+    await _fdhKiUsersLaden().catch(() => {});
+    const ki = (APP_STATE.kiUsers || []).find(k => k.api_key === kiKey);
+    if (!ki) return toast('KI-Mitarbeiter nicht gefunden — Benutzerliste neu laden.', 'error');
+    const masterKey = ki.vonByAccount?.[accountId] || '';
+    const masterName = (APP_STATE.heroUserNames || {})[masterKey] || '';
+    const cache = APP_STATE.agentsCache?.[accountId];
+    const fdMaster = masterName ? (cache?.agents || []).find(a =>
+      String(a.name || '').toLowerCase() === masterName.toLowerCase()) : null;
+    try {
+      if (fdMaster) {
+        await proxyJson('/freshdesk/' + encodeURIComponent(accountId) + '/api/v2/tickets/' + ticketId, {
+          method: 'PUT', body: JSON.stringify({ responder_id: fdMaster.id }) });
+        patchTicketInList(accountId, ticketId, { responder_id: fdMaster.id });
+      }
+      const notiz = '\u{1F916} Zugewiesen an ' + ki.name + (masterName ? ' (arbeitet \u00fcber ' + masterName + ')' : '') + '.\n[FDH:ZUGEWIESEN] ' + ki.name;
+      await proxyJson('/freshdesk/' + encodeURIComponent(accountId) + '/api/v2/tickets/' + ticketId + '/notes', {
+        method: 'POST', body: JSON.stringify({ body: textToHtmlForFreshdesk(notiz), private: true }) });
+      if (CURRENT_TICKET && CURRENT_TICKET.id === ticketId) {
+        CURRENT_TICKET.conversations = CURRENT_TICKET.conversations || [];
+        CURRENT_TICKET.conversations.push({ private: true, body_text: notiz, created_at: new Date().toISOString() });
+      }
+      toast('\u{1F916} Zugewiesen an ' + ki.name + (fdMaster ? ' \u00b7 Freshdesk: ' + masterName : ' (Freshdesk-Master nicht gefunden \u2014 nur Hero-Zuweisung)'), 'success', 5000);
+      if (ticketId) setRegelStopp(accountId, ticketId, 'manual_assign').catch(() => {});
+    } catch (e) {
+      toast('Zuweisung fehlgeschlagen: ' + e.message, 'error', 6000);
+    }
+    return;
+  }
+  const v = sel.value ? parseInt(sel.value, 10) : null;
   const name = v ? (getAgentName(accountId, v) || ('#' + v)) : null;
   await _cardSetField(sel, 'responder_id', v, v ? 'Zugewiesen an ' + name : 'Zuweisung entfernt', 'Zuweisung');
 }
@@ -13694,7 +13753,8 @@ function renderTicketDetailBody(ticket) {
   const status = FD_STATUS[ticket.status] || { label: 'Status ' + ticket.status, cls: 'bg-ink-100 text-ink-600 border-ink-200' };
   const req    = ticket.requester || {};
   const conversations = (ticket.conversations || []).slice().sort((a, b) => new Date(a.created_at || 0) - new Date(b.created_at || 0));
-  const assigneeName = getAgentName(ticket._accountId, ticket.responder_id);
+  const _kiZu = _fdhZugewiesenKI(ticket);
+  const assigneeName = _kiZu ? ('\u{1F916} ' + _kiZu) : getAgentName(ticket._accountId, ticket.responder_id);
   const groupName    = getGroupName(ticket._accountId, ticket.group_id);
 
   // Telefonnummern für die Detail-Ansicht — requester + im Text gefunden, dedupliziert.
@@ -16448,7 +16508,145 @@ function _fdhVersteckteAnhaenge(ticket) {
   return namen;
 }
 
+/* === Virtuelle Benutzer (KI-Mitarbeiter) + @-Wecken (v2.53.0) ==============
+   KI-User haben Rolle "ki" und arbeiten je Account über den Schlüssel eines
+   Masters (AccountAccess.freshdesk_api_key = "VON:<login_key>"). Die Ticket-
+   zuweisung an sie läuft in Freshdesk auf den Master; die Wahrheit steht als
+   Marker-Notiz [FDH:ZUGEWIESEN] <Name> im Ticket. @Name_AI in einer internen
+   Notiz weckt den Agenten über die Steuerzentrale. */
+let _fdhKiUsersPromise = null;
+function _fdhKiUsersLaden(erzwingen) {
+  if (_fdhKiUsersPromise && !erzwingen) return _fdhKiUsersPromise;
+  _fdhKiUsersPromise = (async () => {
+    try {
+      const userRecs = await airtableRead('User', {});
+      const alle = userRecs.map(r => ({ id: r.id, ...(r.fields || {}) }));
+      const nameByKey = {};
+      alle.forEach(u => { if (u.api_key) nameByKey[u.api_key] = u.name || u.api_key; });
+      const kis = alle.filter(u => (u.role || '').toLowerCase() === 'ki' && (u.status || 'aktiv') !== 'inaktiv');
+      for (const k of kis) {
+        k.vonByAccount = {};
+        try {
+          const recs = await airtableRead(ACCESS_TABLE, { filter: "{user_api_key}='" + escapeFormula(k.api_key) + "'" });
+          recs.forEach(r => {
+            const raw = String(r.fields?.freshdesk_api_key || '').trim();
+            const aid = (r.fields?.account_id || '').trim();
+            if (aid && raw.startsWith('VON:')) k.vonByAccount[aid] = raw.slice(4).trim();
+          });
+        } catch (_) {}
+      }
+      APP_STATE.kiUsers = kis;
+      APP_STATE.heroUserNames = nameByKey;
+      return kis;
+    } catch (_) { return APP_STATE.kiUsers || []; }
+  })();
+  return _fdhKiUsersPromise;
+}
+
+/* Letzter [FDH:ZUGEWIESEN]-Marker aus den privaten Notizen — überschreibt die
+   Bearbeiter-Anzeige (Freshdesk zeigt den Master, Hero den echten Bearbeiter). */
+function _fdhZugewiesenKI(ticket) {
+  let name = null;
+  try {
+    (ticket.conversations || []).forEach(c => {
+      if (!c.private) return;
+      const txt = htmlToText(c.body_text || c.body || '');
+      const i = txt.lastIndexOf('[FDH:ZUGEWIESEN]');
+      if (i < 0) return;
+      const z = txt.slice(i + '[FDH:ZUGEWIESEN]'.length).split('\n')[0].trim();
+      if (z) name = z;
+    });
+  } catch (_) {}
+  return name;
+}
+
+function fdhSteuerUrl() {
+  try { return (localStorage.getItem('fdh_steuer_url') || '').trim() || 'http://localhost:4700'; }
+  catch (_) { return 'http://localhost:4700'; }
+}
+
+/* @-Mentions in einer internen Notiz an die Steuerzentrale melden — weckt den
+   KI-Mitarbeiter (läuft nichts, startet sein Lauf mit dem Ticket als Auftrag).
+   Nicht erreichbar? Warteschlange in localStorage, wird nachgeschickt. */
+async function _fdhMentionWecken(accountId, ticketId, ticket, text) {
+  const roh = String(text || '');
+  const treffer = [...new Set((roh.match(/@([A-Za-z\u00C4\u00D6\u00DC\u00E4\u00F6\u00FC\u00DF0-9_]+)/g) || []).map(m => m.slice(1)))];
+  if (!treffer.length) return;
+  await _fdhKiUsersLaden().catch(() => {});
+  const norm = (s) => String(s || '').toLowerCase().replace(/[\s_-]+/g, '');
+  const kiNamen = (APP_STATE.kiUsers || []).map(k => k.name).filter(Boolean);
+  const zuWecken = treffer.filter(t => /_ai$/i.test(t) || kiNamen.some(n => norm(n) === norm(t)));
+  if (!zuWecken.length) return;
+  const acc = (APP_STATE.accounts || []).find(a => a.id === accountId) || null;
+  for (const name of zuWecken) {
+    const auftrag = {
+      name,
+      firma: acc ? (_erpFirmaSlugForAccount(acc) || '') : '',
+      ticket_id: ticketId,
+      betreff: ticket?.subject || '',
+      gruppe: ticket?.group_id ? (getGroupName(accountId, ticket.group_id) || '') : '',
+      text: roh,
+      von: APP_KEYS.user?.name || '',
+    };
+    await _fdhWeckSenden(auftrag, true);
+  }
+}
+
+async function _fdhWeckSenden(auftrag, mitQueue) {
+  try {
+    const res = await fetch(fdhSteuerUrl() + '/api/wecken', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(auftrag), signal: AbortSignal.timeout(8000),
+    });
+    const d = await res.json().catch(() => ({}));
+    if (d.ok) { toast('🤖 ' + (d.meldung || (auftrag.name + ' geweckt')), 'success', 5000); return true; }
+    toast('Wecken: ' + (d.fehler || 'unbekannter Fehler'), 'warn', 6000);
+    return true; // fachlicher Fehler — nicht erneut versuchen
+  } catch (e) {
+    if (mitQueue) {
+      try {
+        const q = JSON.parse(localStorage.getItem('fdh_weck_queue') || '[]');
+        q.push({ ...auftrag, _ts: Date.now() });
+        localStorage.setItem('fdh_weck_queue', JSON.stringify(q.slice(-20)));
+        toast('Steuerzentrale nicht erreichbar — @' + auftrag.name + ' wird nachgeschickt, sobald sie wieder da ist.', 'warn', 6000);
+      } catch (_) {}
+    }
+    return false;
+  }
+}
+
+async function _fdhWeckQueueFlush() {
+  let q = [];
+  try { q = JSON.parse(localStorage.getItem('fdh_weck_queue') || '[]'); } catch (_) { return; }
+  if (!q.length) return;
+  const rest = [];
+  for (const a of q) {
+    if (Date.now() - (a._ts || 0) > 7 * 24 * 3600 * 1000) continue;
+    const ok = await _fdhWeckSenden(a, false);
+    if (!ok) rest.push(a);
+  }
+  try { localStorage.setItem('fdh_weck_queue', JSON.stringify(rest)); } catch (_) {}
+}
+
+/* KI-Duplikat erkennen: private Notiz mit [FDH:KI-DUPLIKAT] quelle=#<nr>
+   (setzt der Vorbereitung-Agent beim Aufteilen automatisch, v2.52.0). */
+function _fdhKiDuplikat(ticket) {
+  try {
+    for (const c of (ticket.conversations || [])) {
+      if (!c.private) continue;
+      const txt = htmlToText(c.body_text || c.body || '');
+      const i = txt.indexOf('[FDH:KI-DUPLIKAT]');
+      if (i < 0) continue;
+      const m = txt.slice(i).match(/quelle=#?(\d+)/);
+      return { quelle: m ? Number(m[1]) : null };
+    }
+  } catch (_) {}
+  return null;
+}
+
 function renderSummaryBody(ticket, summary) {
+  _fdhKiUsersLaden().catch(() => {});
+  _fdhWeckQueueFlush().catch(() => {});
   const req = ticket.requester || {};
   const contact = SUMMARY_CTX?.contact || null;
   // Phones aus requester UND aus contact (falls geladen)
@@ -16498,6 +16696,7 @@ function renderSummaryBody(ticket, summary) {
       <div class="bg-ink-50 rounded-xl p-3 text-xs">
         <p class="font-semibold text-ink-900 leading-snug">${escapeHtml(ticket.subject || '(ohne Betreff)')}</p>
         <div class="flex items-center gap-2 mt-1.5 flex-wrap">
+          ${(() => { const kd = _fdhKiDuplikat(ticket); return kd ? `<span class="text-[10px] uppercase tracking-wider px-1.5 py-0.5 rounded font-semibold border bg-violet-50 text-violet-700 border-violet-200 inline-flex items-center gap-1" title="Dieses Ticket wurde von der KI aus einem Mehranlagen-Ticket aufgeteilt">🤖 KI-Duplikat${kd.quelle ? ` aus #${kd.quelle}` : ''}</span>` : ''; })()}
           <button onclick="openStatusModal('${escapeAttr(SUMMARY_CTX.accountId)}', ${ticket.id}, ${ticket.status}, false)" class="text-[10px] uppercase tracking-wider px-1.5 py-0.5 rounded font-semibold border ${statusInfo.cls} active:opacity-70 inline-flex items-center gap-1" title="Status ändern">${escapeHtml(statusInfo.label)} <i data-lucide="chevron-down" class="w-2.5 h-2.5"></i></button>
           <span class="text-ink-500">#${ticket.id}</span>
         </div>
@@ -16762,6 +16961,7 @@ async function saveCustomNote(btn) {
       timestamp: new Date().toISOString(),
     });
     recordMyNote(SUMMARY_CTX.accountId, SUMMARY_CTX.ticketId, text, 'manuell').catch(() => {});
+    _fdhMentionWecken(SUMMARY_CTX.accountId, SUMMARY_CTX.ticketId, SUMMARY_CTX.ticket, text).catch(() => {});
     toast('Notiz im Ticket gespeichert', 'success', 4000);
     renderSummaryBody(SUMMARY_CTX.ticket, SUMMARY_CTX.summary);
   } catch (e) {
@@ -33729,6 +33929,7 @@ function renderUsersList(recs) {
         const name = f.name || '–';
         const role = (f.role || '').toLowerCase();
         const isAdmin = role === 'admin' || f.is_admin === true;
+        const isKi = role === 'ki';
         const active = (f.status || '').toLowerCase() === 'aktiv';
         return `
           <div class="bg-white rounded-2xl border border-ink-200 p-3 flex items-center gap-3">
@@ -33740,6 +33941,7 @@ function renderUsersList(recs) {
               <p class="text-[11px] text-ink-500">${escapeHtml(f.role || 'user')} ${active?'· aktiv':'· inaktiv'}</p>
             </div>
             ${isAdmin ? '<span class="text-[10px] uppercase tracking-wider bg-brand-100 text-brand-700 px-1.5 py-0.5 rounded font-semibold">Admin</span>' : ''}
+            ${isKi ? '<span class="text-[10px] uppercase tracking-wider bg-violet-100 text-violet-700 px-1.5 py-0.5 rounded font-semibold">🤖 virtuell</span>' : ''}
             <button onclick='openWhatsAppInvite(${JSON.stringify({ id:r.id, ...f }).replace(/'/g, "&#39;")})' class="text-ink-500 hover:text-emerald-600 p-2" title="Per WhatsApp einladen / Login-Daten schicken">
               <i data-lucide="message-circle" class="w-4 h-4"></i>
             </button>
@@ -33755,6 +33957,11 @@ async function openUserModal(user) {
   const isEdit = !!user;
   const isAdminUser = user && ((user.role || '').toLowerCase() === 'admin' || user.is_admin === true);
   const userKey = user?.api_key || generateUserKey();
+  // Alle Benutzer für das „Schlüssel von"-Dropdown (Master-Auswahl) — nur echte
+  // Menschen mit eigenem Login kommen als Master infrage, keine KI-User.
+  let alleUser = [];
+  try { alleUser = (await fetchUsers()).map(r => ({ id: r.id, ...(r.fields || {}) }))
+    .filter(u => (u.role || '').toLowerCase() !== 'ki' && u.api_key && u.api_key !== userKey); } catch (_) {}
   // Bestehende AccountAccess-Einträge für diesen User laden (falls Edit)
   let existingAccess = isEdit ? await loadAccessForUser(user.api_key) : [];
   const accessByAccountId = {};
@@ -33785,8 +33992,9 @@ async function openUserModal(user) {
             <div>
               <label class="text-xs font-semibold text-ink-700">Rolle</label>
               <select id="usrRole" class="mt-1 w-full px-3 py-2 border border-ink-200 rounded-lg text-sm">
-                <option value="user"  ${!isAdminUser?'selected':''}>User</option>
+                <option value="user"  ${!isAdminUser && (user?.role||'')!=='ki' ?'selected':''}>User</option>
                 <option value="admin" ${isAdminUser?'selected':''}>Admin</option>
+                <option value="ki" ${(user?.role||'')==='ki'?'selected':''}>KI-Mitarbeiter 🤖</option>
               </select>
             </div>
             <div>
@@ -33827,7 +34035,9 @@ async function openUserModal(user) {
                 : allAccounts.map(acc => {
                     const ac = accessByAccountId[acc.id];
                     const hasAccess = !!ac;
-                    const fdKey = ac?.freshdesk_api_key || '';
+                    const fdKeyRoh = ac?.freshdesk_api_key || '';
+                    const fdKey = fdKeyRoh;
+                    const fdKeyFeld = fdKeyRoh.startsWith('VON:') ? '' : fdKeyRoh;
                     return `
                       <div class="bg-white border border-ink-200 rounded-lg p-2.5" data-access-row data-account-id="${escapeAttr(acc.id)}">
                         <label class="flex items-center gap-2 cursor-pointer">
@@ -33838,7 +34048,12 @@ async function openUserModal(user) {
                         </label>
                         <div class="access-key-block mt-2 ${hasAccess ? '' : 'hidden'}">
                           <label class="text-[10px] uppercase font-semibold text-purple-800 block">Freshdesk-API-Key für diesen User</label>
-                          <input type="password" class="access-fd-key mt-1 w-full px-2 py-1.5 border border-purple-200 bg-white rounded text-xs font-mono" value="${escapeAttr(fdKey)}" placeholder="${fdKey ? '•••••• gespeichert (zum Ändern überschreiben)' : 'Eigener API-Key des Users'}">
+                          <input type="password" class="access-fd-key mt-1 w-full px-2 py-1.5 border border-purple-200 bg-white rounded text-xs font-mono" value="${escapeAttr(fdKeyFeld)}" placeholder="${fdKeyFeld ? '•••••• gespeichert (zum Ändern überschreiben)' : 'Eigener API-Key des Users'}">
+                          <label class="text-[10px] uppercase font-semibold text-violet-800 block mt-1.5">— oder Schlüssel von (Master, für 🤖 ohne eigene Lizenz)</label>
+                          <select class="access-von-master mt-1 w-full px-2 py-1.5 border border-violet-200 bg-white rounded text-xs">
+                            <option value="">— eigener Key (Feld oben) —</option>
+                            ${alleUser.map(u => `<option value="${escapeAttr(u.api_key)}" ${fdKey === 'VON:' + u.api_key ? 'selected' : ''}>${escapeHtml(u.name || u.api_key)}</option>`).join('')}
+                          </select>
                           ${acc.freshsales_domain ? `
                             <label class="text-[10px] uppercase font-semibold text-purple-800 block mt-1.5">Freshsales-API-Key (optional)</label>
                             <input type="password" class="access-fs-key mt-1 w-full px-2 py-1.5 border border-purple-200 bg-white rounded text-xs font-mono" value="${escapeAttr(ac?.freshsales_api_key || '')}" placeholder="leer = Account-Default nutzen">
@@ -33915,7 +34130,8 @@ async function submitUserForm() {
     for (const row of accessRows) {
       const accId = row.dataset.accountId;
       const enabled = row.querySelector('.access-toggle')?.checked;
-      const fdKey = row.querySelector('.access-fd-key')?.value.trim() || '';
+      const vonMaster = row.querySelector('.access-von-master')?.value.trim() || '';
+      const fdKey = vonMaster ? ('VON:' + vonMaster) : (row.querySelector('.access-fd-key')?.value.trim() || '');
       const fsKey = row.querySelector('.access-fs-key')?.value.trim() || '';
       if (enabled) {
         await upsertAccountAccess(finalUserKey, accId, fdKey, fsKey);
