@@ -802,7 +802,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.65.1';
+const APP_VERSION = 'v2.65.2';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -4846,6 +4846,22 @@ function _sigPlatzhalter(txt, accountId, me) {
     .replace(/\{\{\s*firma\s*\}\}/gi, (acc && acc.name) || '');
 }
 
+/* Bilder in Signaturen bändigen (v2.65.2): Ohne Größenangabe rendern Logos in
+   Originalgröße — in Heros Verlauf UND beim Kunden im Mail-Programm riesig.
+   Inline-max-width überlebt alle E-Mail-Clients. */
+function _sigBilderBegrenzen(html) {
+  try {
+    const t = document.createElement('template');
+    t.innerHTML = String(html || '');
+    t.content.querySelectorAll('img').forEach(img => {
+      const stil = String(img.getAttribute('style') || '');
+      const hatBreite = img.hasAttribute('width') || /(^|;)\s*(max-)?width\s*:/i.test(stil);
+      if (!hatBreite) img.setAttribute('style', (stil ? stil.replace(/;?\s*$/, '; ') : '') + 'max-width:280px; height:auto;');
+    });
+    return t.innerHTML;
+  } catch (_) { return html; }
+}
+
 /* Freitext → versandfähiges HTML (Zeilenumbrüche werden zu <br>). Enthält der
    Text bereits HTML-Tags, wird er unverändert übernommen. */
 function _sigTextToHtml(txt) {
@@ -4873,7 +4889,7 @@ function _agentMeWithSigName(me, accountId) {
   const custom = _sigCustom(accountId);
   if (custom) {
     return Object.assign({}, me, {
-      signature: _sigTextToHtml(_sigPlatzhalter(custom, accountId, me)), signature_raw: rawSig, signature_custom: true,
+      signature: _sigBilderBegrenzen(_sigTextToHtml(_sigPlatzhalter(custom, accountId, me))), signature_raw: rawSig, signature_custom: true,
     });
   }
   // v2.61.0 (Entscheidung Betreiber): Die FRESHDESK-Signatur wird nicht mehr
@@ -14007,7 +14023,7 @@ async function _fdhSigVorschauFuellen(accountId) {
     let sig = me?.signature || '';
     if (!sig) {
       const roh = _sigCustom(accountId);
-      if (roh) sig = _sigTextToHtml(_sigPlatzhalter(roh, accountId, me));
+      if (roh) sig = _sigBilderBegrenzen(_sigTextToHtml(_sigPlatzhalter(roh, accountId, me)));
     }
     const q = _sigQuelleFuer(accountId);
     _sigLog('vorschau', { acc: String(accountId), quelle: q.quelle, len: q.len, agentsMeOk: !!me });
@@ -14029,7 +14045,7 @@ async function _fdhSigVorschauFuellen(accountId) {
       }
       _sigLog('vorschau-direktabruf', { acc: String(accountId), filter: "user_key+account_id", gefunden: recs?.length || 0, len: html.length });
     } catch (e) { diag += ' · airtable-FEHLER: ' + String(e.message || e).slice(0, 80); _sigLog('vorschau-direktabruf-FEHLER', { acc: String(accountId), fehler: String(e.message || e).slice(0, 120) }); }
-    if (direkt) { ziel.innerHTML = _sigTextToHtml(_sigPlatzhalter(direkt, accountId, me)); return; }
+    if (direkt) { ziel.innerHTML = _sigBilderBegrenzen(_sigTextToHtml(_sigPlatzhalter(direkt, accountId, me))); return; }
     ziel.innerHTML = '<span class="text-amber-700">Keine Signatur hinterlegt — Antworten gehen ohne Signatur raus. Pflegen unter Benutzer → Account-Zugriff, oder hier über „bearbeiten".</span>' +
       '<span class="block text-[10px] text-ink-400 mt-1 font-mono">' + escapeHtml(diag) + '</span>' +
       '<button type="button" onclick="loadUserSignatures(true).then(function(){_fdhSigVorschauFuellen(\'' + escapeAttr(String(accountId)) + '\')})" class="mt-1 text-[10px] font-semibold text-brand-600 hover:underline inline-flex items-center gap-1"><i data-lucide="refresh-cw" class="w-3 h-3"></i> neu laden</button>';
