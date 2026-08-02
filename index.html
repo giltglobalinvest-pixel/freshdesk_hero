@@ -802,7 +802,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.60.1';
+const APP_VERSION = 'v2.60.2';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -14178,6 +14178,8 @@ function fdhCustomFeldMerken(el, ticketId, feldName) {
   const btn = document.getElementById('fdhCfAktualisieren');
   if (btn) {
     btn.disabled = false;
+    btn.classList.remove('bg-ink-100', 'text-ink-400', 'cursor-default');
+    btn.classList.add('bg-brand-500', 'text-white', 'hover:bg-brand-600');
     const n = Object.keys(_fdhCfPending.werte).length;
     btn.textContent = 'Aktualisieren (' + n + ')';
   }
@@ -14201,6 +14203,8 @@ async function fdhCfAktualisieren(btn, accountId, ticketId) {
     _fdhCfPending = { ticketId: null, werte: {} };
     setBusy(btn, false);
     btn.disabled = true;
+    btn.classList.remove('bg-brand-500', 'text-white', 'hover:bg-brand-600');
+    btn.classList.add('bg-ink-100', 'text-ink-400', 'cursor-default');
     btn.textContent = 'Aktualisiert ✓';
     setTimeout(() => { if (btn.isConnected) btn.textContent = 'Aktualisieren'; }, 2500);
     document.querySelectorAll('#fdhCustomFelder .ring-brand-400').forEach(e => e.classList.remove('ring-1', 'ring-brand-400', 'border-brand-400'));
@@ -14249,7 +14253,7 @@ function _fdhDetailSidebar(t) {
         ${eigenschaft('Bearbeiter', _assigneeBadgeDropdown(t))}
         ${eigenschaft('Typ', _typeBadgeDropdown(t))}
         <div id="fdhCustomFelder" class="space-y-3.5"><p class="text-[11px] text-ink-400 italic">Individuelle Felder werden geladen …</p></div>
-        <button id="fdhCfAktualisieren" disabled onclick="fdhCfAktualisieren(this, '${escapeAttr(t._accountId)}', ${t.id})" class="w-full mt-1 py-2.5 rounded-lg text-sm font-semibold bg-brand-500 text-white disabled:bg-ink-100 disabled:text-ink-400">Aktualisieren</button>
+        <button id="fdhCfAktualisieren" disabled onclick="fdhCfAktualisieren(this, '${escapeAttr(t._accountId)}', ${t.id})" class="w-full mt-1 py-2.5 rounded-lg text-sm font-semibold bg-ink-100 text-ink-400 cursor-default">Aktualisieren</button>
       </div>
     </div>`;
 }
