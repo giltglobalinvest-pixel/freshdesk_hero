@@ -802,7 +802,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.59.0';
+const APP_VERSION = 'v2.59.1';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -14092,7 +14092,7 @@ function _fdhDetailAktionsleiste(t) {
       <i data-lucide="${icon}" class="w-3.5 h-3.5"></i>${label}
     </button>`;
   return `
-    <div class="max-w-6xl mx-auto mb-3 bg-white border border-ink-200 rounded-xl px-3 py-2 flex items-center gap-2 flex-wrap">
+    <div class="w-full max-w-[1600px] mx-auto mb-3 bg-white border border-ink-200 rounded-xl px-3 py-2 flex items-center gap-2 flex-wrap">
       ${knopf('Antworten', 'reply', `openDirectReplyComposer('${escapeAttr(t._accountId)}', ${t.id})`, true)}
       ${knopf('Notiz', 'sticky-note', `openQuickNoteSheet('${escapeAttr(t._accountId)}', ${t.id})`, false)}
       ${t.status !== 5 ? knopf('Schließen', 'check-circle-2', `_fdhTicketSchliessen('${escapeAttr(t._accountId)}', ${t.id}, this)`, false) : ''}
@@ -14182,7 +14182,8 @@ function renderTicketDetailBody(ticket) {
     </div>` : '';
 
   $('ticketDetailBody').innerHTML = `
-    <div class="space-y-3 max-w-2xl mx-auto">
+    ${_fdhDetailAktionsleiste(ticket)}
+    <div class="space-y-3 max-w-2xl mx-auto" data-fdh-haupt>
       ${_stoppBanner}
 
       <!-- Header-Karte -->
@@ -14361,9 +14362,27 @@ function renderTicketDetailBody(ticket) {
       <!-- Direkter Antwort-Compose -->
       ${_detailReplyComposer(ticket)}
 
-    </div>
-    ${_fdhDetailSidebar(ticket)}
     </div>`;
+  // Freshdesk-Layout (v2.59.1): Zweispaltig per DOM-Umbau NACH dem Rendern —
+  // so können unbalancierte divs im Alt-Template die Sidebar nicht verschieben.
+  (function () {
+    try {
+      if (!(window.matchMedia && window.matchMedia('(min-width: 1024px)').matches)) return;
+      const host = $('ticketDetailBody');
+      const haupt = host.querySelector('[data-fdh-haupt]');
+      if (!haupt) return;
+      haupt.classList.remove('max-w-2xl', 'mx-auto');
+      haupt.classList.add('flex-1', 'min-w-0');
+      const flex = document.createElement('div');
+      flex.className = 'flex gap-4 items-start w-full max-w-[1600px] mx-auto px-1';
+      host.insertBefore(flex, haupt);
+      flex.appendChild(haupt);
+      const tmp = document.createElement('div');
+      tmp.innerHTML = _fdhDetailSidebar(ticket);
+      const sb = tmp.firstElementChild;
+      if (sb) { sb.classList.remove('hidden'); flex.appendChild(sb); }
+    } catch (_) { /* Layout-Umbau darf das Detail nie verhindern */ }
+  })();
   if (window.lucide) lucide.createIcons();
 
   // Fremdsprachige Ticket-Inhalte beim Öffnen automatisch übersetzen (in-place,
