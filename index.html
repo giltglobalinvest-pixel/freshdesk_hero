@@ -802,7 +802,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.64.2';
+const APP_VERSION = 'v2.64.3';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -4686,7 +4686,13 @@ async function loadUserSignatures(force) {
         });
         (recs || []).forEach(r => {
           const f = r.fields || {};
-          if (f.account_id) map.set(String(f.account_id), { recordId: r.id, html: f.signature_html || '' });
+          // Leere Einträge (fehlgeschlagene alte Speicherversuche) zählen nicht —
+          // sie würden sonst den lokalen Spiegel überstimmen.
+          if (f.account_id && String(f.signature_html || '').trim()) {
+            map.set(String(f.account_id), { recordId: r.id, html: f.signature_html });
+          } else if (f.account_id) {
+            map.set('__leer__' + String(f.account_id), { recordId: r.id, html: '' });
+          }
         });
       } catch (e) { console.warn('[Signatur] Laden aus Airtable:', e.message); }
     }
@@ -4721,9 +4727,24 @@ async function loadUserSignatures(force) {
         }
       }
     } catch (e) { console.warn('[Signatur] Master-Fallback:', e.message); }
+    // Selbstheilung: Liegt im lokalen Spiegel eine Signatur, die in Airtable
+    // fehlt oder leer ist (damals fehlgeschlagenes Speichern), übernehmen wir
+    // sie und schreiben sie zurück — „lad doch nochmal und fertig".
+    try {
+      (APP_STATE.accounts || []).forEach(a => {
+        const accId = String(a.id);
+        if (map.has(accId) && map.get(accId).html) return;
+        const spiegel = (localStorage.getItem(SIG_CUSTOM_KEY + '_' + accId) || '').trim();
+        if (spiegel) {
+          const leer = map.get('__leer__' + accId);
+          map.set(accId, { recordId: leer ? leer.recordId : null, html: spiegel });
+          setTimeout(() => { _setSigCustom(accId, spiegel); }, 500);
+        }
+      });
+    } catch (_) {}
     USER_SIG_STATE.byAccount = map; USER_SIG_STATE.loaded = true; USER_SIG_STATE.loading = null;
     // Cache für den synchronen Zugriff spiegeln
-    try { map.forEach((v, accId) => { if (v.html) localStorage.setItem(SIG_CUSTOM_KEY + '_' + accId, v.html); }); } catch (_) {}
+    try { map.forEach((v, accId) => { if (v.html && !String(accId).startsWith('__leer__')) localStorage.setItem(SIG_CUSTOM_KEY + '_' + accId, v.html); }); } catch (_) {}
     return map;
   })();
   return USER_SIG_STATE.loading;
@@ -4731,7 +4752,7 @@ async function loadUserSignatures(force) {
 /* Synchroner Zugriff (aus dem gespiegelten Cache) — von fetchAgentMe genutzt. */
 function _sigCustom(accountId) {
   const rec = USER_SIG_STATE.byAccount.get(String(accountId));
-  if (rec) return String(rec.html || '').trim();
+  if (rec && String(rec.html || '').trim()) return String(rec.html).trim();
   try { return (localStorage.getItem(SIG_CUSTOM_KEY + '_' + accountId) || '').trim(); } catch (_) { return ''; }
 }
 /* Speichern: Airtable (pro User+Mandant) + Sofort-Cache. */
@@ -4743,7 +4764,7 @@ async function _setSigCustom(accountId, html) {
     if (val.trim()) localStorage.setItem(k, val); else localStorage.removeItem(k);
   } catch (_) {}
   const key = _sigUserKey();
-  const prev = USER_SIG_STATE.byAccount.get(accId) || null;
+  const prev = USER_SIG_STATE.byAccount.get(accId) || USER_SIG_STATE.byAccount.get('__leer__' + accId) || null;
   if (val.trim()) USER_SIG_STATE.byAccount.set(accId, { recordId: prev && prev.recordId, html: val });
   else USER_SIG_STATE.byAccount.delete(accId);
   if (!key) { toast('Signatur nur lokal gespeichert (kein Benutzer-Schlüssel).', 'warn', 5000); return; }
