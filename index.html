@@ -805,7 +805,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.66.4';
+const APP_VERSION = 'v2.66.5';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -4635,28 +4635,12 @@ async function fetchContact(accountId, contactId) {
    und liefert die persönliche Signatur. Caching pro Account, 10 min TTL. */
 const AGENT_ME_CACHE = {};
 
-/* === v2.50.8: Absender-Name in der Signatur überschreiben ==================
-   Beim Versand hängt die App die Freshdesk-Signatur des API-Agenten an. Der
-   darin enthaltene Name war bisher fix. Hier kann pro Mandant (oder global)
-   ein abweichender Name hinterlegt werden; er wird beim Anhängen ersetzt.
-   Zentral in fetchAgentMe angewandt → gilt für ALLE Versandwege. */
-const SIG_NAME_KEY = 'fdh_sig_name';
-function _sigNameOverride(accountId) {
-  try {
-    if (accountId) {
-      const perAcc = localStorage.getItem(SIG_NAME_KEY + '_' + accountId);
-      if (perAcc && perAcc.trim()) return perAcc.trim();
-    }
-    return (localStorage.getItem(SIG_NAME_KEY) || '').trim();
-  } catch (_) { return ''; }
-}
-function _setSigNameOverride(accountId, name) {
-  try {
-    const k = accountId ? (SIG_NAME_KEY + '_' + accountId) : SIG_NAME_KEY;
-    if (name && String(name).trim()) localStorage.setItem(k, String(name).trim());
-    else localStorage.removeItem(k);
-  } catch (_) {}
-}
+/* v2.66.5: Der frühere „Absender-Name überschreiben"-Mechanismus (v2.50.8) ist
+   entfallen. Er ersetzte den Namen INNERHALB der Freshdesk-Signatur — seit
+   v2.61.0 wird die Freshdesk-Signatur aber gar nicht mehr verwendet, der Regler
+   war damit wirkungslos und täuschte eine Wirkung nur vor. Der Name steht heute
+   direkt in der Hero-Signatur bzw. kommt aus dem Platzhalter {{name}}. */
+
 /* v2.50.12: Eigene Signatur PRO HERO-BENUTZER und Mandant — persistent in
    Airtable, damit jeder User seine eigene Signatur hat (auch geräteübergreifend)
    obwohl sich alle denselben Freshdesk-API-Zugang teilen. localStorage dient nur
@@ -4878,17 +4862,9 @@ function _sigTextToHtml(txt) {
   if (/<[a-z][\s\S]*>/i.test(t)) return t;
   return escapeHtml(t).replace(/\n/g, '<br>');
 }
-/* Ersetzt den Agent-Namen im Signatur-HTML durch den gewünschten Namen. */
-function _applySigName(sig, agentName, newName) {
-  const s = String(sig || '');
-  const an = String(agentName || '').trim();
-  const nn = String(newName || '').trim();
-  if (!s || !an || !nn || an === nn) return s;
-  const esc = an.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  return s.replace(new RegExp(esc, 'g'), nn);
-}
-/* Wendet den Override zur LESEZEIT an (Cache hält das Original) — eine
-   Änderung wirkt dadurch sofort, ohne Cache-Invalidierung. */
+/* Liefert die tatsächlich zu versendende Signatur (Hero-Signatur des Benutzers,
+   Platzhalter gefüllt, Bilder begrenzt) — zur LESEZEIT, damit Änderungen sofort
+   greifen; der Cache hält weiterhin das Freshdesk-Original. */
 function _agentMeWithSigName(me, accountId) {
   if (!me) return me;
   const rawSig = (me.signature_raw != null) ? me.signature_raw : me.signature;
@@ -20495,31 +20471,24 @@ async function _renderSigNameCard() {
   await loadUserSignatures().catch(() => {});   // v2.50.12: gespeicherte eigene Signaturen holen
   const mes = await Promise.all(accs.map(a => fetchAgentMe(a.id).catch(() => null)));
   if (!document.getElementById('sigNameCard')) return;
+  // v2.66.5: Aufgeräumt. Der frühere „Absender-Name überschreiben"-Regler war
+  // wirkungslos geworden (seit v2.61.0 wird die Freshdesk-Signatur gar nicht mehr
+  // verwendet, der Name also nirgends mehr ersetzt) und hat trotzdem eine Wirkung
+  // vorgetäuscht. Übrig bleibt: Status je Mandant + der eine Editor.
   host.innerHTML = accs.map((a, i) => {
     const me = mes[i];
-    const agentName = (me && me.name) || '';
-    const cur = _sigNameOverride(a.id);
-    const rawSig = (me && (me.signature_raw || me.signature)) || '';
-    const hatName = !!(agentName && rawSig && rawSig.indexOf(agentName) >= 0);
+    const q = _sigQuelleFuer(a.id);
+    const sig = (me && me.signature) || '';
     return '<div class="border-t border-ink-100 pt-2.5 mt-2.5 first:border-0 first:pt-0 first:mt-0">' +
-      '<p class="text-[11px] font-bold text-ink-700">' + escapeHtml(a.name || a.id) + '</p>' +
-      '<p class="text-[10px] text-ink-400 mb-1">Signatur-Name aus Freshdesk: <b>' + escapeHtml(agentName || '—') + '</b>' +
-        (rawSig ? (hatName ? '' : ' · <span class="text-amber-600">Name kommt in der Signatur nicht wörtlich vor — Ersetzen greift hier nicht</span>') : ' · <span class="text-amber-600">keine Signatur hinterlegt</span>') + '</p>' +
-      '<div class="flex items-center gap-1.5">' +
-        '<input id="sigName_' + escapeAttr(a.id) + '" type="text" value="' + escapeAttr(cur) + '" placeholder="' + escapeAttr(agentName || 'Name wie er erscheinen soll') + '" oninput="_sigNamePreview(\'' + escapeAttr(a.id) + '\')" class="flex-1 min-w-0 px-2 py-1.5 border border-ink-300 rounded-lg text-sm">' +
-        '<button onclick="_sigNameSave(\'' + escapeAttr(a.id) + '\', this)" class="shrink-0 px-2.5 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-[12px] font-bold">Speichern</button>' +
-        (cur ? '<button onclick="_sigNameClear(\'' + escapeAttr(a.id) + '\')" class="shrink-0 px-2 py-1.5 border border-ink-300 hover:bg-ink-50 text-ink-600 rounded-lg text-[12px]" title="Zurück auf den Freshdesk-Namen">×</button>' : '') +
+      '<div class="flex items-center justify-between gap-2 flex-wrap">' +
+        '<p class="text-[11px] font-bold text-ink-700">' + escapeHtml(a.name || a.id) + '</p>' +
+        _sigQuelleBadge(q) +
       '</div>' +
-      '<p id="sigPrev_' + escapeAttr(a.id) + '" class="text-[10px] text-ink-500 mt-1">' + _sigNamePreviewText(agentName, cur) + '</p>' +
-      // v2.50.11: derselbe Editor wie beim Versand — eine Oberfläche, ein Verhalten
-      (function () {
-        const custom = _sigCustom(a.id);
-        return '<div class="mt-1.5 flex items-center gap-1.5 flex-wrap">' +
-          '<button onclick="openSignatureEditor(\'' + escapeAttr(a.id) + '\')" class="text-[11px] font-semibold text-emerald-700 inline-flex items-center gap-1"><i data-lucide="pencil" class="w-3 h-3"></i> ' +
-            (custom ? 'Eigene Signatur bearbeiten' : 'Komplette Signatur bearbeiten') + '</button>' +
-          (custom ? '<span class="text-[10px] font-bold text-emerald-700 bg-emerald-50 border border-emerald-200 rounded-full px-1.5 py-0.5">eigene Signatur aktiv</span>' : '') +
-        '</div>';
-      })() +
+      (sig
+        ? '<div class="mt-1 text-[11px] text-ink-700 leading-snug bg-ink-50/60 border border-ink-100 rounded px-2 py-1.5 max-h-28 overflow-auto">' + sig + '</div>'
+        : '<p class="mt-1 text-[10px] text-amber-700">Noch keine Signatur — Antworten gehen für diesen Mandanten ohne Signatur raus.</p>') +
+      '<button onclick="openSignatureEditor(\'' + escapeAttr(a.id) + '\')" class="mt-1.5 text-[11px] font-semibold text-emerald-700 inline-flex items-center gap-1"><i data-lucide="pencil" class="w-3 h-3"></i> ' +
+        (q.quelle === 'keine' ? 'Signatur anlegen' : 'Signatur bearbeiten') + '</button>' +
     '</div>';
   }).join('');
   if (window.lucide) lucide.createIcons();
@@ -20548,20 +20517,6 @@ function _sigSrcApply(accId) {
   toast('HTML übernommen — jetzt noch „Signatur speichern".', 'info', 3500);
 }
 /* Signatur-HTML → Text (nur noch für Diagnose/Fallback, nicht mehr im Editor). */
-function _sigHtmlToText(html) {
-  const h = String(html || '');
-  if (!h) return '';
-  if (!/<[a-z][\s\S]*>/i.test(h)) return h;
-  return h.replace(/<br\s*\/?>/gi, '\n')
-          .replace(/<\/(p|div|tr|li|h[1-6])>/gi, '\n')
-          .replace(/<[^>]+>/g, '')
-          .replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"')
-          .replace(/\n{3,}/g, '\n\n').trim();
-}
-function _sigToggleEditor(accId) {
-  const el = document.getElementById('sigEd_' + accId);
-  if (el) el.classList.toggle('hidden');
-}
 /* === v2.50.11: Signatur-Editor als eigenes Fenster ========================
    Aufrufbar direkt beim Versand (Assistent-Karte) und aus dem Profil. Lädt die
    ECHTE Freshdesk-Signatur (HTML mit Logo) bzw. die bereits gespeicherte eigene
@@ -20640,43 +20595,14 @@ async function _sigEditorSave(accId, btn) {
   await _sigEditorRefreshViews(accId);
   toast('Signatur gespeichert — gilt für dich auf allen Geräten und wird beim Versand angehängt.', 'success', 5000);
 }
+/* v2.66.5: Setzt die eigene Signatur dieses Mandanten zurück. Danach geht der
+   Versand OHNE Signatur raus (die Freshdesk-Signatur wird seit v2.61.0 bewusst
+   nicht mehr verwendet). */
 async function _sigEditorReset(accId) {
   await _setSigCustom(accId, '');
-  _setSigNameOverride(accId, '');
   closeSignatureEditor();
   await _sigEditorRefreshViews(accId);
-  toast('Zurück auf die Freshdesk-Signatur', 'info', 3000);
-}
-
-async function _sigCustomClear(accId) {
-  await _setSigCustom(accId, '');
-  toast('Zurück auf die Freshdesk-Signatur', 'info', 3000);
-  _renderSigNameCard();
-}
-function _sigNamePreviewText(agentName, name) {
-  const n = String(name || '').trim();
-  if (!n) return 'Aktuell: Signatur unverändert (' + escapeHtml(agentName || 'Freshdesk-Name') + ')';
-  return 'In der Signatur erscheint: <b>' + escapeHtml(n) + '</b> statt ' + escapeHtml(agentName || '–');
-}
-function _sigNamePreview(accId) {
-  const inp = document.getElementById('sigName_' + accId);
-  const prev = document.getElementById('sigPrev_' + accId);
-  if (!inp || !prev) return;
-  const me = (AGENT_ME_CACHE[accId] && AGENT_ME_CACHE[accId].data) || null;
-  prev.innerHTML = _sigNamePreviewText(me && me.name, inp.value);
-}
-function _sigNameSave(accId, btn) {
-  const inp = document.getElementById('sigName_' + accId);
-  if (!inp) return;
-  _setSigNameOverride(accId, inp.value);
-  if (btn) { setBusy(btn, true, ''); setTimeout(() => setBusy(btn, false), 300); }
-  toast(inp.value.trim() ? 'Absender-Name gespeichert: ' + inp.value.trim() : 'Absender-Name zurückgesetzt', 'success', 3000);
-  _renderSigNameCard();
-}
-function _sigNameClear(accId) {
-  _setSigNameOverride(accId, '');
-  toast('Zurück auf den Freshdesk-Namen', 'info', 2500);
-  _renderSigNameCard();
+  toast('Signatur entfernt — Antworten gehen für diesen Mandanten ohne Signatur raus.', 'info', 5000);
 }
 
 /* Eigenes-Profil-Bearbeiten-Modal — User kann Name/Email/Telefon + pro Account
