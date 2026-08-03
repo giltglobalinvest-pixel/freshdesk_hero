@@ -805,7 +805,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.66.2';
+const APP_VERSION = 'v2.66.3';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -44768,6 +44768,22 @@ async function lookupAccountAccess(userApiKey, accountId) {
   } catch (_) { return null; }
 }
 
+/* v2.66.3: „Schlüssel von"-Verweise aufloesen. Benutzer ohne eigene Freshdesk-
+   Lizenz tragen statt eines Keys den Verweis VON:<login_key_des_masters>. Ohne
+   diese Aufloesung ging der Verweis woertlich als Passwort an Freshdesk →
+   HTTP 401 "You have to be logged in to perform this action".
+   Keine Ketten: der Key des Masters muss ein echter Key sein. */
+async function resolveVonKey(rawKey, accountId, feld) {
+  const raw = (rawKey || "").trim();
+  if (!raw.startsWith("VON:")) return raw;
+  const masterKey = raw.slice(4).trim();
+  if (!masterKey) return "";
+  const masterAccess = await lookupAccountAccess(masterKey, accountId);
+  const mk = ((masterAccess && masterAccess[feld]) || "").trim();
+  if (!mk || mk.startsWith("VON:")) return "";
+  return mk;
+}
+
 async function resolveAuth(token) {
   if (!token) return null;
   const sess = await getSession(token);
@@ -44924,7 +44940,8 @@ export default async function (req) {
     try { fullUser = await lookupUser(user.api_key); } catch (_) {}
     const userAllowsDefault = !!(fullUser?.allow_default_keys) || !!user.is_admin || isOwner;
     // Key-Auswahl: eigener Key bevorzugt; Default nur wenn explizit erlaubt
-    const ownKey = (access?.freshdesk_api_key && access.freshdesk_api_key.trim()) || "";
+    // v2.66.3: VON:-Verweis auf den Master aufloesen (sonst geht "VON:..." als Key raus → 401)
+    const ownKey = await resolveVonKey((access?.freshdesk_api_key || ""), accountId, "freshdesk_api_key");
     let fdKey = ownKey;
     if (!fdKey && userAllowsDefault) fdKey = acc.api_key;
     if (!fdKey) {
@@ -45028,7 +45045,8 @@ export default async function (req) {
     let fullUserFs = null;
     try { fullUserFs = await lookupUser(user.api_key); } catch (_) {}
     const userAllowsFsDefault = !!(fullUserFs?.allow_default_keys) || !!user.is_admin || isOwnerFs;
-    const ownFsKey = (fsAccess?.freshsales_api_key && fsAccess.freshsales_api_key.trim()) || "";
+    // v2.66.3: auch hier den VON:-Verweis auf den Master aufloesen
+    const ownFsKey = await resolveVonKey((fsAccess?.freshsales_api_key || ""), accountId, "freshsales_api_key");
     let fsKey = ownFsKey;
     if (!fsKey && userAllowsFsDefault) fsKey = acc.fs_api_key;
     if (!fsKey) return jsonResponse({ error: "Kein Freshsales-API-Key. Bitte unter 'Accounts' eintragen." }, 400);
