@@ -805,7 +805,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.66.1';
+const APP_VERSION = 'v2.66.2';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -35063,25 +35063,41 @@ async function openUserModal(user) {
    Benutzers in das Hero-Feld — verwendet wird beim Versand IMMER nur die
    Hero-Signatur; das hier ist reine Tipparbeit-Ersparnis. */
 async function fdhSigAusFreshdesk(btn, accountId) {
-  const name = (document.getElementById('usrName')?.value || '').trim();
-  if (!name) return toast('Erst einen Namen eintragen — der Abgleich läuft über den Namen.', 'warn', 5000);
   const zeile = btn.closest('[data-access-row]');
   const ziel = zeile?.querySelector('.access-signatur');
   if (!ziel) return;
+  // v2.66.2: Ist ein MASTER gewählt, nutzt dieser Benutzer dessen Freshdesk-Zugang —
+  // dann ist die Signatur des MASTERS die vorhandene, nicht die des Hero-Benutzers
+  // (der hat oft gar keinen eigenen Agenten).
+  const masterSel = zeile.querySelector('.access-von-master');
+  const masterKey = masterSel ? masterSel.value : '';
+  const masterName = masterKey ? String(masterSel.options[masterSel.selectedIndex]?.textContent || '').trim() : '';
+  const userName = (document.getElementById('usrName')?.value || '').trim();
+  const name = masterName || userName;
+  if (!name) return toast('Erst einen Namen eintragen oder einen Master wählen.', 'warn', 5000);
   setBusy(btn, true, 'Lade…');
   try {
     await ensureAgentsLoaded(accountId);
     const agents = APP_STATE.agentsCache?.[accountId]?.agents || [];
     const treffer = agents.find(a => String(a.name || '').toLowerCase() === name.toLowerCase());
-    if (!treffer) { setBusy(btn, false); return toast('Kein Freshdesk-Agent namens „' + name + '" in diesem Konto.', 'warn', 6000); }
-    const voll = await proxyJson('/freshdesk/' + encodeURIComponent(accountId) + '/api/v2/agents/' + treffer.id);
-    const sig = (voll?.signature || voll?.contact?.signature || '').trim();
+    let sig = '';
+    let quelle = name;
+    if (treffer) {
+      const voll = await proxyJson('/freshdesk/' + encodeURIComponent(accountId) + '/api/v2/agents/' + treffer.id);
+      sig = (voll?.signature || voll?.contact?.signature || '').trim();
+    } else {
+      // Kein Agent unter diesem Namen → auf den Zugang zurückfallen, mit dem dieser
+      // Account tatsächlich arbeitet (das ist bei Master-Nutzung genau dessen Agent).
+      const me = await proxyJson('/freshdesk/' + encodeURIComponent(accountId) + '/api/v2/agents/me').catch(() => null);
+      sig = (me?.signature || me?.contact?.signature || '').trim();
+      quelle = (me?.contact?.name || me?.name || 'hinterlegter Zugang');
+    }
     setBusy(btn, false);
-    if (!sig) return toast('Dieser Agent hat in Freshdesk keine Signatur hinterlegt.', 'warn', 6000);
+    if (!sig) return toast('Für „' + quelle + '" ist in Freshdesk keine Signatur hinterlegt.', 'warn', 7000);
     ziel.value = sig;
     const vorschau = zeile?.querySelector('.access-signatur-edit');
     if (vorschau) { vorschau.innerHTML = sig; vorschau.classList.add('ring-1', 'ring-emerald-400'); }
-    toast('Freshdesk-Signatur übernommen — prüfen und den Benutzer speichern.', 'success', 6000);
+    toast('Signatur von „' + quelle + '" übernommen' + (masterName ? ' (Master)' : '') + ' — anpassen und den Benutzer speichern.', 'success', 7000);
   } catch (e) {
     setBusy(btn, false);
     toast('Übernehmen fehlgeschlagen: ' + e.message, 'error', 6000);
