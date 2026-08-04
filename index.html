@@ -808,7 +808,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.67.1';
+const APP_VERSION = 'v2.67.2';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -9878,6 +9878,49 @@ function renderTicketList(tickets) {
 
 /* Wenn die Search-API doch keine requester-Daten lieferte, lade Contacts nach und
    patche die jeweilige Card-Zeile direkt — kein voller Re-Render. */
+/* === v2.67.2: Telefonnummern aus der zentralen Kontakt-DB statt aus Freshdesk ===
+   Vorher wurden pro Listenaufruf bis zu 8 VOLLE Tickets (inkl. Verlauf) geladen,
+   nur um Telefonnummern aus Signaturen zu lesen — der größte Rate-Limit-Posten.
+   Jetzt: einmal pro Mandant und Sitzung alle Kontakte aus der ZDB laden und
+   daraus einen Index nach E-Mail bauen. Das ist ein Airtable-Abruf statt vieler
+   Freshdesk-Abrufe (und Airtable ist nicht die knappe Ressource). */
+const HYDRATE_PHONES_FROM_FRESHDESK = false;  // Notschalter: auf true → alte Volldetail-Suche
+const _ZDB_PHONE_INDEX = {};                  // accountId → { byEmail: Map, at } | null
+async function _zdbPhoneIndex(accountId) {
+  if (accountId in _ZDB_PHONE_INDEX) return _ZDB_PHONE_INDEX[accountId];
+  _ZDB_PHONE_INDEX[accountId] = null;         // Platzhalter → keine Parallel-Ladungen
+  try {
+    const account = (APP_STATE.accounts || []).find(a => String(a.id) === String(accountId));
+    if (!account || typeof _zdbTableNames !== 'function' || typeof _zdbRead !== 'function') return null;
+    if (typeof _zdbGetEnabled === 'function' && !_zdbGetEnabled().has(String(accountId))) return null;
+    const namen = _zdbTableNames(account);
+    const rows = await _zdbRead(namen.kontakt, { maxRecords: 5000 });
+    const byEmail = new Map();
+    (rows || []).forEach(r => {
+      const f = r.fields || r.f || r;
+      const mail = String(f.email || '').trim().toLowerCase();
+      if (!mail) return;
+      const tel = String(f.telefon || '').trim();
+      const mob = String(f.mobil || '').trim();
+      if (tel || mob) byEmail.set(mail, { telefon: tel, mobil: mob });
+    });
+    _ZDB_PHONE_INDEX[accountId] = { byEmail, at: Date.now() };
+    console.log('[ZDB-Tel] Mandant ' + accountId + ': ' + byEmail.size + ' Kontakte mit Telefonnummer indiziert');
+    return _ZDB_PHONE_INDEX[accountId];
+  } catch (e) {
+    console.warn('[ZDB-Tel] Index konnte nicht gebaut werden:', e.message);
+    return null;
+  }
+}
+async function _zdbPhoneLookup(accountId, ticket) {
+  const idx = await _zdbPhoneIndex(accountId);
+  if (!idx || !idx.byEmail.size) return null;
+  const cached = (typeof getCachedRequester === 'function') ? getCachedRequester(accountId, ticket.requester_id) : null;
+  const mail = String((cached && cached.email) || ticket.email || '').trim().toLowerCase();
+  if (!mail) return null;
+  return idx.byEmail.get(mail) || null;
+}
+
 async function hydrateMissingRequesters(tickets) {
   if (!Array.isArray(tickets) || !tickets.length) return;
   // Phase 1: Tickets ohne Name/Email — schneller initial-Load (max 8 parallel)
@@ -9920,7 +9963,7 @@ async function hydrateMissingRequesters(tickets) {
   // und alle Tel-Nummern aus Body + Antworten extrahieren. Tel-Nummern stecken oft in der
   // Email-Signatur am Ende der Originalmail bei WG/Re-Tickets.
   // Begrenzt auf max 12 Tickets pro Page, max 3 parallel.
-  const neededBody = [];
+  let neededBody = [];
   for (const t of tickets) {
     if (!t.requester_id) continue;
     const cached = getCachedRequester(t._accountId, t.requester_id);
@@ -9940,7 +9983,28 @@ async function hydrateMissingRequesters(tickets) {
     neededBody.push(t);
   }
   console.log('[hydrate] Phase 3 (Ticket-Body+Conversations):', neededBody.length, 'Tickets ohne Phones in Contact+initial-Body');
+  // v2.67.2: Phase 3 kostete bis zu 8 VOLLE Ticket-Abrufe (inkl. Verlauf) pro
+  // Listenaufruf und Mandant — nur um Telefonnummern aus Signaturen zu fischen.
+  // Das war der größte Posten im Rate-Limit. Jetzt zuerst die zentrale Kontakt-DB
+  // fragen (1 Airtable-Abruf pro Mandant und Sitzung, gecacht); nur was dort fehlt,
+  // wird noch aus Freshdesk nachgeladen — und das auch nur, wenn ausdrücklich erlaubt.
   if (neededBody.length) {
+    try {
+      const restlich = [];
+      for (const t of neededBody) {
+        const treffer = await _zdbPhoneLookup(t._accountId, t);
+        if (treffer && (treffer.telefon || treffer.mobil)) {
+          _insertPhonePillsIntoCardDom(t, [treffer.telefon, treffer.mobil].filter(Boolean), 'aus Kontakt-DB');
+        } else {
+          restlich.push(t);
+        }
+      }
+      const gespart = neededBody.length - restlich.length;
+      if (gespart > 0) console.log('[hydrate] Phase 3: ' + gespart + ' Ticket(s) aus der zentralen DB bedient — ' + gespart + ' Freshdesk-Abrufe gespart');
+      neededBody = restlich;
+    } catch (e) { console.warn('[hydrate] ZDB-Telefonindex nicht nutzbar:', e.message); }
+  }
+  if (neededBody.length && HYDRATE_PHONES_FROM_FRESHDESK) {
     // v2.46.40: Limit auf 8 statt 12 + nur 2 parallel — sonst löst Freshdesk Rate-Limit aus (HTTP 429).
     const limit = neededBody.slice(0, 8);
     const queue3 = limit.slice();
@@ -20879,6 +20943,89 @@ async function saveMyProfile(btnEl) {
   }
 }
 
+/* === v2.67.2: Historie-Analyse ============================================
+   Misst je Mandant, wie viel Vergangenheit in Freshdesk liegt — als Grundlage
+   für die Entscheidung, wohin exportiert wird. Bewusst sparsam: pro Mandant
+   2 Abrufe für den Zeitraum + 1 Suche je Jahr + 3 Stichproben für die Größe.
+   Nutzt die normale Drosselung, läuft also nicht ins Rate-Limit. */
+async function analyseHistorie(btn) {
+  const ziel = document.getElementById('histAnalyse');
+  if (!ziel) return;
+  const accs = (APP_STATE.accounts || []);
+  if (!accs.length) { ziel.innerHTML = '<p class="text-[11px] text-ink-400">Keine Mandanten geladen.</p>'; return; }
+  if (btn) setBusy(btn, true, 'Analysiere…');
+  ziel.innerHTML = '<p class="text-[11px] text-ink-500"><span class="spinner inline-block w-3 h-3 border-[2px] text-emerald-500 mr-1"></span>Frage Freshdesk ab — das dauert einen Moment…</p>';
+  const jahrJetzt = new Date().getFullYear();
+  const ergebnisse = [];
+  for (const a of accs) {
+    const e = { id: a.id, name: a.name || a.id, jahre: [], gesamt: 0, fehler: null, aeltestes: null, neuestes: null, avgBytes: null, kapiert: false };
+    const base = '/freshdesk/' + encodeURIComponent(a.id) + '/api/v2/';
+    try {
+      // Zeitraum: ältestes + neuestes Ticket (je 1 Datensatz)
+      const [alt, neu] = await Promise.all([
+        proxyJson(base + 'tickets?per_page=1&page=1&order_by=created_at&order_type=asc').catch(() => null),
+        proxyJson(base + 'tickets?per_page=1&page=1&order_by=created_at&order_type=desc').catch(() => null),
+      ]);
+      const first = Array.isArray(alt) ? alt[0] : null;
+      const last  = Array.isArray(neu) ? neu[0] : null;
+      if (first?.created_at) e.aeltestes = String(first.created_at).slice(0, 10);
+      if (last?.created_at)  e.neuestes  = String(last.created_at).slice(0, 10);
+      if (last?.id) e.hoechsteId = last.id;
+      // Menge je Jahr über die Such-API (liefert "total")
+      const startJahr = e.aeltestes ? Math.max(2015, parseInt(e.aeltestes.slice(0, 4), 10)) : jahrJetzt - 5;
+      for (let j = startJahr; j <= jahrJetzt; j++) {
+        // Freshdesk erwartet den Ausdruck in doppelten Anführungszeichen, komplett URL-kodiert
+        const inner = "created_at:>'" + j + "-01-01' AND created_at:<'" + (j + 1) + "-01-01'";
+        const r = await proxyJson(base + 'search/tickets?query=' + encodeURIComponent('"' + inner + '"') + '&page=1').catch(() => null);
+        const total = (r && typeof r.total === 'number') ? r.total : null;
+        if (total != null) { e.jahre.push({ jahr: j, anzahl: total }); e.gesamt += total; if (total >= 300) e.kapiert = true; }
+      }
+      // Stichprobe für die Größe: 3 Tickets samt Verlauf
+      const liste = Array.isArray(neu) ? neu : [];
+      const proben = [];
+      for (const t of liste.slice(0, 1)) {
+        try {
+          const full = await proxyJson(base + 'tickets/' + t.id + '?include=conversations');
+          proben.push(JSON.stringify(full || {}).length);
+        } catch (_) {}
+      }
+      if (proben.length) e.avgBytes = Math.round(proben.reduce((s, x) => s + x, 0) / proben.length);
+    } catch (err) { e.fehler = err.message || String(err); }
+    ergebnisse.push(e);
+    _renderHistorieAnalyse(ergebnisse, accs.length);
+  }
+  if (btn) setBusy(btn, false);
+  _renderHistorieAnalyse(ergebnisse, accs.length, true);
+}
+function _renderHistorieAnalyse(list, gesamtAnzahl, fertig) {
+  const ziel = document.getElementById('histAnalyse');
+  if (!ziel) return;
+  const mb = (b) => b == null ? '—' : (b / 1048576).toFixed(b < 10485760 ? 1 : 0) + ' MB';
+  const summeTickets = list.reduce((s, e) => s + (e.gesamt || 0), 0);
+  const summeBytes = list.reduce((s, e) => s + ((e.gesamt || 0) * (e.avgBytes || 0)), 0);
+  ziel.innerHTML =
+    list.map(e => {
+      if (e.fehler) return '<div class="border-t border-ink-100 pt-2 mt-2 first:border-0 first:pt-0 first:mt-0"><p class="text-[11px] font-bold text-ink-700">' + escapeHtml(e.name) + '</p><p class="text-[10px] text-rose-600">' + escapeHtml(e.fehler) + '</p></div>';
+      const maxJ = Math.max(1, ...e.jahre.map(j => j.anzahl));
+      return '<div class="border-t border-ink-100 pt-2 mt-2 first:border-0 first:pt-0 first:mt-0">' +
+        '<div class="flex items-center justify-between gap-2"><p class="text-[11px] font-bold text-ink-700">' + escapeHtml(e.name) + '</p>' +
+          '<p class="text-[11px] font-semibold text-ink-800 tabular-nums">' + (e.gesamt || 0).toLocaleString('de-DE') + ' Tickets' + (e.kapiert ? '*' : '') + '</p></div>' +
+        '<p class="text-[10px] text-ink-500">' + (e.aeltestes || '?') + ' bis ' + (e.neuestes || '?') +
+          (e.avgBytes ? ' · ø ' + Math.round(e.avgBytes / 1024) + ' KB/Ticket · geschätzt ' + mb((e.gesamt || 0) * e.avgBytes) : '') + '</p>' +
+        '<div class="flex items-end gap-0.5 h-10 mt-1">' +
+          e.jahre.map(j => '<div class="flex-1 bg-emerald-400 rounded-t" style="height:' + Math.max(4, Math.round(j.anzahl / maxJ * 100)) + '%" title="' + j.jahr + ': ' + j.anzahl + '"></div>').join('') +
+        '</div>' +
+        '<div class="flex gap-0.5 text-[8px] text-ink-400">' + e.jahre.map(j => '<div class="flex-1 text-center">' + String(j.jahr).slice(2) + '</div>').join('') + '</div>' +
+      '</div>';
+    }).join('') +
+    (fertig
+      ? '<div class="mt-2 pt-2 border-t border-ink-200 text-[11px] text-ink-700">' +
+          '<b>Gesamt: ' + summeTickets.toLocaleString('de-DE') + ' Tickets</b>' + (summeBytes ? ' · geschätztes Volumen inkl. Verlauf: <b>' + mb(summeBytes) + '</b>' : '') +
+          (list.some(x => x.kapiert) ? '<p class="text-[10px] text-amber-700 mt-1">* Freshdesks Such-API deckelt die Trefferzahl — die echten Werte liegen höher. Für die Speicherwahl reicht die Größenordnung.</p>' : '') +
+        '</div>'
+      : '<p class="text-[10px] text-ink-400 mt-2">' + list.length + '/' + gesamtAnzahl + ' Mandanten…</p>');
+}
+
 /* ===================== KI-KOSTEN-DASHBOARD ===================== */
 function renderCostsPage() {
   setPageTitle('KI-Kosten', 'API + Modell-Verbrauch');
@@ -21042,6 +21189,16 @@ function renderCostsPage() {
 
       <!-- v2.67.1: Freshdesk-Kontingent je Mandant -->
       ${limitKarte}
+
+      <!-- v2.67.2: Historie-Analyse — Grundlage für die Export-Entscheidung -->
+      <div class="bg-white rounded-2xl border border-ink-200 p-3">
+        <div class="flex items-center justify-between gap-2 flex-wrap">
+          <p class="text-[11px] font-bold text-ink-800 uppercase tracking-wider inline-flex items-center gap-1"><i data-lucide="database" class="w-3.5 h-3.5 text-violet-600"></i> Historie in Freshdesk</p>
+          <button onclick="analyseHistorie(this)" class="text-[11px] font-semibold bg-violet-600 hover:bg-violet-700 text-white px-2.5 py-1.5 rounded-lg inline-flex items-center gap-1"><i data-lucide="scan-search" class="w-3 h-3"></i> Analysieren</button>
+        </div>
+        <p class="text-[10px] text-ink-500 mt-1">Ermittelt Menge, Zeitraum und geschätztes Datenvolumen je Mandant — Grundlage für die Wahl des Speicherorts. Kostet nur wenige Requests.</p>
+        <div id="histAnalyse" class="mt-2"><p class="text-[11px] text-ink-400">Noch nicht analysiert.</p></div>
+      </div>
 
       <!-- Hero-Karte: Gesamtkosten -->
       <div class="bg-gradient-to-br from-emerald-50 via-amber-50 to-brand-50 border border-emerald-200 rounded-2xl p-4">
