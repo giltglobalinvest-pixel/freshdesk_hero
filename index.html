@@ -805,7 +805,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.66.5';
+const APP_VERSION = 'v2.66.6';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -14484,6 +14484,16 @@ async function fdhCfAktualisieren(btn, accountId, ticketId) {
     if (CURRENT_TICKET && CURRENT_TICKET.id === ticketId) {
       CURRENT_TICKET.custom_fields = { ...(CURRENT_TICKET.custom_fields || {}), ...custom };
     }
+    // v2.66.6: Auch den Ticket-Cache mitziehen — sonst standen beim erneuten
+    // Öffnen des Tickets wieder die alten Werte da (Cache ist ein eigenes Objekt).
+    try {
+      const ck = accountId + '|' + ticketId;
+      const cached = APP_STATE.ticketCache instanceof Map ? APP_STATE.ticketCache.get(ck) : null;
+      if (cached) {
+        cached.custom_fields = { ...(cached.custom_fields || {}), ...custom };
+        APP_STATE.ticketCache.set(ck, cached);
+      }
+    } catch (_) {}
     _fdhCfPending = { ticketId: null, werte: {} };
     setBusy(btn, false);
     btn.disabled = true;
@@ -14492,6 +14502,11 @@ async function fdhCfAktualisieren(btn, accountId, ticketId) {
     btn.textContent = 'Aktualisiert ✓';
     setTimeout(() => { if (btn.isConnected) btn.textContent = 'Aktualisieren'; }, 2500);
     document.querySelectorAll('#fdhCustomFelder .ring-brand-400').forEach(e => e.classList.remove('ring-1', 'ring-brand-400', 'border-brand-400'));
+    // v2.66.6: Felder aus dem aktualisierten Ticket neu zeichnen — der gespeicherte
+    // Stand wird dadurch sofort sichtbar (auch Werte, die Freshdesk normalisiert hat).
+    if (CURRENT_TICKET && CURRENT_TICKET.id === ticketId) {
+      _fdhCustomFelderNachladen(CURRENT_TICKET).catch(() => {});
+    }
     toast(Object.keys(custom).length + ' Feld' + (Object.keys(custom).length === 1 ? '' : 'er') + ' gespeichert', 'success', 3000);
   } catch (e) {
     setBusy(btn, false);
