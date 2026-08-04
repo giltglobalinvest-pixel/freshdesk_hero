@@ -722,6 +722,9 @@
     <button onclick="navTo('reply-templates'); closeMenu();" class="w-full text-left px-3 py-2 text-sm hover:bg-ink-50 flex items-center gap-2">
       <i data-lucide="clipboard-list" class="w-4 h-4 text-rose-500"></i> Antwort-Vorlagen (mit Ansprechpartner)
     </button>
+    <button onclick="navTo('costs'); closeMenu();" class="w-full text-left px-3 py-2 text-sm hover:bg-ink-50 flex items-center gap-2">
+      <i data-lucide="gauge" class="w-4 h-4 text-emerald-500"></i> KI-Verbrauch &amp; Limits
+    </button>
     <button onclick="navTo('stats'); closeMenu();" class="w-full text-left px-3 py-2 text-sm hover:bg-ink-50 flex items-center gap-2">
       <i data-lucide="bar-chart-3" class="w-4 h-4 text-indigo-500"></i> Statistiken
     </button>
@@ -805,7 +808,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.67.0';
+const APP_VERSION = 'v2.67.1';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -2453,6 +2456,43 @@ function _extractAccountIdFromPath(path) {
   const m = String(path).match(/^\/freshdesk\/([^\/]+)\//);
   return m ? decodeURIComponent(m[1]) : null;
 }
+/* === v2.67.1: Kontingent je Mandant aus den Freshdesk-Headern ==============
+   Jeder Mandant ist eine EIGENE Freshdesk-Instanz und hat ein eigenes Limit
+   (Blossom 200/min). Freshdesk liefert es bei jeder Antwort mit; einen eigenen
+   Endpunkt dafür gibt es nicht. Wir merken uns Total/Remaining pro Account und
+   bremsen VOR dem 429, statt nur darauf zu reagieren. */
+const FD_RATE = {};   // accountId → { total, remaining, used, at }
+const _FD_RESERVE = 10;      // ab diesem Rest wird gebremst
+const _FD_RESERVE_HARD = 3;  // ab hier bis zum Fensterwechsel warten
+function _fdNoteRateLimit(accountId, res) {
+  if (!accountId || !res || !res.headers) return;
+  const num = (h) => { const v = parseInt(res.headers.get(h) || '', 10); return Number.isFinite(v) ? v : null; };
+  const total = num('x-ratelimit-total');
+  const remaining = num('x-ratelimit-remaining');
+  if (total == null && remaining == null) return;   // Proxy noch alt → nichts zu tun
+  const prev = FD_RATE[accountId] || {};
+  FD_RATE[accountId] = {
+    total: total != null ? total : prev.total,
+    remaining: remaining != null ? remaining : prev.remaining,
+    used: num('x-ratelimit-used-currentrequest') || prev.used || null,
+    at: Date.now(),
+  };
+}
+/* Wartet, wenn das Kontingent dieses Mandanten fast aufgebraucht ist. Das
+   Zählfenster ist eine Minute — beim Warten reicht der Rest der Minute. */
+async function _fdRespectBudget(accountId) {
+  const r = accountId && FD_RATE[accountId];
+  if (!r || r.remaining == null) return;
+  const alter = Date.now() - r.at;
+  if (alter > 60000) return;                 // Fenster längst weiter → Wert veraltet
+  if (r.remaining > _FD_RESERVE) return;
+  const wartenMs = Math.max(1000, 60000 - alter);
+  const hart = r.remaining <= _FD_RESERVE_HARD;
+  console.warn('[FD-Budget] Account ' + accountId + ': nur noch ' + r.remaining + '/' + (r.total || '?') +
+    ' Requests — warte ' + Math.round(wartenMs / 1000) + 's' + (hart ? ' (hart)' : ''));
+  await new Promise(res => setTimeout(res, hart ? wartenMs : Math.min(wartenMs, 3000)));
+}
+
 async function _fdAcquireSlot(accountId) {
   const key = accountId || '_global';
   // 1. Pause-Check (wenn dieser Account kürzlich 429 hatte)
@@ -2462,6 +2502,8 @@ async function _fdAcquireSlot(accountId) {
     console.warn('[FD-Throttle] Account ' + key + ' pausiert — warte ' + remaining + 'ms');
     await new Promise(r => setTimeout(r, Math.min(remaining, _FD_429_PAUSE_MS)));
   }
+  // 1b. v2.67.1: vorausschauend bremsen, bevor das Kontingent aufgebraucht ist
+  await _fdRespectBudget(accountId);
   // 2. Slot reservieren
   if (!_FD_ACCOUNT_QUEUE[key]) _FD_ACCOUNT_QUEUE[key] = [];
   if ((_FD_ACCOUNT_INFLIGHT[key] || 0) < _FD_MAX_PER_ACCOUNT) {
@@ -2512,6 +2554,8 @@ async function proxyFetch(path, init = {}) {
   const timer = setTimeout(() => ctrl.abort(), timeoutMs);
   try {
     const res = await fetch(_proxyBase() + (path.startsWith('/') ? path : '/' + path), Object.assign({}, init, { headers, signal: ctrl.signal }));
+    // v2.67.1: Kontingent-Header festhalten (Grundlage fürs vorausschauende Bremsen)
+    if (throttled) _fdNoteRateLimit(accountId, res);
     // 429 detection — pausiere DIESEN Account
     if (res.status === 429 && accountId) _fdMarkAccountRateLimited(accountId);
     return res;
@@ -2536,8 +2580,12 @@ async function proxyJson(path, init = {}) {
     const defaultMs = [5000, 15000, 30000][attempt - 1];
     let waitMs = defaultMs;
     const n = parseInt(retryAfter, 10);
-    if (Number.isFinite(n) && n > 0 && n < 120) waitMs = Math.max(waitMs, n * 1000);
-    console.warn('[proxyJson] HTTP 429 für ' + path + ' — Retry ' + attempt + '/3 in ' + waitMs + 'ms');
+    // v2.67.1: Retry-After kommt jetzt tatsächlich durch (Proxy reicht ihn weiter)
+    // und ist die verlässlichste Angabe — daher EXAKT befolgen (+250ms Puffer)
+    // statt nur als Untergrenze. Ohne Header bleibt es beim festen Backoff.
+    if (Number.isFinite(n) && n > 0 && n < 120) waitMs = n * 1000 + 250;
+    console.warn('[proxyJson] HTTP 429 für ' + path + ' — Retry ' + attempt + '/3 in ' + waitMs + 'ms' +
+      (Number.isFinite(n) && n > 0 ? ' (Retry-After: ' + n + 's)' : ' (kein Retry-After — Standard-Backoff)'));
     await new Promise(r => setTimeout(r, waitMs));
     try { res = await proxyFetch(path, init); } catch (e) { console.warn('Retry fetch failed:', e); break; }
   }
@@ -7811,9 +7859,21 @@ async function saveFreshsalesContact(btnEl) {
 }
 
 /* === Agent-Cache (responder_id → name) === */
+/* v2.67.1: TTL für Konfigurations-Caches (Agents/Gruppen/Ticketfelder).
+   Vorher galten sie bis zum Neuladen der Seite — Änderungen in Freshdesk kamen
+   erst nach einem Reload an. Datenform bleibt unverändert, die Frische wird
+   separat gestempelt, damit bestehende Aufrufer nichts merken. */
+const _CFG_TTL_MS = 24 * 60 * 60 * 1000;
+const _CFG_CACHE_AT = {};
+function _cfgFrisch(key) {
+  const at = _CFG_CACHE_AT[key] || 0;
+  return at > 0 && (Date.now() - at) < _CFG_TTL_MS;
+}
+function _cfgStempeln(key) { _CFG_CACHE_AT[key] = Date.now(); }
+
 async function ensureAgentsLoaded(accountId) {
   if (!APP_STATE.agentsCache) APP_STATE.agentsCache = {};
-  if (APP_STATE.agentsCache[accountId]) return APP_STATE.agentsCache[accountId];
+  if (APP_STATE.agentsCache[accountId] && _cfgFrisch('agents|' + accountId)) return APP_STATE.agentsCache[accountId];
   try {
     const data = await proxyJson('/freshdesk/' + encodeURIComponent(accountId) + '/api/v2/agents?per_page=100');
     const agents = (Array.isArray(data) ? data : []).map(a => {
@@ -7823,6 +7883,7 @@ async function ensureAgentsLoaded(accountId) {
     const byId = {};
     agents.forEach(a => byId[a.id] = a);
     APP_STATE.agentsCache[accountId] = { agents, byId };
+    _cfgStempeln('agents|' + accountId);
     return APP_STATE.agentsCache[accountId];
   } catch (e) {
     console.warn('Agent-Load fehlgeschlagen für ' + accountId + ':', e.message);
@@ -7844,7 +7905,7 @@ function getAgentFirstName(accountId, agentId) {
 /* === Gruppen-Cache (group_id → name) === */
 async function ensureGroupsLoaded(accountId) {
   if (!APP_STATE.groupsCache) APP_STATE.groupsCache = {};
-  if (APP_STATE.groupsCache[accountId]) return APP_STATE.groupsCache[accountId];
+  if (APP_STATE.groupsCache[accountId] && _cfgFrisch('groups|' + accountId)) return APP_STATE.groupsCache[accountId];
   try {
     const data = await proxyJson('/freshdesk/' + encodeURIComponent(accountId) + '/api/v2/groups?per_page=100');
     const groups = (Array.isArray(data) ? data : []).map(g => ({
@@ -7853,6 +7914,7 @@ async function ensureGroupsLoaded(accountId) {
     const byId = {};
     groups.forEach(g => byId[g.id] = g);
     APP_STATE.groupsCache[accountId] = { groups, byId };
+    _cfgStempeln('groups|' + accountId);
     return APP_STATE.groupsCache[accountId];
   } catch (e) {
     console.warn('Group-Load fehlgeschlagen für ' + accountId + ':', e.message);
@@ -14411,13 +14473,14 @@ function _fdhDetailAktionsleiste(t) {
    Die Sidebar zeigt damit je Konto exakt die dort konfigurierten Felder. */
 async function ensureTicketFieldsLoaded(accountId) {
   APP_STATE.ticketFieldsCache = APP_STATE.ticketFieldsCache || {};
-  if (APP_STATE.ticketFieldsCache[accountId]) return APP_STATE.ticketFieldsCache[accountId];
+  if (APP_STATE.ticketFieldsCache[accountId] && _cfgFrisch('fields|' + accountId)) return APP_STATE.ticketFieldsCache[accountId];
   try {
     const felder = await proxyJson('/freshdesk/' + encodeURIComponent(accountId) + '/api/v2/ticket_fields');
     const nutzbar = (Array.isArray(felder) ? felder : [])
       .filter(f => f && f.default !== true)
       .sort((a, b) => (a.position || 0) - (b.position || 0));
     APP_STATE.ticketFieldsCache[accountId] = nutzbar;
+    _cfgStempeln('fields|' + accountId);
     return nutzbar;
   } catch (e) {
     // Kein Admin-Recht am Key o. ä. — Sidebar zeigt dann nur die Standardfelder.
@@ -20852,6 +20915,52 @@ function renderCostsPage() {
   });
   const ydCost = yd.reduce((s, x) => s + (x.cost_usd || 0), 0);
 
+  // v2.67.1: Tag/Woche/Monat IMMER sichtbar — unabhängig vom gewählten Zeitraum.
+  const _sum = (ab) => {
+    const rows = log.filter(x => new Date(x.created || 0).getTime() >= ab);
+    return {
+      cost: rows.reduce((s, x) => s + (x.cost_usd || 0), 0),
+      tok:  rows.reduce((s, x) => s + (x.input_tokens || 0) + (x.output_tokens || 0), 0),
+      calls: rows.length,
+    };
+  };
+  const sTag = _sum(todayStart.getTime());
+  const sWoche = _sum(weekStart);
+  const sMonat = _sum(monthStart);
+  // Die Kacheln selbst werden weiter unten gebaut — fmtUsd/fmtTokens sind erst
+  // dort definiert (const → Temporal Dead Zone, vorher nicht aufrufbar).
+
+  // v2.67.1: Freshdesk-Kontingent je Mandant (aus den X-RateLimit-Headern).
+  // Jeder Mandant ist eine eigene Freshdesk-Instanz mit eigenem Limit.
+  const limitKarte = (function () {
+    const accs = APP_STATE.accounts || [];
+    const zeilen = accs.map(a => {
+      const r = FD_RATE[a.id];
+      if (!r || r.remaining == null) {
+        return '<div class="flex items-center justify-between gap-2 py-1 text-[11px]">' +
+          '<span class="text-ink-700 truncate">' + escapeHtml(a.name || a.id) + '</span>' +
+          '<span class="text-ink-400">noch keine Daten</span></div>';
+      }
+      const total = r.total || 0;
+      const pct = total ? Math.max(0, Math.min(100, Math.round(r.remaining / total * 100))) : 0;
+      const farbe = pct > 40 ? 'emerald' : pct > 15 ? 'amber' : 'rose';
+      const alter = Math.round((Date.now() - r.at) / 1000);
+      return '<div class="py-1">' +
+        '<div class="flex items-center justify-between gap-2 text-[11px]">' +
+          '<span class="text-ink-700 truncate">' + escapeHtml(a.name || a.id) + '</span>' +
+          '<span class="font-semibold text-' + farbe + '-700 tabular-nums">' + r.remaining + (total ? ' / ' + total : '') + '</span>' +
+        '</div>' +
+        '<div class="h-1.5 bg-ink-100 rounded-full overflow-hidden mt-0.5"><div class="h-full bg-' + farbe + '-500" style="width:' + pct + '%"></div></div>' +
+        '<p class="text-[9px] text-ink-400 mt-0.5">Stand vor ' + alter + 's' + (alter > 60 ? ' · Fenster vermutlich zurückgesetzt' : '') + '</p>' +
+      '</div>';
+    }).join('');
+    return '<div class="bg-white rounded-2xl border border-ink-200 p-3">' +
+      '<p class="text-[11px] font-bold text-ink-800 uppercase tracking-wider mb-1.5 inline-flex items-center gap-1"><i data-lucide="gauge" class="w-3.5 h-3.5 text-emerald-600"></i> Freshdesk-Kontingent je Mandant</p>' +
+      (zeilen || '<p class="text-[11px] text-ink-400">Keine Mandanten geladen.</p>') +
+      '<p class="text-[10px] text-ink-500 mt-1.5">Verbleibende Requests im laufenden Minutenfenster. Jeder Mandant ist eine eigene Freshdesk-Instanz und hat sein <b>eigenes</b> Limit — deshalb unterscheiden sich die Werte. Werte erscheinen, sobald der Mandant angefragt wurde.</p>' +
+    '</div>';
+  })();
+
   // Verteilung nach Feature
   const byFeature = {};
   inPeriod.forEach(x => {
@@ -20904,6 +21013,18 @@ function renderCostsPage() {
     return (n/1_000_000).toFixed(2) + 'M';
   };
 
+  // v2.67.1: Tages-/Wochen-/Monatsverbrauch dauerhaft sichtbar (unabhängig vom Filter)
+  const _kachel = (titel, s, farbe) =>
+    '<div class="bg-white rounded-xl border border-ink-200 p-2.5">' +
+      '<p class="text-[10px] uppercase tracking-wider font-semibold text-' + farbe + '-700">' + titel + '</p>' +
+      '<p class="text-lg font-bold text-ink-900 leading-tight">' + escapeHtml(fmtUsd(s.cost)) + '</p>' +
+      '<p class="text-[10px] text-ink-500">' + s.calls + ' Calls · ' + escapeHtml(fmtTokens(s.tok)) + ' Tokens</p>' +
+    '</div>';
+  const verbrauchKacheln =
+    '<div class="grid grid-cols-3 gap-2">' +
+      _kachel('Heute', sTag, 'emerald') + _kachel('7 Tage', sWoche, 'blue') + _kachel('30 Tage', sMonat, 'violet') +
+    '</div>';
+
   const featureLabels = {
     summary: 'Zusammenfassung', rule: 'Regel-Eval', translation: 'Übersetzung',
     'phone-validation': 'Tel-Validierung', whatsapp: 'WhatsApp-Text',
@@ -20915,6 +21036,12 @@ function renderCostsPage() {
   $('pageContent').innerHTML = `
     <div class="space-y-3 max-w-2xl mx-auto">
       <button onclick="navTo('profile')" class="text-[11px] text-brand-600 inline-flex items-center gap-1 -ml-1"><i data-lucide="arrow-left" class="w-3 h-3"></i> Zurück zum Profil</button>
+
+      <!-- v2.67.1: Tages-/Wochen-/Monatsverbrauch immer sichtbar -->
+      ${verbrauchKacheln}
+
+      <!-- v2.67.1: Freshdesk-Kontingent je Mandant -->
+      ${limitKarte}
 
       <!-- Hero-Karte: Gesamtkosten -->
       <div class="bg-gradient-to-br from-emerald-50 via-amber-50 to-brand-50 border border-emerald-200 rounded-2xl p-4">
@@ -44877,10 +45004,21 @@ export default async function (req) {
     // "Response with null body status cannot have body". Tritt häufig bei DELETE→204 auf.
     const noBody = upstreamStatus === 101 || upstreamStatus === 204 || upstreamStatus === 205 || upstreamStatus === 304;
     const text = noBody ? null : await upstream.text();
-    return new Response(text, {
-      status: upstreamStatus,
-      headers: { "content-type": upstream.headers.get("content-type") || "application/json", "access-control-allow-origin": "*" }
-    });
+    // v2.67.1: Rate-Limit-Header DURCHREICHEN. Vorher gingen sie verloren —
+    // dadurch war Retry-After im Client wirkungslos (fester Backoff) und das
+    // verbleibende Kontingent gar nicht sichtbar. expose-headers ist zwingend,
+    // sonst darf der Browser sie trotz Weitergabe nicht lesen.
+    const RL_HEADER = ["retry-after", "x-ratelimit-total", "x-ratelimit-remaining", "x-ratelimit-used-currentrequest"];
+    const outHeaders = {
+      "content-type": upstream.headers.get("content-type") || "application/json",
+      "access-control-allow-origin": "*",
+      "access-control-expose-headers": RL_HEADER.join(","),
+    };
+    for (const h of RL_HEADER) {
+      const v = upstream.headers.get(h);
+      if (v) outHeaders[h] = v;
+    }
+    return new Response(text, { status: upstreamStatus, headers: outHeaders });
   }
 
   // ===== /freshdesk/<account_id>/api/v2/... =====
@@ -44942,10 +45080,21 @@ export default async function (req) {
     // "Response with null body status cannot have body". Tritt häufig bei DELETE→204 auf.
     const noBody = upstreamStatus === 101 || upstreamStatus === 204 || upstreamStatus === 205 || upstreamStatus === 304;
     const text = noBody ? null : await upstream.text();
-    return new Response(text, {
-      status: upstreamStatus,
-      headers: { "content-type": upstream.headers.get("content-type") || "application/json", "access-control-allow-origin": "*" }
-    });
+    // v2.67.1: Rate-Limit-Header DURCHREICHEN. Vorher gingen sie verloren —
+    // dadurch war Retry-After im Client wirkungslos (fester Backoff) und das
+    // verbleibende Kontingent gar nicht sichtbar. expose-headers ist zwingend,
+    // sonst darf der Browser sie trotz Weitergabe nicht lesen.
+    const RL_HEADER = ["retry-after", "x-ratelimit-total", "x-ratelimit-remaining", "x-ratelimit-used-currentrequest"];
+    const outHeaders = {
+      "content-type": upstream.headers.get("content-type") || "application/json",
+      "access-control-allow-origin": "*",
+      "access-control-expose-headers": RL_HEADER.join(","),
+    };
+    for (const h of RL_HEADER) {
+      const v = upstream.headers.get(h);
+      if (v) outHeaders[h] = v;
+    }
+    return new Response(text, { status: upstreamStatus, headers: outHeaders });
   }
 
   // ===== /attachment-fetch?url=<encoded-url> =====
