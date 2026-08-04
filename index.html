@@ -805,7 +805,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.66.6';
+const APP_VERSION = 'v2.67.0';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -9424,6 +9424,25 @@ async function _fdhKiZuweisen(accountId, ticketId, kiKey) {
     }
     toast(kiIcon + ' Zugewiesen an ' + ki.name + (fdMaster ? ' \u00b7 Freshdesk: ' + masterName : ' (Freshdesk-Master nicht gefunden \u2014 nur Hero-Zuweisung)'), 'success', 5000);
     setRegelStopp(accountId, ticketId, 'manual_assign').catch(() => {});
+    // v2.67.0: Zuweisung = Beauftragung. Ein virtueller Mitarbeiter wird durch
+    // die Zuweisung sofort geweckt (Einlern-Muster des Betreibers: Ticket
+    // zuweisen + Anweisungs-Notiz — kein @ mehr noetig). Menschen-Benutzer
+    // ohne KI-Rolle werden nicht geweckt.
+    if ((ki.role || '').toLowerCase() === 'ki') {
+      const accW = (APP_STATE.accounts || []).find(a => a.id === accountId) || null;
+      const tW = _fdhTicketAusCache(accountId, ticketId) ||
+        ((CURRENT_TICKET && CURRENT_TICKET.id === ticketId) ? CURRENT_TICKET : {});
+      _fdhWeckSenden({
+        name: ki.name,
+        firma: accW ? (_erpFirmaSlugForAccount(accW) || '') : '',
+        ticket_id: ticketId,
+        betreff: tW.subject || '',
+        gruppe: tW.group_id ? (getGroupName(accountId, tW.group_id) || '') : '',
+        text: 'ZUWEISUNG ohne Zusatztext — die Aufgabenstellung steht als interne Notiz im Ticket.',
+        von: APP_KEYS.user?.name || '',
+        art: 'zuweisung',
+      }, true).catch(() => {});
+    }
     return true;
   } catch (e) {
     toast('Zuweisung fehlgeschlagen: ' + e.message, 'error', 6000);
