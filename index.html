@@ -808,7 +808,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.67.5';
+const APP_VERSION = 'v2.67.6';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -32476,7 +32476,7 @@ function _renderStellungnahmeShell() {
       '</div>' +
     '</div>';
   if (window.lucide) lucide.createIcons();
-  if (s.result) _stnRefreshPreview();
+  _stnRefreshPreview();   // v2.67.6: Briefpapier sofort zeigen, auch ohne erzeugten Text
 }
 
 /* v2.50.6: Dropdown „Bezug / Vorgangsart" (+ Freitext bei „Sonstiges"). */
@@ -32502,7 +32502,7 @@ function _stnUpdateCtx(field, value) {
   const s = window._STN_CTX;
   if (!s) return;
   s[field] = value;
-  if (s.result) _stnRefreshPreview();
+  _stnRefreshPreview();   // Titel/Funktion wirken sofort im Briefpapier
 }
 
 /* v2.50.6: Vorgangsart umschalten. Passt den Titel automatisch mit an, wenn er
@@ -32560,10 +32560,26 @@ async function _stnSaveSignatureAsDefault(btn) {
 
 function _stnRefreshPreview() {
   const s = window._STN_CTX;
-  if (!s?.result) return;
+  if (!s) return;
   const frame = document.getElementById('stnPreviewFrame');
   if (!frame) return;
+  // v2.67.6: Vorher wurde erst NACH dem Erzeugen gezeichnet — das Briefpapier blieb
+  // bis dahin leer. Jetzt wird es sofort mit Kopf, Anschrift und Fußzeile gezeigt;
+  // Betreff/Text sind noch Platzhalter, bis die KI geliefert hat.
+  const leer = !s.result;
+  const sBak = s.result;
+  if (leer) {
+    const t = s.ticket || {};
+    s.result = {
+      betreff: '(Betreff erscheint nach „KI-Stellungnahme erzeugen")',
+      anrede: '',
+      body: '',
+      schluss: '',
+    };
+    s._vorschauLeer = true;
+  }
   const html = _buildStellungnahmeHtml(s);
+  if (leer) { s.result = sBak; delete s._vorschauLeer; }
   try {
     const doc = frame.contentDocument || frame.contentWindow?.document;
     if (doc) {
