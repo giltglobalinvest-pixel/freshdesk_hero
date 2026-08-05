@@ -808,7 +808,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.67.8';
+const APP_VERSION = 'v2.67.9';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -21121,40 +21121,51 @@ async function analyseHistorie(btn) {
   if (btn) setBusy(btn, true, 'Analysiere…');
   ziel.innerHTML = '<p class="text-[11px] text-ink-500"><span class="spinner inline-block w-3 h-3 border-[2px] text-emerald-500 mr-1"></span>Frage Freshdesk ab — das dauert einen Moment…</p>';
   const jahrJetzt = new Date().getFullYear();
+  const JAHR_MIN = 2012;
   const ergebnisse = [];
   for (const a of accs) {
-    const e = { id: a.id, name: a.name || a.id, jahre: [], gesamt: 0, fehler: null, aeltestes: null, neuestes: null, avgBytes: null, kapiert: false };
+    const e = { id: a.id, name: a.name || a.id, jahre: [], gesamt: 0, fehler: null, aeltestes: null, neuestes: null, avgBytes: null, proben: 0 };
     const base = '/freshdesk/' + encodeURIComponent(a.id) + '/api/v2/';
+    const jahrQuery = (j) => encodeURIComponent('"' + "created_at:>'" + (j - 1) + "-12-31' AND created_at:<'" + (j + 1) + "-01-01'" + '"');
     try {
-      // Zeitraum: ältestes + neuestes Ticket (je 1 Datensatz)
-      const [alt, neu] = await Promise.all([
-        proxyJson(base + 'tickets?per_page=1&page=1&order_by=created_at&order_type=asc').catch(() => null),
-        proxyJson(base + 'tickets?per_page=1&page=1&order_by=created_at&order_type=desc').catch(() => null),
-      ]);
-      const first = Array.isArray(alt) ? alt[0] : null;
-      const last  = Array.isArray(neu) ? neu[0] : null;
-      if (first?.created_at) e.aeltestes = String(first.created_at).slice(0, 10);
-      if (last?.created_at)  e.neuestes  = String(last.created_at).slice(0, 10);
-      if (last?.id) e.hoechsteId = last.id;
-      // Menge je Jahr über die Such-API (liefert "total")
-      const startJahr = e.aeltestes ? Math.max(2015, parseInt(e.aeltestes.slice(0, 4), 10)) : jahrJetzt - 5;
-      for (let j = startJahr; j <= jahrJetzt; j++) {
-        // Freshdesk erwartet den Ausdruck in doppelten Anführungszeichen, komplett URL-kodiert
-        const inner = "created_at:>'" + j + "-01-01' AND created_at:<'" + (j + 1) + "-01-01'";
-        const r = await proxyJson(base + 'search/tickets?query=' + encodeURIComponent('"' + inner + '"') + '&page=1').catch(() => null);
-        const total = (r && typeof r.total === 'number') ? r.total : null;
-        if (total != null) { e.jahre.push({ jahr: j, anzahl: total }); e.gesamt += total; if (total >= 300) e.kapiert = true; }
-      }
-      // Stichprobe für die Größe: 3 Tickets samt Verlauf
-      const liste = Array.isArray(neu) ? neu : [];
-      const proben = [];
-      for (const t of liste.slice(0, 1)) {
+      // Neuestes Ticket (für Datum + Größen-Stichprobe). Achtung: /tickets liefert
+      // ohne updated_since NUR die letzten 30 Tage — für das ÄLTESTE Ticket ist der
+      // Endpunkt daher unbrauchbar (v2.67.9: das war der Fehler, der die Historie
+      // auf das laufende Jahr zusammenschrumpfen ließ).
+      const neu = await proxyJson(base + 'tickets?per_page=5&page=1&order_by=created_at&order_type=desc').catch(() => null);
+      const last = Array.isArray(neu) ? neu[0] : null;
+      if (last?.created_at) e.neuestes = String(last.created_at).slice(0, 10);
+      // Menge je Jahr über die Such-API. Deren "total" ist die ECHTE Gesamtzahl —
+      // gedeckelt sind nur die zurückgelieferten Treffer (10 Seiten à 30).
+      const jahre = [];
+      for (let j = JAHR_MIN; j <= jahrJetzt; j++) jahre.push(j);
+      const treffer = await Promise.all(jahre.map(j =>
+        proxyJson(base + 'search/tickets?query=' + jahrQuery(j) + '&page=1')
+          .then(r => ({ jahr: j, total: (r && typeof r.total === 'number') ? r.total : null, results: (r && r.results) || [] }))
+          .catch(() => ({ jahr: j, total: null, results: [] }))
+      ));
+      // Führende Leerjahre abschneiden — erst ab dem ersten Jahr mit Tickets zeigen
+      let ersterIdx = treffer.findIndex(t => (t.total || 0) > 0);
+      if (ersterIdx < 0) ersterIdx = treffer.length;
+      const relevant = treffer.slice(ersterIdx);
+      relevant.forEach(t => { if (t.total != null) { e.jahre.push({ jahr: t.jahr, anzahl: t.total }); e.gesamt += t.total; } });
+      if (relevant.length) e.aeltestes = String(relevant[0].jahr);
+      if (treffer[0] && (treffer[0].total || 0) > 0) e.randVoll = true;   // evtl. noch älter als JAHR_MIN
+      // Größen-Stichprobe: 3 aktuelle + 2 aus dem ältesten Jahr (Verlauf ist dort anders)
+      const probeIds = [];
+      (Array.isArray(neu) ? neu : []).slice(0, 3).forEach(t => probeIds.push(t.id));
+      if (relevant.length) relevant[0].results.slice(0, 2).forEach(t => { if (t && t.id) probeIds.push(t.id); });
+      const groessen = [];
+      for (const id of probeIds) {
         try {
-          const full = await proxyJson(base + 'tickets/' + t.id + '?include=conversations');
-          proben.push(JSON.stringify(full || {}).length);
+          const full = await proxyJson(base + 'tickets/' + id + '?include=conversations');
+          groessen.push(JSON.stringify(full || {}).length);
         } catch (_) {}
       }
-      if (proben.length) e.avgBytes = Math.round(proben.reduce((s, x) => s + x, 0) / proben.length);
+      if (groessen.length) {
+        e.avgBytes = Math.round(groessen.reduce((s, x) => s + x, 0) / groessen.length);
+        e.proben = groessen.length;
+      }
     } catch (err) { e.fehler = err.message || String(err); }
     ergebnisse.push(e);
     _renderHistorieAnalyse(ergebnisse, accs.length);
@@ -21174,9 +21185,12 @@ function _renderHistorieAnalyse(list, gesamtAnzahl, fertig) {
       const maxJ = Math.max(1, ...e.jahre.map(j => j.anzahl));
       return '<div class="border-t border-ink-100 pt-2 mt-2 first:border-0 first:pt-0 first:mt-0">' +
         '<div class="flex items-center justify-between gap-2"><p class="text-[11px] font-bold text-ink-700">' + escapeHtml(e.name) + '</p>' +
-          '<p class="text-[11px] font-semibold text-ink-800 tabular-nums">' + (e.gesamt || 0).toLocaleString('de-DE') + ' Tickets' + (e.kapiert ? '*' : '') + '</p></div>' +
-        '<p class="text-[10px] text-ink-500">' + (e.aeltestes || '?') + ' bis ' + (e.neuestes || '?') +
-          (e.avgBytes ? ' · ø ' + Math.round(e.avgBytes / 1024) + ' KB/Ticket · geschätzt ' + mb((e.gesamt || 0) * e.avgBytes) : '') + '</p>' +
+          '<p class="text-[11px] font-semibold text-ink-800 tabular-nums">' + (e.gesamt || 0).toLocaleString('de-DE') + ' Tickets</p></div>' +
+        '<p class="text-[10px] text-ink-500">' +
+          (e.aeltestes ? (e.randVoll ? 'bis ' + e.aeltestes + ' zurück (evtl. älter)' : 'seit ' + e.aeltestes) : 'kein Zeitraum ermittelt') +
+          (e.neuestes ? ' bis ' + e.neuestes : '') +
+          (e.jahre.length ? ' · ' + e.jahre.length + ' Jahr' + (e.jahre.length === 1 ? '' : 'e') : '') +
+          (e.avgBytes ? ' · ø ' + Math.round(e.avgBytes / 1024) + ' KB/Ticket (' + e.proben + ' Stichproben) · geschätzt ' + mb((e.gesamt || 0) * e.avgBytes) : '') + '</p>' +
         '<div class="flex items-end gap-0.5 h-10 mt-1">' +
           e.jahre.map(j => '<div class="flex-1 bg-emerald-400 rounded-t" style="height:' + Math.max(4, Math.round(j.anzahl / maxJ * 100)) + '%" title="' + j.jahr + ': ' + j.anzahl + '"></div>').join('') +
         '</div>' +
@@ -21186,7 +21200,8 @@ function _renderHistorieAnalyse(list, gesamtAnzahl, fertig) {
     (fertig
       ? '<div class="mt-2 pt-2 border-t border-ink-200 text-[11px] text-ink-700">' +
           '<b>Gesamt: ' + summeTickets.toLocaleString('de-DE') + ' Tickets</b>' + (summeBytes ? ' · geschätztes Volumen inkl. Verlauf: <b>' + mb(summeBytes) + '</b>' : '') +
-          (list.some(x => x.kapiert) ? '<p class="text-[10px] text-amber-700 mt-1">* Freshdesks Such-API deckelt die Trefferzahl — die echten Werte liegen höher. Für die Speicherwahl reicht die Größenordnung.</p>' : '') +
+          '<p class="text-[10px] text-ink-500 mt-1">Ticketzahlen sind exakt (Such-API liefert die echte Gesamtzahl je Jahr; gedeckelt sind nur die ausgelieferten Treffer). Das Volumen ist hochgerechnet aus Stichproben — und eher zu niedrig, weil dabei nur die ersten 10 Nachrichten je Ticket zählen.</p>' +
+          (list.some(x => x.randVoll) ? '<p class="text-[10px] text-amber-700 mt-1">Ein Mandant hat schon ' + 2012 + ' Tickets — es kann noch ältere geben, die hier fehlen.</p>' : '') +
         '</div>'
       : '<p class="text-[10px] text-ink-400 mt-2">' + list.length + '/' + gesamtAnzahl + ' Mandanten…</p>');
 }
@@ -21361,7 +21376,7 @@ function renderCostsPage() {
           <p class="text-[11px] font-bold text-ink-800 uppercase tracking-wider inline-flex items-center gap-1"><i data-lucide="database" class="w-3.5 h-3.5 text-violet-600"></i> Historie in Freshdesk</p>
           <button onclick="analyseHistorie(this)" class="text-[11px] font-semibold bg-violet-600 hover:bg-violet-700 text-white px-2.5 py-1.5 rounded-lg inline-flex items-center gap-1"><i data-lucide="scan-search" class="w-3 h-3"></i> Analysieren</button>
         </div>
-        <p class="text-[10px] text-ink-500 mt-1">Ermittelt Menge, Zeitraum und geschätztes Datenvolumen je Mandant — Grundlage für die Wahl des Speicherorts. Kostet nur wenige Requests.</p>
+        <p class="text-[10px] text-ink-500 mt-1">Ermittelt Menge, Zeitraum und geschätztes Datenvolumen je Mandant — Grundlage für die Wahl des Speicherorts. Kostet rund 20 Requests je Mandant.</p>
         <div id="histAnalyse" class="mt-2"><p class="text-[11px] text-ink-400">Noch nicht analysiert.</p></div>
       </div>
 
