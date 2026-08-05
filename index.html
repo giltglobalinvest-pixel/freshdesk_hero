@@ -808,7 +808,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.67.7';
+const APP_VERSION = 'v2.67.8';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -7887,9 +7887,10 @@ async function ensureAgentsLoaded(accountId) {
     return APP_STATE.agentsCache[accountId];
   } catch (e) {
     console.warn('Agent-Load fehlgeschlagen für ' + accountId + ':', e.message);
-    // v2.67.7: Grund für die Anzeige im Filter festhalten
-    if (APP_STATE.agentsCache) APP_STATE.agentsCache['_fehler_' + accountId] = String(e.message || e);
-    APP_STATE.agentsCache[accountId] = { agents: [], byId: {} };
+    // v2.67.8: Grund am Cache-Objekt selbst festhalten (vorher lag er unter einem
+    // Fremdschlüssel „_fehler_<acc>" in derselben Map). Kein _cfgStempeln im
+    // Fehlerfall — ein späterer Aufruf soll es wieder versuchen dürfen.
+    APP_STATE.agentsCache[accountId] = { agents: [], byId: {}, fehler: String(e.message || e) };
     return APP_STATE.agentsCache[accountId];
   }
 }
@@ -7929,6 +7930,54 @@ function getGroupName(accountId, groupId) {
   if (!groupId) return null;
   const c = APP_STATE.groupsCache?.[accountId];
   return c?.byId?.[groupId]?.name || ('#' + groupId);
+}
+
+/* === Agenten/Gruppen erzwungen neu laden ==================================
+   v2.67.8: Verweigert Freshdesk /agents oder /groups (HTTP 403 — der Zugang hat
+   keine Admin-Rechte), bleibt ein leerer Cache stehen. Werden die Rechte danach
+   in Freshdesk vergeben, sollen die Namen ohne Seiten-Reload zurückkommen.
+   Deshalb hier: Cache verwerfen, neu holen, Ticketliste neu zeichnen (die
+   Gruppen-Pillen und Zuweisungs-Dropdowns hängen am Cache). */
+async function fdhKonfigNeuLaden(accountId, opts) {
+  const acc = accountId || APP_STATE.currentAccount;
+  if (!acc || acc === 'all') return { agents: null, groups: null };
+  if (APP_STATE.agentsCache) delete APP_STATE.agentsCache[acc];
+  if (APP_STATE.groupsCache) delete APP_STATE.groupsCache[acc];
+  delete _CFG_CACHE_AT['agents|' + acc];
+  delete _CFG_CACHE_AT['groups|' + acc];
+  const [agents, groups] = await Promise.all([ensureAgentsLoaded(acc), ensureGroupsLoaded(acc)]);
+  if (!(opts && opts.ohneNeuzeichnen)) _fdhTicketlisteNeuZeichnen();
+  return { agents, groups };
+}
+/* Einheitlicher Klartext, warum eine Liste leer ist. */
+function _fdhKonfigFehlerText(fehler, was) {
+  if (!fehler) return 'Keine ' + was + ' gefunden.';
+  return /403|not authorized/i.test(fehler)
+    ? was + ' nicht abrufbar — der Freshdesk-Zugang hat dafür keine Berechtigung (Admin-Recht nötig).'
+    : was + ' konnten nicht geladen werden: ' + String(fehler).slice(0, 80);
+}
+function _fdhTicketlisteNeuZeichnen() {
+  try {
+    if (APP_STATE.page !== 'tickets' || !$('ticketList')) return;
+    const t = APP_STATE.pageState && APP_STATE.pageState.tickets;
+    if (Array.isArray(t)) renderTicketList(t);
+  } catch (e) { /* Liste gerade nicht im DOM — nächster Render zieht nach */ }
+}
+/* Ein automatischer, gedrosselter Versuch beim Öffnen eines Filters. */
+const _CFG_RETRY_AT = {};
+function _fdhKonfigAutoRetry(acc, art) {
+  const key = art + '|' + acc;
+  if (Date.now() - (_CFG_RETRY_AT[key] || 0) < 20000) return;
+  _CFG_RETRY_AT[key] = Date.now();
+  fdhKonfigNeuLaden(acc, { ohneNeuzeichnen: true }).then(() => {
+    const c = art === 'groups' ? APP_STATE.groupsCache?.[acc] : APP_STATE.agentsCache?.[acc];
+    const anzahl = art === 'groups' ? (c?.groups || []).length : (c?.agents || []).length;
+    if (!anzahl) return;
+    _fdhTicketlisteNeuZeichnen();
+    // Der Picker steht evtl. noch offen — dann mit den echten Namen neu aufbauen.
+    if (art === 'groups' && FILTER_PICKER_KEY === 'groupId') openFilterGroup();
+    if (art === 'agents' && FILTER_PICKER_KEY === 'responderId') openFilterAssignee();
+  }).catch(() => {});
 }
 
 /* === Requester-Cache (per Account, gefüllt aus Ticket-Listen + on-demand) === */
@@ -9240,6 +9289,7 @@ function openFilterGroup() {
     value: g.id, label: g.name, icon: 'users', sub: g.description || ''
   }));
   let hinweis = '';
+  const extra = [];
   if (!eintraege.length) {
     const ausTickets = new Map();
     ((APP_STATE.pageState && APP_STATE.pageState.tickets) || []).forEach(t => {
@@ -9248,15 +9298,29 @@ function openFilterGroup() {
     eintraege = Array.from(ausTickets.entries()).sort((a, b) => b[1] - a[1]).map(([gid, n]) => ({
       value: gid, label: 'Gruppe ' + gid, icon: 'users', sub: n + ' Ticket(s) in der aktuellen Liste',
     }));
-    hinweis = cache.fehler
-      ? (/403|not authorized/i.test(cache.fehler)
-          ? 'Gruppennamen nicht abrufbar — der Freshdesk-Zugang hat dafür keine Berechtigung (Admin-Recht nötig).'
-          : 'Gruppen konnten nicht geladen werden: ' + String(cache.fehler).slice(0, 80))
-      : 'Keine Gruppen gefunden.';
+    hinweis = _fdhKonfigFehlerText(cache.fehler, 'Gruppen');
+    if (cache.fehler) {
+      // v2.67.8: Wurden die Rechte in Freshdesk gerade vergeben, holt das die
+      // echten Namen sofort — ohne die Seite neu zu laden.
+      _fdhKonfigAutoRetry(acc, 'groups');
+      extra.push({
+        value: '__reload__', label: 'Gruppennamen neu laden', icon: 'refresh-cw',
+        sub: 'nachdem die Berechtigung in Freshdesk erteilt wurde',
+        action: async () => {
+          toast('Lade Gruppen neu …', 'info', 2000);
+          _CFG_RETRY_AT['groups|' + acc] = 0;
+          const r = await fdhKonfigNeuLaden(acc).catch(() => null);
+          const n = (r && r.groups && r.groups.groups || []).length;
+          toast(n ? n + ' Gruppen geladen' : 'Weiterhin keine Berechtigung für die Gruppenliste', n ? 'success' : 'error', 4000);
+          openFilterGroup();
+        },
+      });
+    }
   }
   openFilterPicker('Gruppe filtern', 'groupId', [
     { value: null, label: 'alle Gruppen', icon: 'list', sub: hinweis },
     ...eintraege,
+    ...extra,
   ]);
 }
 
@@ -9275,12 +9339,24 @@ function openFilterAssignee() {
   const kis = (APP_STATE.kiUsers || []);
   // v2.67.7: Grund anzeigen, wenn Freshdesk die Agentenliste verweigert (403) —
   // sonst wirkt der Filter schlicht kaputt.
-  const agFehler = APP_STATE.agentsCache && APP_STATE.agentsCache['_fehler_' + acc];
-  const agHinweis = (!cache.agents.length && agFehler)
-    ? (/403|not authorized/i.test(agFehler)
-        ? 'Agentenliste nicht abrufbar — der Freshdesk-Zugang hat dafür keine Berechtigung (Admin-Recht nötig).'
-        : 'Agenten konnten nicht geladen werden: ' + String(agFehler).slice(0, 80))
-    : '';
+  const agFehler = cache.fehler;
+  const agHinweis = (!cache.agents.length && agFehler) ? _fdhKonfigFehlerText(agFehler, 'Agenten') : '';
+  const agExtra = [];
+  if (!cache.agents.length && agFehler) {
+    _fdhKonfigAutoRetry(acc, 'agents');
+    agExtra.push({
+      value: '__reload__', label: 'Agentenliste neu laden', icon: 'refresh-cw',
+      sub: 'nachdem die Berechtigung in Freshdesk erteilt wurde',
+      action: async () => {
+        toast('Lade Agenten neu …', 'info', 2000);
+        _CFG_RETRY_AT['agents|' + acc] = 0;
+        const r = await fdhKonfigNeuLaden(acc).catch(() => null);
+        const n = (r && r.agents && r.agents.agents || []).length;
+        toast(n ? n + ' Agenten geladen' : 'Weiterhin keine Berechtigung für die Agentenliste', n ? 'success' : 'error', 4000);
+        openFilterAssignee();
+      },
+    });
+  }
   openFilterPicker('Zuweisung filtern', 'responderId', [
     { value: null, label: 'alle', icon: 'list', sub: agHinweis },
     { value: 'unassigned', label: 'unzugewiesen', icon: 'user-x' },
@@ -9292,6 +9368,7 @@ function openFilterAssignee() {
     ...cache.agents.slice().sort((a, b) => a.name.localeCompare(b.name, 'de')).map(a => ({
       value: a.id, label: a.name, icon: 'user', sub: a.email || ''
     })),
+    ...agExtra,
   ]);
 }
 
@@ -10432,6 +10509,13 @@ async function applyFilterByIndex(idx) {
   const opt = FILTER_OPTIONS_TMP[idx];
   if (!opt || !FILTER_PICKER_KEY) return;
   const key = FILTER_PICKER_KEY;
+  // v2.67.8: Einträge dürfen eine eigene Aktion mitbringen (z.B. „neu laden") —
+  // die setzen dann keinen Filter.
+  if (typeof opt.action === 'function') {
+    closeFilterPicker();
+    try { await opt.action(); } catch (e) { console.warn('Filter-Aktion fehlgeschlagen:', e); }
+    return;
+  }
   closeFilterPicker();
   if (key === '__bulkAssign__') {
     const items = msSelectedList();
@@ -10736,7 +10820,7 @@ async function openStackGroupPicker(accountId, ticketId) {
             ? groups.map(g =>
                 '<button onclick="_setTicketGroupFromStack(\'' + escapeAttr(accountId) + '\', ' + ticketId + ', ' + g.id + ')" class="w-full bg-white hover:bg-brand-50 border border-ink-200 hover:border-brand-300 text-ink-800 rounded-lg px-3 py-2.5 text-sm font-medium text-left">' + escapeHtml(g.name) + '</button>'
               ).join('')
-            : '<p class="text-[12px] text-ink-500 italic text-center py-4">Keine Gruppen geladen.</p>') +
+            : '<p class="text-[12px] text-ink-500 italic text-center py-4">' + escapeHtml(_fdhKonfigFehlerText(cache.fehler, 'Gruppen')) + '</p>') +
         '</div>' +
         '<button onclick="closeStackPicker()" class="w-full mt-2 bg-ink-100 hover:bg-ink-200 text-ink-700 rounded-lg px-3 py-2 text-xs font-medium shrink-0">Abbrechen</button>' +
       '</div>' +
@@ -15402,7 +15486,7 @@ function renderGroupList(filter) {
         </div>
         ${currentId === g.id ? '<i data-lucide="check" class="w-4 h-4 text-brand-600 shrink-0"></i>' : ''}
       </button>
-    `).join('') : `<p class="text-center text-sm text-ink-500 py-8">${cache.groups.length ? 'Keine Treffer' : 'Keine Gruppen geladen'}</p>`}`;
+    `).join('') : `<p class="text-center text-sm text-ink-500 py-8 px-4">${cache.groups.length ? 'Keine Treffer' : escapeHtml(_fdhKonfigFehlerText(cache.fehler, 'Gruppen'))}</p>`}`;
   if (window.lucide) lucide.createIcons();
 }
 
@@ -20822,6 +20906,9 @@ async function _sigEditorRefreshViews(accId) {
     }
   } catch (_) {}
   try { if (document.getElementById('sigNameCard')) _renderSigNameCard(); } catch (_) {}
+  // v2.67.8: offene Versand-Dialoge zeigen die Signatur — nach dem Speichern nachziehen
+  try { if (document.getElementById('angSendSigVorschau')) await _angSendSigVorschauFuellen(accId); } catch (_) {}
+  try { if (document.getElementById('neSigVorschau')) await _neSigVorschauFuellen(accId); } catch (_) {}
 }
 async function _sigEditorSave(accId, btn) {
   const wys = document.getElementById('sigEdWys_' + accId);
@@ -26045,6 +26132,22 @@ async function _renderNewEmailPreview() {
     '</div>' +
     '<textarea id="neBody" rows="10" class="hidden w-full px-3 py-2.5 border border-ink-300 rounded-xl text-[12px] font-mono leading-snug resize-y">' + escapeHtml(plan.body || '') + '</textarea>' +
     '<div id="nePreview" class="border border-ink-300 rounded-xl p-3 bg-white text-[13px] leading-relaxed max-h-96 overflow-y-auto prose prose-sm">' + (plan.body || '<em class="text-ink-400">(leer)</em>') + '</div>' +
+    // v2.67.8: Die Signatur fehlte hier komplett — sie war weder sichtbar noch
+    // wurde sie mitgeschickt. Jetzt wie im Angebots-Versand: Quelle, Vorschau,
+    // Abschalten und direkt bearbeiten.
+    '<div class="border border-ink-200 rounded-xl p-2.5">' +
+      '<div class="flex items-center justify-between gap-2 flex-wrap">' +
+        '<label class="inline-flex items-center gap-2 text-sm cursor-pointer">' +
+          '<input id="neWithSig" type="checkbox" checked onchange="_neSigToggle(this)" class="w-4 h-4 accent-orange-600">' +
+          '<span>Signatur anhängen</span>' +
+        '</label>' +
+        '<span class="inline-flex items-center gap-1.5">' +
+          '<span id="neSigBadge"></span>' +
+          '<button type="button" onclick="openSignatureEditor(\'' + escapeAttr(String(ref.accountId || '')) + '\')" class="text-[11px] font-semibold text-orange-600 hover:underline inline-flex items-center gap-1"><i data-lucide="pencil" class="w-3 h-3"></i> bearbeiten</button>' +
+        '</span>' +
+      '</div>' +
+      '<div id="neSigVorschau" class="mt-1.5 text-[11px] leading-snug text-ink-700 bg-ink-50/60 border border-ink-100 rounded px-2 py-1.5 max-h-32 overflow-auto"><span class="text-ink-400 italic">Signatur wird geladen …</span></div>' +
+    '</div>' +
     '<div id="neErr" class="hidden bg-red-50 border border-red-200 rounded-xl p-3 text-sm text-red-800"></div>';
   footer.innerHTML =
     '<button onclick="_neBackToPrompt()" class="flex-1 bg-ink-100 hover:bg-ink-200 text-ink-700 rounded-xl px-3 py-3 text-sm font-bold inline-flex items-center justify-center gap-1.5"><i data-lucide="arrow-left" class="w-4 h-4"></i> Zurück</button>' +
@@ -26052,6 +26155,29 @@ async function _renderNewEmailPreview() {
       '<i data-lucide="send" class="w-4 h-4"></i> Jetzt senden' +
     '</button>';
   if (window.lucide) lucide.createIcons();
+  _neSigVorschauFuellen(ref.accountId);   // v2.67.8
+}
+
+/* v2.67.8: Zeigt die Signatur, die an die neue Email angehängt wird. */
+async function _neSigVorschauFuellen(accountId) {
+  const ziel = document.getElementById('neSigVorschau');
+  const badge = document.getElementById('neSigBadge');
+  if (!ziel) return;
+  try {
+    const me = await fetchAgentMe(accountId);
+    const sig = (me && me.signature) || '';
+    if (badge && typeof _sigQuelleFuer === 'function' && typeof _sigQuelleBadge === 'function') {
+      badge.innerHTML = _sigQuelleBadge(_sigQuelleFuer(accountId));
+    }
+    if (sig) { ziel.innerHTML = sig; return; }
+    ziel.innerHTML = '<span class="text-amber-700">Keine Signatur hinterlegt — die Email geht <b>ohne Signatur</b> raus. Über „bearbeiten" anlegen.</span>';
+  } catch (_) {
+    ziel.innerHTML = '<span class="text-ink-400 italic">Signatur konnte nicht geladen werden.</span>';
+  }
+}
+function _neSigToggle(cb) {
+  const box = document.getElementById('neSigVorschau');
+  if (box) box.style.opacity = cb.checked ? '' : '0.4';
 }
 
 function _neApplyTemplate() {
@@ -26123,13 +26249,34 @@ async function processSendNewEmail(btn) {
   const fromId = parseInt(fromIdStr, 10);
   const files = NEW_EMAIL_FILES.slice();
   setBusy(btn, true, files.length ? 'Sende + hänge Anhänge an…' : 'Sende…');
+  // v2.67.8: Signatur anhängen — Freshdesk tut das bei outbound_email nicht selbst.
+  let bodyHtml = body;
+  let _sigLen = 0;
+  const sigBox = document.getElementById('neWithSig');
+  if (!sigBox || sigBox.checked) {
+    try {
+      const me = await fetchAgentMe(ref.accountId);
+      const sig = (me && me.signature) || '';
+      if (sig && typeof appendSignatureHtml === 'function') {
+        bodyHtml = appendSignatureHtml(bodyHtml, sig);
+        _sigLen = sig.length;
+      }
+    } catch (_) {}
+  }
+  try {
+    _sigLog('versand-neue-email', {
+      acc: String(ref.accountId), an: to,
+      quelle: (typeof _sigQuelleFuer === 'function' ? _sigQuelleFuer(ref.accountId).quelle : '?'),
+      angehaengt: _sigLen, abgewaehlt: !!(sigBox && !sigBox.checked),
+    });
+  } catch (_) {}
   try {
     let created;
     if (files.length) {
       // v2.46.259: mit Anhängen → multipart/form-data (outbound_email akzeptiert attachments[])
       const fields = {
         subject: subject,
-        description: body,
+        description: bodyHtml,
         email: to,
         email_config_id: String(fromId),
         priority: String(ref.plan?.priority || 1),
@@ -26139,7 +26286,7 @@ async function processSendNewEmail(btn) {
     } else {
       const payload = {
         subject: subject,
-        description: body,
+        description: bodyHtml,
         email: to,
         email_config_id: fromId,
         priority: ref.plan?.priority || 1,
