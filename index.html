@@ -808,7 +808,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.67.3';
+const APP_VERSION = 'v2.67.4';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -40364,6 +40364,8 @@ const CRAWLED_TYPES_MAP = {
   account_id: 'singleLineText', email: 'singleLineText', name: 'singleLineText',
   firma: 'singleLineText', telefon: 'singleLineText', mobil: 'singleLineText',
   position: 'singleLineText', quelle_ticket: 'singleLineText', kontakt_typ: 'singleLineText',
+  // v2.67.4: Anschrift mitschreiben — Basis für die Firmen-Adresse in der zentralen DB
+  strasse: 'singleLineText', plz: 'singleLineText', ort: 'singleLineText', land: 'singleLineText',
   fd_status: 'singleLineText', fs_status: 'singleLineText', mc_status: 'singleLineText',
   fd_contact_id: 'singleLineText', crawled_at: 'singleLineText', updated_at: 'singleLineText',
   hidden: 'singleLineText', // v2.46.215: 'spam' = als Spam ausgeblendet
@@ -40438,8 +40440,14 @@ async function _crawlTicketSignatures(accountId, ticket, opts) {
           'Du extrahierst KONTAKTDATEN aus Email-Signaturen (Aufzug-Service-Branche). ' +
           'Gegeben sind Text-Ausschnitte (Enden eingehender Emails). Finde alle PERSONEN mit Email-Adresse. ' +
           'Antworte NUR mit JSON-Array, ohne Markdown: ' +
-          '[{"name":"Vorname Nachname","email":"...","firma":"...","telefon":"...","mobil":"...","position":"..."}] ' +
+          '[{"name":"Vorname Nachname","email":"...","firma":"...","telefon":"...","mobil":"...","position":"...","strasse":"...","plz":"...","ort":"...","land":"..."}] ' +
           'Regeln: email ist PFLICHT (sonst weglassen). Keine noreply/no-reply/info@-Sammeladressen erfinden — nur was wirklich in Signaturen steht. ' +
+          // v2.67.4: Anschrift wurde bisher gar nicht abgefragt — deshalb blieben die
+          // Firmen-Adressfelder in der zentralen DB leer.
+          'ANSCHRIFT: Die Firmenadresse steht in Signaturen meist als „Straße Hausnummer" und darunter „PLZ Ort" ' +
+          '(z.B. „Ludwig-Pfau-Str. 17" / „70176 Stuttgart"). Zerlege sie sauber: strasse = Straße + Hausnummer, ' +
+          'plz = nur die Postleitzahl, ort = nur der Ortsname, land = nur wenn ausdrücklich genannt (sonst ""). ' +
+          'PLZ und Ort NIEMALS zusammen in ein Feld schreiben. Nichts erfinden — fehlt eine Angabe, leerer String. ' +
           'Keine Duplikate. Leeres Array [] wenn nichts gefunden.',
         messages: [{ role: 'user', content: 'Ticket-Anfragender: ' + (req.name || '?') + ' <' + (req.email || '?') + '>\n\nTEXT-AUSSCHNITTE:\n\n' + chunks.join('\n\n=====\n\n') }],
       });
@@ -40482,13 +40490,17 @@ async function _crawlTicketSignatures(accountId, ticket, opts) {
         account_id: accountId, email,
         name: p.name || '', firma: p.firma || '',
         telefon: p.telefon || '', mobil: p.mobil || '', position: p.position || '',
+        // v2.67.4: Anschrift aus der Signatur mit sichern
+        strasse: p.strasse || '', plz: p.plz || '', ort: p.ort || '', land: p.land || '',
         quelle_ticket: String(ticket.id), kontakt_typ: '',
         fd_status: fd.status, fd_contact_id: fd.id, fs_status: fs, mc_status: 'unbekannt',
         crawled_at: nowIso(), updated_at: nowIso(),
       }, CRAWLED_TYPES_MAP);
       // v2.46.296: zusätzlich in die zentrale Mandanten-DB
       const _zaCrawl = (APP_STATE.accounts || []).find(a => String(a.id) === String(accountId));
-      _zdbSaveContactLoose(_zaCrawl, { name: p.name, firma: p.firma, email, telefon: p.telefon, mobil: p.mobil, position: p.position, fdId: fd.id, quelle: 'crawl' });
+      _zdbSaveContactLoose(_zaCrawl, { name: p.name, firma: p.firma, email, telefon: p.telefon, mobil: p.mobil, position: p.position,
+        strasse: p.strasse, plz: p.plz, ort: p.ort, land: p.land,   // v2.67.4: Firmen-Anschrift durchreichen
+        fdId: fd.id, quelle: 'crawl' });
       added++; addedNames.push(p.name || email);
     }
     if (added) {
@@ -40691,7 +40703,9 @@ async function _crawlPushFd(i, btn) {
     r.fd_status = 'komplett'; r.fd_contact_id = String(cid || '');
     // v2.46.296: zusätzlich in die zentrale Mandanten-DB
     _zdbSaveContactLoose((APP_STATE.accounts || []).find(a => String(a.id) === String(r.account_id)),
-      { name: r.name, firma: r.firma, email: r.email, telefon: r.telefon, mobil: r.mobil, position: r.position, typ: r.kontakt_typ, fdId: String(cid || ''), quelle: 'freshdesk' });
+      { name: r.name, firma: r.firma, email: r.email, telefon: r.telefon, mobil: r.mobil, position: r.position, typ: r.kontakt_typ,
+        strasse: r.strasse, plz: r.plz, ort: r.ort, land: r.land,   // v2.67.4: Anschrift mitgeben
+        fdId: String(cid || ''), quelle: 'freshdesk' });
     _renderCrawledContacts();
     toast('Freshdesk aktualisiert ✓', 'success', 3000);
   } catch (e) { setBusy(btn, false); toast('FD-Push: ' + (e.message || e), 'error', 8000); }
@@ -40711,7 +40725,9 @@ async function _crawlPushFs(i, btn) {
     r.fs_status = 'komplett';
     // v2.46.296: zusätzlich in die zentrale Mandanten-DB
     _zdbSaveContactLoose((APP_STATE.accounts || []).find(a => String(a.id) === String(r.account_id)),
-      { name: r.name, firma: r.firma, email: r.email, telefon: r.telefon, mobil: r.mobil, position: r.position, typ: r.kontakt_typ, quelle: 'freshsales' });
+      { name: r.name, firma: r.firma, email: r.email, telefon: r.telefon, mobil: r.mobil, position: r.position, typ: r.kontakt_typ,
+        strasse: r.strasse, plz: r.plz, ort: r.ort, land: r.land,   // v2.67.4: Anschrift mitgeben
+        quelle: 'freshsales' });
     _renderCrawledContacts();
   } catch (_) {}
 }
