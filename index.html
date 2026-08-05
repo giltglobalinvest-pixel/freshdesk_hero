@@ -808,7 +808,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.67.2';
+const APP_VERSION = 'v2.67.3';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -14576,10 +14576,29 @@ function _fdhCustomFeldHtml(t, feld) {
     let optionen = [];
     if (Array.isArray(feld.choices)) optionen = feld.choices.map(c => (c && typeof c === 'object') ? (c.value ?? c.label ?? '') : c);
     else if (feld.choices && typeof feld.choices === 'object') optionen = Object.keys(feld.choices);
-    eingabe = `<select ${on} class="${basis}">
-      <option value="" ${wert == null || wert === '' ? 'selected' : ''}>—</option>
-      ${optionen.filter(o => o !== '' && o != null).map(o => `<option value="${escapeAttr(o)}" ${String(wert) === String(o) ? 'selected' : ''}>${escapeHtml(o)}</option>`).join('')}
-    </select>`;
+    optionen = optionen.filter(o => o !== '' && o != null).map(String);
+    // v2.67.3: Freshdesk liefert die Auswahl unsortiert. Natürlich sortieren —
+    // „numeric" ordnet 1449 < 1474 < 1552 korrekt (statt alphabetisch), reine
+    // Zahlen kommen zuerst, benannte Einträge danach.
+    const istZahl = (s) => /^\d+$/.test(s.trim());
+    optionen.sort((a, b) => {
+      const za = istZahl(a), zb = istZahl(b);
+      if (za !== zb) return za ? -1 : 1;
+      return a.localeCompare(b, 'de', { numeric: true, sensitivity: 'base' });
+    });
+    if (optionen.length > 12) {
+      // v2.67.3: Lange Listen bekommen ein Suchfeld (Tippen filtert) — ein reines
+      // <select> kann das nicht. datalist ist nativ, auch auf dem Handy.
+      const lid = 'dl_' + t.id + '_' + String(feld.name).replace(/[^a-zA-Z0-9_]/g, '');
+      eingabe = `<input list="${lid}" value="${escapeAttr(wert == null ? '' : String(wert))}" placeholder="Tippen zum Suchen — ${optionen.length} Einträge"
+          ${on} class="${basis}" autocomplete="off">
+        <datalist id="${lid}">${optionen.map(o => `<option value="${escapeAttr(o)}"></option>`).join('')}</datalist>`;
+    } else {
+      eingabe = `<select ${on} class="${basis}">
+        <option value="" ${wert == null || wert === '' ? 'selected' : ''}>—</option>
+        ${optionen.map(o => `<option value="${escapeAttr(o)}" ${String(wert) === String(o) ? 'selected' : ''}>${escapeHtml(o)}</option>`).join('')}
+      </select>`;
+    }
   } else if (/date/.test(typ)) {
     const d = wert ? String(wert).slice(0, 10) : '';
     eingabe = `<input type="date" value="${escapeAttr(d)}" ${on} class="${basis}">`;
@@ -14603,15 +14622,43 @@ function fdhCustomFeldMerken(el, ticketId, feldName) {
   if (el.type === 'checkbox') wert = el.checked;
   else if (el.type === 'number') wert = el.value === '' ? null : Number(el.value);
   else wert = el.value === '' ? null : el.value;
-  _fdhCfPending.werte[feldName] = wert;
-  el.classList.add('ring-1', 'ring-brand-400', 'border-brand-400');
+  // v2.67.3: Beim Such-Feld (datalist) kann Freitext getippt werden — Freshdesk
+  // lehnt unbekannte Werte ab. Deshalb hier prüfen und den Wert NICHT vormerken,
+  // statt den User in einen Speicherfehler laufen zu lassen.
+  const listId = el.getAttribute && el.getAttribute('list');
+  let ungueltig = false;
+  if (listId && wert != null) {
+    const dl = document.getElementById(listId);
+    const erlaubt = dl ? Array.from(dl.options).map(o => o.value) : [];
+    ungueltig = erlaubt.length > 0 && !erlaubt.some(o => o === String(wert));
+  }
+  if (ungueltig) {
+    el.classList.remove('ring-brand-400', 'border-brand-400');
+    el.classList.add('ring-1', 'ring-rose-400', 'border-rose-400');
+    el.title = 'Kein gültiger Eintrag — bitte aus der Liste wählen';
+    delete _fdhCfPending.werte[feldName];
+  } else {
+    el.classList.remove('ring-rose-400', 'border-rose-400');
+    el.title = '';
+    _fdhCfPending.werte[feldName] = wert;
+    el.classList.add('ring-1', 'ring-brand-400', 'border-brand-400');
+  }
+  // Button-Zustand in BEIDEN Fällen nachziehen — sonst bliebe ein Zähler stehen,
+  // dessen Feld gar nicht mehr vorgemerkt ist.
   const btn = document.getElementById('fdhCfAktualisieren');
   if (btn) {
-    btn.disabled = false;
-    btn.classList.remove('bg-ink-100', 'text-ink-400', 'cursor-default');
-    btn.classList.add('bg-brand-500', 'text-white', 'hover:bg-brand-600');
     const n = Object.keys(_fdhCfPending.werte).length;
-    btn.textContent = 'Aktualisieren (' + n + ')';
+    if (n > 0) {
+      btn.disabled = false;
+      btn.classList.remove('bg-ink-100', 'text-ink-400', 'cursor-default');
+      btn.classList.add('bg-brand-500', 'text-white', 'hover:bg-brand-600');
+      btn.textContent = 'Aktualisieren (' + n + ')';
+    } else {
+      btn.disabled = true;
+      btn.classList.remove('bg-brand-500', 'text-white', 'hover:bg-brand-600');
+      btn.classList.add('bg-ink-100', 'text-ink-400', 'cursor-default');
+      btn.textContent = 'Aktualisieren';
+    }
   }
 }
 async function fdhCfAktualisieren(btn, accountId, ticketId) {
