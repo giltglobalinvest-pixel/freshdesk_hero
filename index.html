@@ -808,7 +808,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.67.6';
+const APP_VERSION = 'v2.67.7';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -7887,6 +7887,8 @@ async function ensureAgentsLoaded(accountId) {
     return APP_STATE.agentsCache[accountId];
   } catch (e) {
     console.warn('Agent-Load fehlgeschlagen für ' + accountId + ':', e.message);
+    // v2.67.7: Grund für die Anzeige im Filter festhalten
+    if (APP_STATE.agentsCache) APP_STATE.agentsCache['_fehler_' + accountId] = String(e.message || e);
     APP_STATE.agentsCache[accountId] = { agents: [], byId: {} };
     return APP_STATE.agentsCache[accountId];
   }
@@ -7918,7 +7920,8 @@ async function ensureGroupsLoaded(accountId) {
     return APP_STATE.groupsCache[accountId];
   } catch (e) {
     console.warn('Group-Load fehlgeschlagen für ' + accountId + ':', e.message);
-    APP_STATE.groupsCache[accountId] = { groups: [], byId: {} };
+    // v2.67.7: Grund merken — sonst zeigt der Filter nur eine leere Liste ohne Erklärung.
+    APP_STATE.groupsCache[accountId] = { groups: [], byId: {}, fehler: String(e.message || e) };
     return APP_STATE.groupsCache[accountId];
   }
 }
@@ -9229,11 +9232,31 @@ function openFilterGroup() {
   const acc = APP_STATE.currentAccount;
   if (acc === 'all') return;
   const cache = APP_STATE.groupsCache?.[acc] || { groups: [] };
+  // v2.67.7: Konnte Freshdesk die Gruppenliste nicht liefern (403 — der Zugang hat
+  // dafür keine Admin-Rechte), stand hier bisher nur „alle Gruppen" ohne jeden
+  // Hinweis. Jetzt: Grund nennen UND als Ersatz die Gruppen anbieten, die in den
+  // geladenen Tickets tatsächlich vorkommen — damit bleibt Filtern möglich.
+  let eintraege = cache.groups.slice().sort((a, b) => a.name.localeCompare(b.name, 'de')).map(g => ({
+    value: g.id, label: g.name, icon: 'users', sub: g.description || ''
+  }));
+  let hinweis = '';
+  if (!eintraege.length) {
+    const ausTickets = new Map();
+    ((APP_STATE.pageState && APP_STATE.pageState.tickets) || []).forEach(t => {
+      if (String(t._accountId) === String(acc) && t.group_id) ausTickets.set(t.group_id, (ausTickets.get(t.group_id) || 0) + 1);
+    });
+    eintraege = Array.from(ausTickets.entries()).sort((a, b) => b[1] - a[1]).map(([gid, n]) => ({
+      value: gid, label: 'Gruppe ' + gid, icon: 'users', sub: n + ' Ticket(s) in der aktuellen Liste',
+    }));
+    hinweis = cache.fehler
+      ? (/403|not authorized/i.test(cache.fehler)
+          ? 'Gruppennamen nicht abrufbar — der Freshdesk-Zugang hat dafür keine Berechtigung (Admin-Recht nötig).'
+          : 'Gruppen konnten nicht geladen werden: ' + String(cache.fehler).slice(0, 80))
+      : 'Keine Gruppen gefunden.';
+  }
   openFilterPicker('Gruppe filtern', 'groupId', [
-    { value: null, label: 'alle Gruppen', icon: 'list' },
-    ...cache.groups.slice().sort((a, b) => a.name.localeCompare(b.name, 'de')).map(g => ({
-      value: g.id, label: g.name, icon: 'users', sub: g.description || ''
-    })),
+    { value: null, label: 'alle Gruppen', icon: 'list', sub: hinweis },
+    ...eintraege,
   ]);
 }
 
@@ -9250,8 +9273,16 @@ function openFilterAssignee() {
   if (acc === 'all') return;
   const cache = APP_STATE.agentsCache?.[acc] || { agents: [] };
   const kis = (APP_STATE.kiUsers || []);
+  // v2.67.7: Grund anzeigen, wenn Freshdesk die Agentenliste verweigert (403) —
+  // sonst wirkt der Filter schlicht kaputt.
+  const agFehler = APP_STATE.agentsCache && APP_STATE.agentsCache['_fehler_' + acc];
+  const agHinweis = (!cache.agents.length && agFehler)
+    ? (/403|not authorized/i.test(agFehler)
+        ? 'Agentenliste nicht abrufbar — der Freshdesk-Zugang hat dafür keine Berechtigung (Admin-Recht nötig).'
+        : 'Agenten konnten nicht geladen werden: ' + String(agFehler).slice(0, 80))
+    : '';
   openFilterPicker('Zuweisung filtern', 'responderId', [
-    { value: null, label: 'alle', icon: 'list' },
+    { value: null, label: 'alle', icon: 'list', sub: agHinweis },
     { value: 'unassigned', label: 'unzugewiesen', icon: 'user-x' },
     ...kis.map(k => ({
       value: 'ki:' + k.name,
@@ -34738,6 +34769,15 @@ async function _buildAngebotPdf(rec) {
   doc.setTextColor(...NAVY); doc.setFont('helvetica','bold'); doc.setFontSize(9.5);
   doc.text(angNr, mr-2, metaY+5, { align:'right' });
   doc.setFont('helvetica','normal'); doc.setFontSize(8.5); doc.setTextColor(...GREY_L);
+  // v2.67.7: Ticket-Nr. direkt darunter — vom vorliegenden Angebot aus ist damit
+  // sofort klar, welches Ticket dazugehört.
+  const tNr = String(rec.freshdesk_ticket_id || '').trim();
+  if (tNr) {
+    doc.text('Ticket-Nr.:', mr-50, metaY+10);
+    doc.setTextColor(...GREY);
+    doc.text('#' + _sanPdf(tNr), mr-2, metaY+10, { align:'right' });
+    doc.setTextColor(...GREY_L);
+  }
   // v2.46.228: „Bearbeiter"-Zeile entfernt (auf Wunsch nicht mehr im Angebot anzeigen).
   y = Math.max(y, 72);  // genug Luft nach Empfänger-Block
   // BETREFF — prominenter Titel mit feiner Unterstreichung
@@ -35063,6 +35103,9 @@ function _fdhChatToBkRec(chatState) {
   );
   return {
     app_angebot_num:      (s.angebotNummer != null ? s.angebotNummer : ('FDH-' + (s.ticketId || '?'))),
+    // v2.67.7: Ticket-Nr. mitgeben, damit sie im PDF-Kopf erscheint — vom
+    // ausgedruckten Angebot aus findet man so direkt das zugehörige Ticket.
+    freshdesk_ticket_id:  String(s.ticketId || ''),
     firma:                firmaSlug,
     bearbeiter:           APP_KEYS.user?.name || '',
     angebot_typ:          'sonstiges',
