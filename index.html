@@ -808,7 +808,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.67.9';
+const APP_VERSION = 'v2.68.0';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -16467,6 +16467,99 @@ async function runSearch(useAI) {
   SEARCH_CTX.busy = false;
   SEARCH_CTX.results = { tickets: filteredTickets, contacts: allContacts, keyword, keyword2, intent, hint, variations, queryTerms, filters, ticketId, aiUsed: useAI };
   renderSearchResults();
+  // v2.68.0: Archiv-Suche nachladen. Bewusst NACH dem Rendern und ohne await —
+  // die gewohnte Suche soll keine Millisekunde länger dauern, das Archiv
+  // schiebt sich nach, sobald es antwortet.
+  _archivSucheAnzeigen(keyword || raw);
+}
+
+/* ===================== v2.68.0: ARCHIV-SUCHE (Cloudflare) =================
+   Freshdesks Such-API kann zwei Dinge grundsätzlich nicht: in ANTWORTEN suchen
+   (nur `description`, also die Erstnachricht, ist durchsuchbar) und mehr als
+   300 Treffer liefern (10 Seiten à 30, hart gedeckelt). Deshalb liegt eine
+   durchsuchbare Kopie in Cloudflare — Volltext über alle Nachrichten, ohne
+   Deckel, ohne Freshdesk-Kontingent zu verbrauchen.
+
+   Angemeldet wird mit dem vorhandenen Hero-Login; der Dienst löst darüber auf,
+   welche Mandanten die Person sehen darf. Kein zweites Passwort. */
+const ARCHIV_URL = 'https://fdh-archiv.service-802.workers.dev';
+
+async function archivSuchen(text, opts = {}) {
+  const key = APP_KEYS.user?.api_key;
+  if (!key || !text) return null;
+  const p = new URLSearchParams({ q: text, limit: String(opts.limit || 15) });
+  if (opts.mandant) p.set('mandant', opts.mandant);
+  const res = await fetch(ARCHIV_URL + '/suche?' + p.toString(), { headers: { 'X-Hero-Key': key } });
+  if (!res.ok) throw new Error('Archiv HTTP ' + res.status + (res.status === 401 ? ' (Login im Archiv nicht bekannt)' : ''));
+  return res.json();
+}
+
+async function _archivSucheAnzeigen(text) {
+  const host = document.getElementById('searchResults');
+  if (!host || !text || String(text).trim().length < 2) return;
+  const box = document.createElement('div');
+  box.id = 'archivBlock';
+  box.className = 'mb-4 border border-emerald-200 bg-emerald-50/40 rounded-xl p-3';
+  box.innerHTML = '<p class="text-[11px] text-emerald-800 inline-flex items-center gap-1.5">'
+    + '<span class="spinner inline-block w-3 h-3 border-2 text-emerald-600"></span> Archiv wird durchsucht …</p>';
+  host.insertBefore(box, host.firstChild);
+
+  try {
+    // Zusammensetzungen: „frequenz" findet „Frequenzumrichter" nur mit Stern.
+    // Den hängt Hero automatisch an, damit niemand die Regel kennen muss.
+    const begriff = String(text).trim().split(/\s+/).map(w => (w.length >= 4 && !w.endsWith('*') ? w + '*' : w)).join(' ');
+    const daten = await archivSuchen(begriff, { limit: 15 });
+    const treffer = [];
+    for (const e of (daten?.ergebnisse || [])) {
+      for (const t of (e.treffer || [])) treffer.push({ ...t, _mandant: e.mandant, _mandantName: e.name });
+    }
+    if (!treffer.length) { box.remove(); return; }
+
+    box.innerHTML =
+      '<div class="flex items-center justify-between gap-2 mb-2">'
+      + '<p class="text-[11px] font-bold text-emerald-900 uppercase tracking-wider inline-flex items-center gap-1.5">'
+      + '<i data-lucide="database" class="w-3.5 h-3.5"></i> Archiv &middot; ' + treffer.length + ' Treffer</p>'
+      + '<span class="text-[10px] text-emerald-700">auch in Antworten &amp; Notizen</span>'
+      + '</div>'
+      + treffer.map(t =>
+          '<button onclick="_archivOeffnen(\'' + escapeAttr(t._mandant) + '\',' + t.id + ')" '
+          + 'class="w-full text-left bg-white border border-emerald-200 rounded-lg px-2.5 py-2 mb-1.5 hover:border-emerald-400 active:scale-[0.99] transition">'
+          + '<div class="flex items-start gap-2">'
+          + '<span class="text-[10px] font-mono text-ink-400 shrink-0 mt-0.5">#' + t.id + '</span>'
+          + '<div class="min-w-0 flex-1">'
+          + '<p class="text-[13px] font-semibold text-ink-900 truncate">' + escapeHtml(t.betreff || '(ohne Betreff)') + '</p>'
+          + (t.ausschnitt ? '<p class="text-[11px] text-ink-600 leading-snug mt-0.5">' + _archivAusschnitt(t.ausschnitt) + '</p>' : '')
+          + '<p class="text-[10px] text-ink-400 mt-0.5">' + escapeHtml(t._mandantName || t._mandant)
+          + (t.absender_email ? ' &middot; ' + escapeHtml(t.absender_email) : '')
+          + (t.erstellt_am ? ' &middot; ' + String(t.erstellt_am).slice(0, 10) : '')
+          + (t.anzahl_nachrichten ? ' &middot; ' + t.anzahl_nachrichten + ' Nachr.' : '') + '</p>'
+          + '</div></div></button>'
+        ).join('');
+    if (window.lucide) lucide.createIcons();
+  } catch (e) {
+    // Kein Drama daraus machen: Die normale Suche steht ja bereits da.
+    // Bei 401 (Login dem Archiv nicht bekannt) verschwindet der Block ganz —
+    // sonst bekäme derjenige bei JEDER Suche eine Fehlerzeile zu sehen, mit der
+    // er nichts anfangen kann. Nur echte Störungen werden gemeldet.
+    if (/401/.test(e.message || '')) { box.remove(); return; }
+    box.innerHTML = '<p class="text-[11px] text-ink-500">Archiv nicht erreichbar (' + escapeHtml(e.message) + ')</p>';
+  }
+}
+
+/* Der Dienst markiert Fundstellen mit « », damit sie nicht mit HTML kollidieren. */
+function _archivAusschnitt(s) {
+  return escapeHtml(String(s || '')).replace(/«/g, '<mark class="bg-amber-200 rounded px-0.5">').replace(/»/g, '</mark>');
+}
+
+/* Treffer öffnen: Ticket in Freshdesk-Hero anzeigen, nicht im Archiv — dort
+   wird gearbeitet. Das Archiv ist nur zum Finden da. */
+function _archivOeffnen(mandantSlug, ticketId) {
+  const acc = (APP_STATE.accounts || []).find(a =>
+    new RegExp(mandantSlug, 'i').test(a.name || '')
+  );
+  closeSearchModal();
+  if (acc) { openTicketDetail(acc.id, ticketId); return; }
+  toast('Mandant „' + mandantSlug + '" ist in dieser Sitzung nicht geladen', 'warn', 4000);
 }
 
 /* Lokale Suche über den filter-UNABHÄNGIGEN Master-Cache. Auch ausgeblendete Tickets
