@@ -808,7 +808,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.68.0';
+const APP_VERSION = 'v2.68.1';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -15963,6 +15963,16 @@ function runSummaryAssistant(btnEl) {
 let SEARCH_CTX = null;
 let SEARCH_REC = null;
 
+/* v2.68.1: Der Suchumfang war nirgends sichtbar — man konnte nicht erkennen, ob
+   nur der oben gewählte Mandant durchsucht wird oder alle. Tatsächlich läuft die
+   Suche IMMER über alle Firmen, unabhängig vom Filter in der Ticketliste. Das
+   gehört in die Kopfzeile, sonst rät man. */
+function _sucheUmfangText() {
+  const n = (APP_STATE.accounts || []).length;
+  if (!n) return 'Name, Stichwort, Auftrag — oder freie Frage';
+  return 'Durchsucht ' + (n === 1 ? 'eine Firma' : 'alle ' + n + ' Firmen') + ' · Tickets, Kontakte, Archiv';
+}
+
 function openSearchModal() {
   SEARCH_CTX = { query: '', results: null, summary: null, busy: false };
   let host = document.getElementById('subModalHost');
@@ -15977,7 +15987,7 @@ function openSearchModal() {
           </button>
           <div class="flex-1 min-w-0">
             <h1 class="font-bold text-ink-900 leading-tight inline-flex items-center gap-1.5"><i data-lucide="search" class="w-4 h-4 text-brand-600"></i> Suche</h1>
-            <p class="text-[11px] text-ink-500 truncate">Name, Stichwort, Auftrag — oder freie Frage</p>
+            <p class="text-[11px] text-ink-500 truncate">${_sucheUmfangText()}</p>
           </div>
         </div>
         <div class="px-3 pb-2 flex items-center gap-1.5">
@@ -16628,7 +16638,12 @@ function renderSearchResults() {
   // Intent-Highlighting: Bei „call" Telefonnummern prominent zeigen
   const showPhonesProminently = intent === 'call';
 
-  const contactBlock = contacts.length ? `
+  // v2.68.1: Wer nach „letzte Bestellungen von KONE" sucht, will Vorgänge sehen —
+  // nicht dreißig Ansprechpartner der Firma. Kontakte werden deshalb eingeklappt,
+  // sobald es Tickets gibt und die Frage erkennbar nicht auf Personen zielt.
+  const hideContacts = contacts.length > 3 && tickets.length > 0
+    && intent !== 'contact' && intent !== 'call';
+  const contactBlock = (contacts.length && !hideContacts) ? `
     <div class="mb-4">
       <p class="text-[10px] uppercase font-bold text-ink-500 tracking-wider mb-2">Kontakte (${contacts.length}) <span class="text-ink-400 font-normal normal-case">— tippen zum Bearbeiten</span></p>
       <div class="space-y-2">
@@ -16738,7 +16753,24 @@ function renderSearchResults() {
       ${filterChipsHtml}
     </div>` : '';
 
-  $('searchResults').innerHTML = headerSummary + contactBlock + ticketBlock + hiddenTicketsHint;
+  const hiddenContactsHint = (hideContacts && contacts.length) ? `
+    <details class="mt-4 bg-ink-50 border border-ink-200 rounded-xl">
+      <summary class="px-3 py-2 text-[11px] text-ink-600 cursor-pointer flex items-center gap-1.5">
+        <i data-lucide="users" class="w-3.5 h-3.5 text-ink-500"></i>
+        <span><b>${contacts.length}</b> passende Kontakte ausgeblendet — du hast nach Vorgängen gefragt. Tippen zum Anzeigen.</span>
+      </summary>
+      <div class="p-3 pt-1 space-y-2">
+        ${contacts.slice(0, 10).map(c => `
+          <button type="button" onclick="closeSearchModal(); openContactEditModal('${escapeAttr(c._accountId)}', ${c.id})" class="w-full text-left bg-white border border-ink-200 rounded-lg p-2 active:bg-ink-100">
+            <p class="text-sm text-ink-900 truncate">${escapeHtml(c.name || '(ohne Namen)')}</p>
+            <p class="text-[11px] text-ink-500 truncate">${escapeHtml(c.email || '')}${c._accountName ? ' · ' + escapeHtml(c._accountName) : ''}</p>
+          </button>`).join('')}
+        ${contacts.length > 10 ? `<p class="text-[10px] text-ink-400 text-center">… und ${contacts.length - 10} weitere</p>` : ''}
+      </div>
+    </details>` : '';
+
+  // Tickets zuerst — sie sind in aller Regel das Gesuchte.
+  $('searchResults').innerHTML = headerSummary + ticketBlock + hiddenTicketsHint + contactBlock + hiddenContactsHint;
   if (window.lucide) lucide.createIcons();
 }
 
