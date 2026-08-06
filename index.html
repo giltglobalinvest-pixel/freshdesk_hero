@@ -808,7 +808,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.68.1';
+const APP_VERSION = 'v2.68.2';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -15963,14 +15963,30 @@ function runSummaryAssistant(btnEl) {
 let SEARCH_CTX = null;
 let SEARCH_REC = null;
 
-/* v2.68.1: Der Suchumfang war nirgends sichtbar — man konnte nicht erkennen, ob
-   nur der oben gewählte Mandant durchsucht wird oder alle. Tatsächlich läuft die
-   Suche IMMER über alle Firmen, unabhängig vom Filter in der Ticketliste. Das
-   gehört in die Kopfzeile, sonst rät man. */
+/* v2.68.2: Die Suche folgt der Mandanten-Auswahl aus der Ticketliste — ist dort
+   eine Firma gewählt, wird nur diese durchsucht; steht sie auf „Alle", alle.
+   Vorher lief die Suche immer über alles, ohne dass man es sehen konnte. */
+function _sucheAccounts() {
+  const alle = APP_STATE.accounts || [];
+  const gewaehlt = APP_STATE.currentAccount;
+  if (!gewaehlt || gewaehlt === 'all') return alle;
+  const einer = alle.filter(a => a.id === gewaehlt);
+  return einer.length ? einer : alle;
+}
 function _sucheUmfangText() {
-  const n = (APP_STATE.accounts || []).length;
-  if (!n) return 'Name, Stichwort, Auftrag — oder freie Frage';
-  return 'Durchsucht ' + (n === 1 ? 'eine Firma' : 'alle ' + n + ' Firmen') + ' · Tickets, Kontakte, Archiv';
+  const alle = (APP_STATE.accounts || []).length;
+  if (!alle) return 'Name, Stichwort, Auftrag — oder freie Frage';
+  const accs = _sucheAccounts();
+  if (accs.length === 1 && alle > 1) return 'Nur ' + (accs[0].name || 'gewählte Firma') + ' · Tickets, Kontakte, Archiv';
+  return 'Alle ' + alle + ' Firmen · Tickets, Kontakte, Archiv';
+}
+
+/* Account → Mandanten-Kürzel des Archivs (dieselben Namen wie im Worker). */
+const _ARCHIV_SLUGS = ['aszendio', 'aufzugshandwerk', 'flp', 'liftaro'];
+function _archivSlugFuer(accountId) {
+  const acc = (APP_STATE.accounts || []).find(a => a.id === accountId);
+  if (!acc) return null;
+  return _ARCHIV_SLUGS.find(sl => new RegExp(sl, 'i').test(acc.name || '')) || null;
 }
 
 function openSearchModal() {
@@ -16342,12 +16358,21 @@ async function runSearch(useAI) {
       <div class="text-center py-10">
         <div class="spinner inline-block w-7 h-7 border-[3px] text-brand-500"></div>
         <p class="text-sm text-ink-500 mt-3">Lade Ticket #${ticketId}…</p>
-        <p class="text-[11px] text-ink-400 mt-1">prüfe alle ${APP_STATE.accounts.length} Accounts parallel</p>
+        <p class="text-[11px] text-ink-400 mt-1">prüfe ${_sucheAccounts().length === 1 ? 'die gewählte Firma' : 'alle ' + _sucheAccounts().length + ' Firmen'}</p>
       </div>`;
-    const settled = await Promise.allSettled(APP_STATE.accounts.map(a => fetchTicketSummary(a.id, ticketId)));
+    // Erst in der gewählten Firma nachsehen. Bleibt es dort leer, doch in allen
+    // suchen — eine Ticketnummer bekommt man oft zugerufen, ohne zu wissen, zu
+    // welchem Mandanten sie gehört. Der zusätzliche Abruf kostet nur im Fehlfall.
+    let idAccs = _sucheAccounts();
+    let settled = await Promise.allSettled(idAccs.map(a => fetchTicketSummary(a.id, ticketId)));
+    const nichtsGefunden = !settled.some(r => r.status === 'fulfilled' && r.value && r.value.id);
+    if (nichtsGefunden && idAccs.length < (APP_STATE.accounts || []).length) {
+      idAccs = APP_STATE.accounts;
+      settled = await Promise.allSettled(idAccs.map(a => fetchTicketSummary(a.id, ticketId)));
+    }
     settled.forEach((res, idx) => {
       if (res.status === 'fulfilled' && res.value && res.value.id) {
-        const acc = APP_STATE.accounts[idx];
+        const acc = idAccs[idx];
         directIdTickets.push({
           ...res.value,
           _accountId: acc.id,
@@ -16396,7 +16421,7 @@ async function runSearch(useAI) {
   });
 
   // Server-Suche pro Account × Begriff
-  const accs = APP_STATE.accounts;
+  const accs = _sucheAccounts();
   const ticketPromises  = accs.flatMap(a => queryTerms.map(term => searchTicketsByKeyword(a.id, term)));
   const contactPromises = accs.flatMap(a => queryTerms.map(term => searchContactsByKeyword(a.id, term)));
   const [tRes, cRes] = await Promise.all([Promise.all(ticketPromises), Promise.all(contactPromises)]);
@@ -16518,7 +16543,10 @@ async function _archivSucheAnzeigen(text) {
     // Zusammensetzungen: „frequenz" findet „Frequenzumrichter" nur mit Stern.
     // Den hängt Hero automatisch an, damit niemand die Regel kennen muss.
     const begriff = String(text).trim().split(/\s+/).map(w => (w.length >= 4 && !w.endsWith('*') ? w + '*' : w)).join(' ');
-    const daten = await archivSuchen(begriff, { limit: 15 });
+    const nurEiner = _sucheAccounts();
+    const slug = (nurEiner.length === 1 && (APP_STATE.accounts || []).length > 1)
+      ? _archivSlugFuer(nurEiner[0].id) : null;
+    const daten = await archivSuchen(begriff, { limit: 15, mandant: slug });
     const treffer = [];
     for (const e of (daten?.ergebnisse || [])) {
       for (const t of (e.treffer || [])) treffer.push({ ...t, _mandant: e.mandant, _mandantName: e.name });
