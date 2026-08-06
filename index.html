@@ -808,7 +808,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.68.5';
+const APP_VERSION = 'v2.68.6';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -40109,7 +40109,13 @@ const ZDB_ENABLED_KEY = 'fdh_zdb_enabled_accounts';
 const _ZDB_TABLE_CACHE = new Map();   // slug → {slug, firma:{id,name}, kontakt:{id,name}}
 // v2.46.296: Autosave global für ALLE Mandanten (Tabellen werden bei Bedarf automatisch
 // angelegt). Auf false setzen, um das automatische Mitschreiben komplett abzuschalten.
-let ZDB_AUTOSAVE = true;
+/* v2.68.6 (Betreiber-Entscheid 07.08.2026): Der Direktweg in die zentrale DB ist ZU.
+   Vorher schrieb u.a. der Crawler jeden gefundenen Kontakt sofort dorthin — am Korb
+   vorbei, und ohne dass der „aktiv"-Schalter das verhindert hätte (der wurde beim
+   Schreiben gar nicht mehr geprüft). Damit war der Korb eine Anzeige, kein Tor.
+   Jetzt führt genau ein Weg in die zentrale DB: die manuelle Freigabe im Korb,
+   die `{ erzwingen: true }` mitgibt. Bestehende Daten bleiben unangetastet. */
+let ZDB_AUTOSAVE = false;
 
 function _zdbSleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 function _zdbGetEnabled() { try { return new Set(JSON.parse(localStorage.getItem(ZDB_ENABLED_KEY) || '[]')); } catch (_) { return new Set(); } }
@@ -40139,6 +40145,9 @@ function _zdbFirmaFieldSpecs() {
     { name: 'email', type: 'singleLineText' },
     { name: 'telefon', type: 'singleLineText' },
     { name: 'ust_id', type: 'singleLineText' },
+    { name: 'webseite', type: 'singleLineText' },     // v2.68.6: von der Steuerzentrale angelegt
+    { name: 'notizen', type: 'multilineText' },
+    { name: 'pipedrive_org_id', type: 'singleLineText' },
     { name: 'quelle', type: 'singleLineText' },
     { name: 'freshdesk_company_id', type: 'singleLineText' },
     { name: 'created_at', type: 'singleLineText' },
@@ -40157,6 +40166,8 @@ function _zdbKontaktFieldSpecs(firmaTableId) {
     { name: 'typ', type: 'singleSelect', options: { choices: ZDB_TYP_OPTIONS.map(n => ({ name: n })) } },
     { name: 'firma', type: 'multipleRecordLinks', options: { linkedTableId: firmaTableId } },
     { name: 'position', type: 'singleLineText' },
+    { name: 'notizen', type: 'multilineText' },        // v2.68.6
+    { name: 'pipedrive_person_id', type: 'singleLineText' },
     { name: 'quelle', type: 'singleLineText' },
     { name: 'freshdesk_contact_id', type: 'singleLineText' },
     { name: 'created_at', type: 'singleLineText' },
@@ -40328,8 +40339,10 @@ async function _zdbUpsertKontakt(names, data, firmaRecId) {
 
 /* Öffentliche Speicher-API: wird ZUSÄTZLICH an bestehenden Speicherpunkten aufgerufen.
    Non-blocking gedacht — Fehler dürfen die bestehenden Flows NIE kippen. */
-async function zdbSaveFirmaKontakt(account, firmaData, kontaktData) {
-  if (!account || ZDB_AUTOSAVE === false) return null;
+async function zdbSaveFirmaKontakt(account, firmaData, kontaktData, opts) {
+  if (!account) return null;
+  // Nur die Freigabe im Korb darf schreiben — alles andere läuft ins Leere.
+  if (ZDB_AUTOSAVE === false && !(opts && opts.erzwingen)) return null;
   try {
     const names = await _zdbEnsureTables(account);
     let firmaId = null;
@@ -40443,7 +40456,8 @@ function _zdbAdminRow(account, isEnabled) {
       '<div class="min-w-0"><p class="font-bold text-sm text-ink-900 truncate">' + escapeHtml(account.name || account.id) + '</p>' +
         '<p class="text-[10px] text-ink-500 font-mono truncate">' + escapeHtml(names.firma) + ' · ' + escapeHtml(names.kontakt) + '</p></div>' +
       '<label class="inline-flex items-center gap-1.5 text-[11px] font-semibold text-ink-700 cursor-pointer shrink-0">' +
-        '<input type="checkbox" data-zdb-toggle ' + (isEnabled ? 'checked' : '') + ' onchange="_zdbToggleEnabled(\'' + id + '\', this.checked)"> aktiv</label>' +
+        '<input type="checkbox" disabled data-zdb-toggle> <span class="line-through opacity-60">aktiv</span>' +
+        '<span class="text-[9px] text-amber-700 bg-amber-50 border border-amber-200 rounded px-1 ml-1" title="Dieser Schalter war der Direktpfad Crawler→Zentrale DB am Korb vorbei. Seit v2.68.6 führt ausschließlich die Freigabe im Korb in die zentrale DB.">veraltet</span></label>' +
     '</div>' +
     '<div class="flex gap-2 mt-2 flex-wrap">' +
       '<button onclick="_zdbRunSetup(\'' + id + '\', this)" class="px-3 py-1.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg text-[12px] font-bold inline-flex items-center gap-1"><i data-lucide="table-2" class="w-3.5 h-3.5"></i> Tabellen anlegen + migrieren</button>' +
@@ -40506,7 +40520,7 @@ async function _zdbShowCounts(accId, btn) {
    Bewusst einfach gehalten; Spalten später erweiterbar. Ersetzt langfristig die
    Freshsales-Kontaktansicht. */
 const ZDB_VIEW_STATE = { accountId: null, tab: 'kontakte', firmaFilter: null, data: null, search: '' };
-const _ZDB_FIRMA_EDIT = [['name', 'Name'], ['strasse', 'Strasse'], ['plz', 'PLZ'], ['ort', 'Ort'], ['land', 'Land'], ['email', 'E-Mail'], ['telefon', 'Telefon'], ['ust_id', 'USt-ID'], ['quelle', 'Quelle']];
+const _ZDB_FIRMA_EDIT = [['name', 'Name'], ['strasse', 'Strasse'], ['plz', 'PLZ'], ['ort', 'Ort'], ['land', 'Land'], ['email', 'E-Mail'], ['telefon', 'Telefon'], ['webseite', 'Webseite'], ['ust_id', 'USt-ID'], ['quelle', 'Quelle']];
 
 function showZdbTableView(btn) {
   const sel = document.getElementById('contactsSearchAccount');
@@ -40635,7 +40649,7 @@ function _zdbKontakteBody(d) {
     '<div class="overflow-x-auto"><table class="w-full text-[12px] border-collapse"><thead><tr><th class="border-b border-ink-200 bg-ink-50 w-8"></th>' + _zdbHeadCells(cols) + '</tr></thead><tbody>' + trs + '</tbody></table></div></div>';
 }
 function _zdbFirmenBody(d) {
-  const cols = [['name', 'Name'], ['strasse', 'Strasse'], ['plz', 'PLZ'], ['ort', 'Ort'], ['land', 'Land'], ['telefon', 'Telefon'], ['email', 'E-Mail'], ['ust_id', 'USt-ID']];
+  const cols = [['name', 'Name'], ['strasse', 'Strasse'], ['plz', 'PLZ'], ['ort', 'Ort'], ['land', 'Land'], ['telefon', 'Telefon'], ['email', 'E-Mail'], ['webseite', 'Webseite'], ['ust_id', 'USt-ID']];
   let rows = d.firmen;
   const _q = String(ZDB_VIEW_STATE.search || '').trim().toLowerCase();
   if (_q) rows = rows.filter(r => { const f = r.fields || {}; return [f.name, f.strasse, f.plz, f.ort, f.land, f.email, f.telefon, f.ust_id].join(' ').toLowerCase().includes(_q); });
@@ -40802,6 +40816,38 @@ function _zdbPermHintHtml() {
 
 const CRAWLED_TABLE = 'CrawledContacts';
 const CONTACT_TYPES_TABLE = 'ContactTypes';
+/* === Freigabe-Workflow (📥 Korb → 🗄 Zentrale DB) ==========================
+   Wortgleich und ableitungsgleich zur Steuerzentrale, die auf denselben
+   Airtable-Tabellen arbeitet. Zwei Oberflächen, ein Workflow — sonst entstehen
+   Doppel-Wahrheiten und versehentliche Direkt-Importe.
+
+   Reihenfolge der Prüfung ist verbindlich: Spam schlägt alles, dann verworfen,
+   dann übernommen, sonst wartend. */
+const KORB_STATUS = {
+  spam:        { label: '\u2715 Spam',        cls: 'bg-rose-100 text-rose-700 border-rose-300' },
+  verworfen:   { label: '\u2715 verworfen',   cls: 'bg-ink-100 text-ink-600 border-ink-300' },
+  uebernommen: { label: '\u2713 \u00fcbernommen',  cls: 'bg-emerald-100 text-emerald-700 border-emerald-300' },
+  wartend:     { label: '\u23F3 wartend',     cls: 'bg-amber-100 text-amber-800 border-amber-300' },
+};
+function _korbStatus(r) {
+  if (!r) return 'wartend';
+  if (r.hidden === 'spam') return 'spam';
+  const z = String(r.zdb_status || '').trim().toLowerCase();
+  if (z.startsWith('verworfen')) return 'verworfen';
+  if (z.startsWith('uebernommen')) return 'uebernommen';
+  return 'wartend';
+}
+function _korbStatusBadge(r) {
+  const st = KORB_STATUS[_korbStatus(r)];
+  return '<span class="text-[10px] px-1.5 py-0.5 rounded border font-bold ' + st.cls + '">' + st.label + '</span>';
+}
+/* Herkunft eines Korb-Eintrags — Altbestand ohne Angabe gilt als Crawl. */
+function _korbQuelle(r) { return String((r && r.quelle) || 'crawl'); }
+function _korbQuelleBadge(r) {
+  return '<span class="text-[10px] px-1.5 py-0.5 rounded border bg-violet-50 text-violet-700 border-violet-200" title="Herkunft dieses Eintrags">'
+    + escapeHtml(_korbQuelle(r)) + '</span>';
+}
+
 const CRAWL_STATE = {
   done: new Set(),        // 'accountId|ticketId' — pro Session nur 1x crawlen
   cacheByAccount: new Map(),  // accountId → Set(lowercase emails) bereits erfasst
@@ -40809,6 +40855,7 @@ const CRAWL_STATE = {
   types: null,            // ContactTypes-Liste
   filterTyp: '',
   showHidden: false,      // v2.46.215: Spam/ausgeblendete Kontakte mit anzeigen
+  nurOffene: true,        // v2.68.6: Standardansicht = nur Wartende (die brauchen Aufmerksamkeit)
 };
 
 /* v2.46.218: Auf den in der Kontakte-Seite gewählten Mandanten eingegrenzte Liste.
@@ -40824,6 +40871,8 @@ function _crawlMandantScoped() {
 function _crawlVisible() {
   return _crawlMandantScoped().filter(r => {
     if (CRAWL_STATE.filterTyp && r.kontakt_typ !== CRAWL_STATE.filterTyp) return false;
+    // v2.68.6: „Nur offene" blendet alles Entschiedene aus — übernommen, verworfen, Spam.
+    if (CRAWL_STATE.nurOffene) return _korbStatus(r) === 'wartend' && r.hidden !== 'hidden';
     if (r.hidden === 'spam')   return !!CRAWL_STATE.showHidden;      // Spam-Toggle
     if (r.hidden === 'hidden') return !!CRAWL_STATE.showHiddenSoft;  // v2.46.286: Ausblenden-Toggle
     return true;
@@ -40839,6 +40888,9 @@ const CRAWLED_TYPES_MAP = {
   fd_status: 'singleLineText', fs_status: 'singleLineText', mc_status: 'singleLineText',
   fd_contact_id: 'singleLineText', crawled_at: 'singleLineText', updated_at: 'singleLineText',
   hidden: 'singleLineText', // v2.46.215: 'spam' = als Spam ausgeblendet
+  // v2.68.6: Freigabe-Workflow, gemeinsam mit der Steuerzentrale genutzt
+  zdb_status: 'singleLineText', // '' | 'uebernommen <ISO> …' | 'verworfen <ISO> …'
+  quelle: 'singleLineText',     // crawl | servicebox | freshsales | maxise | …
 };
 
 async function _crawlLoadExisting(accountId) {
@@ -40963,6 +41015,7 @@ async function _crawlTicketSignatures(accountId, ticket, opts) {
         // v2.67.4: Anschrift aus der Signatur mit sichern
         strasse: p.strasse || '', plz: p.plz || '', ort: p.ort || '', land: p.land || '',
         quelle_ticket: String(ticket.id), kontakt_typ: '',
+        quelle: 'crawl',   // v2.68.6: Herkunft im Korb ausweisen
         fd_status: fd.status, fd_contact_id: fd.id, fs_status: fs, mc_status: 'unbekannt',
         crawled_at: nowIso(), updated_at: nowIso(),
       }, CRAWLED_TYPES_MAP);
@@ -41082,7 +41135,10 @@ function _renderCrawledContacts() {
   host.innerHTML =
     '<div id="crawlRoot" class="bg-gradient-to-br from-violet-50 to-indigo-50 border border-violet-200 rounded-xl p-3 mb-2">' +
       '<div class="flex items-center gap-2 flex-wrap">' +
-        '<p class="font-bold text-violet-900 text-sm inline-flex items-center gap-1.5"><i data-lucide="radar" class="w-4 h-4"></i> Gecrawlte Kontakte (' + list.length + (CRAWL_STATE.filterTyp ? ' / ' + scoped.length : '') + ')</p>' +
+        '<p class="font-bold text-violet-900 text-sm inline-flex items-center gap-1.5"><i data-lucide="inbox" class="w-4 h-4"></i> \u{1F4E5} Korb (' + list.length + (CRAWL_STATE.filterTyp ? ' / ' + scoped.length : '') + ')</p>' +
+        '<label class="inline-flex items-center gap-1.5 text-[11px] text-ink-600 cursor-pointer bg-white border border-violet-200 rounded-lg px-2 py-1" title="Wartende sind die, ueber die noch nicht entschieden wurde">' +
+          '<input type="checkbox" ' + (CRAWL_STATE.nurOffene ? 'checked' : '') + ' onchange="_korbToggleNurOffene(this)"> nur offene</label>' +
+        '<span class="text-[10px] text-violet-700">Quellen \u2192 \u{1F4E5} Korb \u2192 Freigabe \u2192 \u{1F5C4} Zentrale DB</span>' +
         (mandantName ? '<span class="text-[10px] font-bold px-1.5 py-0.5 rounded bg-white border border-violet-300 text-violet-700 inline-flex items-center gap-1"><i data-lucide="building-2" class="w-3 h-3"></i> ' + escapeHtml(mandantName) + '</span>' : '') +
         '<select onchange="CRAWL_STATE.filterTyp=this.value;_renderCrawledContacts()" class="ml-auto px-2 py-1 border border-violet-300 rounded-lg text-[11px] bg-white">' +
           '<option value="">Alle Typen</option>' +
@@ -41109,6 +41165,7 @@ function _renderCrawledContacts() {
       '<div class="' + (r.hidden === 'spam' ? 'bg-rose-50 border-rose-200' : r.hidden === 'hidden' ? 'bg-ink-50 border-ink-200 opacity-60' : 'bg-white border-ink-200') + ' rounded-xl border p-3 mb-2 transition">' +
         '<div class="flex items-start gap-2 flex-wrap">' +
           '<div class="flex-1 min-w-[220px] cursor-pointer" onclick="_crawlDetail(' + i + ')" title="Vollständige Kontaktdetails anzeigen">' +
+            '<div class="flex items-center gap-1.5 mb-1">' + _korbStatusBadge(r) + _korbQuelleBadge(r) + '</div>' +
             '<p class="font-bold text-ink-900 text-sm hover:text-violet-700">' + escapeHtml(r.name || r.email) + (r.position ? ' <span class="font-normal text-ink-500">· ' + escapeHtml(r.position) + '</span>' : '') +
               (r.hidden === 'spam' ? ' <span class="text-[9px] font-bold px-1.5 py-0.5 rounded border bg-rose-100 text-rose-700 border-rose-300 align-middle">SPAM</span>' : r.hidden === 'hidden' ? ' <span class="text-[9px] font-bold px-1.5 py-0.5 rounded border bg-ink-100 text-ink-600 border-ink-300 align-middle">AUSGEBLENDET</span>' : '') +
               ' <i data-lucide="info" class="w-3 h-3 inline-block text-ink-400 align-middle"></i></p>' +
@@ -41122,6 +41179,15 @@ function _renderCrawledContacts() {
           '<div class="flex flex-col gap-1 items-end shrink-0">' +
             '<select onchange="_crawlTypChange(\'' + escapeAttr(r.recordId) + '\', this.value)" class="px-1.5 py-1 border border-ink-300 rounded text-[10px] bg-white max-w-[140px]">' + typOpts(r.kontakt_typ || '') + '</select>' +
             '<div class="flex gap-1 flex-wrap justify-end">' +
+              // v2.68.6: Freigabe zuerst — das ist die eigentliche Entscheidung.
+              (function () {
+                const st = _korbStatus(r);
+                if (st === 'uebernommen') {
+                  return '<button onclick="_korbAusDbEntfernen(' + i + ', this)" class="px-2 py-1 bg-white border border-rose-300 text-rose-700 hover:bg-rose-50 rounded text-[10px] font-bold" title="Kontakt aus der zentralen DB loeschen (Firma bleibt)">\u2715 Aus DB entfernen</button>';
+                }
+                const label = st === 'wartend' ? '\u2713 \u00dcbernehmen' : '\u2713 Doch \u00fcbernehmen';
+                return '<button onclick="_korbUebernehmen(' + i + ', this)" class="px-2 py-1 bg-emerald-600 hover:bg-emerald-700 text-white rounded text-[10px] font-bold" title="In die zentrale DB uebernehmen">' + label + '</button>';
+              })() +
               '<button onclick="_crawlSendMarketing(' + i + ')" class="px-2 py-1 bg-orange-500 hover:bg-orange-600 text-white rounded text-[10px] font-bold inline-flex items-center gap-1" title="Werbe-Email senden (bestehendes Marketing-Feature)"><i data-lucide="megaphone" class="w-3 h-3"></i> Werbung</button>' +
               '<button onclick="_crawlPushFd(' + i + ', this)" class="px-2 py-1 bg-blue-600 hover:bg-blue-700 text-white rounded text-[10px] font-bold" title="In Freshdesk anlegen/aktualisieren">→ FD</button>' +
               (r.fs_status !== 'n/a' ? '<button onclick="_crawlPushFs(' + i + ', this)" class="px-2 py-1 bg-orange-600 hover:bg-orange-700 text-white rounded text-[10px] font-bold" title="Nach Freshsales pushen (bestehende Funktion)">→ FS</button>' : '') +
@@ -41141,11 +41207,97 @@ function _renderCrawledContacts() {
           '</div>' +
         '</div>' +
       '</div>'
-    ).join('') : '<div class="bg-white rounded-xl border border-dashed border-ink-300 p-6 text-center text-ink-500 text-sm">Noch keine gecrawlten Kontakte' + (mandantName ? ' für „' + escapeHtml(mandantName) + '"' : '') + (CRAWL_STATE.filterTyp ? ' mit diesem Typ' : '') + '. Öffne Tickets — Signaturen werden automatisch gescannt.</div>');
+    ).join('') : '<div class="bg-white rounded-xl border border-dashed border-ink-300 p-6 text-center text-ink-500 text-sm">' + (CRAWL_STATE.nurOffene ? 'Nichts Offenes im Korb' : 'Noch nichts im Korb') + (mandantName ? ' für „' + escapeHtml(mandantName) + '"' : '') + (CRAWL_STATE.filterTyp ? ' mit diesem Typ' : '') + '. Öffne Tickets — Signaturen werden automatisch gescannt.</div>');
   if (window.lucide) lucide.createIcons();
 }
 
 /* Der gefilterte Index i bezieht sich auf die AKTUELL gerenderte Liste. */
+/* Airtable-Record löschen (für „Aus DB entfernen"). */
+async function _zdbDeleteRecord(tableName, recordId) {
+  const url = 'https://api.airtable.com/v0/' + ZDB_BASE_ID + '/' + encodeURIComponent(tableName) + '/' + recordId;
+  const res = await fetch(url, { method: 'DELETE', headers: { Authorization: 'Bearer ' + APP_KEYS.airtableWriteKey } });
+  if (!res.ok) throw new Error('Löschen fehlgeschlagen: HTTP ' + res.status);
+  return true;
+}
+
+/* Kontaktdaten eines Korb-Eintrags in die Form der zentralen DB bringen. */
+function _korbKontaktDaten(r) {
+  const teile = String(r.name || '').trim().split(/\s+/).filter(Boolean);
+  return {
+    vorname: teile.length > 1 ? teile.slice(0, -1).join(' ') : (teile[0] || ''),
+    nachname: teile.length > 1 ? teile[teile.length - 1] : '',
+    email: r.email || '', telefon: r.telefon || '', mobil: r.mobil || '', position: r.position || '',
+    // Typ nur übernehmen, wenn er zum Wertevorrat der zentralen DB passt
+    typ: ZDB_TYP_OPTIONS.includes(r.kontakt_typ) ? r.kontakt_typ : '',
+    quelle: _korbQuelle(r), freshdesk_contact_id: r.fd_contact_id || '',
+  };
+}
+
+function _korbAccount(r) {
+  return (APP_STATE.accounts || []).find(a => String(a.id) === String(r && r.account_id)) || null;
+}
+
+/* ✓ Übernehmen — der EINZIGE Weg in die zentrale DB.
+   Auch aus Spam/verworfen heraus möglich („doch übernehmen"). */
+async function _korbUebernehmen(i, btn) {
+  const r = _crawlRecAt(i); if (!r) return;
+  const account = _korbAccount(r);
+  if (!account) return toast('Mandant zu diesem Eintrag nicht gefunden', 'warn', 5000);
+  if (btn) setBusy(btn, true, 'Übernehme…');
+  try {
+    const res = await zdbSaveFirmaKontakt(
+      account,
+      r.firma ? { name: r.firma, strasse: r.strasse, plz: r.plz, ort: r.ort, land: r.land, quelle: _korbQuelle(r) } : null,
+      _korbKontaktDaten(r),
+      { erzwingen: true }        // Freigabe darf schreiben, sonst niemand
+    );
+    if (!res || !res.kontaktId) throw new Error('Kontakt wurde nicht angelegt');
+    const stempel = 'uebernommen ' + nowIso() + ' · ' + ((APP_KEYS.user && APP_KEYS.user.name) || 'Hero');
+    await airtableUpdateWithAutoField(CRAWLED_TABLE, r.recordId,
+      { zdb_status: stempel, hidden: '', updated_at: nowIso() }, CRAWLED_TYPES_MAP);
+    r.zdb_status = stempel; r.hidden = '';
+    toast('In die zentrale DB übernommen', 'success', 3500);
+    _renderCrawledContacts();
+  } catch (e) {
+    toast('Übernahme fehlgeschlagen: ' + e.message, 'error', 7000);
+  }
+  if (btn) setBusy(btn, false);
+}
+
+/* ✕ Aus DB entfernen — löscht NUR den Kontakt. Die Firma bleibt, sie kann
+   weitere Kontakte haben. Der Korb-Eintrag selbst wird nie gelöscht, nur
+   markiert: Er ist der Beleg, dass hier bewusst entschieden wurde. */
+async function _korbAusDbEntfernen(i, btn) {
+  const r = _crawlRecAt(i); if (!r) return;
+  const account = _korbAccount(r);
+  if (!account) return toast('Mandant zu diesem Eintrag nicht gefunden', 'warn', 5000);
+  const wer = r.name || r.email || 'dieser Kontakt';
+  if (!confirm('„' + wer + '" aus der zentralen DB von ' + (account.name || '') + ' löschen?\n\n'
+    + 'Die Firma bleibt bestehen. Der Korb-Eintrag wird als „verworfen" markiert und bleibt erhalten.')) return;
+  if (btn) setBusy(btn, true, 'Entferne…');
+  try {
+    const names = await _zdbEnsureTables(account);
+    let hit = null;
+    if (r.email) hit = (await _zdbSelect(names.kontakt.name, { filter: "LOWER({email})='" + _zdbEsc(String(r.email).toLowerCase()) + "'", maxRecords: 1 }))[0] || null;
+    if (!hit && r.name) hit = (await _zdbSelect(names.kontakt.name, { filter: "LOWER({name})='" + _zdbEsc(String(r.name).toLowerCase()) + "'", maxRecords: 1 }))[0] || null;
+    if (hit) await _zdbDeleteRecord(names.kontakt.name, hit.id);
+    const stempel = 'verworfen ' + nowIso() + ' · ' + ((APP_KEYS.user && APP_KEYS.user.name) || 'Hero');
+    await airtableUpdateWithAutoField(CRAWLED_TABLE, r.recordId,
+      { zdb_status: stempel, updated_at: nowIso() }, CRAWLED_TYPES_MAP);
+    r.zdb_status = stempel;
+    toast(hit ? 'Aus der zentralen DB entfernt' : 'War dort nicht (mehr) vorhanden — als verworfen markiert', 'success', 4000);
+    _renderCrawledContacts();
+  } catch (e) {
+    toast('Entfernen fehlgeschlagen: ' + e.message, 'error', 7000);
+  }
+  if (btn) setBusy(btn, false);
+}
+
+function _korbToggleNurOffene(el) {
+  CRAWL_STATE.nurOffene = !!(el && el.checked);
+  _renderCrawledContacts();
+}
+
 function _crawlRecAt(i) {
   return _crawlVisible()[i] || null;
 }
@@ -41285,7 +41437,7 @@ function _crawlEdit(i) {
             fld('Telefon', 'crawlEditTelefon', r.telefon, '') +
             fld('Mobil', 'crawlEditMobil', r.mobil, '') +
           '</div>' +
-          '<p class="text-[10px] text-ink-400">Änderungen werden in den gecrawlten Kontakten gespeichert. Push-Buttons übertragen die korrigierten Daten anschließend nach FD/FS/MC.</p>' +
+          '<p class="text-[10px] text-ink-400">Änderungen werden im Korb gespeichert. Push-Buttons übertragen die korrigierten Daten anschließend nach FD/FS/MC.</p>' +
         '</div>' +
         '<div class="border-t border-ink-200 p-3 shrink-0 flex gap-2">' +
           '<button onclick="closeCrawlEdit()" class="flex-1 bg-ink-100 hover:bg-ink-200 text-ink-700 rounded-xl px-3 py-3 text-sm font-bold">Abbrechen</button>' +
@@ -41455,7 +41607,7 @@ async function renderContactsPage() {
     // v2.47: Primär-Leiste — nur Gecrawlt + Zentrale DB; Rest per „Erweiterte Suche" einblendbar
     '<div class="bg-white rounded-xl border border-ink-200 p-2.5">' +
       '<div class="flex flex-wrap items-center gap-2">' +
-        '<button onclick="showCrawledContacts(this)" class="flex-1 min-w-[160px] px-4 py-2.5 bg-gradient-to-br from-violet-500 to-indigo-600 hover:from-violet-600 hover:to-indigo-700 text-white rounded-lg text-sm font-bold inline-flex items-center justify-center gap-1.5" title="Zeige alle aus Ticket-Signaturen gecrawlten Kontakte"><i data-lucide="radar" class="w-4 h-4"></i> Gecrawlt</button>' +
+        '<button onclick="showCrawledContacts(this)" class="flex-1 min-w-[160px] px-4 py-2.5 bg-gradient-to-br from-violet-500 to-indigo-600 hover:from-violet-600 hover:to-indigo-700 text-white rounded-lg text-sm font-bold inline-flex items-center justify-center gap-1.5" title="Zeige alle aus Ticket-Signaturen gecrawlten Kontakte"><i data-lucide="inbox" class="w-4 h-4"></i> \u{1F4E5} Korb</button>' +
         '<button onclick="showZdbTableView(this)" class="flex-1 min-w-[160px] px-4 py-2.5 bg-gradient-to-br from-indigo-600 to-blue-700 hover:from-indigo-700 hover:to-blue-800 text-white rounded-lg text-sm font-bold inline-flex items-center justify-center gap-1.5" title="Tabellarische Ansicht der zentralen Kontakt-DB (synchron zu Airtable)"><i data-lucide="database" class="w-4 h-4"></i> Zentrale DB</button>' +
         '<label class="text-[11px] inline-flex items-center gap-1.5 cursor-pointer select-none shrink-0 ml-auto text-ink-600">' +
           '<input type="checkbox" id="contactsAdvToggle" ' + (showAdv ? 'checked' : '') + ' onchange="_toggleContactsAdvanced(this.checked)" class="w-4 h-4 accent-orange-600">' +
@@ -41543,7 +41695,7 @@ async function renderContactsPage() {
     '<div id="contactsResults">' +
       '<div class="bg-white rounded-xl border border-dashed border-ink-300 p-6 text-center text-sm text-ink-500">' +
         '<i data-lucide="users" class="w-8 h-8 inline text-ink-400"></i>' +
-        '<p class="mt-2">Wähle oben <b>Gecrawlt</b> oder <b>Zentrale DB</b>.</p>' +
+        '<p class="mt-2">Wähle oben <b>\u{1F4E5} Korb</b> oder <b>\u{1F5C4} Zentrale DB</b>.</p>' +
         '<p class="text-[11px] text-ink-400 mt-1">Für die KI-/Marketing-Suche oben rechts <b>Erweiterte Suche</b> aktivieren.</p>' +
       '</div>' +
     '</div>' +
@@ -42956,7 +43108,7 @@ function _renderContactsResults() {
   if (!CONTACTS_STATE.results.length) {
     host.innerHTML = '<div class="bg-white rounded-xl border border-dashed border-ink-300 p-6 text-center text-sm text-ink-500">' +
       '<i data-lucide="users" class="w-8 h-8 inline text-ink-400"></i>' +
-      '<p class="mt-2">Wähle oben <b>Gecrawlt</b> oder <b>Zentrale DB</b>.</p>' +
+      '<p class="mt-2">Wähle oben <b>\u{1F4E5} Korb</b> oder <b>\u{1F5C4} Zentrale DB</b>.</p>' +
       '<p class="text-[11px] text-ink-400 mt-1">Für die KI-/Marketing-Suche oben rechts <b>Erweiterte Suche</b> aktivieren.</p>' +
     '</div>';
     if (window.lucide) lucide.createIcons();
