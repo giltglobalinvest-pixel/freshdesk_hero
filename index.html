@@ -808,7 +808,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.68.3';
+const APP_VERSION = 'v2.68.4';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -16505,7 +16505,10 @@ async function runSearch(useAI) {
   // v2.68.0: Archiv-Suche nachladen. Bewusst NACH dem Rendern und ohne await —
   // die gewohnte Suche soll keine Millisekunde länger dauern, das Archiv
   // schiebt sich nach, sobald es antwortet.
-  _archivSucheAnzeigen(keyword || raw);
+  // v2.68.4: Die GANZE Frage übergeben, nicht nur den KI-Begriff. Vorher ging
+  // aus „letzte Bestellung von KONE" nur „KONE" ans Archiv — zurück kam alles,
+  // was je eine kone.com-Adresse enthielt, sortiert nach Worthäufigkeit.
+  _archivSucheAnzeigen(raw, keyword);
 }
 
 /* ===================== v2.68.0: ARCHIV-SUCHE (Cloudflare) =================
@@ -16529,7 +16532,41 @@ async function archivSuchen(text, opts = {}) {
   return res.json();
 }
 
-async function _archivSucheAnzeigen(text) {
+/* Füllwörter, die als Suchbegriff nichts beitragen. Sie stehen in fast jeder
+   Frage („zeig mir die letzte Bestellung von …") und würden UND-verknüpft jeden
+   Treffer verhindern. */
+const _ARCHIV_FUELLWOERTER = new Set([
+  'und','oder','der','die','das','den','dem','des','ein','eine','einen','einem','einer','eines',
+  'von','vom','für','fuer','mit','bei','aus','auf','an','am','im','in','zu','zum','zur','über','ueber',
+  'ist','sind','war','waren','hat','habe','haben','hatte','hatten','wird','werden','wurde','wurden',
+  'ich','du','wir','ihr','sie','er','es','mir','mich','uns','man','mein','meine','unser','unsere',
+  'zeig','zeige','zeigen','such','suche','suchen','finde','finden','gib','gibt','bitte','mal','doch',
+  'was','wer','wie','wo','wann','warum','welche','welcher','welches','ob','dass','nicht','kein','keine',
+  'alle','alles','etwas','noch','schon','nur','auch','sehr','ganz','wieder','dann','als','wenn','damit',
+  'nach','vor','seit','bis','ohne','gegen','um','durch','los','denn','aber','sondern','weil','sowie',
+  'gerade','eben','halt','eigentlich','vielleicht','wohl','ja','nein','okay','danke','hallo',
+]);
+
+/* Wörter, die eine Zeitfrage anzeigen. „Die letzte Bestellung" ist keine
+   Relevanz-, sondern eine Datumsfrage — nach Relevanz sortiert steht sonst ein
+   Jahre altes Ticket oben, nur weil das Wort dort häufiger vorkommt. */
+const _ARCHIV_ZEITWOERTER = /(letzte|letzten|letzter|letztes|neueste|neuesten|neuester|aktuell|aktuelle|aktuellen|zuletzt|juengste|jüngste|kuerzlich|kürzlich|derzeit)/i;
+
+/* Aus der Frage die bedeutungstragenden Wörter ziehen. „bestellung" UND „kone"
+   trifft die Bestellungen — „kone" allein trifft jede Mahnung. */
+function _archivBegriffe(text) {
+  return String(text || '')
+    .replace(/[^\p{L}\p{N}\s*@.-]/gu, ' ')
+    .split(/\s+/)
+    .map(w => w.trim())
+    // Zeitwörter fliegen ebenfalls raus: „letzten" steuert die SORTIERUNG, es ist
+    // kein Inhalt. Als Suchwort mitgeschickt müsste es im Ticket stehen — was es
+    // praktisch nie tut, und die Suche liefe ins Leere.
+    .filter(w => w.length >= 3 && !_ARCHIV_FUELLWOERTER.has(w.toLowerCase()) && !_ARCHIV_ZEITWOERTER.test(w))
+    .slice(0, 6);
+}
+
+async function _archivSucheAnzeigen(text, kiBegriff) {
   const host = document.getElementById('searchResults');
   if (!host || !text || String(text).trim().length < 2) return;
   const box = document.createElement('div');
@@ -16539,17 +16576,38 @@ async function _archivSucheAnzeigen(text) {
     + '<span class="spinner inline-block w-3 h-3 border-2 text-emerald-600"></span> Archiv wird durchsucht …</p>';
   host.insertBefore(box, host.firstChild);
 
+  let gesucht = '';
+  const nachDatum = _ARCHIV_ZEITWOERTER.test(String(text));
   try {
     // Zusammensetzungen: „frequenz" findet „Frequenzumrichter" nur mit Stern.
-    // Den hängt Hero automatisch an, damit niemand die Regel kennen muss.
-    const begriff = String(text).trim().split(/\s+/).map(w => (w.length >= 4 && !w.endsWith('*') ? w + '*' : w)).join(' ');
+    const mitStern = (ws) => ws.map(w => (w.length >= 4 && !w.endsWith('*') ? w + '*' : w)).join(' ');
     const nurEiner = _sucheAccounts();
     const slug = (nurEiner.length === 1 && (APP_STATE.accounts || []).length > 1)
       ? _archivSlugFuer(nurEiner[0].id) : null;
-    const daten = await archivSuchen(begriff, { limit: 15, mandant: slug });
-    const treffer = [];
-    for (const e of (daten?.ergebnisse || [])) {
-      for (const t of (e.treffer || [])) treffer.push({ ...t, _mandant: e.mandant, _mandantName: e.name });
+    const opts = { limit: 15, mandant: slug, sort: nachDatum ? 'datum' : null };
+    const sammeln = (daten) => {
+      const out = [];
+      for (const e of (daten?.ergebnisse || [])) {
+        for (const t of (e.treffer || [])) out.push({ ...t, _mandant: e.mandant, _mandantName: e.name });
+      }
+      return out;
+    };
+
+    // Erst die ganze Frage, UND-verknüpft — das ist die präzise Antwort.
+    const woerter = _archivBegriffe(text);
+    gesucht = mitStern(woerter);
+    let treffer = gesucht ? sammeln(await archivSuchen(gesucht, opts)) : [];
+
+    // Nichts gefunden? Schrittweise lockern statt leer ausgehen lassen:
+    // erst der KI-Begriff, sonst das längste Wort der Frage.
+    if (!treffer.length) {
+      const ersatz = (kiBegriff && kiBegriff.trim())
+        || woerter.slice().sort((a, b) => b.length - a.length)[0] || '';
+      const weicher = ersatz ? mitStern([ersatz]) : '';
+      if (weicher && weicher !== gesucht) {
+        gesucht = weicher;
+        treffer = sammeln(await archivSuchen(gesucht, opts));
+      }
     }
     if (!treffer.length) { box.remove(); return; }
 
@@ -16557,7 +16615,9 @@ async function _archivSucheAnzeigen(text) {
       '<div class="flex items-center justify-between gap-2 mb-2">'
       + '<p class="text-[11px] font-bold text-emerald-900 uppercase tracking-wider inline-flex items-center gap-1.5">'
       + '<i data-lucide="database" class="w-3.5 h-3.5"></i> Archiv &middot; ' + treffer.length + ' Treffer</p>'
-      + '<span class="text-[10px] text-emerald-700">auch in Antworten &amp; Notizen</span>'
+      + '<span class="text-[10px] text-emerald-700">'
+      + (gesucht ? 'gesucht: ' + escapeHtml(gesucht.replace(/\*/g, '')) + ' &middot; ' : '')
+      + (nachDatum ? 'neueste zuerst' : 'auch in Antworten &amp; Notizen') + '</span>'
       + '</div>'
       + treffer.map(t =>
           '<button onclick="_archivOeffnen(\'' + escapeAttr(t._mandant) + '\',' + t.id + ')" '
