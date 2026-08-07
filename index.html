@@ -808,7 +808,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.68.12';
+const APP_VERSION = 'v2.68.13';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -9046,6 +9046,7 @@ async function renderTicketsPage() {
             html += `<button onclick="resetFilters()" class="shrink-0 px-2 py-1 rounded-md text-[11px] font-medium bg-ink-50 text-ink-600 border border-ink-200 inline-flex items-center gap-1"><i data-lucide="x" class="w-3 h-3"></i> Reset</button>`;
             // v2.68.11: Diagnose direkt neben den Filtern — dort entstehen die Fragen,
             // dort gehört auch die Antwort hin.
+            html += `<span id="kiArbeitLeiste" class="contents"></span>`;
             html += `<button onclick="openDiagProtokoll()" class="shrink-0 px-2 py-1 rounded-md text-[11px] font-medium bg-ink-50 text-ink-600 border border-ink-200 inline-flex items-center gap-1" title="Protokoll: gestellte Abfrage, Antwortmenge und was jeder Filterschritt übrig lässt"><i data-lucide="stethoscope" class="w-3 h-3"></i> Protokoll${_FDH_DIAG.length ? ' (' + _FDH_DIAG.length + ')' : ''}</button>`;
           }
           // v2.46.45: View/Vollbild jetzt am ANFANG der Reihe — Reload-Button bleibt rechts.
@@ -9066,6 +9067,7 @@ async function renderTicketsPage() {
 
   // Load tickets (parallel mit Agent-Cache) — Pagination-State zurücksetzen
   APP_STATE.pageState = { page: 1, hasMore: false, exhausted: new Set(), tickets: [] };
+  _fdhKiArbeitStarten();   // v2.68.13: „arbeitet gerade" im Hintergrund mitführen
   try {
     const opts = { perPage: TICKETS_PER_PAGE, filters: APP_STATE.filters, page: 1 };
     const ticketsPromise = (acc === 'all')
@@ -9485,11 +9487,13 @@ function _assigneeBadgeDropdown(t) {
   const kiTagName = _fdhKiAusTags(t.tags);
   const kis = (APP_STATE.kiUsers || []).filter(k => k.vonByAccount && k.vonByAccount[t._accountId]);
   const currentName = kiTagName ? (_fdhKiIconFuer(kiTagName) + ' ' + kiTagName) : getAgentFirstName(t._accountId, t.responder_id);
+  // v2.68.13: Läuft dieser Mitarbeiter gerade an genau diesem Ticket?
+  const _arbeit = kiTagName ? _fdhKiArbeitet(kiTagName, t.id) : null;
   const hasOne = !!currentName;
   const badgeCls = hasOne ? 'bg-ink-100 text-ink-700' : 'bg-amber-50 text-amber-700 border border-amber-200';
   return `
     <span class="relative inline-flex items-center" onclick="event.stopPropagation()">
-      <span class="text-[10px] uppercase tracking-wider px-1.5 py-0.5 rounded font-semibold ${badgeCls} pointer-events-none inline-flex items-center gap-1"><i data-lucide="user" class="w-2.5 h-2.5"></i>${escapeHtml(currentName || 'unzugewiesen')} <i data-lucide="chevron-down" class="w-2.5 h-2.5"></i></span>
+      <span class="text-[10px] uppercase tracking-wider px-1.5 py-0.5 rounded font-semibold ${_arbeit ? 'bg-emerald-100 text-emerald-800 border border-emerald-300' : badgeCls} pointer-events-none inline-flex items-center gap-1" ${_arbeit ? `title="${escapeAttr(_arbeit.taetigkeit || 'arbeitet gerade')}"` : ''}>${_arbeit ? '<span class="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse"></span>' : '<i data-lucide="user" class="w-2.5 h-2.5"></i>'}${escapeHtml(currentName || 'unzugewiesen')} <i data-lucide="chevron-down" class="w-2.5 h-2.5"></i></span>
       <select data-account-id="${escapeAttr(t._accountId)}" data-ticket-id="${t.id}" onchange="cardChangeAssignee(this)" class="absolute inset-0 opacity-0 cursor-pointer w-full">
         <option value="" ${!t.responder_id && !kiTagName ? 'selected' : ''}>— unzugewiesen —</option>
         ${kis.length ? `<optgroup label="Hero-Benutzer (ohne Freshdesk-Lizenz)">${kis.map(k =>
@@ -18060,6 +18064,74 @@ function _fdhZugewiesenKI(ticket) {
     });
   } catch (_) {}
   return name;
+}
+
+/* === v2.68.13: „Arbeitet gerade" der KI-Mitarbeiter ======================
+   Hero weckt die Steuerzentrale bereits (POST /api/wecken). Die Gegenrichtung
+   fehlte: Man sah nicht, ob jemand gerade tatsächlich an einem Ticket arbeitet.
+
+   Erwartete Antwort von GET {steuerUrl}/api/status:
+     { "ok": true, "arbeitet": [
+         { "name": "Manuela_AI", "ticket_id": 40314,
+           "seit": "2026-08-07T15:40:00Z", "taetigkeit": "Angebot wird erstellt" } ] }
+
+   Bewusst zustandslos und kurzlebig: Ein Eintrag gilt nur als „arbeitet", wenn
+   die Antwort frisch ist. Fällt die Steuerzentrale aus, verschwindet die Anzeige
+   von selbst, statt einen Mitarbeiter für immer als beschäftigt auszuweisen.
+   Gibt es den Endpunkt (noch) nicht, bleibt alles still — kein Fehler, keine
+   Meldung, keine Wiederholungsschleife. */
+const _FDH_KI_ARBEIT = { stand: [], geholt: 0, aus: false };
+const _FDH_KI_FRISCH_MS = 90 * 1000;   // älter = nicht mehr als „arbeitet gerade" zeigen
+
+async function _fdhKiArbeitHolen() {
+  if (_FDH_KI_ARBEIT.aus) return;
+  try {
+    const res = await fetch(fdhSteuerUrl() + '/api/status', { signal: AbortSignal.timeout(3000) });
+    if (res.status === 404) { _FDH_KI_ARBEIT.aus = true; return; }   // Endpunkt gibt es dort nicht
+    if (!res.ok) return;
+    const d = await res.json().catch(() => null);
+    if (!d || !Array.isArray(d.arbeitet)) return;
+    _FDH_KI_ARBEIT.stand = d.arbeitet;
+    _FDH_KI_ARBEIT.geholt = Date.now();
+    _fdhKiArbeitAnzeigen();
+  } catch (_) { /* Steuerzentrale nicht erreichbar — schweigen */ }
+}
+
+/* Arbeitet dieser Hero-Benutzer gerade? Optional an einem bestimmten Ticket. */
+function _fdhKiArbeitet(name, ticketId) {
+  if (Date.now() - _FDH_KI_ARBEIT.geholt > _FDH_KI_FRISCH_MS) return null;
+  return (_FDH_KI_ARBEIT.stand || []).find(e =>
+    String(e.name || '').toLowerCase() === String(name || '').toLowerCase() &&
+    (ticketId == null || String(e.ticket_id) === String(ticketId))) || null;
+}
+
+/* Sammelanzeige in der Filterleiste — wer arbeitet gerade woran. */
+function _fdhKiArbeitAnzeigen() {
+  const ziel = document.getElementById('kiArbeitLeiste');
+  if (!ziel) return;
+  const frisch = Date.now() - _FDH_KI_ARBEIT.geholt <= _FDH_KI_FRISCH_MS;
+  const liste = frisch ? (_FDH_KI_ARBEIT.stand || []) : [];
+  if (!liste.length) { ziel.innerHTML = ''; return; }
+  ziel.innerHTML = liste.map(e =>
+    '<button onclick="' + (e.ticket_id ? 'openTicketDetail(APP_STATE.currentAccount, ' + Number(e.ticket_id) + ')' : '') + '" '
+    + 'class="shrink-0 px-2 py-1 rounded-md text-[11px] font-medium bg-emerald-50 text-emerald-800 border border-emerald-300 inline-flex items-center gap-1.5" '
+    + 'title="' + escapeAttr((e.taetigkeit || 'arbeitet') + (e.seit ? ' · seit ' + String(e.seit).slice(11, 16) : '')) + '">'
+    + '<span class="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse"></span>'
+    + '\u{1F916} ' + escapeHtml(e.name) + ' arbeitet'
+    + (e.ticket_id ? ' \u00b7 #' + escapeHtml(String(e.ticket_id)) : '')
+    + '</button>').join('');
+}
+
+/* Abfrage im Hintergrund. Pausiert, wenn das Fenster nicht sichtbar ist —
+   ein Hintergrund-Tab muss die Steuerzentrale nicht alle 20 Sekunden fragen. */
+let _FDH_KI_TIMER = null;
+function _fdhKiArbeitStarten() {
+  if (_FDH_KI_TIMER) return;
+  _fdhKiArbeitHolen();
+  _FDH_KI_TIMER = setInterval(() => {
+    if (document.hidden || _FDH_KI_ARBEIT.aus) return;
+    _fdhKiArbeitHolen();
+  }, 20000);
 }
 
 function fdhSteuerUrl() {
