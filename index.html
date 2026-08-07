@@ -808,7 +808,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.68.20';
+const APP_VERSION = 'v2.68.21';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -40465,6 +40465,7 @@ function _zdbKontaktFieldSpecs(firmaTableId) {
     { name: 'position', type: 'singleLineText' },
     { name: 'notizen', type: 'multilineText' },        // v2.68.6
     { name: 'mailchimp', type: 'singleLineText' },     // v2.68.14: 'gepusht <Zeit> via Hero'
+    { name: 'freshsales', type: 'singleLineText' },    // v2.68.21: 'gepusht <Zeit> via Hero'
     { name: 'pipedrive_person_id', type: 'singleLineText' },
     { name: 'quelle', type: 'singleLineText' },
     { name: 'freshdesk_contact_id', type: 'singleLineText' },
@@ -40993,6 +40994,100 @@ async function _zdbPushMc(recId, btn) {
   if (btn) setBusy(btn, false);
 }
 
+/* === v2.68.21: Ausgehende Aktionen am geprüften Kontakt ==================
+   Werbung, → FD und → FS lagen bisher im Korb. Dort gehören sie nicht hin: Der
+   Korb ist zum Sichten und Freigeben da, alles Ausgehende setzt einen geprüften
+   Kontakt voraus. Im Korb bleiben sie vorerst bestehen, damit nichts wegfällt,
+   bevor der Ersatz erprobt ist. */
+function _zdbSatzVon(recId) {
+  const d = ZDB_VIEW_STATE.data || {};
+  const rec = (d.kontakte || []).find(x => x.id === recId);
+  const acc = _zdbCurrentAccount();
+  if (!rec || !acc) return null;
+  const f = rec.fields || {};
+  const teile = String(f.name || '').trim().split(/\s+/).filter(Boolean);
+  return {
+    rec, acc, f,
+    email: String(f.email || '').trim(),
+    name: f.name || [f.vorname, f.nachname].filter(Boolean).join(' ') || teile.join(' '),
+    telefon: f.telefon || '', mobil: f.mobil || '', position: f.position || '',
+    firma: ((f.firma || []).map(id => (d.firmaName || {})[id]).filter(Boolean).join(', ')),
+    fdId: f.freshdesk_contact_id ? Number(f.freshdesk_contact_id) : 0,
+  };
+}
+
+/* → FD: Kontakt in Freshdesk anlegen oder aktualisieren, Id zurückschreiben. */
+async function _zdbPushFd(recId, btn) {
+  const k = _zdbSatzVon(recId);
+  if (!k) return;
+  if (!k.email) return toast('Ohne E-Mail-Adresse kann in Freshdesk kein Kontakt angelegt werden.', 'warn', 5000);
+  if (btn) setBusy(btn, true);
+  try {
+    const base = '/freshdesk/' + encodeURIComponent(k.acc.id) + '/api/v2';
+    const payload = { name: k.name || k.email, email: k.email };
+    if (k.telefon) payload.phone = k.telefon;
+    if (k.mobil) payload.mobile = k.mobil;
+    if (k.position) payload.job_title = k.position;
+    const liste = await proxyJson(base + '/contacts?email=' + encodeURIComponent(k.email)).catch(() => []);
+    let cid;
+    if (Array.isArray(liste) && liste[0]) {
+      cid = liste[0].id;
+      await proxyJson(base + '/contacts/' + cid, { method: 'PUT', body: JSON.stringify(payload) });
+    } else {
+      const neu = await proxyJson(base + '/contacts', { method: 'POST', body: JSON.stringify(payload) });
+      cid = neu && neu.id;
+    }
+    if (cid) {
+      const namen = _zdbTableNames(k.acc);
+      await _zdbUpdateSafe(namen.kontakt.name, recId, { freshdesk_contact_id: String(cid), updated_at: nowIso() });
+      k.rec.fields = { ...k.f, freshdesk_contact_id: String(cid) };
+    }
+    toast('Freshdesk: ' + k.email + ' angelegt/aktualisiert ✓', 'success', 3500);
+    _zdbNeuZeichnen();
+  } catch (e) { toast('Freshdesk-Push: ' + (e.message || e), 'error', 8000); }
+  if (btn) setBusy(btn, false);
+}
+
+/* → FS: nutzt den bestehenden Freshsales-Weg und vermerkt es am Kontakt. */
+async function _zdbPushFs(recId, btn) {
+  const k = _zdbSatzVon(recId);
+  if (!k) return;
+  if (!k.email) return toast('Ohne E-Mail-Adresse kein Freshsales-Push.', 'warn', 5000);
+  const email = k.email.toLowerCase();
+  if (!CONTACTS_STATE.results.find(x => String(x.email || '').toLowerCase() === email)) {
+    CONTACTS_STATE.results.push({ _accountId: k.acc.id, email: k.email, name: k.name, phone: k.telefon, mobile: k.mobil, job_title: k.position, address: '' });
+  }
+  await _pushContactToFs(email, btn);
+  try {
+    const namen = _zdbTableNames(k.acc);
+    const stempel = 'gepusht ' + new Date().toLocaleString('de-DE') + ' via Hero';
+    await _zdbUpdateSafe(namen.kontakt.name, recId, { freshsales: stempel, updated_at: nowIso() });
+    k.rec.fields = { ...k.f, freshsales: stempel };
+    _zdbNeuZeichnen();
+  } catch (e) { console.warn('[FS] Vermerk:', e.message); }
+}
+
+/* Werbung: derselbe Weg wie im Korb, nur vom geprüften Kontakt aus. */
+function _zdbSendMarketing(recId) {
+  const k = _zdbSatzVon(recId);
+  if (!k) return;
+  if (!k.email) return toast('Keine E-Mail-Adresse hinterlegt', 'warn', 4000);
+  openMarketingFromContactModal(k.acc.id, k.email, k.name || '', k.fdId || 0, null);
+}
+
+/* Kompakte Aktionsspalte — Werbung nur mit Beleg, wie bei Mailchimp. */
+function _zdbAktionenZelle(r, f) {
+  if (!f.email) return '<span class="text-[10px] text-ink-300">—</span>';
+  const fd = f.freshdesk_contact_id
+    ? '<button onclick="event.stopPropagation(); _zdbPushFd(\'' + r.id + '\', this)" class="px-1.5 py-0.5 bg-white border border-blue-300 text-blue-700 hover:bg-blue-50 rounded text-[10px] font-bold" title="In Freshdesk aktualisieren (vorhanden: #' + escapeAttr(String(f.freshdesk_contact_id)) + ')">\u2192 FD</button>'
+    : '<button onclick="event.stopPropagation(); _zdbPushFd(\'' + r.id + '\', this)" class="px-1.5 py-0.5 bg-blue-600 hover:bg-blue-700 text-white rounded text-[10px] font-bold" title="In Freshdesk anlegen">\u2192 FD</button>';
+  const fs = '<button onclick="event.stopPropagation(); _zdbPushFs(\'' + r.id + '\', this)" class="px-1.5 py-0.5 ' + (String(f.freshsales || '').trim() ? 'bg-white border border-orange-300 text-orange-700 hover:bg-orange-50' : 'bg-orange-600 hover:bg-orange-700 text-white') + ' rounded text-[10px] font-bold" title="' + (String(f.freshsales || '').trim() ? escapeAttr(String(f.freshsales)) : 'Nach Freshsales pushen') + '">\u2192 FS</button>';
+  const werbung = _zdbMcBeleg(f)
+    ? '<button onclick="event.stopPropagation(); _zdbSendMarketing(\'' + r.id + '\')" class="px-1.5 py-0.5 bg-orange-500 hover:bg-orange-600 text-white rounded text-[10px] font-bold" title="Werbe-Email senden">Werbung</button>'
+    : '<span class="px-1.5 py-0.5 bg-ink-50 text-ink-400 border border-ink-200 rounded text-[10px] font-bold" title="Kein belegter Geschäftskontakt — keine Werbung">Werbung</span>';
+  return '<span class="inline-flex items-center gap-1">' + werbung + fd + fs + '</span>';
+}
+
 /* v2.68.20: Arbeitsansicht für den Mailchimp-Übertrag.
    Bewusst auf das Nötige reduziert — Vorname, Nachname, E-Mail, Firma und der
    Knopf. In der vollen Kontaktliste sucht man die Spalte sonst am rechten Rand,
@@ -41045,7 +41140,7 @@ function _zdbMailchimpBody(d) {
 }
 
 function _zdbKontakteBody(d) {
-  const cols = [['name', 'Name'], ['email', 'E-Mail'], ['telefon', 'Telefon'], ['mobil', 'Mobil'], ['typ', 'Typ'], ['firma', 'Firma'], ['position', 'Position'], ['mailchimp', 'Mailchimp']];
+  const cols = [['name', 'Name'], ['email', 'E-Mail'], ['telefon', 'Telefon'], ['mobil', 'Mobil'], ['typ', 'Typ'], ['firma', 'Firma'], ['position', 'Position'], ['mailchimp', 'Mailchimp'], ['aktionen', 'Aktionen']];
   const filter = ZDB_VIEW_STATE.firmaFilter;
   let rows = d.kontakte;
   let chip = '';
@@ -41068,7 +41163,9 @@ function _zdbKontakteBody(d) {
     return '<tr class="hover:bg-indigo-50/60 cursor-pointer" onclick="_zdbEditRecord(\'kontakt\',\'' + r.id + '\')" title="Zum Bearbeiten tippen">' +
       '<td class="px-2 py-1.5 border-b border-ink-100 text-indigo-600 align-middle"><i data-lucide="edit-3" class="w-4 h-4"></i></td>' +
       cols.map(c => '<td class="px-2 py-1.5 border-b border-ink-100 whitespace-nowrap">' +
-        (c[0] === 'mailchimp' ? _zdbMcZelle(r, f) : escapeHtml(String(cells[c[0]] || ''))) + '</td>').join('') + '</tr>';
+        (c[0] === 'mailchimp' ? _zdbMcZelle(r, f)
+         : c[0] === 'aktionen' ? _zdbAktionenZelle(r, f)
+         : escapeHtml(String(cells[c[0]] || ''))) + '</td>').join('') + '</tr>';
   }).join('');
   return '<div class="bg-white rounded-xl border border-ink-200 p-4">' + chip +
     '<p class="text-[11px] text-ink-500 mb-1.5 font-semibold">' + rows.length + ' Kontakte <span class="font-normal text-ink-400">· Zeile tippen = bearbeiten</span></p>' +
