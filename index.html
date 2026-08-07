@@ -808,7 +808,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.68.15';
+const APP_VERSION = 'v2.68.16';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -40815,6 +40815,69 @@ function _zdbViewSearch(v) {
 function _zdbHeadCells(cols) {
   return cols.map(c => '<th class="text-left font-semibold text-ink-600 px-2 py-1.5 whitespace-nowrap border-b border-ink-200 bg-ink-50">' + escapeHtml(c[1]) + '</th>').join('');
 }
+/* v2.68.16: Mailchimp-Spalte der zentralen DB.
+   Der Ablauf endet hier — der Kontakt ist geprüft und freigegeben, also gehört
+   der Werbeversand auch hierhin und nicht in den Korb. Dort ist der Knopf
+   bewusst gesperrt, solange nichts freigegeben wurde.
+   Beleg bleibt Bedingung: ohne Mailverkehr oder Freshdesk-Kontakt kein Versand. */
+function _zdbMcBeleg(f) {
+  if (!f) return false;
+  if (f.freshdesk_contact_id) return true;
+  const q = String(f.quelle || '').toLowerCase();
+  return q === 'crawl' || q === 'servicebox' || q === 'erp-hero' || q === 'flp-push';
+}
+function _zdbMcZelle(r, f) {
+  const stand = String(f.mailchimp || '').trim();
+  if (stand) {
+    return '<span class="text-[10px] px-1.5 py-0.5 rounded border bg-emerald-50 text-emerald-700 border-emerald-200 font-semibold" title="' + escapeAttr(stand) + '">\u2713 in Mailchimp</span>';
+  }
+  if (!f.email) return '<span class="text-[10px] text-ink-300">keine E-Mail</span>';
+  if (!_zdbMcBeleg(f)) {
+    return '<span class="text-[10px] text-ink-400" title="Ohne Mailverkehr oder Freshdesk-Kontakt kein Werbeversand">kein Beleg</span>';
+  }
+  return '<button onclick="event.stopPropagation(); _zdbPushMc(\'' + r.id + '\', this)" class="px-2 py-0.5 bg-yellow-500 hover:bg-yellow-600 text-white rounded text-[10px] font-bold">\u2192 MC</button>';
+}
+
+/* Push eines freigegebenen Kontakts nach Mailchimp — und Vermerk im Datensatz. */
+async function _zdbPushMc(recId, btn) {
+  const d = ZDB_VIEW_STATE.data;
+  const rec = (d && d.kontakte || []).find(x => x.id === recId);
+  const acc = _zdbCurrentAccount();
+  if (!rec || !acc) return;
+  const f = rec.fields || {};
+  const slug = _erpFirmaSlugForAccount(acc);
+  if (!APP_KEYS.erpProxyUrl || !slug) return toast('Mailchimp läuft über den Berichtskonverter-Proxy — ERP-Settings prüfen', 'warn', 6000);
+  if (btn) setBusy(btn, true);
+  try {
+    const firmaName = ((f.firma || []).map(id => d.firmaName[id]).filter(Boolean))[0] || '';
+    const member = {
+      email_address: String(f.email).toLowerCase(),
+      merge_fields: {
+        FNAME: f.vorname || '', LNAME: f.nachname || '',
+        COMPANY: firmaName, PHONE: f.telefon || f.mobil || '',
+      },
+      tags: [firmaName, f.typ].filter(Boolean),
+    };
+    let schon = false;
+    try {
+      await erpFetch('/mailchimp/' + encodeURIComponent(slug) + '/upsert', { method: 'POST', body: member });
+    } catch (e) {
+      const msg = String(e.message || e);
+      if (/already a list member|Member Exists|400/i.test(msg)) schon = true; else throw e;
+    }
+    const namen = _zdbTableNames(acc);
+    const stempel = (schon ? 'vorhanden ' : 'gepusht ') + new Date().toLocaleString('de-DE') + ' via Hero';
+    await _zdbUpdateSafe(namen.kontakt.name, recId, { mailchimp: stempel, updated_at: nowIso() });
+    rec.fields = { ...f, mailchimp: stempel };
+    toast(schon ? 'Mailchimp: bereits eingetragen ✓' : 'Mailchimp: ' + f.email + ' gepusht ✓', 'success', 3500);
+    const el = document.getElementById('zdbBody');
+    if (el) { el.innerHTML = _zdbBodyHtml(); if (window.lucide) lucide.createIcons(); }
+  } catch (e) {
+    toast('Mailchimp-Push: ' + (e.message || e), 'error', 8000);
+  }
+  if (btn) setBusy(btn, false);
+}
+
 function _zdbKontakteBody(d) {
   const cols = [['name', 'Name'], ['email', 'E-Mail'], ['telefon', 'Telefon'], ['mobil', 'Mobil'], ['typ', 'Typ'], ['firma', 'Firma'], ['position', 'Position'], ['mailchimp', 'Mailchimp']];
   const filter = ZDB_VIEW_STATE.firmaFilter;
@@ -40834,9 +40897,12 @@ function _zdbKontakteBody(d) {
       email: f.email || '', telefon: f.telefon || '', mobil: f.mobil || '',
       typ: f.typ || '', firma: ((f.firma || []).map(id => d.firmaName[id]).filter(Boolean).join(', ')), position: f.position || ''
     };
+    // v2.68.16: Fehlende Felder ergaben bisher wörtlich „undefined" in der Zelle.
+    cols.forEach(c => { if (cells[c[0]] == null) cells[c[0]] = f[c[0]] || ''; });
     return '<tr class="hover:bg-indigo-50/60 cursor-pointer" onclick="_zdbEditRecord(\'kontakt\',\'' + r.id + '\')" title="Zum Bearbeiten tippen">' +
       '<td class="px-2 py-1.5 border-b border-ink-100 text-indigo-600 align-middle"><i data-lucide="edit-3" class="w-4 h-4"></i></td>' +
-      cols.map(c => '<td class="px-2 py-1.5 border-b border-ink-100 whitespace-nowrap">' + escapeHtml(String(cells[c[0]])) + '</td>').join('') + '</tr>';
+      cols.map(c => '<td class="px-2 py-1.5 border-b border-ink-100 whitespace-nowrap">' +
+        (c[0] === 'mailchimp' ? _zdbMcZelle(r, f) : escapeHtml(String(cells[c[0]] || ''))) + '</td>').join('') + '</tr>';
   }).join('');
   return '<div class="bg-white rounded-xl border border-ink-200 p-4">' + chip +
     '<p class="text-[11px] text-ink-500 mb-1.5 font-semibold">' + rows.length + ' Kontakte <span class="font-normal text-ink-400">· Zeile tippen = bearbeiten</span></p>' +
