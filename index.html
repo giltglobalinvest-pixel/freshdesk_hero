@@ -808,7 +808,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.68.8';
+const APP_VERSION = 'v2.68.9';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -19087,11 +19087,20 @@ function renderAssistantPreview() {
       if (isActive && isPending) {
         // Aktive Kachel: Dropdown mit allen Agents, Vorschlag der KI vorausgewählt
         const opts = allAgents.map(ag => `<option value="${ag.id}" ${a.agent_id === ag.id ? 'selected' : ''}>${escapeHtml(ag.name)}${ag.email ? ' · ' + escapeHtml(ag.email) : ''}</option>`).join('');
+        // v2.68.9: Hero-Benutzer ohne eigene Freshdesk-Lizenz gehörten hier auch hin.
+        // Auf der Ticketkarte standen sie längst zur Wahl, im Assistenten nicht —
+        // „Manuela_AI" war dort schlicht nicht auswählbar. Sie werden über das
+        // KI-Tag zugewiesen und arbeiten unter der Kennung ihres Masters.
+        const kiListe = (APP_STATE.kiUsers || []).filter(k => k.vonByAccount && k.vonByAccount[ctx.accountId]);
+        const kiOpts = kiListe.length
+          ? `<optgroup label="Hero-Benutzer (ohne Freshdesk-Lizenz)">` + kiListe.map(k =>
+              `<option value="ki:${escapeAttr(k.api_key)}" ${a.ki_key === k.api_key ? 'selected' : ''}>${(k.role || '').toLowerCase() === 'ki' ? '\u{1F916}' : '\u{1F464}'} ${escapeHtml(k.name)}</option>`).join('') + `</optgroup>`
+          : '';
         body = `${idSet ? `<p class="text-[11px] text-ink-600 mb-1">KI-Vorschlag: <span class="font-semibold text-ink-900">${escapeHtml(guessName)}</span> — du kannst unten ändern.</p>` : `<p class="text-[11px] text-amber-700 mb-1 inline-flex items-center gap-1"><i data-lucide="alert-circle" class="w-3 h-3"></i> Bearbeiter nicht eindeutig — bitte wählen:</p>`}
                 <label class="text-[10px] uppercase font-semibold text-brand-800 block">Bearbeiter</label>
                 <select id="stepAgent_${i}" class="w-full text-sm px-3 py-2 border border-brand-300 bg-white rounded-lg mt-1">
                   ${!idSet ? '<option value="">— bitte wählen —</option>' : ''}
-                  ${opts || '<option value="">(keine Agents geladen)</option>'}
+                  ${(opts + kiOpts) || '<option value="">(keine Agents geladen)</option>'}
                 </select>`;
       } else {
         body = `<p class="text-sm"><span class="text-ink-500">→</span> <span class="font-semibold text-ink-900">${escapeHtml(guessName || '?')}</span></p>`;
@@ -19415,9 +19424,10 @@ async function confirmAssistantStep(idx, btnEl) {
     a.betreff = betr;
   }
   if (a.type === 'assign') {
-    const v = $('stepAgent_' + idx)?.value;
-    if (v) a.agent_id = parseInt(v, 10);
-    if (!a.agent_id) return toast('Bitte einen Bearbeiter aus der Liste wählen', 'warn');
+    const v = $('stepAgent_' + idx)?.value || '';
+    if (v.startsWith('ki:')) { a.ki_key = v.slice(3); a.agent_id = null; }
+    else if (v) { a.agent_id = parseInt(v, 10); a.ki_key = null; }
+    if (!a.agent_id && !a.ki_key) return toast('Bitte einen Bearbeiter aus der Liste wählen', 'warn');
   }
   if (a.type === 'group') {
     const v = $('stepGroup_' + idx)?.value;
@@ -19702,6 +19712,13 @@ async function executeSingleAssistantAction(ctx, a) {
     }
     recordKnowledge(ctx.accountId, _t, 'forward', { to: a.forward_to || [], attachments: (a._attachments || []).map(f => f.name) }, a.body).catch(() => {});
   } else if (a.type === 'assign') {
+    // Hero-Benutzer ohne Lizenz laufen über _fdhKiZuweisen: KI-Tag setzen und
+    // den Freshdesk-Bearbeiter auf den Master, unter dem sie arbeiten.
+    if (a.ki_key) {
+      const ok = await _fdhKiZuweisen(ctx.accountId, ctx.ticketId, a.ki_key);
+      if (!ok) throw new Error('Zuweisung an den Hero-Benutzer fehlgeschlagen');
+      return;
+    }
     if (!a.agent_id) throw new Error('Kein Bearbeiter ausgewählt');
     await proxyJson(base, { method: 'PUT', body: JSON.stringify({ responder_id: a.agent_id }) });
     // Lokalen Cache + Übersicht + CURRENT_TICKET sofort updaten (Freshdesk-Search-Index laggt sonst)
