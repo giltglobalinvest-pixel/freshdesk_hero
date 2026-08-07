@@ -808,7 +808,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.68.9';
+const APP_VERSION = 'v2.68.10';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -4598,7 +4598,14 @@ async function fetchTicketsForAccount(accountId, opts = {}) {
       list = list.filter(t => !t.responder_id);
     } else if (filters && typeof filters.responderId === 'string' && filters.responderId.startsWith('ki:')) {
       const kiTag = _fdhKiTag(filters.responderId.slice(3));
-      list = list.filter(t => Array.isArray(t.tags) && t.tags.includes(kiTag));
+      // v2.68.10: Tickets OHNE mitgelieferte Tags durchlassen statt verwerfen.
+      // Sobald ein Filter gesetzt ist, holt Hero über Freshdesks Filter-Endpunkt —
+      // und der liefert einen reduzierten Datensatz OHNE `tags`. Die frühere
+      // Bedingung `Array.isArray(t.tags) && …` war damit für jedes Ticket falsch
+      // und hat exakt die Treffer verworfen, die die Serverabfrage
+      // (`tag:'KI:<Name>'`) gerade gefunden hatte — Ergebnis: immer leer.
+      // Sind Tags vorhanden (Listen-Endpunkt, Cache), wird weiterhin geprüft.
+      list = list.filter(t => !Array.isArray(t.tags) || t.tags.includes(kiTag));
     } else if (filters && filters.responderId) {
       list = list.filter(t => t.responder_id === filters.responderId);
     }
