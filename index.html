@@ -808,7 +808,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.68.10';
+const APP_VERSION = 'v2.68.11';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -4501,6 +4501,46 @@ const FD_PRIORITY = {
   4: { label:'Dringend', cls:'bg-red-100 text-red-700' },
 };
 
+/* === v2.68.11: Diagnose-Protokoll =======================================
+   Bisher musste man bei „Liste bleibt leer" raten, an welcher Stelle die
+   Tickets verschwinden — Serverabfrage, Nachkontrolle oder Sichtbarkeit.
+   Das Protokoll zählt jeden Schritt mit und ist über die Pille „Protokoll"
+   in der Ticket-Leiste einsehbar und kopierbar. */
+const _FDH_DIAG = [];
+function _diagLog(art, daten) {
+  const e = { zeit: new Date().toLocaleTimeString('de-DE'), art, ...(daten || {}) };
+  _FDH_DIAG.unshift(e);
+  if (_FDH_DIAG.length > 120) _FDH_DIAG.pop();
+  try { console.debug('[diag]', art, daten); } catch (_) {}
+}
+function _diagText() {
+  return _FDH_DIAG.map(e => JSON.stringify(e)).join('\n');
+}
+function openDiagProtokoll() {
+  let host = document.getElementById('subModalHost');
+  if (!host) { host = document.createElement('div'); host.id = 'subModalHost'; document.body.appendChild(host); }
+  host.innerHTML =
+    '<div class="fixed inset-0 z-[70] flex items-end sm:items-center justify-center bg-black/40" onclick="if(event.target===this)this.remove()">' +
+      '<div class="bg-white w-full max-w-3xl rounded-t-2xl sm:rounded-2xl shadow-2xl flex flex-col safe-bottom" style="max-height:85vh">' +
+        '<div class="px-4 py-3 border-b border-ink-200 flex items-center justify-between gap-2">' +
+          '<div><h3 class="font-bold text-ink-900">Protokoll &amp; Diagnose (' + _FDH_DIAG.length + ')</h3>' +
+          '<p class="text-[11px] text-ink-500">Zeigt je Abruf: gestellte Abfrage, Antwortmenge und was jeder Filterschritt übrig lässt.</p></div>' +
+          '<div class="flex items-center gap-2 shrink-0">' +
+            '<button onclick="navigator.clipboard.writeText(document.getElementById(\'diagText\').textContent).then(()=>toast(\'Protokoll kopiert\',\'success\',2500))" class="px-3 py-1.5 bg-brand-500 text-white rounded-lg text-xs font-semibold">Kopieren</button>' +
+            '<button onclick="_FDH_DIAG.length=0; openDiagProtokoll();" class="px-3 py-1.5 bg-ink-100 text-ink-700 rounded-lg text-xs font-semibold">Leeren</button>' +
+            '<button onclick="document.getElementById(\'subModalHost\').innerHTML=\'\'" class="w-9 h-9 rounded-lg hover:bg-ink-100 flex items-center justify-center"><i data-lucide="x" class="w-5 h-5 text-ink-700"></i></button>' +
+          '</div>' +
+        '</div>' +
+        '<div class="flex-1 overflow-auto p-3">' +
+          (_FDH_DIAG.length
+            ? '<pre id="diagText" class="text-[11px] leading-relaxed whitespace-pre-wrap break-all text-ink-800">' + escapeHtml(_diagText()) + '</pre>'
+            : '<p id="diagText" class="text-sm text-ink-500 text-center py-8">Noch nichts protokolliert — lade die Ticketliste einmal neu.</p>') +
+        '</div>' +
+      '</div>' +
+    '</div>';
+  if (window.lucide) lucide.createIcons();
+}
+
 function buildSearchQuery(filters, opts = {}) {
   if (!filters) return '';
   const parts = [];
@@ -4565,6 +4605,12 @@ async function fetchTicketsForAccount(accountId, opts = {}) {
 
   const data = await proxyJson(path);
   let list = Array.isArray(data) ? data : (data.results || []);
+  _diagLog('abruf', {
+    mandant: accountId, endpunkt: q ? 'search/tickets' : 'tickets', seite: page,
+    abfrage: q || '(kein Filter)', geliefert: list.length,
+    gesamt_laut_server: (data && typeof data.total === 'number') ? data.total : null,
+    tags_dabei: list.length ? Array.isArray(list[0].tags) : null,
+  });
   // Falls die Server-Antwort doch keinen requester-Block hatte: Fallback auf Top-Level email
   list.forEach(t => {
     if (!t.requester && (t.requester_id || t.email)) {
@@ -4595,7 +4641,8 @@ async function fetchTicketsForAccount(accountId, opts = {}) {
       list = list.filter(t => t.group_id === filters.groupId);
     }
     if (filters && filters.responderId === 'unassigned') {
-      list = list.filter(t => !t.responder_id);
+      const v = list.length; list = list.filter(t => !t.responder_id);
+      if (v !== list.length) _diagLog('filter', { schritt: 'unzugewiesen', vorher: v, nachher: list.length });
     } else if (filters && typeof filters.responderId === 'string' && filters.responderId.startsWith('ki:')) {
       const kiTag = _fdhKiTag(filters.responderId.slice(3));
       // v2.68.10: Tickets OHNE mitgelieferte Tags durchlassen statt verwerfen.
@@ -4605,7 +4652,10 @@ async function fetchTicketsForAccount(accountId, opts = {}) {
       // und hat exakt die Treffer verworfen, die die Serverabfrage
       // (`tag:'KI:<Name>'`) gerade gefunden hatte — Ergebnis: immer leer.
       // Sind Tags vorhanden (Listen-Endpunkt, Cache), wird weiterhin geprüft.
+      const vorher = list.length;
       list = list.filter(t => !Array.isArray(t.tags) || t.tags.includes(kiTag));
+      _diagLog('filter', { schritt: 'ki-tag', gesucht: kiTag, vorher, nachher: list.length,
+        tags_geliefert: vorher ? Array.isArray(list[0]?.tags) : null });
     } else if (filters && filters.responderId) {
       list = list.filter(t => t.responder_id === filters.responderId);
     }
@@ -4615,24 +4665,29 @@ async function fetchTicketsForAccount(accountId, opts = {}) {
   const visMode = (filters && filters.visibility) || 'active';
   if (visMode !== 'all') {
     const now = Date.now();
+    const _vorWv = list.length;
     list = list.filter(t => {
       const onWv = isOnWiedervorlage(accountId, t.id, now);
       if (visMode === 'active') return !onWv;
       if (visMode === 'wiedervorlage') return onWv;
       return true;
     });
+    if (_vorWv !== list.length) _diagLog('filter', { schritt: 'sicht/wiedervorlage', modus: visMode, vorher: _vorWv, nachher: list.length });
   }
 
   // Aufgaben-Gruppen (v2.46.0): Tickets in konfigurierten Aufgaben-Gruppen erscheinen
   // NICHT in der normalen Ticket-Liste — sie werden im Aufgaben-Tab dargestellt.
   // opts.includeTaskGroups=true überschreibt das (z.B. wenn der User explizit nach
   // einer Aufgaben-Gruppe filtert via groupId).
+  const _vorAufg = list.length;
   if (!opts.includeTaskGroups) {
     const taskGroupIds = getTaskGroupIds(accountId);
     if (taskGroupIds.length) {
       list = list.filter(t => !taskGroupIds.includes(Number(t.group_id)));
     }
   }
+  if (_vorAufg !== list.length) _diagLog('filter', { schritt: 'aufgaben-gruppen', vorher: _vorAufg, nachher: list.length });
+  _diagLog('ergebnis', { mandant: accountId, tickets: list.length });
 
   const acc = APP_STATE.accounts.find(a => a.id === accountId);
   const annotated = list.map(t => ({ ...t, _accountId: accountId, _accountName: acc?.name || '?', _accountColor: acc?.color || '#64748b' }));
@@ -8981,6 +9036,9 @@ async function renderTicketsPage() {
           const anyActive = statusActive || visActive || f.type || f.groupId || f.responderId;
           if (anyActive) {
             html += `<button onclick="resetFilters()" class="shrink-0 px-2 py-1 rounded-md text-[11px] font-medium bg-ink-50 text-ink-600 border border-ink-200 inline-flex items-center gap-1"><i data-lucide="x" class="w-3 h-3"></i> Reset</button>`;
+            // v2.68.11: Diagnose direkt neben den Filtern — dort entstehen die Fragen,
+            // dort gehört auch die Antwort hin.
+            html += `<button onclick="openDiagProtokoll()" class="shrink-0 px-2 py-1 rounded-md text-[11px] font-medium bg-ink-50 text-ink-600 border border-ink-200 inline-flex items-center gap-1" title="Protokoll: gestellte Abfrage, Antwortmenge und was jeder Filterschritt übrig lässt"><i data-lucide="stethoscope" class="w-3 h-3"></i> Protokoll${_FDH_DIAG.length ? ' (' + _FDH_DIAG.length + ')' : ''}</button>`;
           }
           // v2.46.45: View/Vollbild jetzt am ANFANG der Reihe — Reload-Button bleibt rechts.
           html += `<button onclick="renderTicketsPage()" class="shrink-0 ml-auto px-2 py-1 rounded-md text-[11px] font-medium bg-white text-ink-700 border border-ink-200" title="Neu laden"><i data-lucide="refresh-cw" class="w-3.5 h-3.5"></i></button>`;
