@@ -808,7 +808,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.68.22';
+const APP_VERSION = 'v2.68.23';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -2644,7 +2644,14 @@ async function proxyJson(path, init = {}) {
     else if (text)              msg = clip(text);
     else                        msg = '(leere Antwort)';
     msg = 'HTTP ' + res.status + ' · ' + msg;
-    console.error('proxyJson error:', { method: init.method || 'GET', path, status: res.status, data, text });
+    // v2.68.23: 404 ist eine gültige Antwort („kenne ich nicht"), kein Fehler.
+    // Tickets verweisen regelmäßig auf Kontakte, die in Freshdesk gelöscht oder
+    // zusammengeführt wurden — das Nachladen läuft dann korrekt ins Leere. Als
+    // Fehler protokolliert füllte das nur die Fehlerpille und lenkte von echten
+    // Störungen ab. Der Aufrufer bekommt die Ausnahme unverändert.
+    const _protokoll = (res.status === 404) ? console.debug : console.error;
+    _protokoll('proxyJson ' + (res.status === 404 ? 'nicht gefunden' : 'error') + ':',
+      { method: init.method || 'GET', path, status: res.status, data, text });
     const err = new Error(msg); err.status = res.status; err.data = data; throw err;
   }
   return data;
