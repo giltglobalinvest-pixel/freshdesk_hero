@@ -808,7 +808,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.68.16';
+const APP_VERSION = 'v2.68.17';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -40863,7 +40863,12 @@ async function _zdbPushMc(recId, btn) {
       await erpFetch('/mailchimp/' + encodeURIComponent(slug) + '/upsert', { method: 'POST', body: member });
     } catch (e) {
       const msg = String(e.message || e);
-      if (/already a list member|Member Exists|400/i.test(msg)) schon = true; else throw e;
+      // v2.68.17: „400" NICHT mehr pauschal als Erfolg werten.
+      // Der Proxy macht längst ein echtes PUT-Upsert (idempotent über md5 der
+      // Adresse) — „already a list member" kann dabei gar nicht mehr auftreten.
+      // Ein 400 bedeutet heute etwas anderes: ungültige Adresse, falsche Audience.
+      // Das als „vorhanden" zu stempeln wäre eine Lüge im Datensatz.
+      if (/already a list member|Member Exists/i.test(msg)) schon = true; else throw e;
     }
     const namen = _zdbTableNames(acc);
     const stempel = (schon ? 'vorhanden ' : 'gepusht ') + new Date().toLocaleString('de-DE') + ' via Hero';
@@ -41701,7 +41706,8 @@ async function _crawlPushMc(i, btn) {
       // Mailchimp. Der (ältere) Proxy macht POST statt idempotentem PUT und meldet
       // das als 400. Wir werten es als „vorhanden, passt" statt als Fehler.
       const msg = String(e.message || e);
-      if (/already a list member|Member Exists|400/i.test(msg)) {
+      // v2.68.17: siehe oben — ein nacktes 400 ist kein Erfolg mehr.
+      if (/already a list member|Member Exists/i.test(msg)) {
         already = true;
         statusLabel = 'vorhanden';
       } else {
