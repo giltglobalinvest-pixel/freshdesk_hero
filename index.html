@@ -808,7 +808,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.68.6';
+const APP_VERSION = 'v2.68.7';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -9568,9 +9568,20 @@ async function _fdhKiZuweisen(accountId, ticketId, kiKey) {
   if (!ki) { toast('KI-Mitarbeiter nicht gefunden — Benutzerliste neu laden.', 'error'); return false; }
   const masterKey = ki.vonByAccount?.[accountId] || '';
   const masterName = (APP_STATE.heroUserNames || {})[masterKey] || '';
-  const cache = APP_STATE.agentsCache?.[accountId];
-  const fdMaster = masterName ? (cache?.agents || []).find(a =>
-    String(a.name || '').toLowerCase() === masterName.toLowerCase()) : null;
+  // v2.68.7: Agentenliste bei Bedarf NACHLADEN. Vorher wurde nur der Cache
+  // gelesen — war er leer (z.B. Zuweisung direkt nach dem Start, ohne dass die
+  // Ticketliste die Listen geholt hatte), blieb `fdMaster` null, `responder_id`
+  // unverändert, und es wurde stillschweigend nur das KI-Tag gesetzt.
+  // Beleg: Ticket #40303 Aufzugshandwerk — Tag KI:Mergim_AI gesetzt, Bearbeiter
+  // blieb Patrizio, obwohl der Freshdesk-Agent „Mergim Ademaj" existiert.
+  let cache = APP_STATE.agentsCache?.[accountId];
+  if (masterName && !(cache?.agents || []).length) {
+    try { cache = await ensureAgentsLoaded(accountId); } catch (_) { /* 403 o.ä. — unten sauber behandelt */ }
+  }
+  const _nameGleich = (a, b) =>
+    String(a || '').trim().replace(/\s+/g, ' ').toLowerCase() ===
+    String(b || '').trim().replace(/\s+/g, ' ').toLowerCase();
+  const fdMaster = masterName ? (cache?.agents || []).find(a => _nameGleich(a.name, masterName)) : null;
   try {
     let alteTags = _fdhTicketAusCache(accountId, ticketId)?.tags;
     if (!Array.isArray(alteTags)) {
@@ -9585,7 +9596,14 @@ async function _fdhKiZuweisen(accountId, ticketId, kiKey) {
     patchTicketInList(accountId, ticketId, { ...(fdMaster ? { responder_id: fdMaster.id } : {}), tags });
     if (CURRENT_TICKET && CURRENT_TICKET.id === ticketId) CURRENT_TICKET.tags = tags;
     const kiIcon = (ki.role || '').toLowerCase() === 'ki' ? '\u{1F916}' : '\u{1F464}';
-    const notiz = kiIcon + ' Zugewiesen an ' + ki.name + (masterName ? ' (arbeitet \u00fcber ' + masterName + ')' : '') + '.\n[FDH:ZUGEWIESEN] ' + ki.name;
+    // v2.68.7: Den Zusatz \u201e(arbeitet \u00fcber X)" nur schreiben, wenn der Bearbeiter
+    // in Freshdesk tats\u00e4chlich gesetzt wurde. Vorher stand er auch dann in der
+    // Notiz, wenn die Zuweisung gar nicht stattfand \u2014 eine Behauptung, die im
+    // Ticket dauerhaft stehen bleibt und niemand mehr nachpr\u00fcft.
+    const notiz = kiIcon + ' Zugewiesen an ' + ki.name
+      + (fdMaster ? ' (arbeitet \u00fcber ' + masterName + ')'
+                  : (masterName ? ' (Freshdesk-Bearbeiter NICHT gesetzt \u2014 \u201e' + masterName + '" dort nicht gefunden)' : ''))
+      + '.\n[FDH:ZUGEWIESEN] ' + ki.name;
     await proxyJson('/freshdesk/' + encodeURIComponent(accountId) + '/api/v2/tickets/' + ticketId + '/notes', {
       method: 'POST', body: JSON.stringify({ body: textToHtmlForFreshdesk(notiz), private: true }) });
     if (CURRENT_TICKET && CURRENT_TICKET.id === ticketId) {
