@@ -808,7 +808,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.68.18';
+const APP_VERSION = 'v2.68.20';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -4500,6 +4500,99 @@ const FD_PRIORITY = {
   3: { label:'Hoch',     cls:'bg-amber-100 text-amber-700' },
   4: { label:'Dringend', cls:'bg-red-100 text-red-700' },
 };
+
+/* === v2.68.19: Fehlerpille ==============================================
+   Fehler landeten bisher nur in der Browser-Konsole — wer die nicht offen hat,
+   sieht einen Toast, der nach Sekunden verschwindet, und danach nichts mehr.
+   Alles Auffällige wird hier gesammelt und ist kopierbar: eigene Ausnahmen,
+   nicht behandelte Versprechen, console.error und jeder Fehler-Toast. */
+const _FDH_FEHLER = [];
+function _fehlerLog(quelle, text, extra) {
+  try {
+    const e = {
+      zeit: new Date().toLocaleTimeString('de-DE'),
+      quelle,
+      text: String(text || '').slice(0, 600),
+      ...(extra || {}),
+    };
+    // Identische Meldung direkt hintereinander nur zählen, nicht wiederholen —
+    // eine Schleife würde die Liste sonst in Sekunden unbrauchbar machen.
+    const letzter = _FDH_FEHLER[0];
+    if (letzter && letzter.quelle === e.quelle && letzter.text === e.text) {
+      letzter.anzahl = (letzter.anzahl || 1) + 1;
+      letzter.zeit = e.zeit;
+    } else {
+      _FDH_FEHLER.unshift(e);
+      if (_FDH_FEHLER.length > 100) _FDH_FEHLER.pop();
+    }
+    _fehlerPilleZeichnen();
+  } catch (_) { /* die Fehlererfassung darf niemals selbst etwas kippen */ }
+}
+function _fehlerText() {
+  return _FDH_FEHLER.map(e => JSON.stringify(e)).join('\n');
+}
+function _fehlerPilleZeichnen() {
+  let el = document.getElementById('fehlerPille');
+  if (!_FDH_FEHLER.length) { if (el) el.remove(); return; }
+  if (!el) {
+    el = document.createElement('button');
+    el.id = 'fehlerPille';
+    el.className = 'fixed left-3 z-[55] px-2.5 py-1.5 rounded-full bg-rose-600 hover:bg-rose-700 text-white text-[11px] font-bold shadow-lg inline-flex items-center gap-1.5';
+    el.style.bottom = 'calc(env(safe-area-inset-bottom, 0px) + 4.5rem)';
+    el.onclick = openFehlerProtokoll;
+    document.body.appendChild(el);
+  }
+  const summe = _FDH_FEHLER.reduce((s, e) => s + (e.anzahl || 1), 0);
+  el.innerHTML = '<i data-lucide="alert-triangle" class="w-3.5 h-3.5"></i> ' + summe + ' Fehler';
+  if (window.lucide) lucide.createIcons();
+}
+function openFehlerProtokoll() {
+  let host = document.getElementById('subModalHost');
+  if (!host) { host = document.createElement('div'); host.id = 'subModalHost'; document.body.appendChild(host); }
+  host.innerHTML =
+    '<div class="fixed inset-0 z-[70] flex items-end sm:items-center justify-center bg-black/40" onclick="if(event.target===this)this.remove()">' +
+      '<div class="bg-white w-full max-w-3xl rounded-t-2xl sm:rounded-2xl shadow-2xl flex flex-col safe-bottom" style="max-height:85vh">' +
+        '<div class="px-4 py-3 border-b border-ink-200 flex items-center justify-between gap-2">' +
+          '<div><h3 class="font-bold text-ink-900 inline-flex items-center gap-2"><i data-lucide="alert-triangle" class="w-4 h-4 text-rose-600"></i> Fehler (' + _FDH_FEHLER.length + ')</h3>' +
+          '<p class="text-[11px] text-ink-500">Neueste zuerst. Wiederholungen werden gezählt statt wiederholt.</p></div>' +
+          '<div class="flex items-center gap-2 shrink-0">' +
+            '<button onclick="navigator.clipboard.writeText(document.getElementById(\'fehlerText\').textContent).then(()=>toast(\'Fehlerprotokoll kopiert\',\'success\',2500))" class="px-3 py-1.5 bg-brand-500 text-white rounded-lg text-xs font-semibold">Kopieren</button>' +
+            '<button onclick="_FDH_FEHLER.length=0; _fehlerPilleZeichnen(); document.getElementById(\'subModalHost\').innerHTML=\'\';" class="px-3 py-1.5 bg-ink-100 text-ink-700 rounded-lg text-xs font-semibold">Leeren</button>' +
+            '<button onclick="document.getElementById(\'subModalHost\').innerHTML=\'\'" class="w-9 h-9 rounded-lg hover:bg-ink-100 flex items-center justify-center"><i data-lucide="x" class="w-5 h-5 text-ink-700"></i></button>' +
+          '</div>' +
+        '</div>' +
+        '<div class="flex-1 overflow-auto p-3">' +
+          '<pre id="fehlerText" class="text-[11px] leading-relaxed whitespace-pre-wrap break-all text-ink-800">' + escapeHtml(_fehlerText()) + '</pre>' +
+        '</div>' +
+      '</div>' +
+    '</div>';
+  if (window.lucide) lucide.createIcons();
+}
+
+/* Aufzeichnung anklemmen — einmalig, tolerant, ohne bestehendes Verhalten zu ändern. */
+(function _fehlerErfassungStarten() {
+  try {
+    window.addEventListener('error', (ev) => {
+      _fehlerLog('ausnahme', (ev && ev.message) || 'Fehler',
+        { datei: (ev && ev.filename ? String(ev.filename).split('/').pop() : ''), zeile: ev && ev.lineno });
+    });
+    window.addEventListener('unhandledrejection', (ev) => {
+      const r = ev && ev.reason;
+      _fehlerLog('versprechen', (r && (r.message || r)) || 'abgelehnt');
+    });
+    const echt = console.error.bind(console);
+    console.error = function (...args) {
+      try {
+        _fehlerLog('console', args.map(a => {
+          if (a instanceof Error) return a.message;
+          if (typeof a === 'object') { try { return JSON.stringify(a).slice(0, 300); } catch (_) { return '[Objekt]'; } }
+          return String(a);
+        }).join(' '));
+      } catch (_) {}
+      echt(...args);
+    };
+  } catch (_) {}
+})();
 
 /* === v2.68.11: Diagnose-Protokoll =======================================
    Bisher musste man bei „Liste bleibt leer" raten, an welcher Stelle die
@@ -18080,7 +18173,7 @@ function _fdhZugewiesenKI(ticket) {
    von selbst, statt einen Mitarbeiter für immer als beschäftigt auszuweisen.
    Gibt es den Endpunkt (noch) nicht, bleibt alles still — kein Fehler, keine
    Meldung, keine Wiederholungsschleife. */
-const _FDH_KI_ARBEIT = { stand: [], geholt: 0, aus: false };
+const _FDH_KI_ARBEIT = { stand: [], geholt: 0, aus: false, fehler: 0 };
 const _FDH_KI_FRISCH_MS = 90 * 1000;   // älter = nicht mehr als „arbeitet gerade" zeigen
 
 async function _fdhKiArbeitHolen() {
@@ -18093,8 +18186,19 @@ async function _fdhKiArbeitHolen() {
     if (!d || !Array.isArray(d.arbeitet)) return;
     _FDH_KI_ARBEIT.stand = d.arbeitet;
     _FDH_KI_ARBEIT.geholt = Date.now();
+    _FDH_KI_ARBEIT.fehler = 0;
     _fdhKiArbeitAnzeigen();
-  } catch (_) { /* Steuerzentrale nicht erreichbar — schweigen */ }
+  } catch (_) {
+    // v2.68.19: Nach drei Fehlversuchen endgültig aufhören.
+    // Der 404-Abbruch oben greift nicht, wenn die Steuerzentrale keine
+    // CORS-Kopfzeilen mitschickt: Dann blockt der Browser die Antwort, `fetch`
+    // wirft, und der Status ist gar nicht lesbar. Ohne diesen Zähler kämen
+    // dauerhaft alle 20 Sekunden zwei rote Zeilen in die Konsole.
+    if (++_FDH_KI_ARBEIT.fehler >= 3) {
+      _FDH_KI_ARBEIT.aus = true;
+      console.info('[ki-status] Steuerzentrale antwortet nicht (oder ohne CORS-Freigabe) — Abfrage eingestellt bis zum Neuladen.');
+    }
+  }
 }
 
 /* Arbeitet dieser Hero-Benutzer gerade? Optional an einem bestimmten Ticket. */
@@ -40789,7 +40893,7 @@ function _zdbPaintView() {
         '<button onclick="closeZdbTableView()" class="text-[11px] bg-ink-50 hover:bg-ink-100 border border-ink-200 text-ink-700 px-2 py-1.5 rounded inline-flex items-center gap-1"><i data-lucide="x" class="w-3 h-3"></i> Schließen</button>' +
       '</div>' +
       '<p class="text-[10px] text-ink-500 font-mono mt-1 truncate">' + escapeHtml(names.firma) + ' · ' + escapeHtml(names.kontakt) + '</p>' +
-      '<div class="flex gap-1 mt-2 items-center flex-wrap">' + tabBtn('kontakte', 'Kontakte') + tabBtn('firmen', 'Firmen') + konfTab +
+      '<div class="flex gap-1 mt-2 items-center flex-wrap">' + tabBtn('kontakte', 'Kontakte') + tabBtn('firmen', 'Firmen') + tabBtn('mailchimp', '\u{1F4E7} Mailchimp') + konfTab +
         (canEdit ? '<div class="flex-1"></div><button onclick="_zdbNewRecord(\'' + tab + '\')" class="px-2.5 py-1 rounded-lg text-[12px] font-bold bg-emerald-600 hover:bg-emerald-700 text-white inline-flex items-center gap-1"><i data-lucide="plus" class="w-3.5 h-3.5"></i> Neu</button>' : '') +
       '</div>' + searchBox +
     '</div>' +
@@ -40804,7 +40908,10 @@ function _zdbBodyHtml() {
   if (d.loading) return '<div class="bg-white rounded-xl border border-ink-200 p-4 text-sm text-ink-500">Lade aus Airtable…</div>';
   if (d.error === 'perm' || d.error === 'missing') return '<div class="bg-white rounded-xl border border-ink-200 p-4"><div class="text-center py-6"><p class="text-sm text-ink-600">Für diesen Mandanten sind die Tabellen noch nicht angelegt.</p><p class="text-[12px] text-ink-500 mt-1">Einstellungen → <b>Zentrale Kontakt-DB</b> → beim Mandanten „Tabellen anlegen + migrieren" (oder es füllt sich automatisch beim ersten Kontakt).</p><p class="text-[10px] text-ink-400 mt-2">Bleibt es bestehen: Airtable-Token-Zugriff für die Base prüfen.</p></div></div>';
   if (d.error) return '<div class="bg-white rounded-xl border border-ink-200 p-4"><p class="text-sm text-rose-600">Fehler beim Laden: ' + escapeHtml(d.msg || '') + '</p></div>';
-  return (tab === 'konflikte') ? _zdbKonflikteBody(d) : (tab === 'firmen') ? _zdbFirmenBody(d) : _zdbKontakteBody(d);
+  if (tab === 'konflikte') return _zdbKonflikteBody(d);
+  if (tab === 'firmen') return _zdbFirmenBody(d);
+  if (tab === 'mailchimp') return _zdbMailchimpBody(d);
+  return _zdbKontakteBody(d);
 }
 function _zdbViewSearch(v) {
   ZDB_VIEW_STATE.search = v;
@@ -40846,7 +40953,10 @@ async function _zdbPushMc(recId, btn) {
   if (!rec || !acc) return;
   const f = rec.fields || {};
   const slug = _erpFirmaSlugForAccount(acc);
-  if (!APP_KEYS.erpProxyUrl || !slug) return toast('Mailchimp läuft über den Berichtskonverter-Proxy — ERP-Settings prüfen', 'warn', 6000);
+  // v2.68.19: Benennen, welche der beiden Voraussetzungen fehlt — „ERP-Settings
+  // prüfen" allein lässt einen raten, ob die Adresse fehlt oder die Zuordnung.
+  if (!APP_KEYS.erpProxyUrl) return toast('Mailchimp läuft über den Berichtskonverter-Proxy — dessen Adresse ist nicht hinterlegt (Einstellungen → ERP-Proxy-URL).', 'warn', 8000);
+  if (!slug) return toast('Für „' + (acc.name || acc.id) + '" ist keine Berichtskonverter-Firma zugeordnet — ohne die weiß der Proxy nicht, welche Mailchimp-Audience gemeint ist.', 'warn', 9000);
   if (btn) setBusy(btn, true);
   try {
     const firmaName = ((f.firma || []).map(id => d.firmaName[id]).filter(Boolean))[0] || '';
@@ -40881,6 +40991,57 @@ async function _zdbPushMc(recId, btn) {
     toast('Mailchimp-Push: ' + (e.message || e), 'error', 8000);
   }
   if (btn) setBusy(btn, false);
+}
+
+/* v2.68.20: Arbeitsansicht für den Mailchimp-Übertrag.
+   Bewusst auf das Nötige reduziert — Vorname, Nachname, E-Mail, Firma und der
+   Knopf. In der vollen Kontaktliste sucht man die Spalte sonst am rechten Rand,
+   und die übrigen Felder lenken beim Durchgehen nur ab.
+   Standardmäßig nur die noch Offenen; bereits Übertragene sind einen Haken weit
+   entfernt, damit man nachsehen kann, was schon draußen ist. */
+function _zdbMcNurOffene() { return ZDB_VIEW_STATE.mcNurOffene !== false; }
+function _zdbMcToggleOffene(el) { ZDB_VIEW_STATE.mcNurOffene = !!(el && el.checked); _zdbNeuZeichnen(); }
+function _zdbNeuZeichnen() {
+  const el = document.getElementById('zdbBody');
+  if (el) { el.innerHTML = _zdbBodyHtml(); if (window.lucide) lucide.createIcons(); }
+}
+
+function _zdbMailchimpBody(d) {
+  let rows = (d.kontakte || []).filter(r => (r.fields || {}).email);
+  const offen = (f) => !String(f.mailchimp || '').trim();
+  const gesamt = rows.length;
+  const bereit = rows.filter(r => _zdbMcBeleg(r.fields) && offen(r.fields)).length;
+  const drin = rows.filter(r => !offen(r.fields)).length;
+  if (_zdbMcNurOffene()) rows = rows.filter(r => offen(r.fields));
+
+  const _q = String(ZDB_VIEW_STATE.search || '').trim().toLowerCase();
+  if (_q) rows = rows.filter(r => { const f = r.fields || {}; return [f.vorname, f.nachname, f.name, f.email, (f.firma || []).map(id => d.firmaName[id]).join(' ')].join(' ').toLowerCase().includes(_q); });
+
+  const kopf = '<div class="flex items-center gap-3 flex-wrap mb-2">'
+    + '<p class="text-[11px] text-ink-600"><b>' + bereit + '</b> bereit \u00b7 <b>' + drin + '</b> bereits in Mailchimp \u00b7 ' + gesamt + ' Kontakte mit E-Mail</p>'
+    + '<label class="inline-flex items-center gap-1.5 text-[11px] text-ink-600 cursor-pointer"><input type="checkbox" ' + (_zdbMcNurOffene() ? 'checked' : '') + ' onchange="_zdbMcToggleOffene(this)"> nur offene</label>'
+    + '</div>';
+
+  if (!rows.length) return '<div class="bg-white rounded-xl border border-ink-200 p-4">' + kopf
+    + '<p class="text-sm text-ink-500 py-4 text-center">' + (_q ? 'Keine Treffer.' : 'Nichts offen \u2014 alle Kontakte mit E-Mail sind \u00fcbertragen.') + '</p></div>';
+
+  const trs = rows.map(r => {
+    const f = r.fields || {};
+    const firma = ((f.firma || []).map(id => d.firmaName[id]).filter(Boolean).join(', '));
+    const teile = String(f.name || '').trim().split(/\s+/).filter(Boolean);
+    return '<tr class="hover:bg-yellow-50/60">'
+      + '<td class="px-2 py-1.5 border-b border-ink-100 whitespace-nowrap">' + escapeHtml(f.vorname || (teile.length > 1 ? teile.slice(0, -1).join(' ') : teile[0] || '')) + '</td>'
+      + '<td class="px-2 py-1.5 border-b border-ink-100 whitespace-nowrap font-semibold">' + escapeHtml(f.nachname || (teile.length > 1 ? teile[teile.length - 1] : '')) + '</td>'
+      + '<td class="px-2 py-1.5 border-b border-ink-100 whitespace-nowrap font-mono text-[11px]">' + escapeHtml(f.email || '') + '</td>'
+      + '<td class="px-2 py-1.5 border-b border-ink-100 whitespace-nowrap">' + escapeHtml(firma) + '</td>'
+      + '<td class="px-2 py-1.5 border-b border-ink-100 whitespace-nowrap text-right">' + _zdbMcZelle(r, f) + '</td>'
+      + '</tr>';
+  }).join('');
+
+  return '<div class="bg-white rounded-xl border border-ink-200 p-4">' + kopf
+    + '<div class="overflow-x-auto"><table class="w-full text-[12px] border-collapse"><thead><tr>'
+    + ['Vorname', 'Nachname', 'E-Mail', 'Firma', 'Mailchimp'].map(h => '<th class="text-left font-semibold text-ink-600 px-2 py-1.5 whitespace-nowrap border-b border-ink-200 bg-ink-50">' + h + '</th>').join('')
+    + '</tr></thead><tbody>' + trs + '</tbody></table></div></div>';
 }
 
 function _zdbKontakteBody(d) {
