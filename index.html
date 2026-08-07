@@ -808,7 +808,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.68.13';
+const APP_VERSION = 'v2.68.14';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -40360,6 +40360,7 @@ function _zdbKontaktFieldSpecs(firmaTableId) {
     { name: 'firma', type: 'multipleRecordLinks', options: { linkedTableId: firmaTableId } },
     { name: 'position', type: 'singleLineText' },
     { name: 'notizen', type: 'multilineText' },        // v2.68.6
+    { name: 'mailchimp', type: 'singleLineText' },     // v2.68.14: 'gepusht <Zeit> via Hero'
     { name: 'pipedrive_person_id', type: 'singleLineText' },
     { name: 'quelle', type: 'singleLineText' },
     { name: 'freshdesk_contact_id', type: 'singleLineText' },
@@ -40815,7 +40816,7 @@ function _zdbHeadCells(cols) {
   return cols.map(c => '<th class="text-left font-semibold text-ink-600 px-2 py-1.5 whitespace-nowrap border-b border-ink-200 bg-ink-50">' + escapeHtml(c[1]) + '</th>').join('');
 }
 function _zdbKontakteBody(d) {
-  const cols = [['name', 'Name'], ['email', 'E-Mail'], ['telefon', 'Telefon'], ['mobil', 'Mobil'], ['typ', 'Typ'], ['firma', 'Firma'], ['position', 'Position']];
+  const cols = [['name', 'Name'], ['email', 'E-Mail'], ['telefon', 'Telefon'], ['mobil', 'Mobil'], ['typ', 'Typ'], ['firma', 'Firma'], ['position', 'Position'], ['mailchimp', 'Mailchimp']];
   const filter = ZDB_VIEW_STATE.firmaFilter;
   let rows = d.kontakte;
   let chip = '';
@@ -41384,7 +41385,9 @@ function _renderCrawledContacts() {
               '<button onclick="_crawlSendMarketing(' + i + ')" class="px-2 py-1 bg-orange-500 hover:bg-orange-600 text-white rounded text-[10px] font-bold inline-flex items-center gap-1" title="Werbe-Email senden (bestehendes Marketing-Feature)"><i data-lucide="megaphone" class="w-3 h-3"></i> Werbung</button>' +
               '<button onclick="_crawlPushFd(' + i + ', this)" class="px-2 py-1 bg-blue-600 hover:bg-blue-700 text-white rounded text-[10px] font-bold" title="In Freshdesk anlegen/aktualisieren">→ FD</button>' +
               (r.fs_status !== 'n/a' ? '<button onclick="_crawlPushFs(' + i + ', this)" class="px-2 py-1 bg-orange-600 hover:bg-orange-700 text-white rounded text-[10px] font-bold" title="Nach Freshsales pushen (bestehende Funktion)">→ FS</button>' : '') +
-              '<button onclick="_crawlPushMc(' + i + ', this)" class="px-2 py-1 bg-yellow-500 hover:bg-yellow-600 text-white rounded text-[10px] font-bold" title="Zu Mailchimp pushen (Upsert)">→ MC</button>' +
+              (_mcBelegVorhanden(r)
+                ? '<button onclick="_crawlPushMc(' + i + ', this)" class="px-2 py-1 bg-yellow-500 hover:bg-yellow-600 text-white rounded text-[10px] font-bold" title="Zu Mailchimp pushen · Beleg: ' + escapeAttr(_mcBelegGrund(r)) + '">\u2192 MC</button>'
+                : '<span class="px-2 py-1 bg-ink-50 text-ink-400 border border-ink-200 rounded text-[10px] font-bold cursor-not-allowed" title="Kein belegter Gesch\u00e4ftskontakt \u2014 ohne Mailverkehr oder Freshdesk-Kontakt kein Werbeversand">\u2192 MC</span>') +
               '<button onclick="_crawlRecheck(' + i + ', this)" class="px-2 py-1 bg-ink-100 hover:bg-ink-200 text-ink-700 rounded text-[10px] font-bold" title="Status neu prüfen">↻</button>' +
               '<button onclick="_crawlEdit(' + i + ')" class="px-2 py-1 bg-ink-100 hover:bg-ink-200 text-ink-700 rounded text-[10px] font-bold" title="Kontaktdaten bearbeiten (Name/Firma/Kontakt)">✎</button>' +
               // v2.46.286: neutrales Ausblenden (ausgrauen, reversibel) — separat von Spam
@@ -41547,14 +41550,46 @@ async function _crawlPushFs(i, btn) {
   } catch (_) {}
 }
 
+/* v2.68.14: Mailchimp nur bei belegtem Geschäftskontakt.
+   Ein Werbeversand an jemanden, mit dem nie Mailverkehr bestand, ist keine
+   Bestandspflege, sondern Kaltakquise — rechtlich wie praktisch etwas anderes.
+   Als Beleg zählt: ein Ticket, aus dem der Kontakt stammt, oder ein Eintrag als
+   Freshdesk-Kontakt. Reine Listenimporte (Pipedrive, Maxise) haben beides nicht. */
+function _mcBelegVorhanden(r) {
+  if (!r) return false;
+  if (r.quelle_ticket) return true;                     // aus einem Ticket gecrawlt
+  if (r.fd_contact_id) return true;                     // existiert als Freshdesk-Kontakt
+  if (r.fd_status && r.fd_status !== 'fehlt' && r.fd_status !== 'unbekannt') return true;
+  return false;
+}
+function _mcBelegGrund(r) {
+  if (r && r.quelle_ticket) return 'Ticket #' + r.quelle_ticket;
+  if (r && (r.fd_contact_id || r.fd_status)) return 'Freshdesk-Kontakt';
+  return '';
+}
+
 async function _crawlPushMc(i, btn) {
   const r = _crawlRecAt(i);
   if (!r) return;
   const acc = (APP_STATE.accounts || []).find(a => a.id === r.account_id);
   const slug = _erpFirmaSlugForAccount(acc);
   if (!APP_KEYS.erpProxyUrl || !slug) return toast('Mailchimp läuft über den Berichtskonverter-Proxy — ERP-Settings prüfen', 'warn', 6000);
+  if (!_mcBelegVorhanden(r)) {
+    return toast('Kein belegter Geschäftskontakt — für Mailchimp braucht es Mailverkehr oder einen Freshdesk-Kontakt.', 'warn', 7000);
+  }
   setBusy(btn, true);
   try {
+    // (1) Erst sicherstellen, dass der Kontakt in der zentralen DB steht.
+    //     Bewusste Einzelaktion des Betreibers — daher `erzwingen`, wie bei der
+    //     Freigabe im Korb. Der automatische Direktweg bleibt zu.
+    let zdbKontaktId = null;
+    try {
+      const res = await zdbSaveFirmaKontakt(acc,
+        r.firma ? { name: r.firma, strasse: r.strasse, plz: r.plz, ort: r.ort, land: r.land, quelle: _korbQuelle(r) } : null,
+        _korbKontaktDaten(r), { erzwingen: true });
+      zdbKontaktId = res && res.kontaktId;
+    } catch (e) { console.warn('[MC] Übernahme in die zentrale DB:', e.message); }
+
     const parts = String(r.name || '').trim().split(/\s+/);
     const member = {
       email_address: r.email.toLowerCase(),
@@ -41584,6 +41619,16 @@ async function _crawlPushMc(i, btn) {
     }
     await airtableUpdateWithAutoField(CRAWLED_TABLE, r.recordId, { mc_status: statusLabel, updated_at: nowIso() }, CRAWLED_TYPES_MAP);
     r.mc_status = statusLabel;
+    // (2) Im Kontakt der zentralen DB vermerken, dass er in Mailchimp ist.
+    //     Steht dort, wo der Kontakt gepflegt wird — nicht nur im Korb, den
+    //     später vielleicht niemand mehr ansieht.
+    if (zdbKontaktId) {
+      try {
+        const namen = _zdbTableNames(acc);
+        const stempel = 'gepusht ' + new Date().toLocaleString('de-DE') + ' via Hero';
+        await _zdbUpdateSafe(namen.kontakt.name, zdbKontaktId, { mailchimp: stempel, updated_at: nowIso() });
+      } catch (e) { console.warn('[MC] Vermerk in der zentralen DB:', e.message); }
+    }
     _renderCrawledContacts();
     toast(already
       ? 'Mailchimp: ' + r.email + ' ist bereits eingetragen ✓ (kein Update nötig)'
