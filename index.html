@@ -808,7 +808,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.68.11';
+const APP_VERSION = 'v2.68.12';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -4554,7 +4554,11 @@ function buildSearchQuery(filters, opts = {}) {
     if (filters.groupId) parts.push('group_id:' + filters.groupId);
     if (filters.responderId === 'unassigned') parts.push('agent_id:null');
     else if (typeof filters.responderId === 'string' && filters.responderId.startsWith('ki:')) {
-      parts.push("tag:'" + _fdhKiTag(filters.responderId.slice(3)).replace(/'/g, "") + "'");
+      // v2.68.12: BEWUSST keine Server-Bedingung. Am Protokoll gemessen liefert
+      // Freshdesk auf `tag:'KI:Manuela_AI'` null Treffer, obwohl das Tag an den
+      // Tickets hängt — der Doppelpunkt im Tag ist zugleich das Trennzeichen der
+      // Abfragesprache. Gefiltert wird deshalb clientseitig über die Tags, die
+      // der Endpunkt ohnehin mitliefert (ebenfalls am Protokoll belegt).
     }
     else if (filters.responderId) parts.push('agent_id:' + filters.responderId);
   }
@@ -4653,9 +4657,13 @@ async function fetchTicketsForAccount(accountId, opts = {}) {
       // (`tag:'KI:<Name>'`) gerade gefunden hatte — Ergebnis: immer leer.
       // Sind Tags vorhanden (Listen-Endpunkt, Cache), wird weiterhin geprüft.
       const vorher = list.length;
-      list = list.filter(t => !Array.isArray(t.tags) || t.tags.includes(kiTag));
-      _diagLog('filter', { schritt: 'ki-tag', gesucht: kiTag, vorher, nachher: list.length,
-        tags_geliefert: vorher ? Array.isArray(list[0]?.tags) : null });
+      // Welche KI-Tags kommen in dieser Seite überhaupt vor? Steht im Protokoll und
+      // beantwortet sofort, ob der gesuchte Name schlicht anders geschrieben ist.
+      const gesehen = [...new Set(list.flatMap(t => (Array.isArray(t.tags) ? t.tags : []))
+        .filter(x => String(x).startsWith('KI:')))];
+      list = list.filter(t => Array.isArray(t.tags) && t.tags.includes(kiTag));
+      _diagLog('filter', { schritt: 'ki-tag (clientseitig)', gesucht: kiTag, vorher, nachher: list.length,
+        ki_tags_auf_dieser_seite: gesehen });
     } else if (filters && filters.responderId) {
       list = list.filter(t => t.responder_id === filters.responderId);
     }
