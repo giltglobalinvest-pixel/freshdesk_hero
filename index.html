@@ -808,7 +808,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.68.17';
+const APP_VERSION = 'v2.68.18';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -41106,6 +41106,21 @@ function _korbStatusBadge(r) {
   const st = KORB_STATUS[_korbStatus(r)];
   return '<span class="text-[10px] px-1.5 py-0.5 rounded border font-bold ' + st.cls + '">' + st.label + '</span>';
 }
+/* v2.68.18: Zu welchem Freshdesk-Mandanten gehört der Eintrag?
+   Bei „Alle Mandanten" liegen die Einträge gemischt untereinander — ohne diese
+   Angabe weiß man beim Freigeben nicht, in welche Gesellschaft der Kontakt
+   wandert. Farbpunkt wie in der Mandantenleiste der Ticketliste, damit man es
+   im Vorbeischauen erkennt. */
+function _korbMandantBadge(r) {
+  const acc = (APP_STATE.accounts || []).find(a => String(a.id) === String(r && r.account_id));
+  if (!acc) {
+    return '<span class="text-[10px] px-1.5 py-0.5 rounded border bg-rose-50 text-rose-700 border-rose-200" title="Zu diesem Eintrag ist kein Mandant geladen — Freigabe nicht möglich">Mandant unbekannt</span>';
+  }
+  return '<span class="text-[10px] px-1.5 py-0.5 rounded border bg-white text-ink-700 border-ink-200 inline-flex items-center gap-1" title="Freshdesk-Mandant dieses Kontakts">'
+    + '<span class="w-2 h-2 rounded-full shrink-0" style="background:' + escapeAttr(acc.color || '#64748b') + '"></span>'
+    + escapeHtml(acc.name || acc.id) + '</span>';
+}
+
 /* Herkunft eines Korb-Eintrags — Altbestand ohne Angabe gilt als Crawl. */
 function _korbQuelle(r) { return String((r && r.quelle) || 'crawl'); }
 function _korbQuelleBadge(r) {
@@ -41430,7 +41445,7 @@ function _renderCrawledContacts() {
       '<div class="' + (r.hidden === 'spam' ? 'bg-rose-50 border-rose-200' : r.hidden === 'hidden' ? 'bg-ink-50 border-ink-200 opacity-60' : 'bg-white border-ink-200') + ' rounded-xl border p-3 mb-2 transition">' +
         '<div class="flex items-start gap-2 flex-wrap">' +
           '<div class="flex-1 min-w-[220px] cursor-pointer" onclick="_crawlDetail(' + i + ')" title="Vollständige Kontaktdetails anzeigen">' +
-            '<div class="flex items-center gap-1.5 mb-1">' + _korbStatusBadge(r) + _korbQuelleBadge(r) + '</div>' +
+            '<div class="flex items-center gap-1.5 mb-1 flex-wrap">' + _korbStatusBadge(r) + _korbMandantBadge(r) + _korbQuelleBadge(r) + '</div>' +
             '<p class="font-bold text-ink-900 text-sm hover:text-violet-700">' + escapeHtml(r.name || r.email) + (r.position ? ' <span class="font-normal text-ink-500">· ' + escapeHtml(r.position) + '</span>' : '') +
               (r.hidden === 'spam' ? ' <span class="text-[9px] font-bold px-1.5 py-0.5 rounded border bg-rose-100 text-rose-700 border-rose-300 align-middle">SPAM</span>' : r.hidden === 'hidden' ? ' <span class="text-[9px] font-bold px-1.5 py-0.5 rounded border bg-ink-100 text-ink-600 border-ink-300 align-middle">AUSGEBLENDET</span>' : '') +
               ' <i data-lucide="info" class="w-3 h-3 inline-block text-ink-400 align-middle"></i></p>' +
