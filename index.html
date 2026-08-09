@@ -808,7 +808,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.69.0';
+const APP_VERSION = 'v2.69.1';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -16797,6 +16797,19 @@ async function _mcUpsertKontakt(account, mitglied) {
     mitglied,
     mandant: _archivSlugFuer(account.id) || undefined,
   });
+}
+
+/**
+ * Abgleich gegen die Zielgruppe: Welche unserer Adressen stehen dort, mit
+ * welchem Status? Beantwortet zwei Fragen auf einmal — wer ist schon drin
+ * (auch ohne je von hier gepusht worden zu sein), und wer hat sich seither
+ * abgemeldet.
+ */
+async function _mcAbgleichHolen(account, emails) {
+  const k = _mcKonfig(account);
+  if (!k) throw new Error('Kein Mailchimp-Schlüssel für „' + (account?.name || '?') + '" (Einstellungen → Mailchimp).');
+  if (!k.liste) throw new Error('Keine Zielgruppe gewählt (Einstellungen → Mailchimp).');
+  return _mcRuf('abgleich', { schluessel: k.schluessel, liste: k.liste, emails });
 }
 
 /* Füllwörter, die als Suchbegriff nichts beitragen. Sie stehen in fast jeder
@@ -40921,7 +40934,7 @@ async function _zdbShowCounts(accId, btn) {
    Zeigt die Firma_/Kontakt_-Tabellen des gewählten Mandanten live aus Airtable.
    Bewusst einfach gehalten; Spalten später erweiterbar. Ersetzt langfristig die
    Freshsales-Kontaktansicht. */
-const ZDB_VIEW_STATE = { accountId: null, tab: 'kontakte', firmaFilter: null, data: null, search: '' };
+const ZDB_VIEW_STATE = { accountId: null, tab: 'kontakte', firmaFilter: null, data: null, search: '', mcStand: null };
 const _ZDB_FIRMA_EDIT = [['name', 'Name'], ['strasse', 'Strasse'], ['plz', 'PLZ'], ['ort', 'Ort'], ['land', 'Land'], ['email', 'E-Mail'], ['telefon', 'Telefon'], ['webseite', 'Webseite'], ['ust_id', 'USt-ID'], ['quelle', 'Quelle']];
 
 function showZdbTableView(btn) {
@@ -40933,15 +40946,15 @@ function showZdbTableView(btn) {
     accId = cand ? String(cand.id) : null;
   }
   if (!accId) { toast('Kein Mandant verfügbar', 'warn', 3000); return; }
-  ZDB_VIEW_STATE.accountId = accId; ZDB_VIEW_STATE.firmaFilter = null; ZDB_VIEW_STATE.data = null; ZDB_VIEW_STATE.search = '';
+  ZDB_VIEW_STATE.accountId = accId; ZDB_VIEW_STATE.firmaFilter = null; ZDB_VIEW_STATE.data = null; ZDB_VIEW_STATE.search = ''; ZDB_VIEW_STATE.mcStand = null;
   _zdbLoadAndRender();
 }
 function _zdbCurrentAccount() { return (APP_STATE.accounts || []).find(a => String(a.id) === String(ZDB_VIEW_STATE.accountId)); }
-function _zdbViewPickAccount(id) { ZDB_VIEW_STATE.accountId = id; ZDB_VIEW_STATE.firmaFilter = null; ZDB_VIEW_STATE.data = null; ZDB_VIEW_STATE.search = ''; _zdbLoadAndRender(); }
+function _zdbViewPickAccount(id) { ZDB_VIEW_STATE.accountId = id; ZDB_VIEW_STATE.firmaFilter = null; ZDB_VIEW_STATE.data = null; ZDB_VIEW_STATE.search = ''; ZDB_VIEW_STATE.mcStand = null; _zdbLoadAndRender(); }
 function _zdbViewSetTab(tab) { ZDB_VIEW_STATE.tab = tab; ZDB_VIEW_STATE.firmaFilter = null; ZDB_VIEW_STATE.search = ''; _zdbPaintView(); }
 function _zdbViewFilterFirma(recId) { ZDB_VIEW_STATE.firmaFilter = recId; ZDB_VIEW_STATE.tab = 'kontakte'; ZDB_VIEW_STATE.search = ''; _zdbPaintView(); }
 function _zdbViewClearFilter() { ZDB_VIEW_STATE.firmaFilter = null; _zdbPaintView(); }
-function _zdbViewSync() { ZDB_VIEW_STATE.data = null; _zdbLoadAndRender(); }
+function _zdbViewSync() { ZDB_VIEW_STATE.data = null; ZDB_VIEW_STATE.mcStand = null; _zdbLoadAndRender(); }
 function closeZdbTableView() { renderContactsPage(); }
 
 /* Lädt Firmen + Kontakte des Mandanten aus Airtable in den View-Cache, dann rendern. */
@@ -41288,7 +41301,9 @@ function _zdbMailchimpBody(d) {
   const kopf = '<div class="flex items-center gap-3 flex-wrap mb-2">'
     + '<p class="text-[11px] text-ink-600"><b>' + bereit + '</b> bereit \u00b7 <b>' + drin + '</b> bereits in Mailchimp \u00b7 ' + gesamt + ' Kontakte mit E-Mail</p>'
     + '<label class="inline-flex items-center gap-1.5 text-[11px] text-ink-600 cursor-pointer"><input type="checkbox" ' + (_zdbMcNurOffene() ? 'checked' : '') + ' onchange="_zdbMcToggleOffene(this)"> nur offene</label>'
-    + '</div>';
+    + '<button onclick="_zdbMcAbgleich(this)" class="ml-auto px-2.5 py-1 rounded-lg text-[11px] font-bold bg-amber-600 hover:bg-amber-700 text-white inline-flex items-center gap-1" title="Zielgruppe abfragen: Wer steht dort, wer hat sich abgemeldet?"><i data-lucide="refresh-cw" class="w-3 h-3"></i> Mit Mailchimp abgleichen</button>'
+    + '</div>'
+    + _zdbMcStandKopf();
 
   if (!rows.length) return '<div class="bg-white rounded-xl border border-ink-200 p-4">' + kopf
     + '<p class="text-sm text-ink-500 py-4 text-center">' + (_q ? 'Keine Treffer.' : 'Nichts offen \u2014 alle Kontakte mit E-Mail sind \u00fcbertragen.') + '</p></div>';
@@ -41302,14 +41317,129 @@ function _zdbMailchimpBody(d) {
       + '<td class="px-2 py-1.5 border-b border-ink-100 whitespace-nowrap font-semibold">' + escapeHtml(f.nachname || (teile.length > 1 ? teile[teile.length - 1] : '')) + '</td>'
       + '<td class="px-2 py-1.5 border-b border-ink-100 whitespace-nowrap font-mono text-[11px]">' + escapeHtml(f.email || '') + '</td>'
       + '<td class="px-2 py-1.5 border-b border-ink-100 whitespace-nowrap">' + escapeHtml(firma) + '</td>'
+      + '<td class="px-2 py-1.5 border-b border-ink-100 whitespace-nowrap">' + _zdbMcZielgruppenZelle(f.email) + '</td>'
       + '<td class="px-2 py-1.5 border-b border-ink-100 whitespace-nowrap text-right">' + _zdbMcZelle(r, f) + '</td>'
       + '</tr>';
   }).join('');
 
   return '<div class="bg-white rounded-xl border border-ink-200 p-4">' + kopf
     + '<div class="overflow-x-auto"><table class="w-full text-[12px] border-collapse"><thead><tr>'
-    + ['Vorname', 'Nachname', 'E-Mail', 'Firma', 'Mailchimp'].map(h => '<th class="text-left font-semibold text-ink-600 px-2 py-1.5 whitespace-nowrap border-b border-ink-200 bg-ink-50">' + h + '</th>').join('')
+    + ['Vorname', 'Nachname', 'E-Mail', 'Firma', 'In der Zielgruppe', 'Mailchimp'].map(h => '<th class="text-left font-semibold text-ink-600 px-2 py-1.5 whitespace-nowrap border-b border-ink-200 bg-ink-50">' + h + '</th>').join('')
     + '</tr></thead><tbody>' + trs + '</tbody></table></div></div>';
+}
+
+/* === v2.69.1: Abgleich mit der Mailchimp-Zielgruppe ======================
+   Beantwortet die zwei Fragen, die der Push allein offen lässt: Wer steht
+   dort schon, ohne je von hier gepusht worden zu sein? Und wer hat sich
+   seither abgemeldet, während bei uns weiterhin „gepusht ✓" steht? */
+
+const _MC_STATUS_TEXT = {
+  subscribed:   ['angemeldet',   'bg-emerald-50 text-emerald-700 border-emerald-200'],
+  unsubscribed: ['abgemeldet',   'bg-red-50 text-red-700 border-red-200'],
+  cleaned:      ['unzustellbar', 'bg-orange-50 text-orange-700 border-orange-200'],
+  pending:      ['unbestätigt',  'bg-amber-50 text-amber-700 border-amber-200'],
+  archived:     ['archiviert',   'bg-ink-100 text-ink-600 border-ink-200'],
+};
+
+function _zdbMcZielgruppenZelle(email) {
+  const st = ZDB_VIEW_STATE.mcStand;
+  if (!st) return '<span class="text-[10px] text-ink-300">–</span>';
+  const s = st.treffer[String(email || '').toLowerCase()];
+  if (!s) return '<span class="text-[10px] px-1.5 py-0.5 rounded border bg-white text-ink-400 border-ink-200">nicht drin</span>';
+  const [text, klasse] = _MC_STATUS_TEXT[s] || [s, 'bg-ink-100 text-ink-600 border-ink-200'];
+  return '<span class="text-[10px] px-1.5 py-0.5 rounded border font-semibold ' + klasse + '">' + escapeHtml(text) + '</span>';
+}
+
+function _zdbMcStandKopf() {
+  const st = ZDB_VIEW_STATE.mcStand;
+  if (!st) return '';
+  const drin = Object.keys(st.treffer).length;
+  const abgemeldet = Object.values(st.treffer).filter(s => s !== 'subscribed').length;
+  const ueberschuss = Math.max(0, (st.gesamt || 0) - drin);
+  const abw = _zdbMcAbweichungen();
+  return '<div class="mb-2 rounded-lg border border-amber-200 bg-amber-50/60 px-3 py-2 text-[11px] text-amber-900">'
+    + '<b>' + drin + '</b> von ' + st.geprueft + ' Kontakten stehen in der Zielgruppe'
+    + (abgemeldet ? ' · davon <b>' + abgemeldet + '</b> nicht mehr erreichbar' : '')
+    + ' · die Zielgruppe hat <b>' + (st.gesamt || 0) + '</b> Mitglieder'
+    + (ueberschuss ? ', also <b>' + ueberschuss + '</b> ohne Gegenstück in der zentralen DB' : '')
+    + (st.unvollstaendig ? ' <b>· Achtung: nur die ersten ' + st.durchsucht + ' Mitglieder durchsucht, das Ergebnis ist unvollständig.</b>' : '')
+    + (abw.length
+        ? ' <button onclick="_zdbMcStandUebernehmen(this)" class="ml-1 px-2 py-0.5 rounded bg-amber-600 hover:bg-amber-700 text-white font-bold">' + abw.length + ' Vermerk' + (abw.length === 1 ? '' : 'e') + ' berichtigen</button>'
+        : ' · Vermerke stimmen überein')
+    + '</div>';
+}
+
+/** Datensätze, deren Mailchimp-Vermerk dem tatsächlichen Stand widerspricht. */
+function _zdbMcAbweichungen() {
+  const st = ZDB_VIEW_STATE.mcStand;
+  const d = ZDB_VIEW_STATE.data;
+  if (!st || !d) return [];
+  return (d.kontakte || []).filter(r => {
+    const f = r.fields || {};
+    if (!f.email) return false;
+    const s = st.treffer[String(f.email).toLowerCase()];
+    const vermerk = String(f.mailchimp || '').trim();
+    if (s && !vermerk) return true;                                   // steht drin, aber nirgends vermerkt
+    if (s && s !== 'subscribed' && !/ABGEMELDET|UNZUSTELLBAR|ARCHIVIERT|UNBEST/i.test(vermerk)) return true;  // nicht mehr erreichbar, Vermerk behauptet das Gegenteil
+    if (!s && vermerk) return true;                                   // vermerkt, steht aber nicht (mehr) dort
+    return false;
+  });
+}
+
+async function _zdbMcAbgleich(btn) {
+  const acc = _zdbCurrentAccount();
+  const d = ZDB_VIEW_STATE.data;
+  if (!acc || !d) return;
+  const emails = (d.kontakte || []).map(r => (r.fields || {}).email).filter(Boolean);
+  if (!emails.length) return toast('Keine Kontakte mit E-Mail-Adresse.', 'warn', 4000);
+  setBusy(btn, true, 'Frage Mailchimp…');
+  try {
+    const st = await _mcAbgleichHolen(acc, emails);
+    ZDB_VIEW_STATE.mcStand = st;
+    // „nur offene" blendet genau die Kontakte aus, um die es beim Abgleich
+    // geht — die bereits eingetragenen. Nach dem Abgleich also alle zeigen.
+    ZDB_VIEW_STATE.mcNurOffene = false;
+    setBusy(btn, false);
+    _zdbNeuZeichnen();
+    if (st.unvollstaendig) toast('Die Zielgruppe ist größer als der Abgleich reicht — nur die ersten ' + st.durchsucht + ' Mitglieder wurden durchsucht.', 'warn', 9000);
+    else toast('Abgleich fertig: ' + Object.keys(st.treffer).length + ' von ' + st.geprueft + ' Kontakten stehen in der Zielgruppe.', 'success', 5000);
+  } catch (e) {
+    setBusy(btn, false);
+    toast('Abgleich: ' + (e.message || e), 'error', 9000);
+  }
+}
+
+/** Den festgestellten Stand in die Datensätze schreiben — nur wo er abweicht. */
+async function _zdbMcStandUebernehmen(btn) {
+  const acc = _zdbCurrentAccount();
+  const st = ZDB_VIEW_STATE.mcStand;
+  const abw = _zdbMcAbweichungen();
+  if (!acc || !st || !abw.length) return;
+  const namen = _zdbTableNames(acc);
+  const zeit = new Date().toLocaleString('de-DE');
+  const k = _mcKonfig(acc);
+  const ziel = (k && (k.listeName || k.liste)) || 'Zielgruppe';
+  setBusy(btn, true, '0/' + abw.length);
+  let n = 0, fehler = 0;
+  for (const r of abw) {
+    const f = r.fields || {};
+    const s = st.treffer[String(f.email).toLowerCase()];
+    // Steht der Kontakt NICHT in der Zielgruppe, wird der Vermerk geleert statt
+    // durch „nicht drin" ersetzt: Ein gefüllter Vermerk gilt überall in Hero als
+    // „erledigt" und würde den Kontakt aus der Push-Liste nehmen — genau falsch.
+    const vermerk = !s ? ''
+      : 'vorhanden ' + zeit + ' · ' + ziel
+        + (s !== 'subscribed' ? ' · ' + ((_MC_STATUS_TEXT[s] || [s])[0]).toUpperCase() : '');
+    try {
+      await _zdbUpdateSafe(namen.kontakt.name, r.id, { mailchimp: vermerk, updated_at: nowIso() });
+      r.fields = { ...f, mailchimp: vermerk };
+      n++;
+    } catch (e) { fehler++; console.warn('[MC-Abgleich]', f.email, e.message); }
+    setBusy(btn, true, n + '/' + abw.length);
+  }
+  setBusy(btn, false);
+  _zdbNeuZeichnen();
+  toast(n + ' Vermerk' + (n === 1 ? '' : 'e') + ' berichtigt' + (fehler ? ' · ' + fehler + ' fehlgeschlagen (siehe Fehler-Pille)' : ' ✓'), fehler ? 'warn' : 'success', 6000);
 }
 
 function _zdbKontakteBody(d) {
