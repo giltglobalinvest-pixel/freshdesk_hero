@@ -808,7 +808,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.69.1';
+const APP_VERSION = 'v2.69.2';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -40638,19 +40638,31 @@ async function _zdbFetchJson(url, init) {
   }
   throw new Error('Airtable 429 (Rate-Limit) — bitte erneut versuchen');
 }
+/* v2.69.2: Ein fehlender Tabellenname landete bisher wörtlich als „undefined"
+   in der URL. Airtable antwortet darauf mit 403 — nicht mit 404 — und man sucht
+   die Ursache stundenlang beim Token statt im Aufruf. Deshalb hier abfangen,
+   bevor die Anfrage überhaupt hinausgeht. */
+function _zdbTab(tableName) {
+  const t = String(tableName == null ? '' : tableName);
+  if (!t || t === 'undefined' || t === 'null') {
+    throw new Error('Interner Fehler: Tabellenname fehlt (bekam „' + t + '"). Der Aufruf ist falsch, nicht der Airtable-Zugang.');
+  }
+  return encodeURIComponent(t);
+}
+
 async function _zdbWrite(tableName, fields) {
-  return _zdbFetchJson('https://api.airtable.com/v0/' + ZDB_BASE_ID + '/' + encodeURIComponent(tableName),
+  return _zdbFetchJson('https://api.airtable.com/v0/' + ZDB_BASE_ID + '/' + _zdbTab(tableName),
     { method: 'POST', headers: { Authorization: 'Bearer ' + APP_KEYS.airtableWriteKey, 'Content-Type': 'application/json' }, body: JSON.stringify({ fields, typecast: true }) });
 }
 async function _zdbUpdate(tableName, id, fields) {
-  return _zdbFetchJson('https://api.airtable.com/v0/' + ZDB_BASE_ID + '/' + encodeURIComponent(tableName) + '/' + id,
+  return _zdbFetchJson('https://api.airtable.com/v0/' + ZDB_BASE_ID + '/' + _zdbTab(tableName) + '/' + id,
     { method: 'PATCH', headers: { Authorization: 'Bearer ' + APP_KEYS.airtableWriteKey, 'Content-Type': 'application/json' }, body: JSON.stringify({ fields, typecast: true }) });
 }
 /* Liest ZDB-Tabellen DIREKT mit dem Write-Key (hat data.records:read) — umgeht den
    evtl. eingeschränkten Read-Key, der neue Tabellen sonst mit 403 blockt. */
 async function _zdbRead(tableName, opts) {
   opts = opts || {};
-  const base = 'https://api.airtable.com/v0/' + ZDB_BASE_ID + '/' + encodeURIComponent(tableName);
+  const base = 'https://api.airtable.com/v0/' + ZDB_BASE_ID + '/' + _zdbTab(tableName);
   const H = { Authorization: 'Bearer ' + APP_KEYS.airtableWriteKey };
   const all = [];
   let offset = null;
@@ -41090,7 +41102,7 @@ async function _zdbPushMc(recId, btn) {
     const stempel = (schon ? 'vorhanden ' : 'gepusht ') + new Date().toLocaleString('de-DE')
       + ' via Hero · ' + (mcK.listeName || mcK.liste)
       + (erg.abgemeldet ? ' · ABGEMELDET' : '');
-    await _zdbUpdateSafe(namen.kontakt.name, recId, { mailchimp: stempel, updated_at: nowIso() });
+    await _zdbUpdateSafe(namen.kontakt, recId, { mailchimp: stempel, updated_at: nowIso() });
     rec.fields = { ...f, mailchimp: stempel };
     // Abgemeldete bleiben abgemeldet — das ist die Rechtslage, kein Fehler.
     // Es muss aber sichtbar sein, sonst wartet jemand auf eine Wirkung, die
@@ -41150,7 +41162,7 @@ async function _zdbPushFd(recId, btn) {
     }
     if (cid) {
       const namen = _zdbTableNames(k.acc);
-      await _zdbUpdateSafe(namen.kontakt.name, recId, { freshdesk_contact_id: String(cid), updated_at: nowIso() });
+      await _zdbUpdateSafe(namen.kontakt, recId, { freshdesk_contact_id: String(cid), updated_at: nowIso() });
       k.rec.fields = { ...k.f, freshdesk_contact_id: String(cid) };
     }
     toast('Freshdesk: ' + k.email + ' angelegt/aktualisiert ✓', 'success', 3500);
@@ -41172,7 +41184,7 @@ async function _zdbPushFs(recId, btn) {
   try {
     const namen = _zdbTableNames(k.acc);
     const stempel = 'gepusht ' + new Date().toLocaleString('de-DE') + ' via Hero';
-    await _zdbUpdateSafe(namen.kontakt.name, recId, { freshsales: stempel, updated_at: nowIso() });
+    await _zdbUpdateSafe(namen.kontakt, recId, { freshsales: stempel, updated_at: nowIso() });
     k.rec.fields = { ...k.f, freshsales: stempel };
     _zdbNeuZeichnen();
   } catch (e) { console.warn('[FS] Vermerk:', e.message); }
@@ -41209,10 +41221,12 @@ async function _zdbZurueckInKorb(recId, btn) {
     if (!treffer.length && k.name) treffer = await airtableRead(CRAWLED_TABLE, { filter: 'AND(' + teile.concat(["LOWER({name})='" + escapeFormula(String(k.name).toLowerCase()) + "'"]).join(',') + ')', maxRecords: 1 }).catch(() => []);
 
     const jetzt = nowIso();
+    const vorher = treffer.length ? (treffer[0].fields || {}) : null;
+    let neuerEintrag = null;
     if (treffer.length) {
       await airtableUpdateWithAutoField(CRAWLED_TABLE, treffer[0].id, { zdb_status: '', hidden: '', updated_at: jetzt }, CRAWLED_TYPES_MAP);
     } else {
-      await airtableWriteWithAutoField(CRAWLED_TABLE, {
+      neuerEintrag = await airtableWriteWithAutoField(CRAWLED_TABLE, {
         account_id: k.acc.id, email: k.email || '', name: k.name || '',
         firma: k.firma || '', telefon: k.telefon || '', mobil: k.mobil || '', position: k.position || '',
         kontakt_typ: k.f.typ || '', quelle: k.f.quelle || 'zentrale-db',
@@ -41224,7 +41238,26 @@ async function _zdbZurueckInKorb(recId, btn) {
 
     // 2. Erst danach löschen — schlägt Schritt 1 fehl, bleibt der Kontakt erhalten.
     const namen = _zdbTableNames(k.acc);
-    await _zdbDeleteRecord(namen.kontakt.name, recId);
+    try {
+      await _zdbDeleteRecord(namen.kontakt, recId);
+    } catch (e) {
+      // v2.69.2: Ohne Rücknahme stünde der Kontakt jetzt an BEIDEN Stellen — im
+      // Korb als wartend und weiterhin in der zentralen DB. Wer dann im Korb
+      // erneut freigibt, legt ihn ein zweites Mal an. Also Schritt 1 zurück.
+      try {
+        if (treffer.length) {
+          await airtableUpdateWithAutoField(CRAWLED_TABLE, treffer[0].id,
+            { zdb_status: vorher.zdb_status || '', hidden: vorher.hidden || '', updated_at: jetzt }, CRAWLED_TYPES_MAP);
+        } else if (neuerEintrag && neuerEintrag.id) {
+          await airtableUpdateWithAutoField(CRAWLED_TABLE, neuerEintrag.id,
+            { hidden: 'hidden', updated_at: jetzt }, CRAWLED_TYPES_MAP);
+        }
+      } catch (e2) {
+        console.warn('[Korb] Rücknahme misslungen:', e2.message);
+        throw new Error((e.message || e) + ' — ACHTUNG: Der Kontakt steht jetzt im Korb UND in der zentralen DB. Bitte im Korb prüfen.');
+      }
+      throw new Error((e.message || e) + ' — der Korb-Eintrag wurde zurückgenommen, der Kontakt bleibt unverändert in der zentralen DB.');
+    }
 
     toast('„' + wer + '" liegt wieder im Korb ' + (treffer.length ? '' : '(neuer Eintrag angelegt)'), 'success', 5000);
     if (typeof _zdbLoadAndRender === 'function') _zdbLoadAndRender();
@@ -41253,7 +41286,7 @@ async function _zdbFirmaEntfernen(recId, btn) {
   if (btn) setBusy(btn, true, 'Entferne…');
   try {
     const namen = _zdbTableNames(acc);
-    await _zdbDeleteRecord(namen.firma.name, recId);
+    await _zdbDeleteRecord(namen.firma, recId);
     toast('„' + name + '" entfernt' + (dran.length ? ' · ' + dran.length + ' Kontakt(e) ohne Firmenzuordnung' : ''), 'success', 5000);
     if (typeof _zdbLoadAndRender === 'function') _zdbLoadAndRender();
   } catch (e) { toast('Entfernen fehlgeschlagen: ' + (e.message || e), 'error', 8000); }
@@ -41431,7 +41464,7 @@ async function _zdbMcStandUebernehmen(btn) {
       : 'vorhanden ' + zeit + ' · ' + ziel
         + (s !== 'subscribed' ? ' · ' + ((_MC_STATUS_TEXT[s] || [s])[0]).toUpperCase() : '');
     try {
-      await _zdbUpdateSafe(namen.kontakt.name, r.id, { mailchimp: vermerk, updated_at: nowIso() });
+      await _zdbUpdateSafe(namen.kontakt, r.id, { mailchimp: vermerk, updated_at: nowIso() });
       r.fields = { ...f, mailchimp: vermerk };
       n++;
     } catch (e) { fehler++; console.warn('[MC-Abgleich]', f.email, e.message); }
@@ -42060,9 +42093,17 @@ function _renderCrawledContacts() {
 /* Der gefilterte Index i bezieht sich auf die AKTUELL gerenderte Liste. */
 /* Airtable-Record löschen (für „Aus DB entfernen"). */
 async function _zdbDeleteRecord(tableName, recordId) {
-  const url = 'https://api.airtable.com/v0/' + ZDB_BASE_ID + '/' + encodeURIComponent(tableName) + '/' + recordId;
+  const url = 'https://api.airtable.com/v0/' + ZDB_BASE_ID + '/' + _zdbTab(tableName) + '/' + recordId;
   const res = await fetch(url, { method: 'DELETE', headers: { Authorization: 'Bearer ' + APP_KEYS.airtableWriteKey } });
-  if (!res.ok) throw new Error('Löschen fehlgeschlagen: HTTP ' + res.status);
+  if (!res.ok) {
+    // Airtables Status allein führt in die Irre: 403 bedeutet sowohl „darf
+    // nicht" als auch „gibt es hier nicht" (INVALID_PERMISSIONS_OR_MODEL_NOT_
+    // FOUND). Ohne den Fehlertext sucht man an der falschen Stelle.
+    let grund = '';
+    try { const d = JSON.parse(await res.text()); grund = (d && d.error && (d.error.type || d.error.message)) || ''; } catch (_) {}
+    throw new Error('Löschen fehlgeschlagen: HTTP ' + res.status + (grund ? ' · ' + grund : '')
+      + (res.status === 403 ? ' — Airtable meldet 403 auch dann, wenn Tabelle oder Datensatz nicht existieren.' : ''));
+  }
   return true;
 }
 
