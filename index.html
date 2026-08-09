@@ -808,7 +808,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.68.23';
+const APP_VERSION = 'v2.68.24';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -9812,6 +9812,7 @@ async function _fdhKiZuweisen(accountId, ticketId, kiKey) {
         ((CURRENT_TICKET && CURRENT_TICKET.id === ticketId) ? CURRENT_TICKET : {});
       _fdhWeckSenden({
         name: ki.name,
+        _accountId: accountId,          // v2.68.24: für den Briefkasten im Archiv
         firma: accW ? (_erpFirmaSlugForAccount(accW) || '') : '',
         ticket_id: ticketId,
         betreff: tW.subject || '',
@@ -18267,6 +18268,7 @@ async function _fdhMentionWecken(accountId, ticketId, ticket, text) {
   for (const name of zuWecken) {
     const auftrag = {
       name,
+      _accountId: accountId,            // v2.68.24: für den Briefkasten im Archiv
       firma: acc ? (_erpFirmaSlugForAccount(acc) || '') : '',
       ticket_id: ticketId,
       betreff: ticket?.subject || '',
@@ -18278,7 +18280,37 @@ async function _fdhMentionWecken(accountId, ticketId, ticket, text) {
   }
 }
 
+/* v2.68.24: Auftrag zuerst in den Briefkasten des Archivs legen.
+   Vorher ging der Weckruf ausschließlich direkt an die Steuerzentrale — war die
+   gerade nicht erreichbar, blieb er in der localStorage-Warteschlange GENAU
+   DIESES Browsers liegen. Wer vom Handy zuwies, hinterließ den Auftrag dort.
+   Der Briefkasten ist dagegen immer erreichbar; die Steuerzentrale holt ab,
+   wenn sie läuft. Der direkte Weckruf bleibt zusätzlich bestehen — er ist der
+   schnelle Weg, wenn beide gerade da sind.
+   Angemeldet wird mit dem Hero-Login des Benutzers; ein gemeinsames Geheimnis
+   im öffentlich lesbaren index.html wäre keines. */
+async function _fdhAuftragEinreihen(auftrag) {
+  const key = APP_KEYS.user?.api_key;
+  const slug = _archivSlugFuer(auftrag._accountId);
+  if (!key || !slug || !auftrag.ticket_id) return false;
+  try {
+    const res = await fetch(ARCHIV_URL + '/auftraege', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'X-Hero-Key': key },
+      body: JSON.stringify({
+        mandant: slug, ticket_id: auftrag.ticket_id, art: auftrag.art || 'zuweisung',
+        betreff: auftrag.betreff || '', bearbeiter: auftrag.name || '',
+        tags: auftrag.name ? ['KI:' + auftrag.name] : [], text: auftrag.text || '',
+      }),
+      signal: AbortSignal.timeout(6000),
+    });
+    return res.ok;
+  } catch (_) { return false; }
+}
+
 async function _fdhWeckSenden(auftrag, mitQueue) {
+  // Erst einreihen (überlebt geschlossene Browser), dann direkt wecken.
+  const eingereiht = await _fdhAuftragEinreihen(auftrag);
   try {
     const res = await fetch(fdhSteuerUrl() + '/api/wecken', {
       method: 'POST', headers: { 'content-type': 'application/json' },
@@ -18289,6 +18321,12 @@ async function _fdhWeckSenden(auftrag, mitQueue) {
     toast('Wecken: ' + (d.fehler || 'unbekannter Fehler'), 'warn', 6000);
     return true; // fachlicher Fehler — nicht erneut versuchen
   } catch (e) {
+    if (eingereiht) {
+      // Der Auftrag liegt sicher im Briefkasten — die Steuerzentrale holt ihn ab,
+      // sobald sie läuft. Keine Browser-Warteschlange nötig.
+      toast('\u{1F916} ' + auftrag.name + ' beauftragt — die Steuerzentrale holt den Auftrag ab.', 'success', 5000);
+      return true;
+    }
     if (mitQueue) {
       try {
         const q = JSON.parse(localStorage.getItem('fdh_weck_queue') || '[]');
