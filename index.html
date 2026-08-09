@@ -808,7 +808,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.69.2';
+const APP_VERSION = 'v2.69.3';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -15467,7 +15467,19 @@ function renderAssigneeList(filter) {
 
   const kiHier = (APP_STATE.kiUsers || []).filter(k => k.vonByAccount && k.vonByAccount[ASSIGNEE_CTX.accountId])
     .filter(k => !f || (k.name || '').toLowerCase().includes(f));
+  // v2.69.3: Trägt das Ticket bereits einen KI-Mitarbeiter, gibt es hier den
+  // absichtlichen Anstoß — ohne erneute Zuweisung, also ohne eine weitere
+  // Notiz im Ticket. Bisher blieb dafür nur, dieselbe Person nochmals
+  // zuzuweisen, was den Verlauf mit Wiederholungen zugemüllt hat.
+  const _kiName = _fdhKiTagName(ASSIGNEE_CTX.accountId, ASSIGNEE_CTX.ticketId);
   $('assigneeList').innerHTML = `
+    ${_kiName && !f ? `
+      <div class="px-4 py-3 border-b border-ink-100 bg-violet-50/60">
+        <button onclick="_fdhKiAnstossen(this)" class="w-full px-3 py-2.5 rounded-lg bg-violet-600 hover:bg-violet-700 text-white text-sm font-bold flex items-center justify-center gap-2">
+          <i data-lucide="play" class="w-4 h-4"></i> ${escapeHtml(_kiName)} jetzt anstoßen
+        </button>
+        <p class="text-[10px] text-violet-700 mt-1.5 text-center">Legt einen Auftrag in den Briefkasten. Zuweisung und Ticket bleiben unverändert.</p>
+      </div>` : ''}
     ${kiHier.length ? `<p class="px-4 pt-3 pb-1 text-[10px] uppercase tracking-wider font-semibold text-violet-700">Hero-Benutzer (ohne eigene Freshdesk-Lizenz)</p>` : ''}
     ${kiHier.map(k => `
       <button onclick="assignKiAndClose('${escapeAttr(k.api_key)}')" class="w-full text-left px-4 py-3 active:bg-ink-50 border-b border-ink-100 flex items-center gap-3">
@@ -15579,6 +15591,50 @@ function refreshTicketsListFromCache() {
   if (!APP_STATE.pageState?.tickets) return;
   if (!$('ticketList')) return;
   renderTicketList(APP_STATE.pageState.tickets);
+}
+
+/* === v2.69.3: Anstoß von Hand ============================================
+   Der automatische Weg läuft über den Archiv-Worker, der Freshdesk alle fünf
+   Minuten abfragt. Für „das hier bitte jetzt" braucht es trotzdem einen Weg
+   ohne Wartezeit — und einen, der nicht als erneute Zuweisung im Ticket
+   auftaucht. */
+
+/** Name des KI-Mitarbeiters am Ticket, aus dem KI:-Tag. Null, wenn keiner. */
+function _fdhKiTagName(accountId, ticketId) {
+  const t = _fdhTicketAusCache(accountId, ticketId) ||
+    ((CURRENT_TICKET && CURRENT_TICKET.id === ticketId) ? CURRENT_TICKET : null);
+  const tag = (t && Array.isArray(t.tags) ? t.tags : []).find(x => String(x).startsWith('KI:'));
+  return tag ? String(tag).slice(3) : null;
+}
+
+async function _fdhKiAnstossen(btn) {
+  if (!ASSIGNEE_CTX) return;
+  const { accountId, ticketId } = ASSIGNEE_CTX;
+  const name = _fdhKiTagName(accountId, ticketId);
+  if (!name) return toast('Dieses Ticket ist keinem KI-Mitarbeiter zugewiesen.', 'warn', 5000);
+  const acc = (APP_STATE.accounts || []).find(a => a.id === accountId) || null;
+  const t = _fdhTicketAusCache(accountId, ticketId) ||
+    ((CURRENT_TICKET && CURRENT_TICKET.id === ticketId) ? CURRENT_TICKET : {});
+  if (btn) setBusy(btn, true, 'Stoße an…');
+  const ok = await _fdhWeckSenden({
+    name,
+    _accountId: accountId,
+    firma: acc ? (_erpFirmaSlugForAccount(acc) || '') : '',
+    ticket_id: ticketId,
+    betreff: t.subject || '',
+    gruppe: t.group_id ? (getGroupName(accountId, t.group_id) || '') : '',
+    text: 'ANSTOSS von Hand aus Freshdesk Hero — die Aufgabenstellung steht im Ticket.',
+    von: APP_KEYS.user?.name || '',
+    art: 'zuweisung',
+  }, true).catch(() => false);
+  if (btn) setBusy(btn, false);
+  closeAssigneeModal();
+  // _fdhWeckSenden meldet nur den direkten Weckruf. Der Briefkasten ist der
+  // verlässliche Teil — deshalb kein „fehlgeschlagen", wenn bloß die
+  // Steuerzentrale gerade nicht läuft.
+  toast(ok ? '▶ ' + name + ' angestoßen — Auftrag liegt im Briefkasten.'
+           : '▶ ' + name + ': Auftrag liegt im Briefkasten, die Steuerzentrale war nicht direkt erreichbar.',
+        ok ? 'success' : 'warn', 6000);
 }
 
 async function assignKiAndClose(kiKey) {
@@ -40580,6 +40636,7 @@ function _zdbKontaktFieldSpecs(firmaTableId) {
     { name: 'firma', type: 'multipleRecordLinks', options: { linkedTableId: firmaTableId } },
     { name: 'position', type: 'singleLineText' },
     { name: 'notizen', type: 'multilineText' },        // v2.68.6
+    { name: 'historie_ki', type: 'multilineText' },    // v2.69.3: KI-Zusammenfassung des Schriftverkehrs
     { name: 'mailchimp', type: 'singleLineText' },     // v2.68.14: 'gepusht <Zeit> via Hero'
     { name: 'freshsales', type: 'singleLineText' },    // v2.68.21: 'gepusht <Zeit> via Hero'
     { name: 'pipedrive_person_id', type: 'singleLineText' },
@@ -41205,12 +41262,14 @@ function _zdbSendMarketing(recId) {
    durch Prüfung und Freigabe läuft. Gibt es keinen Korb-Eintrag mehr (oder kam
    der Kontakt nie aus dem Korb), wird einer angelegt — sonst verschwänden die
    Daten ersatzlos, und genau das soll der Rückweg verhindern. */
-async function _zdbZurueckInKorb(recId, btn) {
+async function _zdbZurueckInKorb(recId, btn, ausblenden) {
   const k = _zdbSatzVon(recId);
   if (!k) return;
   const wer = k.name || k.email || 'dieser Kontakt';
   if (!confirm('„' + wer + '" aus der zentralen DB von ' + (k.acc.name || '') + ' entfernen und zurück in den Korb legen?\n\n'
-    + 'Der Kontakt wird dort wieder als „wartend" geführt und kann erneut geprüft und freigegeben werden.\n'
+    + (ausblenden
+        ? 'Im Korb wird er sofort ausgeblendet — er taucht dort also nicht wieder in der Arbeitsliste auf.\n'
+        : 'Der Kontakt wird dort wieder als „wartend" geführt und kann erneut geprüft und freigegeben werden.\n')
     + 'Die Firma bleibt bestehen.')) return;
   if (btn) setBusy(btn, true, 'Zurück…');
   try {
@@ -41224,7 +41283,7 @@ async function _zdbZurueckInKorb(recId, btn) {
     const vorher = treffer.length ? (treffer[0].fields || {}) : null;
     let neuerEintrag = null;
     if (treffer.length) {
-      await airtableUpdateWithAutoField(CRAWLED_TABLE, treffer[0].id, { zdb_status: '', hidden: '', updated_at: jetzt }, CRAWLED_TYPES_MAP);
+      await airtableUpdateWithAutoField(CRAWLED_TABLE, treffer[0].id, { zdb_status: '', hidden: ausblenden ? 'hidden' : '', updated_at: jetzt }, CRAWLED_TYPES_MAP);
     } else {
       neuerEintrag = await airtableWriteWithAutoField(CRAWLED_TABLE, {
         account_id: k.acc.id, email: k.email || '', name: k.name || '',
@@ -41232,7 +41291,7 @@ async function _zdbZurueckInKorb(recId, btn) {
         kontakt_typ: k.f.typ || '', quelle: k.f.quelle || 'zentrale-db',
         fd_contact_id: k.f.freshdesk_contact_id || '', fd_status: k.f.freshdesk_contact_id ? 'komplett' : 'unbekannt',
         fs_status: 'unbekannt', mc_status: 'unbekannt',
-        zdb_status: '', crawled_at: jetzt, updated_at: jetzt,
+        zdb_status: '', hidden: ausblenden ? 'hidden' : '', crawled_at: jetzt, updated_at: jetzt,
       }, CRAWLED_TYPES_MAP);
     }
 
@@ -41259,7 +41318,7 @@ async function _zdbZurueckInKorb(recId, btn) {
       throw new Error((e.message || e) + ' — der Korb-Eintrag wurde zurückgenommen, der Kontakt bleibt unverändert in der zentralen DB.');
     }
 
-    toast('„' + wer + '" liegt wieder im Korb ' + (treffer.length ? '' : '(neuer Eintrag angelegt)'), 'success', 5000);
+    toast('„' + wer + '" liegt wieder im Korb' + (ausblenden ? ' — dort ausgeblendet' : '') + (treffer.length ? '' : ' (neuer Eintrag angelegt)'), 'success', 5000);
     if (typeof _zdbLoadAndRender === 'function') _zdbLoadAndRender();
   } catch (e) {
     toast('Zurücklegen fehlgeschlagen: ' + (e.message || e), 'error', 8000);
@@ -41294,6 +41353,141 @@ async function _zdbFirmaEntfernen(recId, btn) {
 }
 
 /* Kompakte Aktionsspalte — Werbung nur mit Beleg, wie bei Mailchimp. */
+/* === v2.69.3: KI-Zusammenfassung der Kontakt-Historie ====================
+   Quelle ist das Archiv, nicht Freshdesk: Dort liegt der vollständige
+   Schriftwechsel seit 2012, während Freshdesks Such-API bei 300 Treffern
+   abschneidet. Das Ergebnis wird im Datensatz abgelegt — eine Zusammenfassung,
+   die bei jedem Öffnen neu erzeugt wird, kostet jedes Mal und liest sich jedes
+   Mal anders. */
+
+async function _zdbHistorieHolen(acc, email) {
+  const key = APP_KEYS.user?.api_key;
+  const slug = _archivSlugFuer(acc.id);
+  if (!key) throw new Error('Nicht angemeldet.');
+  if (!slug) throw new Error('Für „' + (acc.name || acc.id) + '" gibt es kein Archiv.');
+  const p = new URLSearchParams({ email, mandant: slug, limit: '20' });
+  const res = await fetch(ARCHIV_URL + '/historie?' + p.toString(), { headers: { 'X-Hero-Key': key } });
+  const d = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(d.fehler || ('Archiv HTTP ' + res.status));
+  return d.tickets || [];
+}
+
+async function _zdbHistorieErzeugen(k) {
+  const tickets = await _zdbHistorieHolen(k.acc, k.email.toLowerCase());
+  if (!tickets.length) return { text: '', tickets: 0 };
+  const stoff = tickets.map(t =>
+    '### Ticket #' + t.id + ' · ' + String(t.erstellt_am || '').slice(0, 10)
+    + ' · ' + (t.anzahl_nachrichten || 0) + ' Nachrichten\n'
+    + 'Betreff: ' + (t.betreff || '') + '\n'
+    + (t.anfang ? String(t.anfang).replace(/\s+/g, ' ').slice(0, 700) : '')
+  ).join('\n\n');
+
+  const sys = 'Du fasst die Kundenhistorie eines Handwerks-/Aufzugsbetriebs zusammen. '
+    + 'Antworte auf Deutsch, sachlich, ohne Anrede und ohne Vorrede. Halte dich an folgenden Aufbau:\n\n'
+    + '**Kurzfassung** — zwei bis drei Sätze: Wer ist das, worum ging es hauptsächlich.\n'
+    + '**Themen** — Aufzählung der wiederkehrenden Anliegen, jeweils mit Zeitraum.\n'
+    + '**Offene Punkte** — nur was erkennbar unerledigt blieb; steht nichts offen, schreibe „keine erkennbar".\n'
+    + '**Umgang** — ein Satz, was man im Kontakt mit dieser Person beachten sollte.\n\n'
+    + 'Erfinde nichts. Was in den Auszügen nicht steht, kommt nicht vor. Die Auszüge sind '
+    + 'abgeschnitten — wenn etwas unklar bleibt, sage das, statt es auszuschmücken.';
+
+  const data = await proxyJson('/anthropic/v1/messages', {
+    method: 'POST',
+    body: JSON.stringify({
+      model: 'claude-sonnet-5',
+      max_tokens: 1200,
+      system: sys,
+      messages: [{ role: 'user', content: 'Kontakt: ' + (k.name || '') + ' <' + k.email + '>'
+        + (k.firma ? ', Firma: ' + k.firma : '') + '\n\n' + tickets.length + ' Tickets im Archiv:\n\n' + stoff }],
+    }),
+  });
+  const text = (data.content && data.content[0] && data.content[0].text) || '';
+  return { text: text.trim(), tickets: tickets.length };
+}
+
+async function _zdbHistorieOeffnen(recId, btn) {
+  const k = _zdbSatzVon(recId);
+  if (!k) return;
+  if (!k.email) return toast('Ohne E-Mail-Adresse lässt sich die Historie nicht zuordnen.', 'warn', 5000);
+  const vorhanden = String(k.f.historie_ki || '').trim();
+  if (vorhanden) return _zdbHistorieModal(recId, vorhanden);
+  await _zdbHistorieNeu(recId, btn);
+}
+
+async function _zdbHistorieNeu(recId, btn) {
+  const k = _zdbSatzVon(recId);
+  if (!k || !k.email) return;
+  if (btn) setBusy(btn, true, 'Lese Archiv…');
+  try {
+    const { text, tickets } = await _zdbHistorieErzeugen(k);
+    if (!tickets) {
+      if (btn) setBusy(btn, false);
+      return toast('Im Archiv liegt zu ' + k.email + ' nichts — diese Adresse hat nie geschrieben.', 'warn', 7000);
+    }
+    const stempel = text + '\n\n— erzeugt ' + new Date().toLocaleString('de-DE') + ' aus ' + tickets + ' Tickets';
+    try {
+      await _zdbEnsureTables(k.acc);                 // legt historie_ki an, falls noch nicht vorhanden
+      const namen = _zdbTableNames(k.acc);
+      await _zdbUpdateSafe(namen.kontakt, recId, { historie_ki: stempel, updated_at: nowIso() });
+      k.rec.fields = { ...k.f, historie_ki: stempel };
+    } catch (e) {
+      // Speichern misslungen — die Zusammenfassung trotzdem zeigen. Sie wegen
+      // eines Schreibfehlers zu verwerfen, wäre die teuerste Art zu scheitern.
+      console.warn('[Historie] Speichern:', e.message);
+      toast('Zusammenfassung erstellt, konnte aber nicht gespeichert werden: ' + e.message, 'warn', 8000);
+    }
+    if (btn) setBusy(btn, false);
+    _zdbNeuZeichnen();
+    _zdbHistorieModal(recId, stempel);
+  } catch (e) {
+    if (btn) setBusy(btn, false);
+    toast('Historie: ' + (e.message || e), 'error', 9000);
+  }
+}
+
+function _zdbHistorieModal(recId, text) {
+  const k = _zdbSatzVon(recId);
+  let host = document.getElementById('zdbHistHost');
+  if (!host) { host = document.createElement('div'); host.id = 'zdbHistHost'; document.body.appendChild(host); }
+  // Eigener Host, kein #subModalHost: Von dort aus wird das Modal auch über
+  // dem Bearbeiten-Dialog geöffnet, und ein geteilter Host zerlegt das Eltern-
+  // Fenster.
+  const abs = String(text || '').split('\n').map(z => {
+    const t = z.trim();
+    if (!t) return '<div class="h-2"></div>';
+    const fett = t.replace(/\*\*(.+?)\*\*/g, '<b class="text-ink-900">$1</b>');
+    if (/^[-•]\s+/.test(t)) return '<div class="pl-4 text-[13px] text-ink-700">• ' + fett.replace(/^[-•]\s+/, '') + '</div>';
+    return '<div class="text-[13px] text-ink-700">' + fett + '</div>';
+  }).join('');
+  host.innerHTML =
+    '<div class="fixed inset-0 z-[85] bg-black/40 flex items-start justify-center overflow-y-auto p-4" onclick="if(event.target===this)_zdbHistorieSchliessen()">' +
+      '<div class="bg-white rounded-2xl shadow-xl w-full max-w-lg my-8">' +
+        '<div class="flex items-center justify-between p-4 border-b border-ink-200">' +
+          '<div><h3 class="font-bold text-ink-900">Historie — ' + escapeHtml(k ? (k.name || k.email) : '') + '</h3>' +
+          '<p class="text-[11px] text-ink-500">Zusammengefasst aus dem Freshdesk-Archiv</p></div>' +
+          '<button onclick="_zdbHistorieSchliessen()" class="text-ink-400 hover:text-ink-700"><i data-lucide="x" class="w-5 h-5"></i></button></div>' +
+        '<div class="p-4 space-y-0.5 max-h-[60vh] overflow-y-auto">' + abs + '</div>' +
+        '<div class="flex items-center justify-between gap-2 p-4 border-t border-ink-200">' +
+          '<button onclick="_zdbHistorieSchliessen(); _zdbHistorieNeu(\'' + recId + '\', null)" class="px-3 py-2 text-[12px] font-semibold text-teal-700 border border-teal-300 hover:bg-teal-50 rounded-lg inline-flex items-center gap-1"><i data-lucide="refresh-cw" class="w-3.5 h-3.5"></i> Neu erzeugen</button>' +
+          '<button onclick="_zdbHistorieSchliessen()" class="px-4 py-2 text-sm font-bold bg-ink-800 hover:bg-ink-900 text-white rounded-lg">Schließen</button>' +
+        '</div>' +
+      '</div>' +
+    '</div>';
+  if (window.lucide) lucide.createIcons();
+}
+function _zdbHistorieSchliessen() { const h = document.getElementById('zdbHistHost'); if (h) h.innerHTML = ''; }
+
+/* v2.69.3: Von der Kontaktzeile direkt zur Firma. Der Klick auf die Zeile
+   öffnet den Kontakt — für die Firma gab es bisher keinen Weg außer über den
+   Firmen-Reiter und erneutes Suchen. */
+function _zdbFirmaZelle(f, name) {
+  const id = ((f.firma || [])[0]) || '';
+  const text = escapeHtml(String(name || ''));
+  if (!id) return text || '<span class="text-[10px] text-ink-300">—</span>';
+  return '<span class="inline-flex items-center gap-1">' + text
+    + '<button onclick="event.stopPropagation(); _zdbEditRecord(\'firma\',\'' + id + '\')" class="text-indigo-500 hover:text-indigo-700 shrink-0" title="Firma öffnen"><i data-lucide="building-2" class="w-3.5 h-3.5"></i></button></span>';
+}
+
 function _zdbAktionenZelle(r, f) {
   if (!f.email) return '<span class="text-[10px] text-ink-300">—</span>';
   const fd = f.freshdesk_contact_id
@@ -41304,7 +41498,14 @@ function _zdbAktionenZelle(r, f) {
     ? '<button onclick="event.stopPropagation(); _zdbSendMarketing(\'' + r.id + '\')" class="px-1.5 py-0.5 bg-orange-500 hover:bg-orange-600 text-white rounded text-[10px] font-bold" title="Werbe-Email senden">Werbung</button>'
     : '<span class="px-1.5 py-0.5 bg-ink-50 text-ink-400 border border-ink-200 rounded text-[10px] font-bold" title="Kein belegter Geschäftskontakt — keine Werbung">Werbung</span>';
   const zurueck = '<button onclick="event.stopPropagation(); _zdbZurueckInKorb(\'' + r.id + '\', this)" class="px-1.5 py-0.5 bg-white border border-ink-300 text-ink-600 hover:bg-ink-50 rounded text-[10px] font-bold" title="Aus der zentralen DB entfernen und zurück in den Korb legen — dort wieder als wartend">\u21A9 Korb</button>';
-  return '<span class="inline-flex items-center gap-1">' + werbung + fd + fs + zurueck + '</span>';
+  // v2.69.3: Derselbe Rückweg, nur im Korb gleich ausgeblendet — für Kontakte,
+  // die nicht in die Stammdaten gehören und auch nicht wieder zur Prüfung
+  // anstehen sollen. Sonst müsste man zweimal hin: zurücklegen, dort verstecken.
+  const zurueckAus = '<button onclick="event.stopPropagation(); _zdbZurueckInKorb(\'' + r.id + '\', this, true)" class="px-1.5 py-0.5 bg-white border border-ink-300 text-ink-500 hover:bg-ink-50 rounded text-[10px] font-bold" title="Zurück in den Korb UND dort ausblenden — verschwindet aus beiden Arbeitslisten">↩⊘</button>';
+  // v2.69.3: KI-Zusammenfassung des Schriftverkehrs aus dem Archiv.
+  const hatHist = String(f.historie_ki || '').trim();
+  const historie = '<button onclick="event.stopPropagation(); _zdbHistorieOeffnen(\'' + r.id + '\', this)" class="px-1.5 py-0.5 ' + (hatHist ? 'bg-teal-600 hover:bg-teal-700 text-white' : 'bg-white border border-teal-300 text-teal-700 hover:bg-teal-50') + ' rounded text-[10px] font-bold" title="' + (hatHist ? 'Zusammenfassung der Historie ansehen' : 'Historie aus dem Archiv zusammenfassen lassen') + '">∑</button>';
+  return '<span class="inline-flex items-center gap-1">' + historie + werbung + fd + fs + zurueck + zurueckAus + '</span>';
 }
 
 /* v2.68.20: Arbeitsansicht für den Mailchimp-Übertrag.
@@ -41501,6 +41702,7 @@ function _zdbKontakteBody(d) {
       cols.map(c => '<td class="px-2 py-1.5 border-b border-ink-100 whitespace-nowrap">' +
         (c[0] === 'mailchimp' ? _zdbMcZelle(r, f)
          : c[0] === 'aktionen' ? _zdbAktionenZelle(r, f)
+         : c[0] === 'firma' ? _zdbFirmaZelle(f, cells.firma)
          : escapeHtml(String(cells[c[0]] || ''))) + '</td>').join('') + '</tr>';
   }).join('');
   return '<div class="bg-white rounded-xl border border-ink-200 p-4">' + chip +
@@ -41612,7 +41814,12 @@ function _zdbOpenEditModal(kind, recId, f) {
       inp('telefon', 'Telefon', f.telefon) + inp('mobil', 'Mobil', f.mobil) +
       '<label class="block mb-2"><span class="text-[11px] font-semibold text-ink-600">Typ</span><select data-zf="typ" class="w-full mt-0.5 px-2.5 py-1.5 border border-ink-300 rounded-lg text-sm bg-white">' + typOpts + '</select></label>' +
       inp('position', 'Position', f.position) +
-      '<label class="block mb-2"><span class="text-[11px] font-semibold text-ink-600">Firma</span><select data-zf="firma" class="w-full mt-0.5 px-2.5 py-1.5 border border-ink-300 rounded-lg text-sm bg-white">' + firmaOpts + '</select></label>' +
+      // v2.69.3: Bei über hundert Firmen ist eine reine Auswahlliste unbenutzbar
+      // — das Suchfeld filtert die Einträge, ohne die Verknüpfung zu verlieren.
+      '<label class="block mb-2"><span class="text-[11px] font-semibold text-ink-600">Firma</span>' +
+      '<input id="zdbFirmaSuche" type="search" placeholder="Firma suchen…" autocomplete="off" oninput="_zdbFirmaFiltern(this.value)" class="w-full mt-0.5 mb-1 px-2.5 py-1.5 border border-ink-300 rounded-lg text-sm">' +
+      '<select data-zf="firma" id="zdbFirmaSelect" size="6" class="w-full px-2.5 py-1.5 border border-ink-300 rounded-lg text-sm bg-white">' + firmaOpts + '</select>' +
+      '<span id="zdbFirmaZaehler" class="text-[10px] text-ink-400"></span></label>' +
       inp('quelle', 'Quelle', f.quelle);
   }
   host.innerHTML =
@@ -41629,6 +41836,23 @@ function _zdbOpenEditModal(kind, recId, f) {
     '</div>';
   if (window.lucide) lucide.createIcons();
 }
+/* Filtert die Firmenliste im Bearbeiten-Dialog. Die Auswahl selbst bleibt
+   erhalten, auch wenn sie gerade herausgefiltert ist — sonst würde ein Tippen
+   ins Suchfeld die bestehende Verknüpfung stillschweigend kappen. */
+function _zdbFirmaFiltern(text) {
+  const sel = document.getElementById('zdbFirmaSelect');
+  const zaehler = document.getElementById('zdbFirmaZaehler');
+  if (!sel) return;
+  const q = String(text || '').trim().toLowerCase();
+  let sichtbar = 0;
+  Array.from(sel.options).forEach(o => {
+    const treffer = !q || o.value === '' || o.value === sel.value || o.text.toLowerCase().includes(q);
+    o.hidden = !treffer;
+    if (treffer && o.value) sichtbar++;
+  });
+  if (zaehler) zaehler.textContent = q ? (sichtbar + ' Treffer') : '';
+}
+
 function _zdbCloseEdit() { const h = document.getElementById('zdbEditHost'); if (h) h.innerHTML = ''; }
 async function _zdbSaveEdit(kind, recId, btn) {
   const d = ZDB_VIEW_STATE.data;
