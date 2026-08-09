@@ -88,6 +88,15 @@
   @keyframes spin { to { transform: rotate(360deg); } }
   .toast-enter { animation: toast-in .25s ease-out; }
   @keyframes toast-in { from { opacity:0; transform:translateY(8px) } to { opacity:1; transform:translateY(0) } }
+  /* v2.70.0: Callcenter-Sicht — alles ausblenden, was nicht zum Telefonieren
+     gehört. Menü, Tabs, die beiden Aktionsknöpfe unten rechts. */
+  body.nur-callcenter #bottomNav,
+  body.nur-callcenter #newEmailFab,
+  body.nur-callcenter #contactImportFab,
+  body.nur-callcenter #hdrMenuBtn,
+  body.nur-callcenter #dropdownMenu,
+  body.nur-callcenter #hdrSearchBtn { display: none !important; }
+  body.nur-callcenter #pageContent { padding-bottom: 2rem; }
   .scrollbar-hidden::-webkit-scrollbar { display:none; }
   .scrollbar-hidden { scrollbar-width: none; }
   /* Hide tailwind play CDN dev-warning */
@@ -660,13 +669,13 @@
       <button onclick="goHome()" class="w-9 h-9 rounded-lg hover:bg-brand-50 flex items-center justify-center group" aria-label="Startbildschirm" title="Zum Startbildschirm zurück">
         <i data-lucide="home" class="w-5 h-5 text-brand-600 group-active:text-brand-800"></i>
       </button>
-      <button onclick="openSearchModal()" class="w-9 h-9 rounded-lg hover:bg-brand-50 flex items-center justify-center group" aria-label="Suche" title="Suche (KI-gestützt)">
+      <button id="hdrSearchBtn" onclick="openSearchModal()" class="w-9 h-9 rounded-lg hover:bg-brand-50 flex items-center justify-center group" aria-label="Suche" title="Suche (KI-gestützt)">
         <i data-lucide="search" class="w-5 h-5 text-brand-600 group-active:text-brand-800"></i>
       </button>
       <button onclick="openHelpModal()" class="w-9 h-9 rounded-lg hover:bg-ink-100 flex items-center justify-center group" aria-label="Hilfe / Anleitung" title="Anleitung zur App">
         <i data-lucide="circle-help" class="w-5 h-5 text-ink-600 group-active:text-ink-900"></i>
       </button>
-      <button onclick="toggleMenu()" class="w-9 h-9 rounded-lg hover:bg-ink-100 flex items-center justify-center" aria-label="Menü">
+      <button id="hdrMenuBtn" onclick="toggleMenu()" class="w-9 h-9 rounded-lg hover:bg-ink-100 flex items-center justify-center" aria-label="Menü">
         <i data-lucide="menu" class="w-5 h-5 text-ink-700"></i>
       </button>
     </div>
@@ -751,7 +760,7 @@
     <div id="msActions" class="flex gap-2 overflow-x-auto scrollbar-hidden px-3 py-2"></div>
   </div>
 
-  <nav class="fixed bottom-0 inset-x-0 z-30 bg-white/95 backdrop-blur border-t border-ink-200 safe-bottom">
+  <nav id="bottomNav" class="fixed bottom-0 inset-x-0 z-30 bg-white/95 backdrop-blur border-t border-ink-200 safe-bottom">
     <div class="flex justify-around max-w-md mx-auto">
       <button data-nav="tickets"  onclick="navTo('tickets')"  class="flex-1 py-2 flex flex-col items-center gap-0.5 text-ink-500">
         <i data-lucide="ticket" class="w-5 h-5"></i>
@@ -808,7 +817,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.69.5';
+const APP_VERSION = 'v2.70.0';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -2878,6 +2887,32 @@ async function ensureAppTables() {
     { name: 'color',               type: 'singleLineText' },
     { name: 'api_key',             type: 'singleLineText' },
     { name: 'created',             type: 'singleLineText' },
+  ]);
+  // v2.70.0: Kampagnen-Tabelle für die Callcenter-Oberfläche. Bewusst getrennt
+  // vom Korb: Der Korb ist zum Prüfen einzelner Kontakte da, eine Kampagne führt
+  // Tausende, die niemand einzeln prüfen kann. Der Dublettenschlüssel und das
+  // Feld „quelle" sind deshalb von Anfang an dabei.
+  await ensureTable(CC_TABLE, [
+    { name: 'firma',           type: 'singleLineText' },   // Primary
+    { name: 'account_id',      type: 'singleLineText' },
+    { name: 'kampagne',        type: 'singleLineText' },
+    { name: 'ansprechpartner', type: 'singleLineText' },
+    { name: 'telefon',         type: 'singleLineText' },
+    { name: 'email',           type: 'singleLineText' },
+    { name: 'position',        type: 'singleLineText' },
+    { name: 'ort',             type: 'singleLineText' },
+    { name: 'quelle',          type: 'singleLineText' },   // zentrale-db | archiv | gekauft | …
+    { name: 'dedupe_key',      type: 'singleLineText' },   // E-Mail bzw. normalisierte Nummer
+    { name: 'status',          type: 'singleLineText' },
+    { name: 'versuche',        type: 'singleLineText' },
+    { name: 'letzter_versuch', type: 'singleLineText' },
+    { name: 'notiz',           type: 'multilineText'  },   // Telefonzusammenfassung, wenige Worte
+    { name: 'bearbeiter',      type: 'singleLineText' },
+    { name: 'gesperrt_bis',    type: 'singleLineText' },   // Zuteilung an einen Anrufer
+    { name: 'preisliste_am',   type: 'singleLineText' },
+    { name: 'ticket_id',       type: 'singleLineText' },
+    { name: 'created_at',      type: 'singleLineText' },
+    { name: 'updated_at',      type: 'singleLineText' },
   ]);
   await ensureTable(WIEDERVORLAGE_TABLE, [
     { name: 'api_key',     type: 'singleLineText' },
@@ -8399,6 +8434,7 @@ function navTo(page) {
   else if (page === 'reply-templates') renderFn = renderReplyTemplatesPage;
   else if (page === 'contacts')  renderFn = renderContactsPage;
   else if (page === 'stats')     renderFn = renderStatsPage;
+  else if (page === 'callcenter') renderFn = renderCallcenterPage;
   try {
     const result = renderFn();
     if (result && typeof result.catch === 'function') {
@@ -36176,7 +36212,9 @@ async function openUserModal(user) {
                 <option value="user"  ${!isAdminUser && (user?.role||'')!=='ki' ?'selected':''}>User</option>
                 <option value="admin" ${isAdminUser?'selected':''}>Admin</option>
                 <option value="ki" ${(user?.role||'')==='ki'?'selected':''}>KI-Mitarbeiter 🤖</option>
+                <option value="callcenter" ${(user?.role||'')==='callcenter'?'selected':''}>Callcenter ☎ (nur Anrufliste)</option>
               </select>
+              ${(user?.role||'')==='callcenter' ? '<p class="text-[10px] text-amber-700 mt-1">Sieht nach dem Login ausschließlich die Anrufliste — keine Tickets, keine Einstellungen.</p>' : ''}
             </div>
             <div>
               <label class="text-xs font-semibold text-ink-700">Status</label>
@@ -41941,6 +41979,415 @@ function _zdbPermHintHtml() {
     '<p class="text-[12px] text-ink-600 mt-2 max-w-md mx-auto">Der Token ist auf bestimmte Tabellen beschränkt — die neu angelegten Firma_/Kontakt_-Tabellen sind nicht im Scope. In Airtable (<b>Builder Hub → Personal access tokens</b>) den Token für die Base <span class="font-mono text-[11px]">' + ZDB_BASE_ID + '</span> auf <b>„All tables in this base"</b> setzen. Danach in den Einstellungen erneut migrieren.</p></div>';
 }
 
+/* ==================== CALLCENTER-OBERFLÄCHE (v2.70.0) =====================
+   Eine Agentur ruft Hausverwaltungen an. Sie arbeitet in Hero, nicht in ihrer
+   eigenen Software — deshalb sieht sie von Hero auch nur diese eine Seite.
+
+   Der Aufbau folgt drei Sätzen:
+   · Tabellarisch, der Reihe nach. Wer sich seine Anrufe aussuchen kann, ruft
+     die einfachen zuerst und lässt den Rest liegen.
+   · Eine Zeile gehört beim Anruf für 20 Minuten einem Anrufer. Sonst rufen
+     zwei Agenten denselben Verwalter an, und das merkt der.
+   · Alles, was jemand über ein Gespräch weiß, gehört in wenige Worte. Ein
+     großes Formular wird nicht ausgefüllt, wenn im Minutentakt telefoniert
+     wird. */
+
+const CC_TABLE = 'Kampagne';
+const CC_TYPES = {
+  firma: 'singleLineText', account_id: 'singleLineText', kampagne: 'singleLineText',
+  ansprechpartner: 'singleLineText', telefon: 'singleLineText', email: 'singleLineText',
+  position: 'singleLineText', ort: 'singleLineText', quelle: 'singleLineText',
+  dedupe_key: 'singleLineText', status: 'singleLineText', versuche: 'singleLineText',
+  letzter_versuch: 'singleLineText', notiz: 'multilineText', bearbeiter: 'singleLineText',
+  gesperrt_bis: 'singleLineText', preisliste_am: 'singleLineText', ticket_id: 'singleLineText',
+  created_at: 'singleLineText', updated_at: 'singleLineText',
+};
+
+const CC_STATUS = {
+  offen:          { label: 'offen',           cls: 'bg-white text-ink-600 border-ink-300' },
+  kein_kontakt:   { label: 'nicht erreicht',  cls: 'bg-amber-50 text-amber-700 border-amber-300' },
+  rueckruf:       { label: 'Rückruf',         cls: 'bg-sky-50 text-sky-700 border-sky-300' },
+  interessiert:   { label: 'interessiert',    cls: 'bg-emerald-50 text-emerald-700 border-emerald-300' },
+  kein_interesse: { label: 'kein Interesse',  cls: 'bg-ink-100 text-ink-500 border-ink-300' },
+  falsch:         { label: 'falsche Nummer',  cls: 'bg-ink-100 text-ink-500 border-ink-300' },
+  sperre:         { label: 'keine Anrufe',    cls: 'bg-rose-100 text-rose-700 border-rose-300' },
+};
+
+let CC_STATE = { leads: [], aktiv: null, laden: false, filter: 'offen', historie: {} };
+
+/** Reine Callcenter-Kraft: sieht nur diese eine Seite. Admins nie. */
+function _ccIstCallcenter() {
+  const u = APP_KEYS.user || {};
+  return String(u.role || '').toLowerCase() === 'callcenter' && !u.is_admin;
+}
+
+/** Telefonnummer auf Ziffern reduzieren — Grundlage der Dublettenprüfung. */
+function _ccNummerNormal(nr) {
+  let n = String(nr || '').replace(/[^\d+]/g, '');
+  if (n.startsWith('+49')) n = '0' + n.slice(3);
+  else if (n.startsWith('0049')) n = '0' + n.slice(4);
+  return n.replace(/\D/g, '');
+}
+
+function _ccDedupeKey(lead) {
+  const mail = String(lead.email || '').trim().toLowerCase();
+  if (mail) return 'm:' + mail;
+  const nr = _ccNummerNormal(lead.telefon);
+  return nr ? 't:' + nr : '';
+}
+
+function _ccStatusVon(r) {
+  const s = String(r.status || '').trim().toLowerCase();
+  return CC_STATUS[s] ? s : 'offen';
+}
+
+/* Herkunft als Stichwort. Nicht Zierde: Bei gemischten Quellen entscheidet sie,
+   wie belastbar die Daten sind und ob überhaupt angerufen werden darf. Ein
+   unbekanntes Kürzel wird angezeigt, wie es dasteht — lieber roh als verschwiegen. */
+const CC_QUELLEN = {
+  'zentrale-db': { label: 'Zentrale DB', cls: 'bg-indigo-50 text-indigo-700 border-indigo-200' },
+  'archiv':      { label: 'Archiv',      cls: 'bg-teal-50 text-teal-700 border-teal-200' },
+  'gekauft':     { label: 'Zugekauft',   cls: 'bg-amber-50 text-amber-800 border-amber-200' },
+  'recherche':   { label: 'Recherche',   cls: 'bg-sky-50 text-sky-700 border-sky-200' },
+  'freshdesk':   { label: 'Freshdesk',   cls: 'bg-blue-50 text-blue-700 border-blue-200' },
+};
+function _ccQuelleBadge(r) {
+  const q = String(r.quelle || '').trim();
+  if (!q) return '<span class="text-[10px] px-1.5 py-0.5 rounded border bg-ink-50 text-ink-400 border-ink-200" title="Herkunft nicht vermerkt">Quelle ?</span>';
+  const t = CC_QUELLEN[q.toLowerCase()];
+  return '<span class="text-[10px] px-1.5 py-0.5 rounded border font-semibold ' + (t ? t.cls : 'bg-ink-50 text-ink-600 border-ink-200') + '" title="Herkunft: ' + escapeAttr(q) + '">' + escapeHtml(t ? t.label : q) + '</span>';
+}
+
+function _ccStatusBadge(r) {
+  const s = _ccStatusVon(r);
+  return '<span class="text-[10px] px-1.5 py-0.5 rounded border font-semibold whitespace-nowrap ' + CC_STATUS[s].cls + '">' + escapeHtml(CC_STATUS[s].label) + '</span>';
+}
+
+/* Die LED. Grau = nichts angefordert, Bernstein = Preisliste angefordert und
+   Ticket im Büro, Grün = tatsächlich versendet. Grün vergibt erst der spätere
+   Generator — eine LED, die Erfolg meldet, bevor etwas raus ist, wäre schlimmer
+   als gar keine. */
+function _ccLed(r) {
+  const versendet = String(r.preisliste_am || '').trim();
+  const angefordert = String(r.ticket_id || '').trim();
+  const farbe = versendet ? 'bg-emerald-500 shadow-emerald-400/60' : (angefordert ? 'bg-amber-400 shadow-amber-300/60' : 'bg-ink-200');
+  const titel = versendet ? 'Preisliste versendet ' + versendet
+    : (angefordert ? 'Preisliste angefordert — Ticket #' + angefordert : 'noch nichts angefordert');
+  return '<span class="inline-block w-2.5 h-2.5 rounded-full ' + farbe + (versendet || angefordert ? ' shadow-[0_0_6px_2px]' : '') + '" title="' + escapeAttr(titel) + '"></span>';
+}
+
+/* Der Mandant der Kampagne. Callcenter-Kräfte haben genau einen freigeschaltet;
+   für Admins gilt die aktuelle Auswahl, sonst der erste. */
+function _ccAccount() {
+  const alle = APP_STATE.accounts || [];
+  if (APP_STATE.currentAccount && APP_STATE.currentAccount !== 'all') {
+    const a = alle.find(x => x.id === APP_STATE.currentAccount);
+    if (a) return a;
+  }
+  return alle[0] || null;
+}
+
+async function _ccLaden() {
+  const acc = _ccAccount();
+  if (!acc) { CC_STATE.leads = []; return; }
+  CC_STATE.laden = true;
+  const rows = await airtableRead(CC_TABLE, { filter: "{account_id}='" + escapeFormula(acc.id) + "'" }).catch(() => []);
+  CC_STATE.leads = (rows || []).map(r => Object.assign({ recordId: r.id }, r.fields || {}));
+  CC_STATE.laden = false;
+}
+
+/* Reihenfolge: offene zuerst, dann Rückrufe, dann alles Erledigte. Innerhalb
+   dessen nach Firma — so bleibt die Liste zwischen zwei Aufrufen stabil, und
+   niemand verliert die Stelle, an der er war. */
+const _CC_RANG = { offen: 0, rueckruf: 1, kein_kontakt: 2, interessiert: 3, kein_interesse: 4, falsch: 5, sperre: 6 };
+function _ccSortiert(liste) {
+  return liste.slice().sort((a, b) => {
+    const ra = _CC_RANG[_ccStatusVon(a)] ?? 9, rb = _CC_RANG[_ccStatusVon(b)] ?? 9;
+    if (ra !== rb) return ra - rb;
+    return String(a.firma || '').localeCompare(String(b.firma || ''), 'de');
+  });
+}
+
+function _ccSichtbar() {
+  let l = CC_STATE.leads;
+  if (CC_STATE.filter === 'offen') l = l.filter(r => ['offen', 'rueckruf', 'kein_kontakt'].includes(_ccStatusVon(r)));
+  else if (CC_STATE.filter === 'interessiert') l = l.filter(r => _ccStatusVon(r) === 'interessiert');
+  if (CC_STATE.quelle) l = l.filter(r => String(r.quelle || '').toLowerCase() === CC_STATE.quelle);
+  const q = String(CC_STATE.suche || '').trim().toLowerCase();
+  if (q) l = l.filter(r => [r.firma, r.ansprechpartner, r.telefon, r.email, r.ort].join(' ').toLowerCase().includes(q));
+  return _ccSortiert(l);
+}
+
+async function renderCallcenterPage() {
+  const host = $('pageContent');
+  if (!host) return;
+  host.innerHTML = '<div class="text-center py-10 text-sm text-ink-500"><span class="spinner inline-block w-4 h-4 border-[2px] text-brand-500"></span> Lade Anrufliste…</div>';
+  await _ccLaden();
+  _ccZeichnen();
+}
+
+function _ccZeichnen() {
+  const host = $('pageContent');
+  if (!host) return;
+  const acc = _ccAccount();
+  const alle = CC_STATE.leads;
+  const offen = alle.filter(r => ['offen', 'rueckruf', 'kein_kontakt'].includes(_ccStatusVon(r))).length;
+  const interessiert = alle.filter(r => _ccStatusVon(r) === 'interessiert').length;
+  const rows = _ccSichtbar();
+
+  const reiter = (key, text, n) => '<button onclick="_ccFilter(\'' + key + '\')" class="px-3 py-1.5 rounded-lg text-[12px] font-bold '
+    + (CC_STATE.filter === key ? 'bg-brand-600 text-white' : 'bg-white border border-ink-200 text-ink-600 hover:bg-ink-50')
+    + '">' + escapeHtml(text) + (n != null ? ' <span class="opacity-70">' + n + '</span>' : '') + '</button>';
+
+  host.innerHTML =
+    '<div class="mb-3">'
+      + '<h2 class="text-lg font-bold text-ink-900">Anrufliste' + (acc ? ' — ' + escapeHtml(acc.name || '') : '') + '</h2>'
+      + '<p class="text-[12px] text-ink-500">Der Reihe nach von oben. Eine Zeile antippen öffnet den Anruf.</p>'
+    + '</div>'
+    + '<div class="flex items-center gap-2 flex-wrap mb-3">'
+      + reiter('offen', 'Zu tun', offen) + reiter('interessiert', 'Interessiert', interessiert) + reiter('alle', 'Alle', alle.length)
+      + _ccQuellenFilter(alle)
+      + '<input type="search" value="' + escapeAttr(CC_STATE.suche || '') + '" oninput="_ccSuche(this.value)" placeholder="Suchen…" class="ml-auto px-3 py-1.5 border border-ink-200 rounded-lg text-sm w-44">'
+      + '<button onclick="renderCallcenterPage()" class="px-3 py-1.5 rounded-lg text-[12px] font-bold bg-white border border-ink-200 text-ink-600 hover:bg-ink-50" title="Liste neu laden"><i data-lucide="refresh-cw" class="w-3.5 h-3.5"></i></button>'
+    + '</div>'
+    + (rows.length ? _ccTabelle(rows) : '<div class="bg-white rounded-xl border border-ink-200 p-8 text-center text-sm text-ink-500">'
+        + (alle.length ? 'Hier ist nichts mehr zu tun.' : 'Noch keine Leads in der Kampagne.'
+           + (APP_KEYS.user?.is_admin ? '<br><button onclick="_ccImportAusZentralerDb(this)" class="mt-3 px-3 py-2 bg-brand-600 hover:bg-brand-700 text-white rounded-lg text-[12px] font-bold">Kontakte aus der zentralen DB übernehmen</button>' : ''))
+        + '</div>')
+    + (APP_KEYS.user?.is_admin && alle.length
+        ? '<div class="mt-3 text-right"><button onclick="_ccImportAusZentralerDb(this)" class="px-3 py-1.5 bg-white border border-ink-200 text-ink-600 hover:bg-ink-50 rounded-lg text-[11px] font-semibold">Weitere Kontakte übernehmen</button></div>'
+        : '');
+  if (window.lucide) lucide.createIcons();
+}
+
+function _ccFilter(k) { CC_STATE.filter = k; CC_STATE.aktiv = null; _ccZeichnen(); }
+function _ccSuche(v) { CC_STATE.suche = v; _ccZeichnen(); }
+function _ccQuelleFilter(v) { CC_STATE.quelle = v || ''; CC_STATE.aktiv = null; _ccZeichnen(); }
+
+/* Auswahl nur aus den Quellen, die tatsächlich vorkommen — eine Liste mit
+   Einträgen, die null Treffer haben, sieht nach Fehler aus. Erscheint erst,
+   wenn es überhaupt mehr als eine Quelle gibt. */
+function _ccQuellenFilter(alle) {
+  const zaehl = {};
+  alle.forEach(r => { const q = String(r.quelle || '').toLowerCase().trim() || '?'; zaehl[q] = (zaehl[q] || 0) + 1; });
+  const keys = Object.keys(zaehl).sort();
+  if (keys.length < 2) return '';
+  return '<select onchange="_ccQuelleFilter(this.value)" class="px-2.5 py-1.5 border border-ink-200 rounded-lg text-[12px] bg-white font-semibold text-ink-700" title="Nach Herkunft filtern">'
+    + '<option value="">Alle Quellen (' + alle.length + ')</option>'
+    + keys.map(q => {
+        const t = CC_QUELLEN[q];
+        const label = t ? t.label : (q === '?' ? 'ohne Angabe' : q);
+        return '<option value="' + escapeAttr(q === '?' ? '' : q) + '"' + (CC_STATE.quelle === q ? ' selected' : '') + '>' + escapeHtml(label) + ' (' + zaehl[q] + ')</option>';
+      }).join('')
+    + '</select>';
+}
+
+function _ccTabelle(rows) {
+  const trs = rows.map(r => {
+    const aktiv = CC_STATE.aktiv === r.recordId;
+    const tel = String(r.telefon || '').trim();
+    return '<tr class="' + (aktiv ? 'bg-brand-50/70' : 'hover:bg-ink-50/70') + ' cursor-pointer align-top" onclick="_ccAktiv(\'' + r.recordId + '\')">'
+      + '<td class="px-2 py-2 border-b border-ink-100">' + _ccLed(r) + '</td>'
+      + '<td class="px-2 py-2 border-b border-ink-100 font-semibold text-ink-900">' + escapeHtml(r.firma || '—')
+        + '<div class="font-normal mt-0.5 flex items-center gap-1 flex-wrap">'
+          + (r.ort ? '<span class="text-[10px] text-ink-400">' + escapeHtml(r.ort) + '</span>' : '')
+          + _ccQuelleBadge(r)
+        + '</div></td>'
+      + '<td class="px-2 py-2 border-b border-ink-100">' + escapeHtml(r.ansprechpartner || '—')
+        + (r.position ? '<div class="text-[10px] text-ink-400">' + escapeHtml(r.position) + '</div>' : '') + '</td>'
+      + '<td class="px-2 py-2 border-b border-ink-100 whitespace-nowrap">'
+        + (tel ? '<a href="tel:' + escapeAttr(tel.replace(/\s/g, '')) + '" onclick="event.stopPropagation()" class="text-brand-700 font-mono text-[13px] font-bold hover:underline">' + escapeHtml(tel) + '</a>' : '<span class="text-ink-300">keine Nummer</span>')
+        + '</td>'
+      + '<td class="px-2 py-2 border-b border-ink-100">' + _ccStatusBadge(r)
+        + (r.versuche && +r.versuche > 0 ? '<div class="text-[10px] text-ink-400 mt-0.5">' + r.versuche + '. Versuch</div>' : '') + '</td>'
+      + '<td class="px-2 py-2 border-b border-ink-100 text-[11px] text-ink-600 max-w-[220px]">' + escapeHtml(String(r.notiz || '').slice(0, 120)) + '</td>'
+      + '</tr>'
+      + (aktiv ? '<tr class="bg-brand-50/70"><td colspan="6" class="px-2 pb-3 border-b border-ink-200">' + _ccArbeitsbereich(r) + '</td></tr>' : '');
+  }).join('');
+
+  return '<div class="bg-white rounded-xl border border-ink-200 overflow-hidden">'
+    + '<div class="overflow-x-auto"><table class="w-full text-[12px] border-collapse">'
+    + '<thead><tr>' + ['', 'Firma', 'Ansprechpartner', 'Telefon', 'Status', 'Notiz']
+        .map(h => '<th class="text-left font-semibold text-ink-600 px-2 py-1.5 border-b border-ink-200 bg-ink-50 whitespace-nowrap">' + h + '</th>').join('')
+    + '</tr></thead><tbody>' + trs + '</tbody></table></div></div>';
+}
+
+/* Der aufgeklappte Bereich unter der aktiven Zeile: Vorgeschichte, die vier
+   Ergebnisknöpfe, das Notizfeld und der Versandknopf. Bewusst wenig — wer im
+   Minutentakt telefoniert, füllt kein Formular aus. */
+function _ccArbeitsbereich(r) {
+  const hist = CC_STATE.historie[r.recordId];
+  const histText = hist === undefined ? '<span class="text-ink-400">Vorgeschichte wird geladen…</span>'
+    : (hist ? escapeHtml(hist) : '<span class="text-ink-400">Kein früherer Schriftwechsel im Archiv.</span>');
+  const erg = (key, text, cls) => '<button onclick="event.stopPropagation(); _ccErgebnis(\'' + r.recordId + '\',\'' + key + '\', this)" class="px-2.5 py-1.5 rounded-lg text-[11px] font-bold ' + cls + '">' + escapeHtml(text) + '</button>';
+  return '<div class="rounded-xl border border-brand-200 bg-white p-3">'
+    + '<p class="text-[11px] text-ink-600 mb-2"><b class="text-ink-800">Vorgeschichte:</b> ' + histText + '</p>'
+    + '<div class="flex flex-wrap items-center gap-1.5 mb-2">'
+      + erg('interessiert',   'Interessiert',    'bg-emerald-600 hover:bg-emerald-700 text-white')
+      + erg('kein_interesse', 'Kein Interesse',  'bg-white border border-ink-300 text-ink-600 hover:bg-ink-50')
+      + erg('kein_kontakt',   'Nicht erreicht',  'bg-white border border-amber-300 text-amber-700 hover:bg-amber-50')
+      + erg('rueckruf',       'Rückruf',         'bg-white border border-sky-300 text-sky-700 hover:bg-sky-50')
+      + erg('falsch',         'Falsche Nummer',  'bg-white border border-ink-300 text-ink-500 hover:bg-ink-50')
+      + erg('sperre',         'Nie wieder anrufen', 'bg-white border border-rose-300 text-rose-700 hover:bg-rose-50')
+    + '</div>'
+    + '<div class="flex items-center gap-2 flex-wrap">'
+      + '<input id="ccNotiz_' + r.recordId + '" value="' + escapeAttr(r.notiz || '') + '" onclick="event.stopPropagation()" onblur="_ccNotizSpeichern(\'' + r.recordId + '\', this.value)" placeholder="Was wurde gesagt? Wenige Worte genügen." class="flex-1 min-w-[200px] px-2.5 py-1.5 border border-ink-300 rounded-lg text-[12px]">'
+      + '<button onclick="event.stopPropagation(); _ccPreislisteAnfordern(\'' + r.recordId + '\', this)" class="px-3 py-1.5 rounded-lg text-[12px] font-bold bg-brand-600 hover:bg-brand-700 text-white inline-flex items-center gap-1.5"><i data-lucide="mail" class="w-3.5 h-3.5"></i> Preisliste senden</button>'
+    + '</div></div>';
+}
+
+async function _ccAktiv(recordId) {
+  CC_STATE.aktiv = (CC_STATE.aktiv === recordId) ? null : recordId;
+  _ccZeichnen();
+  if (CC_STATE.aktiv && CC_STATE.historie[recordId] === undefined) {
+    const r = CC_STATE.leads.find(x => x.recordId === recordId);
+    CC_STATE.historie[recordId] = await _ccHistorie(r).catch(() => '');
+    if (CC_STATE.aktiv === recordId) _ccZeichnen();
+  }
+}
+
+/* Vorgeschichte aus dem Archiv — ohne KI. Zwei Sätze aus Zahlen und Daten sind
+   sofort da und kosten nichts; bei hunderten Leads wäre alles andere unbezahlbar
+   und zu langsam für ein Telefonat, das gerade läuft. */
+async function _ccHistorie(r) {
+  if (!r || !r.email) return '';
+  const acc = _ccAccount();
+  const key = APP_KEYS.user?.api_key;
+  const slug = acc ? _archivSlugFuer(acc.id) : null;
+  if (!key || !slug) return '';
+  const p = new URLSearchParams({ email: String(r.email).toLowerCase(), mandant: slug, limit: '20' });
+  const res = await fetch(ARCHIV_URL + '/historie?' + p.toString(), { headers: { 'X-Hero-Key': key } });
+  if (!res.ok) return '';
+  const d = await res.json().catch(() => ({}));
+  const t = d.tickets || [];
+  if (!t.length) return '';
+  const letzte = t[0];
+  const jahr = String(letzte.erstellt_am || '').slice(0, 7).split('-').reverse().join('/');
+  return t.length + (t.length === 1 ? ' Vorgang' : ' Vorgänge') + ', zuletzt ' + jahr + ': ' + String(letzte.betreff || '').slice(0, 80);
+}
+
+async function _ccSpeichern(recordId, patch) {
+  const r = CC_STATE.leads.find(x => x.recordId === recordId);
+  if (!r) return;
+  Object.assign(r, patch);
+  await airtableUpdateWithAutoField(CC_TABLE, recordId, Object.assign({ updated_at: nowIso() }, patch), CC_TYPES);
+}
+
+async function _ccErgebnis(recordId, status, btn) {
+  const r = CC_STATE.leads.find(x => x.recordId === recordId);
+  if (!r) return;
+  if (status === 'sperre' && !confirm('„' + (r.firma || r.ansprechpartner || 'Dieser Kontakt') + '" dauerhaft von Anrufen ausschließen?\n\nDas gilt für alle künftigen Kampagnen und lässt sich hier nicht rückgängig machen.')) return;
+  if (btn) setBusy(btn, true);
+  const patch = { status, letzter_versuch: nowIso(), bearbeiter: (APP_KEYS.user && APP_KEYS.user.name) || '' };
+  if (['kein_kontakt', 'rueckruf'].includes(status)) patch.versuche = String((parseInt(r.versuche, 10) || 0) + 1);
+  try {
+    await _ccSpeichern(recordId, patch);
+    // Nach einem abschließenden Ergebnis gleich weiter — die Liste soll sich
+    // von oben nach unten leeren, ohne dass jemand suchen muss.
+    if (['interessiert', 'kein_interesse', 'falsch', 'sperre'].includes(status)) CC_STATE.aktiv = null;
+    _ccZeichnen();
+  } catch (e) {
+    if (btn) setBusy(btn, false);
+    toast('Konnte nicht gespeichert werden: ' + (e.message || e), 'error', 8000);
+  }
+}
+
+async function _ccNotizSpeichern(recordId, wert) {
+  const r = CC_STATE.leads.find(x => x.recordId === recordId);
+  if (!r || String(r.notiz || '') === String(wert || '')) return;
+  try { await _ccSpeichern(recordId, { notiz: String(wert || '').slice(0, 500) }); }
+  catch (e) { toast('Notiz nicht gespeichert: ' + (e.message || e), 'error', 7000); }
+}
+
+/* Preisliste anfordern. Der Generator kommt später — bis dahin legt der Knopf
+   ein Freshdesk-Ticket im Büro an, mit allem, was zum Versenden nötig ist.
+   Damit ist der Weg von Anfang an lückenlos: Der Anrufer klickt einmal, und
+   niemand muss abends eine Liste durchgehen, wer noch Post bekommt. */
+async function _ccPreislisteAnfordern(recordId, btn) {
+  const r = CC_STATE.leads.find(x => x.recordId === recordId);
+  const acc = _ccAccount();
+  if (!r || !acc) return;
+  if (!String(r.email || '').trim()) return toast('Ohne E-Mail-Adresse lässt sich nichts senden — bitte im Gespräch erfragen und eintragen.', 'warn', 7000);
+  if (btn) setBusy(btn, true, 'Melde an…');
+  try {
+    const betreff = 'Preisliste senden: ' + (r.firma || r.ansprechpartner || r.email);
+    const text = [
+      'Aus der Anrufliste angefordert.',
+      '',
+      'Firma: ' + (r.firma || '—'),
+      'Ansprechpartner: ' + (r.ansprechpartner || '—') + (r.position ? ' (' + r.position + ')' : ''),
+      'E-Mail: ' + r.email,
+      'Telefon: ' + (r.telefon || '—'),
+      'Notiz aus dem Gespräch: ' + (r.notiz || '—'),
+      '',
+      'Angefordert von ' + ((APP_KEYS.user && APP_KEYS.user.name) || '?') + ' am ' + new Date().toLocaleString('de-DE') + '.',
+    ].join('\n');
+    const erstellt = await proxyJson('/freshdesk/' + encodeURIComponent(acc.id) + '/api/v2/tickets', {
+      method: 'POST',
+      body: JSON.stringify({
+        subject: betreff,
+        description: textToHtmlForFreshdesk(text),
+        email: r.email,
+        name: r.ansprechpartner || r.firma || undefined,
+        priority: 1, status: 2,
+        tags: ['Kaltakquise', 'Preisliste'],
+      }),
+    });
+    if (!erstellt || !erstellt.id) throw new Error('Freshdesk hat keine Ticketnummer zurückgegeben');
+    await _ccSpeichern(recordId, { ticket_id: String(erstellt.id), status: 'interessiert', letzter_versuch: nowIso() });
+    if (btn) setBusy(btn, false);
+    _ccZeichnen();
+    toast('Vorgemerkt — Ticket #' + erstellt.id + ' im Büro angelegt.', 'success', 5000);
+  } catch (e) {
+    if (btn) setBusy(btn, false);
+    toast('Anforderung fehlgeschlagen: ' + (e.message || e), 'error', 9000);
+  }
+}
+
+/* Leads aus der zentralen DB übernehmen — nur für Admins, nicht für die
+   Agentur. Dubletten werden über E-Mail bzw. normalisierte Nummer erkannt;
+   ohne beides kann ein Datensatz nicht sauber unterschieden werden und wird
+   übersprungen, statt die Liste mit Unbrauchbarem zu füllen. */
+async function _ccImportAusZentralerDb(btn) {
+  const acc = _ccAccount();
+  if (!acc) return;
+  if (!confirm('Kontakte aus der zentralen DB von ' + (acc.name || '') + ' in die Anrufliste übernehmen?\n\nBereits vorhandene werden übersprungen.')) return;
+  setBusy(btn, true, 'Lese…');
+  try {
+    const namen = _zdbTableNames(acc);
+    const kontakte = await _zdbRead(namen.kontakt, {});
+    const firmen = await _zdbRead(namen.firma, {});
+    const firmaName = {}; (firmen || []).forEach(f => { firmaName[f.id] = (f.fields && f.fields.name) || ''; });
+    const vorhanden = new Set(CC_STATE.leads.map(l => l.dedupe_key).filter(Boolean));
+    const jetzt = nowIso();
+    let neu = 0, doppelt = 0, unbrauchbar = 0;
+    for (const k of (kontakte || [])) {
+      const f = k.fields || {};
+      const lead = {
+        firma: ((f.firma || []).map(id => firmaName[id]).filter(Boolean))[0] || f.name || '',
+        ansprechpartner: f.name || [f.vorname, f.nachname].filter(Boolean).join(' '),
+        telefon: f.telefon || f.mobil || '', email: f.email || '', position: f.position || '',
+      };
+      const key = _ccDedupeKey(lead);
+      if (!key) { unbrauchbar++; continue; }
+      if (vorhanden.has(key)) { doppelt++; continue; }
+      vorhanden.add(key);
+      await airtableWriteWithAutoField(CC_TABLE, Object.assign({}, lead, {
+        account_id: acc.id, kampagne: 'Sonderkonditionen', quelle: 'zentrale-db',
+        dedupe_key: key, status: 'offen', versuche: '0', created_at: jetzt, updated_at: jetzt,
+      }), CC_TYPES);
+      neu++;
+      setBusy(btn, true, neu + ' neu…');
+    }
+    setBusy(btn, false);
+    toast(neu + ' übernommen · ' + doppelt + ' schon vorhanden · ' + unbrauchbar + ' ohne Nummer und Adresse übersprungen', 'success', 8000);
+    renderCallcenterPage();
+  } catch (e) {
+    setBusy(btn, false);
+    toast('Übernahme fehlgeschlagen: ' + (e.message || e), 'error', 9000);
+  }
+}
+
 const CRAWLED_TABLE = 'CrawledContacts';
 const CONTACT_TYPES_TABLE = 'ContactTypes';
 /* === Freigabe-Workflow (📥 Korb → 🗄 Zentrale DB) ==========================
@@ -47390,6 +47837,16 @@ async function showApp() {
   try { localStorage.setItem('fdh_tickets_view_mode', 'list'); } catch (_) {}
   TICKETS_STACK_FULLSCREEN = false;
   document.body.classList.remove('fullscreen-stack');
+  // v2.70.0: Callcenter-Kräfte sehen ausschließlich die Anrufliste. Die Sperre
+  // ist eine Sichtsperre, keine Sicherheitsgrenze — sie hält niemanden auf, der
+  // die Konsole öffnet. Sie hält aber die Oberfläche frei von allem, was eine
+  // Agentur weder braucht noch versehentlich anfassen soll.
+  if (_ccIstCallcenter()) {
+    document.body.classList.add('nur-callcenter');
+    navTo('callcenter');
+    checkForUpdate(false);
+    return;
+  }
   navTo('tickets');
   // Deep-Link: wenn URL-Hash auf ein Ticket zeigt, direkt öffnen
   handleDeepLink();
