@@ -808,7 +808,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.69.3';
+const APP_VERSION = 'v2.69.4';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -13175,6 +13175,9 @@ function openCardActionsSheet(accountId, ticketId) {
         </div>
         <div class="overflow-y-auto">
           ${row('ticket',           'brand',   'Ticket öffnen',                  `closeCardActionsSheet(); openTicketDetail('${escapeAttr(accountId)}', ${ticketId})`, 'Volles Ticket-Detail anzeigen')}
+          ${(() => { const _n = _fdhKiTagName(accountId, ticketId); return _n
+            ? row('play', 'violet', _n + ' anstoßen', `closeCardActionsSheet(); _fdhKiAnstossen('${escapeAttr(accountId)}', ${ticketId}, null)`, 'Auftrag in den Briefkasten legen — ohne erneute Zuweisung')
+            : ''; })()}
           ${row('sparkles',         'purple',  'KI-Zusammenfassung',             `closeCardActionsSheet(); openTicketSummaryModal('${escapeAttr(accountId)}', ${ticketId})`, 'Anliegen + nächster Schritt')}
           ${row('mic',              'purple',  'KI-Assistent',                   `closeCardActionsSheet(); openAssistantModal('${escapeAttr(accountId)}', ${ticketId})`, 'Antworten / Zuweisen / Notizen per Sprache')}
           ${row('sticky-note',      'amber',   'Schnell-Notiz hinzufügen',       `closeCardActionsSheet(); openQuickNoteSheet('${escapeAttr(accountId)}', ${ticketId})`, 'Interne Anmerkung für dich/dein Team')}
@@ -14037,6 +14040,11 @@ function _ticketActionBarIcons(accountId, ticketId) {
     btn('check-circle-2', 'emerald', 'Ticket schließen (Status: Geschlossen)',                  `ticketActionClose('${accIdAttr}', ${ticketId}, this)`),
     btn('ban',            'red',     'Als SPAM markieren / in Papierkorb',                     `ticketActionSpam('${accIdAttr}', ${ticketId}, this)`),
     `<span class="shrink-0 w-px h-5 bg-ink-200 mx-0.5"></span>`,
+    // v2.69.4: Anstoß direkt aus der Ticketleiste — nur sichtbar, wenn das
+    // Ticket überhaupt einem KI-Mitarbeiter gehört.
+    (_fdhKiTagName(accountId, ticketId)
+      ? btn('play', 'violet', _fdhKiTagName(accountId, ticketId) + ' anstoßen (Auftrag in den Briefkasten)', `_fdhKiAnstossen('${accIdAttr}', ${ticketId}, this)`)
+      : ''),
     btn('sparkles',       'purple',  'KI-Zusammenfassung',                                     `openTicketSummaryModal('${accIdAttr}', ${ticketId})`),
     btn('mic',            'purple',  'KI-Assistent (Antworten/Notizen/Zuweisen per Sprache)',  `openAssistantModal('${accIdAttr}', ${ticketId})`),
     btn('sticky-note',    'amber',   'Schnell-Notiz hinzufügen',                               `openQuickNoteSheet('${accIdAttr}', ${ticketId})`),
@@ -15475,7 +15483,7 @@ function renderAssigneeList(filter) {
   $('assigneeList').innerHTML = `
     ${_kiName && !f ? `
       <div class="px-4 py-3 border-b border-ink-100 bg-violet-50/60">
-        <button onclick="_fdhKiAnstossen(this)" class="w-full px-3 py-2.5 rounded-lg bg-violet-600 hover:bg-violet-700 text-white text-sm font-bold flex items-center justify-center gap-2">
+        <button onclick="_fdhKiAnstossen(undefined, undefined, this)" class="w-full px-3 py-2.5 rounded-lg bg-violet-600 hover:bg-violet-700 text-white text-sm font-bold flex items-center justify-center gap-2">
           <i data-lucide="play" class="w-4 h-4"></i> ${escapeHtml(_kiName)} jetzt anstoßen
         </button>
         <p class="text-[10px] text-violet-700 mt-1.5 text-center">Legt einen Auftrag in den Briefkasten. Zuweisung und Ticket bleiben unverändert.</p>
@@ -15601,15 +15609,22 @@ function refreshTicketsListFromCache() {
 
 /** Name des KI-Mitarbeiters am Ticket, aus dem KI:-Tag. Null, wenn keiner. */
 function _fdhKiTagName(accountId, ticketId) {
+  // Die Ticketnummer kommt je nach Aufrufer als Zahl oder als Text — der
+  // Cache-Vergleich ist streng, ohne das findet er nichts.
+  ticketId = parseInt(ticketId, 10);
+  if (!accountId || !ticketId) return null;
   const t = _fdhTicketAusCache(accountId, ticketId) ||
     ((CURRENT_TICKET && CURRENT_TICKET.id === ticketId) ? CURRENT_TICKET : null);
   const tag = (t && Array.isArray(t.tags) ? t.tags : []).find(x => String(x).startsWith('KI:'));
   return tag ? String(tag).slice(3) : null;
 }
 
-async function _fdhKiAnstossen(btn) {
-  if (!ASSIGNEE_CTX) return;
-  const { accountId, ticketId } = ASSIGNEE_CTX;
+async function _fdhKiAnstossen(accountId, ticketId, btn) {
+  // Ohne Argumente aus dem Zuweisen-Dialog heraus — mit Argumenten von überall
+  // sonst. Der Anstoß ist nichts, wofür man erst einen Dialog öffnen sollte.
+  if (accountId === undefined && ASSIGNEE_CTX) ({ accountId, ticketId } = ASSIGNEE_CTX);
+  if (!accountId || !ticketId) return;
+  ticketId = parseInt(ticketId, 10);
   const name = _fdhKiTagName(accountId, ticketId);
   if (!name) return toast('Dieses Ticket ist keinem KI-Mitarbeiter zugewiesen.', 'warn', 5000);
   const acc = (APP_STATE.accounts || []).find(a => a.id === accountId) || null;
@@ -15628,7 +15643,7 @@ async function _fdhKiAnstossen(btn) {
     art: 'zuweisung',
   }, true).catch(() => false);
   if (btn) setBusy(btn, false);
-  closeAssigneeModal();
+  if (ASSIGNEE_CTX) closeAssigneeModal();
   // _fdhWeckSenden meldet nur den direkten Weckruf. Der Briefkasten ist der
   // verlässliche Teil — deshalb kein „fehlgeschlagen", wenn bloß die
   // Steuerzentrale gerade nicht läuft.
