@@ -808,7 +808,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.69.4';
+const APP_VERSION = 'v2.69.5';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -40838,10 +40838,38 @@ async function _zdbUpsertKontakt(names, data, firmaRecId) {
 
 /* Öffentliche Speicher-API: wird ZUSÄTZLICH an bestehenden Speicherpunkten aufgerufen.
    Non-blocking gedacht — Fehler dürfen die bestehenden Flows NIE kippen. */
+/* v2.69.5: Wörter, die aus Signaturen und Ticketköpfen als „Firma" ankommen,
+   in Wahrheit aber die ROLLE der Person benennen. Aus „Eigentümer" wurde bisher
+   ein Firmensatz, an dem später wildfremde Leute hängen — er sagt nichts aus
+   und verbindet Kontakte, die nichts miteinander zu tun haben.
+
+   Bewusst nur exakte Treffer: „Hausverwaltung Meier GmbH" ist eine echte Firma,
+   das nackte „Hausverwaltung" nicht. */
+const _ZDB_ROLLENWOERTER = new Set([
+  'eigentümer', 'eigentuemer', 'eigentümerin', 'eigentuemerin', 'eigentümergemeinschaft',
+  'betreiber', 'betreiberin', 'mieter', 'mieterin', 'vermieter', 'vermieterin',
+  'verwalter', 'verwalterin', 'verwaltung', 'hausverwaltung', 'hausmeister',
+  'bewohner', 'anwohner', 'bauherr', 'bauherrin', 'privat', 'privatperson',
+  'kunde', 'kundin', 'interessent', 'interessentin', 'weg', 'wohnungseigentümergemeinschaft',
+]);
+
+function _zdbIstRolleKeineFirma(name) {
+  const n = String(name || '').trim().toLowerCase().replace(/[.,;:]+$/, '');
+  return !!n && _ZDB_ROLLENWOERTER.has(n);
+}
+
 async function zdbSaveFirmaKontakt(account, firmaData, kontaktData, opts) {
   if (!account) return null;
   // Nur die Freigabe im Korb darf schreiben — alles andere läuft ins Leere.
   if (ZDB_AUTOSAVE === false && !(opts && opts.erzwingen)) return null;
+  // Rollenwort statt Firmenname: Die Angabe geht nicht verloren, sie landet
+  // nur dort, wo sie hingehört — bei der Person, nicht als eigene Firma.
+  if (firmaData && _zdbIstRolleKeineFirma(firmaData.name) && !firmaData.freshdesk_company_id) {
+    if (kontaktData && !String(kontaktData.position || '').trim()) {
+      kontaktData = Object.assign({}, kontaktData, { position: String(firmaData.name).trim() });
+    }
+    firmaData = null;
+  }
   try {
     const names = await _zdbEnsureTables(account);
     let firmaId = null;
@@ -42382,7 +42410,12 @@ async function _korbUebernehmen(i, btn) {
     await airtableUpdateWithAutoField(CRAWLED_TABLE, r.recordId,
       { zdb_status: stempel, hidden: '', updated_at: nowIso() }, CRAWLED_TYPES_MAP);
     r.zdb_status = stempel; r.hidden = '';
-    toast('In die zentrale DB übernommen', 'success', 3500);
+    // Sichtbar machen, dass die „Firma" als Rolle behandelt wurde — sonst sucht
+    // man den Firmensatz und findet ihn nicht.
+    toast(_zdbIstRolleKeineFirma(r.firma)
+      ? 'Übernommen — „' + String(r.firma).trim() + '" ist eine Rolle, keine Firma: als Position beim Kontakt hinterlegt.'
+      : 'In die zentrale DB übernommen',
+      'success', _zdbIstRolleKeineFirma(r.firma) ? 7000 : 3500);
     _renderCrawledContacts();
   } catch (e) {
     toast('Übernahme fehlgeschlagen: ' + e.message, 'error', 7000);
