@@ -820,7 +820,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.70.1';
+const APP_VERSION = 'v2.70.2';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -42083,11 +42083,25 @@ function _ccLed(r) {
    für Admins gilt die aktuelle Auswahl, sonst der erste. */
 function _ccAccount() {
   const alle = APP_STATE.accounts || [];
+  // Eigene Auswahl der Anrufliste zuerst — eine Kampagne gehört zu genau einem
+  // Mandanten, und der soll nicht mit dem Ticketfilter mitwandern.
+  if (CC_STATE.accountId) {
+    const a = alle.find(x => x.id === CC_STATE.accountId);
+    if (a) return a;
+  }
   if (APP_STATE.currentAccount && APP_STATE.currentAccount !== 'all') {
     const a = alle.find(x => x.id === APP_STATE.currentAccount);
     if (a) return a;
   }
   return alle[0] || null;
+}
+
+async function _ccMandantWechseln(id) {
+  CC_STATE.accountId = id;
+  CC_STATE.aktiv = null;
+  CC_STATE.historie = {};
+  try { localStorage.setItem('fdh_cc_account', id || ''); } catch (_) {}
+  await renderCallcenterPage();
 }
 
 async function _ccLaden() {
@@ -42124,6 +42138,14 @@ function _ccSichtbar() {
 async function renderCallcenterPage() {
   const host = $('pageContent');
   if (!host) return;
+  // Zuletzt gewählten Mandanten wiederherstellen — wer eine Kampagne abarbeitet,
+  // will nach jedem Neuladen dort weitermachen und nicht beim ersten Mandanten.
+  if (!CC_STATE.accountId) {
+    try {
+      const g = localStorage.getItem('fdh_cc_account');
+      if (g && (APP_STATE.accounts || []).some(a => a.id === g)) CC_STATE.accountId = g;
+    } catch (_) {}
+  }
   host.innerHTML = '<div class="text-center py-10 text-sm text-ink-500"><span class="spinner inline-block w-4 h-4 border-[2px] text-brand-500"></span> Lade Anrufliste…</div>';
   await _ccLaden();
   _ccZeichnen();
@@ -42143,9 +42165,12 @@ function _ccZeichnen() {
     + '">' + escapeHtml(text) + (n != null ? ' <span class="opacity-70">' + n + '</span>' : '') + '</button>';
 
   host.innerHTML =
-    '<div class="mb-3">'
-      + '<h2 class="text-lg font-bold text-ink-900">Anrufliste' + (acc ? ' — ' + escapeHtml(acc.name || '') : '') + '</h2>'
-      + '<p class="text-[12px] text-ink-500">Der Reihe nach von oben. Eine Zeile antippen öffnet den Anruf.</p>'
+    '<div class="mb-3 flex items-start gap-3 flex-wrap">'
+      + '<div class="flex-1 min-w-[220px]">'
+        + '<h2 class="text-lg font-bold text-ink-900">Anrufliste</h2>'
+        + '<p class="text-[12px] text-ink-500">Der Reihe nach von oben. Eine Zeile antippen öffnet den Anruf.</p>'
+      + '</div>'
+      + _ccMandantWahl(acc)
     + '</div>'
     + '<div class="flex items-center gap-2 flex-wrap mb-3">'
       + reiter('offen', 'Zu tun', offen) + reiter('interessiert', 'Interessiert', interessiert) + reiter('alle', 'Alle', alle.length)
@@ -42161,6 +42186,19 @@ function _ccZeichnen() {
         ? '<div class="mt-3 text-right"><button onclick="_ccImportAusZentralerDb(this)" class="px-3 py-1.5 bg-white border border-ink-200 text-ink-600 hover:bg-ink-50 rounded-lg text-[11px] font-semibold">Weitere Kontakte übernehmen</button></div>'
         : '');
   if (window.lucide) lucide.createIcons();
+}
+
+/* Mandantenwahl. Jede Kampagne gehört zu genau einem Mandanten — deshalb keine
+   Sammelansicht „alle": Sie würde Leads mischen, deren Anrufe verschiedene
+   Firmen betreffen, und der Anrufer sagte am Telefon den falschen Namen. */
+function _ccMandantWahl(aktuell) {
+  const alle = APP_STATE.accounts || [];
+  if (alle.length < 2) {
+    return aktuell ? '<span class="text-[12px] font-bold text-ink-700 px-3 py-2 bg-white border border-ink-200 rounded-lg">' + escapeHtml(aktuell.name || '') + '</span>' : '';
+  }
+  return '<select onchange="_ccMandantWechseln(this.value)" class="px-3 py-2 border border-ink-200 rounded-lg text-sm font-bold text-ink-800 bg-white" title="Kampagne welches Mandanten?">'
+    + alle.map(a => '<option value="' + escapeAttr(a.id) + '"' + (aktuell && a.id === aktuell.id ? ' selected' : '') + '>' + escapeHtml(a.name || a.id) + '</option>').join('')
+    + '</select>';
 }
 
 function _ccFilter(k) { CC_STATE.filter = k; CC_STATE.aktiv = null; _ccZeichnen(); }
