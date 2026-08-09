@@ -692,6 +692,9 @@
     <button onclick="navTo('users'); closeMenu();" id="menuUsersBtn" class="hidden w-full text-left px-3 py-2 text-sm hover:bg-ink-50 flex items-center gap-2">
       <i data-lucide="users" class="w-4 h-4 text-ink-500"></i> Benutzer
     </button>
+    <button onclick="navTo('callcenter'); closeMenu();" class="w-full text-left px-3 py-2 text-sm hover:bg-ink-50 flex items-center gap-2">
+      <i data-lucide="phone-call" class="w-4 h-4 text-brand-600"></i> Anrufliste
+    </button>
     <button onclick="navTo('rules'); closeMenu();" class="w-full text-left px-3 py-2 text-sm hover:bg-ink-50 flex items-center gap-2">
       <i data-lucide="sparkles" class="w-4 h-4 text-purple-500"></i> KI-Regeln
     </button>
@@ -817,7 +820,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.70.0';
+const APP_VERSION = 'v2.70.1';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
