@@ -824,7 +824,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.73.0';
+const APP_VERSION = 'v2.73.1';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -42417,6 +42417,7 @@ function _ccZeichnen() {
       + (ohneNr ? '<label class="inline-flex items-center gap-1.5 text-[11px] text-ink-600 cursor-pointer" title="' + ohneNr + ' Kontakte haben keine brauchbare Nummer"><input type="checkbox"' + (CC_STATE.nurMitNummer ? ' checked' : '') + ' onchange="_ccNummerFilter(this.checked)"> nur mit Nummer <span class="text-ink-400">(' + ohneNr + ' ohne)</span></label>' : '')
       + (versteckt ? '<label class="inline-flex items-center gap-1.5 text-[11px] text-ink-600 cursor-pointer"><input type="checkbox"' + (CC_STATE.zeigeVersteckte ? ' checked' : '') + ' onchange="_ccVersteckteFilter(this.checked)"> ausgeblendete zeigen <span class="text-ink-400">(' + versteckt + ')</span></label>' : '')
       + '<input type="search" value="' + escapeAttr(CC_STATE.suche || '') + '" oninput="_ccSuche(this.value)" placeholder="Suchen…" class="ml-auto px-3 py-1.5 border border-ink-200 rounded-lg text-sm w-44">'
+      + '<button onclick="_ccDashboardOeffnen()" class="px-3 py-1.5 rounded-lg text-[12px] font-bold bg-white border border-ink-200 text-ink-600 hover:bg-ink-50 inline-flex items-center gap-1" title="Wie läuft die Kampagne?"><i data-lucide="bar-chart-3" class="w-3.5 h-3.5"></i> Statistik</button>'
       + '<button onclick="renderCallcenterPage()" class="px-3 py-1.5 rounded-lg text-[12px] font-bold bg-white border border-ink-200 text-ink-600 hover:bg-ink-50" title="Liste neu laden"><i data-lucide="refresh-cw" class="w-3.5 h-3.5"></i></button>'
       + (APP_KEYS.user?.is_admin
           ? '<button onclick="_ccDublettenPruefen(this)" class="px-3 py-1.5 rounded-lg text-[12px] font-bold bg-white border border-ink-200 text-ink-600 hover:bg-ink-50" title="Dubletten, Werbesperre und Bestandskunden prüfen"><i data-lucide="search-check" class="w-3.5 h-3.5"></i></button>'
@@ -43506,6 +43507,133 @@ async function _ccDublettenPruefen(btn) {
     toast('Prüfung fehlgeschlagen: ' + (e.message || e), 'error', 9000);
   }
 }
+
+/* ==================== DASHBOARD (v2.73.1) ==============================
+   Was eine Telefonkampagne wirklich beantworten muss, ist nicht „wie viele
+   Anrufe", sondern: Trägt sie? Deshalb stehen die Quoten oben und die
+   absoluten Zahlen darunter — und je Quelle nebeneinander, weil sich erst dort
+   zeigt, ob eine zugekaufte Liste ihr Geld wert war. */
+
+function _ccKennzahlen(leads) {
+  const z = { gesamt: leads.length, offen: 0, versucht: 0, erreicht: 0, interessiert: 0,
+              kein: 0, gesperrt: 0, falsch: 0, versendet: 0, ohneNr: 0, bestand: 0, anrufe: 0 };
+  for (const r of leads) {
+    const st = _ccStatusVon(r);
+    z.anrufe += parseInt(r.versuche, 10) || 0;
+    if (_ccNummerNormal(r.telefon).length < 6) z.ohneNr++;
+    if (String(r.bestand || '') === 'ja') z.bestand++;
+    if (String(r.preisliste_am || '').trim()) z.versendet++;
+    if (st === 'offen') z.offen++;
+    if (['interessiert', 'kein_interesse', 'sperre'].includes(st)) { z.erreicht++; z.versucht++; }
+    else if (['kein_kontakt', 'rueckruf', 'falsch'].includes(st)) z.versucht++;
+    if (st === 'interessiert') z.interessiert++;
+    if (st === 'kein_interesse') z.kein++;
+    if (st === 'sperre') z.gesperrt++;
+    if (st === 'falsch') z.falsch++;
+  }
+  return z;
+}
+
+function _ccProzent(a, b) { return b ? Math.round((a / b) * 100) : 0; }
+
+function _ccKachel(wert, label, farbe, hinweis) {
+  return '<div class="rounded-xl border border-ink-200 bg-white p-3 text-center" title="' + escapeAttr(hinweis || '') + '">'
+    + '<div class="text-2xl font-bold ' + (farbe || 'text-ink-900') + '">' + wert + '</div>'
+    + '<div class="text-[11px] text-ink-500 mt-0.5">' + escapeHtml(label) + '</div></div>';
+}
+
+function _ccBalken(anteil, farbe) {
+  return '<div class="h-1.5 rounded-full bg-ink-100 overflow-hidden"><div class="h-full ' + (farbe || 'bg-brand-500') + '" style="width:' + Math.min(100, anteil) + '%"></div></div>';
+}
+
+/** Gruppierte Auswertung — je Quelle bzw. je Anrufer. */
+function _ccGruppenTabelle(leads, feld, titel, leerText) {
+  const gruppen = {};
+  leads.forEach(r => {
+    const k = String(r[feld] || '').trim() || '—';
+    (gruppen[k] = gruppen[k] || []).push(r);
+  });
+  const keys = Object.keys(gruppen).sort((a, b) => gruppen[b].length - gruppen[a].length);
+  if (!keys.length) return '';
+  const zeilen = keys.map(k => {
+    const z = _ccKennzahlen(gruppen[k]);
+    const quote = _ccProzent(z.interessiert, z.erreicht);
+    return '<tr class="hover:bg-ink-50/60">'
+      + '<td class="px-2 py-1.5 border-b border-ink-100 text-[12px] font-semibold text-ink-800 max-w-[220px] truncate">' + escapeHtml(k === '—' ? leerText : k) + '</td>'
+      + '<td class="px-2 py-1.5 border-b border-ink-100 text-[12px] text-right">' + z.gesamt + '</td>'
+      + '<td class="px-2 py-1.5 border-b border-ink-100 text-[12px] text-right">' + z.erreicht + '</td>'
+      + '<td class="px-2 py-1.5 border-b border-ink-100 text-[12px] text-right font-bold text-emerald-700">' + z.interessiert + '</td>'
+      + '<td class="px-2 py-1.5 border-b border-ink-100 w-28">'
+        // Quote nur zeigen, wenn genug erreicht wurde. Bei drei Gesprächen sagt
+        // „33 %" nichts und verleitet doch dazu, eine Liste abzuschreiben.
+        + (z.erreicht >= 5
+            ? '<div class="flex items-center gap-1.5"><span class="text-[11px] font-bold text-ink-700 w-8 text-right">' + quote + '%</span>' + _ccBalken(quote, 'bg-emerald-500') + '</div>'
+            : '<span class="text-[10px] text-ink-400">zu wenig Daten</span>')
+        + '</td></tr>';
+  }).join('');
+  return '<div class="bg-white rounded-xl border border-ink-200 overflow-hidden">'
+    + '<p class="px-3 py-2 text-[12px] font-bold text-ink-800 bg-ink-50 border-b border-ink-200">' + escapeHtml(titel) + '</p>'
+    + '<div class="overflow-x-auto"><table class="w-full border-collapse">'
+    + '<thead><tr>' + ['', 'Leads', 'erreicht', 'interessiert', 'Quote'].map((h, i) =>
+        '<th class="text-[10px] uppercase tracking-wide font-bold text-ink-500 px-2 py-1.5 border-b border-ink-200 ' + (i ? 'text-right' : 'text-left') + '">' + h + '</th>').join('')
+    + '</tr></thead><tbody>' + zeilen + '</tbody></table></div></div>';
+}
+
+function _ccDashboardOeffnen() {
+  const leads = _ccKampagnenLeads().filter(r => String(r.versteckt || '') !== 'ja');
+  const z = _ccKennzahlen(leads);
+  const acc = _ccAccount();
+  const erreichbar = z.gesamt - z.ohneNr;
+  const fortschritt = _ccProzent(z.versucht, erreichbar);
+
+  let host = document.getElementById('ccDashHost');
+  if (!host) { host = document.createElement('div'); host.id = 'ccDashHost'; document.body.appendChild(host); }
+  host.innerHTML =
+    '<div class="fixed inset-0 z-[80] bg-black/40 flex items-start justify-center overflow-y-auto p-4" onclick="if(event.target===this)_ccDashboardSchliessen()">'
+      + '<div class="bg-white rounded-2xl shadow-xl w-full max-w-3xl my-8">'
+        + '<div class="flex items-center justify-between p-4 border-b border-ink-200">'
+          + '<div><h3 class="font-bold text-ink-900">Kampagne „' + escapeHtml(CC_STATE.kampagne || CC_KAMPAGNE_STANDARD) + '"</h3>'
+          + '<p class="text-[11px] text-ink-500">' + escapeHtml(acc ? (acc.name || '') : '') + '</p></div>'
+          + '<button onclick="_ccDashboardSchliessen()" class="text-ink-400 hover:text-ink-700"><i data-lucide="x" class="w-5 h-5"></i></button></div>'
+        + '<div class="p-4 space-y-4">'
+
+          + '<div class="rounded-xl border border-brand-200 bg-brand-50/50 p-3">'
+            + '<div class="flex items-baseline justify-between mb-1.5">'
+              + '<span class="text-[12px] font-bold text-ink-800">Abgearbeitet</span>'
+              + '<span class="text-[12px] text-ink-600">' + z.versucht + ' von ' + erreichbar + ' anrufbaren · ' + fortschritt + '%</span>'
+            + '</div>' + _ccBalken(fortschritt)
+            + (z.ohneNr ? '<p class="text-[11px] text-ink-500 mt-1.5">' + z.ohneNr + ' Kontakte haben keine brauchbare Nummer und zählen hier nicht mit.</p>' : '')
+          + '</div>'
+
+          + '<div class="grid grid-cols-2 sm:grid-cols-4 gap-2">'
+            + _ccKachel(z.interessiert, 'interessiert', 'text-emerald-600', 'Gespräch mit positivem Ausgang')
+            + _ccKachel(z.versendet, 'Preislisten raus', 'text-emerald-600', 'Tatsächlich versendet')
+            + _ccKachel(z.erreicht, 'erreicht', 'text-ink-900', 'Jemand war am Apparat')
+            + _ccKachel(z.offen, 'noch offen', 'text-ink-500', 'Noch kein Versuch')
+          + '</div>'
+
+          + '<div class="grid grid-cols-2 sm:grid-cols-4 gap-2">'
+            + _ccKachel(_ccProzent(z.interessiert, z.erreicht) + '%', 'Erfolgsquote', 'text-emerald-600', 'interessiert je erreichtem Gespräch')
+            + _ccKachel(_ccProzent(z.erreicht, z.versucht) + '%', 'Erreichbarkeit', 'text-ink-900', 'erreicht je Versuch')
+            + _ccKachel(z.anrufe, 'Anrufversuche', 'text-ink-900', 'inkl. Wiederholungen')
+            + _ccKachel(z.gesperrt, 'Werbesperren', z.gesperrt ? 'text-rose-600' : 'text-ink-400', 'ausdrücklicher Widerspruch')
+          + '</div>'
+
+          + (z.erreicht < 5
+              ? '<p class="text-[11px] text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">Erst ' + z.erreicht + ' Gespräche geführt — die Quoten oben sind noch Zufall, nicht Aussage.</p>'
+              : '')
+
+          + _ccGruppenTabelle(leads, 'quelle', 'Nach Quelle — welche Liste trägt?', 'ohne Quelle')
+          + _ccGruppenTabelle(leads.filter(r => String(r.bearbeiter || '').trim()), 'bearbeiter', 'Nach Anrufer', 'ohne Zuordnung')
+          + _ccGruppenTabelle(leads.filter(r => String(r.typ || '').trim()), 'typ', 'Nach Kontakttyp', 'ohne Typ')
+
+        + '</div>'
+        + '<div class="flex justify-end p-4 border-t border-ink-200"><button onclick="_ccDashboardSchliessen()" class="px-4 py-2 text-sm font-bold bg-ink-800 hover:bg-ink-900 text-white rounded-lg">Schließen</button></div>'
+      + '</div>'
+    + '</div>';
+  if (window.lucide) lucide.createIcons();
+}
+function _ccDashboardSchliessen() { const h = document.getElementById('ccDashHost'); if (h) h.innerHTML = ''; }
 
 function _ccPruefErgebnis(doppelt, gesperrt, bestand) {
   let host = document.getElementById('ccImportHost');
