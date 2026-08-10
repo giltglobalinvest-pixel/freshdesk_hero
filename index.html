@@ -824,7 +824,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.75.6';
+const APP_VERSION = 'v2.75.7';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -42574,6 +42574,7 @@ function _ccZeichnen() {
       + (ohneNr ? '<label class="inline-flex items-center gap-1.5 text-[11px] text-ink-600 cursor-pointer" title="' + ohneNr + ' Kontakte haben keine brauchbare Nummer"><input type="checkbox"' + (CC_STATE.nurMitNummer ? ' checked' : '') + ' onchange="_ccNummerFilter(this.checked)"> nur mit Nummer <span class="text-ink-400">(' + ohneNr + ' ohne)</span></label>' : '')
       + (ohneNr && APP_KEYS.user?.is_admin ? '<button onclick="_ccNummernSuchen(this)" class="px-2.5 py-1.5 rounded-lg text-[11px] font-bold bg-white border border-teal-300 text-teal-700 hover:bg-teal-50 inline-flex items-center gap-1" title="Fehlende Nummern im Archiv suchen"><i data-lucide="phone-incoming" class="w-3.5 h-3.5"></i> Nummern suchen</button>' : '')
       + (versteckt ? '<label class="inline-flex items-center gap-1.5 text-[11px] text-ink-600 cursor-pointer"><input type="checkbox"' + (CC_STATE.zeigeVersteckte ? ' checked' : '') + ' onchange="_ccVersteckteFilter(this.checked)"> ausgeblendete zeigen <span class="text-ink-400">(' + versteckt + ')</span></label>' : '')
+      + '<button onclick="_ccZustandSpeichernKnopf(this)" class="px-2.5 py-1.5 rounded-lg text-[11px] font-bold bg-white border border-brand-300 text-brand-700 hover:bg-brand-50 inline-flex items-center gap-1" title="Diese Auswahl beim nächsten Öffnen wieder verwenden"><i data-lucide="bookmark" class="w-3.5 h-3.5"></i> Filter merken</button>'
       + '<input type="search" value="' + escapeAttr(CC_STATE.suche || '') + '" oninput="_ccSuche(this.value)" placeholder="Suchen…" class="ml-auto px-3 py-1.5 border border-ink-200 rounded-lg text-sm w-44">'
       + '<button onclick="_ccDashboardOeffnen()" class="px-3 py-1.5 rounded-lg text-[12px] font-bold bg-white border border-ink-200 text-ink-600 hover:bg-ink-50 inline-flex items-center gap-1" title="Wie läuft die Kampagne?"><i data-lucide="bar-chart-3" class="w-3.5 h-3.5"></i> Statistik</button>'
       + '<button onclick="renderCallcenterPage()" class="px-3 py-1.5 rounded-lg text-[12px] font-bold bg-white border border-ink-200 text-ink-600 hover:bg-ink-50" title="Liste neu laden"><i data-lucide="refresh-cw" class="w-3.5 h-3.5"></i></button>'
@@ -42653,6 +42654,30 @@ function _ccZustandHolen() {
     CC_STATE.nurMitNummer = !!g.nurMitNummer;
     CC_STATE.zeigeVersteckte = !!g.zeigeVersteckte;
   } catch (_) {}
+}
+
+/* v2.75.7: Ausdrücklich speichern — mit Rückmeldung.
+   Gespeichert wird ohnehin bei jeder Änderung; dieser Knopf ist dafür da, dass
+   man es SIEHT. Eine unsichtbare Automatik, der man nicht glaubt, ist keine. */
+function _ccZustandSpeichernKnopf(btn) {
+  _ccZustandMerken();
+  let bestaetigt = null;
+  try { bestaetigt = JSON.parse(localStorage.getItem(CC_ZUSTAND_KEY) || 'null'); } catch (_) {}
+  if (!bestaetigt) {
+    return toast('Speichern nicht möglich — dieser Browser erlaubt keinen lokalen Speicher (privates Fenster?).', 'error', 9000);
+  }
+  const acc = _ccAccount();
+  const teile = [
+    acc ? (acc.name || acc.id) : '—',
+    'Kampagne „' + (CC_STATE.kampagne || CC_KAMPAGNE_STANDARD) + '"',
+    { offen: 'Zu tun', interessiert: 'Interessiert', alle: 'Alle' }[CC_STATE.filter] || CC_STATE.filter,
+  ];
+  if (CC_STATE.quelle) teile.push('Quelle ' + CC_STATE.quelle);
+  if (CC_STATE.typ) teile.push('Typ ' + CC_STATE.typ);
+  if (CC_STATE.ohneBestand) teile.push('nur Neukunden');
+  if (CC_STATE.nurMitNummer) teile.push('nur mit Nummer');
+  if (CC_STATE.zeigeVersteckte) teile.push('mit ausgeblendeten');
+  toast('Gemerkt: ' + teile.join(' · ') + ' — so wird beim nächsten Öffnen gestartet.', 'success', 8000);
 }
 
 function _ccFilter(k) { CC_STATE.filter = k; CC_STATE.aktiv = null; _ccZustandMerken(); _ccZeichnen(); }
