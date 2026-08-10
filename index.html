@@ -824,7 +824,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.72.2';
+const APP_VERSION = 'v2.73.0';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -2968,6 +2968,17 @@ async function ensureAppTables() {
   // v2.72.2: Kontakttypen dauerhaft, unabhängig von Kampagne und Quelle.
   // Wer einmal als „Lieferant" erkannt wurde, soll bei jedem künftigen Import
   // sofort so dastehen — sonst macht jemand dieselbe Arbeit zum zweiten Mal.
+  // v2.73.0: Versandvorlage je Kampagne — Betreff und Anschreiben. Die PDF-Datei
+  // liegt NICHT hier, sondern im Worker-Speicher: Airtables Anhang-Adressen sind
+  // signiert und laufen ab, der Versand braucht die Datei aber bei jedem Lead.
+  await ensureTable(CC_VORLAGE_TABLE, [
+    { name: 'kampagne',    type: 'singleLineText' },   // Primary
+    { name: 'account_id',  type: 'singleLineText' },
+    { name: 'betreff',     type: 'singleLineText' },
+    { name: 'anschreiben', type: 'multilineText'  },
+    { name: 'pdf_name',    type: 'singleLineText' },
+    { name: 'updated_at',  type: 'singleLineText' },
+  ]);
   await ensureTable(CC_TYP_TABLE, [
     { name: 'dedupe_key',  type: 'singleLineText' },   // Primary
     { name: 'typ',         type: 'singleLineText' },
@@ -42114,6 +42125,25 @@ function _zdbPermHintHtml() {
 const CC_TABLE = 'Kampagne';
 const CC_SPERR_TABLE = 'Werbesperre';
 const CC_TYP_TABLE = 'Kontakttyp';
+const CC_VORLAGE_TABLE = 'Kampagne_Vorlage';
+const CC_VORLAGE_TYPEN = {
+  kampagne: 'singleLineText', account_id: 'singleLineText', betreff: 'singleLineText',
+  anschreiben: 'multilineText', pdf_name: 'singleLineText', updated_at: 'singleLineText',
+};
+
+/* Platzhalter im Anschreiben. Bewusst wenige und selbsterklärend — eine
+   Vorlagensprache, die man nachschlagen muss, wird nicht benutzt. */
+const CC_PLATZHALTER = [
+  ['{firma}', 'Firmenname'], ['{name}', 'Ansprechpartner'], ['{vorname}', 'Vorname'],
+  ['{anrede}', 'Sehr geehrte(r) Herr/Frau … bzw. Damen und Herren'],
+  ['{position}', 'Position'], ['{ort}', 'Ort'], ['{gueltig_bis}', 'Gültigkeitsdatum'],
+];
+
+const CC_ANSCHREIBEN_STANDARD =
+  '{anrede}\n\n'
+  + 'vielen Dank für das freundliche Telefonat. Wie besprochen erhalten Sie anbei unsere aktuelle Preisliste.\n\n'
+  + 'Die darin genannten Sonderkonditionen gelten für Neuabschlüsse bis {gueltig_bis}.\n\n'
+  + 'Für Rückfragen oder ein persönliches Gespräch stehe ich Ihnen gerne zur Verfügung.';
 const CC_TYPES = {
   firma: 'singleLineText', account_id: 'singleLineText', kampagne: 'singleLineText',
   ansprechpartner: 'singleLineText', telefon: 'singleLineText', email: 'singleLineText',
@@ -42390,6 +42420,7 @@ function _ccZeichnen() {
       + '<button onclick="renderCallcenterPage()" class="px-3 py-1.5 rounded-lg text-[12px] font-bold bg-white border border-ink-200 text-ink-600 hover:bg-ink-50" title="Liste neu laden"><i data-lucide="refresh-cw" class="w-3.5 h-3.5"></i></button>'
       + (APP_KEYS.user?.is_admin
           ? '<button onclick="_ccDublettenPruefen(this)" class="px-3 py-1.5 rounded-lg text-[12px] font-bold bg-white border border-ink-200 text-ink-600 hover:bg-ink-50" title="Dubletten, Werbesperre und Bestandskunden prüfen"><i data-lucide="search-check" class="w-3.5 h-3.5"></i></button>'
+            + '<button onclick="_ccVorlageOeffnen()" class="px-3 py-1.5 rounded-lg text-[12px] font-bold bg-white border border-ink-200 text-ink-600 hover:bg-ink-50 inline-flex items-center gap-1" title="Preisliste und Anschreiben für diese Kampagne festlegen"><i data-lucide="file-text" class="w-3.5 h-3.5"></i> Vorlage</button>'
             + '<button onclick="_ccImportOeffnen()" class="px-3 py-1.5 rounded-lg text-[12px] font-bold bg-brand-600 hover:bg-brand-700 text-white inline-flex items-center gap-1"><i data-lucide="upload" class="w-3.5 h-3.5"></i> Import</button>'
           : '')
     + '</div>'
@@ -42520,6 +42551,7 @@ function _ccKampagneWechseln(wert) {
   }
   CC_STATE.aktiv = null;
   CC_STATE.typ = ''; CC_STATE.quelle = '';
+  _CC_VORLAGE = null;   // je Kampagne eine eigene
   try { localStorage.setItem('fdh_cc_kampagne', CC_STATE.kampagne); } catch (_) {}
   _ccZeichnen();
 }
@@ -42843,48 +42875,287 @@ async function _ccNotizSpeichern(recordId, wert) {
   catch (e) { toast('Notiz nicht gespeichert: ' + (e.message || e), 'error', 7000); }
 }
 
-/* Preisliste anfordern. Der Generator kommt später — bis dahin legt der Knopf
-   ein Freshdesk-Ticket im Büro an, mit allem, was zum Versenden nötig ist.
-   Damit ist der Weg von Anfang an lückenlos: Der Anrufer klickt einmal, und
-   niemand muss abends eine Liste durchgehen, wer noch Post bekommt. */
+/* ============== VERSANDVORLAGE UND VERSAND (v2.73.0) ====================
+   Die Preisliste ist eine feste PDF-Datei, das Anschreiben wird je Empfänger
+   personalisiert. Andersherum wäre es falsch: Eine anlagenbezogene Preisliste
+   setzt Vertragsdaten voraus, die ein Kaltakquise-Kontakt naturgemäß nicht hat. */
+
+let _CC_VORLAGE = null;   // { recordId, betreff, anschreiben, pdf_name }
+
+function _ccVorlageSchluessel() {
+  return (CC_STATE.kampagne || CC_KAMPAGNE_STANDARD) + '.pdf';
+}
+
+async function _ccVorlageLaden(neu) {
+  const acc = _ccAccount();
+  const kampagne = CC_STATE.kampagne || CC_KAMPAGNE_STANDARD;
+  if (_CC_VORLAGE && !neu && _CC_VORLAGE._kampagne === kampagne) return _CC_VORLAGE;
+  if (!acc) return null;
+  const rows = await airtableRead(CC_VORLAGE_TABLE, {
+    filter: "AND({account_id}='" + escapeFormula(acc.id) + "',{kampagne}='" + escapeFormula(kampagne) + "')", maxRecords: 1,
+  }).catch(() => []);
+  const r = (rows || [])[0];
+  _CC_VORLAGE = r
+    ? Object.assign({ recordId: r.id, _kampagne: kampagne }, r.fields)
+    : { recordId: null, _kampagne: kampagne, betreff: 'Ihre Preisliste — Sonderkonditionen', anschreiben: CC_ANSCHREIBEN_STANDARD, pdf_name: '' };
+  return _CC_VORLAGE;
+}
+
+/** Anrede aus dem, was bekannt ist. Nie raten: Ohne Namen bleibt es förmlich. */
+function _ccAnrede(r) {
+  const n = String(r.ansprechpartner || '').trim();
+  if (!n || !n.includes(' ')) return 'Sehr geehrte Damen und Herren,';
+  return 'Sehr geehrte/r ' + n + ',';
+}
+
+function _ccPlatzhalterFuellen(text, r) {
+  const teile = String(r.ansprechpartner || '').trim().split(/\s+/).filter(Boolean);
+  const werte = {
+    '{firma}': r.firma || '', '{name}': r.ansprechpartner || '',
+    '{vorname}': teile.length > 1 ? teile.slice(0, -1).join(' ') : (teile[0] || ''),
+    '{anrede}': _ccAnrede(r), '{position}': r.position || '', '{ort}': r.ort || '',
+    '{gueltig_bis}': '31.12.' + new Date().getFullYear(),
+  };
+  return String(text || '').replace(/\{[a-z_]+\}/g, m => (m in werte ? werte[m] : m));
+}
+
+/* --- Einrichtung ------------------------------------------------------- */
+
+async function _ccVorlageOeffnen() {
+  const acc = _ccAccount();
+  if (!acc) return;
+  const v = await _ccVorlageLaden(true);
+  let host = document.getElementById('ccVorlageHost');
+  if (!host) { host = document.createElement('div'); host.id = 'ccVorlageHost'; document.body.appendChild(host); }
+  host.innerHTML =
+    '<div class="fixed inset-0 z-[80] bg-black/40 flex items-start justify-center overflow-y-auto p-4" onclick="if(event.target===this)_ccVorlageSchliessen()">'
+      + '<div class="bg-white rounded-2xl shadow-xl w-full max-w-2xl my-8">'
+        + '<div class="flex items-center justify-between p-4 border-b border-ink-200">'
+          + '<div><h3 class="font-bold text-ink-900">Versandvorlage</h3>'
+          + '<p class="text-[11px] text-ink-500">Kampagne „' + escapeHtml(CC_STATE.kampagne || CC_KAMPAGNE_STANDARD) + '" · ' + escapeHtml(acc.name || '') + '</p></div>'
+          + '<button onclick="_ccVorlageSchliessen()" class="text-ink-400 hover:text-ink-700"><i data-lucide="x" class="w-5 h-5"></i></button></div>'
+        + '<div class="p-4 space-y-3">'
+          + '<div class="rounded-xl border border-ink-200 p-3">'
+            + '<p class="text-[12px] font-bold text-ink-800 mb-1">Preisliste (PDF)</p>'
+            + '<p class="text-[11px] text-ink-500 mb-2">' + (v.pdf_name
+                ? 'Hinterlegt: <b>' + escapeHtml(v.pdf_name) + '</b> — neue Datei ersetzt sie.'
+                : 'Noch keine Datei hinterlegt. Ohne sie kann nicht versendet werden.') + '</p>'
+            + '<input type="file" id="ccVorlagePdf" accept="application/pdf,.pdf" onchange="_ccVorlagePdfHochladen(this)" class="w-full text-[12px]">'
+            + '<div id="ccVorlagePdfMeldung" class="text-[11px] mt-1"></div>'
+          + '</div>'
+          + '<label class="block"><span class="text-[11px] font-semibold text-ink-700">Betreff</span>'
+            + '<input id="ccVorlageBetreff" value="' + escapeAttr(v.betreff || '') + '" class="w-full mt-0.5 px-2.5 py-1.5 border border-ink-300 rounded-lg text-sm"></label>'
+          + '<label class="block"><span class="text-[11px] font-semibold text-ink-700">Anschreiben</span>'
+            + '<textarea id="ccVorlageText" rows="10" class="w-full mt-0.5 px-2.5 py-2 border border-ink-300 rounded-lg text-[13px] font-sans">' + escapeHtml(v.anschreiben || '') + '</textarea></label>'
+          + '<p class="text-[11px] text-ink-500">Platzhalter: ' + CC_PLATZHALTER.map(pp => '<code class="bg-ink-100 px-1 rounded">' + pp[0] + '</code>').join(' ') + ' — werden beim Versand ersetzt.</p>'
+          + '<div class="rounded-xl border border-violet-200 bg-violet-50/60 p-3">'
+            + '<p class="text-[11px] text-violet-900 mb-1.5">Anschreiben von der KI schreiben lassen — beschreib in einem Satz, worum es geht:</p>'
+            + '<div class="flex gap-2 flex-wrap">'
+              + '<input id="ccVorlageKiWunsch" placeholder="z. B. Sonderkonditionen für Hausverwaltungen bis Jahresende" class="flex-1 min-w-[220px] px-2.5 py-1.5 border border-violet-300 rounded-lg text-[12px]">'
+              + '<button onclick="_ccVorlageKi(this)" class="px-3 py-1.5 bg-violet-600 hover:bg-violet-700 text-white rounded-lg text-[12px] font-bold">Vorschlag</button>'
+            + '</div>'
+          + '</div>'
+        + '</div>'
+        + '<div class="flex items-center justify-end gap-2 p-4 border-t border-ink-200">'
+          + '<button onclick="_ccVorlageSchliessen()" class="px-3 py-2 text-sm text-ink-600 hover:bg-ink-100 rounded-lg">Abbrechen</button>'
+          + '<button onclick="_ccVorlageSpeichern(this)" class="px-4 py-2 text-sm font-bold bg-brand-600 hover:bg-brand-700 text-white rounded-lg">Vorlage speichern</button>'
+        + '</div>'
+      + '</div>'
+    + '</div>';
+  if (window.lucide) lucide.createIcons();
+}
+function _ccVorlageSchliessen() { const h = document.getElementById('ccVorlageHost'); if (h) h.innerHTML = ''; }
+
+async function _ccVorlagePdfHochladen(input) {
+  const datei = input && input.files && input.files[0];
+  const meld = document.getElementById('ccVorlagePdfMeldung');
+  const acc = _ccAccount();
+  const key = APP_KEYS.user?.api_key;
+  const slug = acc ? _archivSlugFuer(acc.id) : null;
+  if (!datei || !acc) return;
+  if (!key || !slug) { if (meld) meld.innerHTML = '<span class="text-red-700">Für diesen Mandanten gibt es keinen Archiv-Speicher.</span>'; return; }
+  if (meld) meld.innerHTML = '<span class="text-ink-500">Lade hoch …</span>';
+  try {
+    const res = await fetch(ARCHIV_URL + '/vorlage/' + slug + '/' + encodeURIComponent(_ccVorlageSchluessel()), {
+      method: 'PUT',
+      headers: { 'X-Hero-Key': key, 'content-type': datei.type || 'application/pdf' },
+      body: await datei.arrayBuffer(),
+    });
+    const d = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(d.fehler || ('HTTP ' + res.status));
+    if (_CC_VORLAGE) _CC_VORLAGE.pdf_name = datei.name;
+    if (meld) meld.innerHTML = '<span class="text-emerald-700">' + escapeHtml(datei.name) + ' hochgeladen (' + Math.round((d.bytes || 0) / 1024) + ' KB). Jetzt noch die Vorlage speichern.</span>';
+  } catch (e) {
+    if (meld) meld.innerHTML = '<span class="text-red-700">' + escapeHtml(e.message || String(e)) + '</span>';
+  }
+}
+
+async function _ccVorlageKi(btn) {
+  const wunsch = (document.getElementById('ccVorlageKiWunsch')?.value || '').trim();
+  if (!wunsch) return toast('Bitte in einem Satz beschreiben, worum es geht.', 'warn', 5000);
+  const acc = _ccAccount();
+  setBusy(btn, true, 'Schreibt…');
+  try {
+    const sys = 'Du schreibst ein kurzes Anschreiben für den Versand einer Preisliste nach einem Telefonat (Kaltakquise, B2B).\n'
+      + 'Absender: ' + ((acc && acc.name) || '') + '. Sprache: Deutsch, sachlich, höflich, ohne Werbefloskeln.\n'
+      + 'VORGABEN:\n'
+      + '- Beginne mit dem Platzhalter {anrede} in einer eigenen Zeile.\n'
+      + '- Nutze wo passend die Platzhalter {firma}, {name}, {gueltig_bis} — schreibe sie exakt so.\n'
+      + '- Höchstens 90 Wörter, drei kurze Absätze.\n'
+      + '- Nimm Bezug auf das vorangegangene Telefonat.\n'
+      + '- KEINE Grußformel und KEIN Firmenname am Ende — die Signatur wird angehängt.\n'
+      + '- Erfinde keine Preise, Rabatte oder Zusagen.\n'
+      + 'Antworte NUR mit dem Text, ohne Betreff und ohne Anführungszeichen.';
+    const data = await proxyJson('/anthropic/v1/messages', {
+      method: 'POST',
+      body: JSON.stringify({ model: 'claude-sonnet-4-5-20250929', max_tokens: 700, system: sys, messages: [{ role: 'user', content: wunsch }] }),
+    });
+    const text = (data.content && data.content[0] && data.content[0].text || '').trim();
+    if (!text) throw new Error('Die KI hat nichts zurückgegeben.');
+    const ta = document.getElementById('ccVorlageText');
+    if (ta) ta.value = text;
+    setBusy(btn, false);
+    toast('Vorschlag eingesetzt — bitte durchlesen und anpassen.', 'success', 5000);
+  } catch (e) {
+    setBusy(btn, false);
+    toast('KI: ' + (e.message || e), 'error', 8000);
+  }
+}
+
+async function _ccVorlageSpeichern(btn) {
+  const acc = _ccAccount();
+  if (!acc) return;
+  const kampagne = CC_STATE.kampagne || CC_KAMPAGNE_STANDARD;
+  const felder = {
+    kampagne, account_id: acc.id,
+    betreff: (document.getElementById('ccVorlageBetreff')?.value || '').trim(),
+    anschreiben: (document.getElementById('ccVorlageText')?.value || '').trim(),
+    pdf_name: (_CC_VORLAGE && _CC_VORLAGE.pdf_name) || '',
+    updated_at: nowIso(),
+  };
+  setBusy(btn, true, 'Speichere…');
+  try {
+    if (_CC_VORLAGE && _CC_VORLAGE.recordId) await airtableUpdateWithAutoField(CC_VORLAGE_TABLE, _CC_VORLAGE.recordId, felder, CC_VORLAGE_TYPEN);
+    else {
+      const rec = await airtableWriteWithAutoField(CC_VORLAGE_TABLE, felder, CC_VORLAGE_TYPEN);
+      if (_CC_VORLAGE) _CC_VORLAGE.recordId = rec && rec.id;
+    }
+    Object.assign(_CC_VORLAGE, felder);
+    setBusy(btn, false);
+    _ccVorlageSchliessen();
+    toast('Vorlage gespeichert', 'success', 4000);
+  } catch (e) {
+    setBusy(btn, false);
+    toast('Speichern fehlgeschlagen: ' + (e.message || e), 'error', 8000);
+  }
+}
+
+/* Versand: personalisiertes Anschreiben + feste Preisliste als PDF, über
+   Freshdesk hinaus. Der Rückläufer wird damit automatisch ein Ticket, landet im
+   Archiv und ist durchsuchbar — die Nacharbeit braucht keine eigene Mechanik. */
 async function _ccPreislisteAnfordern(recordId, btn) {
   const r = CC_STATE.leads.find(x => x.recordId === recordId);
   const acc = _ccAccount();
   if (!r || !acc) return;
   if (!String(r.email || '').trim()) return toast('Ohne E-Mail-Adresse lässt sich nichts senden — bitte im Gespräch erfragen und eintragen.', 'warn', 7000);
-  if (btn) setBusy(btn, true, 'Melde an…');
+  if (btn) setBusy(btn, true, 'Vorbereiten…');
   try {
-    const betreff = 'Preisliste senden: ' + (r.firma || r.ansprechpartner || r.email);
-    const text = [
-      'Aus der Anrufliste angefordert.',
-      '',
-      'Firma: ' + (r.firma || '—'),
-      'Ansprechpartner: ' + (r.ansprechpartner || '—') + (r.position ? ' (' + r.position + ')' : ''),
-      'E-Mail: ' + r.email,
-      'Telefon: ' + (r.telefon || '—'),
-      'Notiz aus dem Gespräch: ' + (r.notiz || '—'),
-      '',
-      'Angefordert von ' + ((APP_KEYS.user && APP_KEYS.user.name) || '?') + ' am ' + new Date().toLocaleString('de-DE') + '.',
-    ].join('\n');
-    const erstellt = await proxyJson('/freshdesk/' + encodeURIComponent(acc.id) + '/api/v2/tickets', {
-      method: 'POST',
-      body: JSON.stringify({
-        subject: betreff,
-        description: textToHtmlForFreshdesk(text),
-        email: r.email,
-        name: r.ansprechpartner || r.firma || undefined,
-        priority: 1, status: 2,
-        tags: ['Kaltakquise', 'Preisliste'],
-      }),
-    });
-    if (!erstellt || !erstellt.id) throw new Error('Freshdesk hat keine Ticketnummer zurückgegeben');
-    await _ccSpeichern(recordId, { ticket_id: String(erstellt.id), status: 'interessiert', letzter_versuch: nowIso() });
+    const v = await _ccVorlageLaden();
+    if (!v || !v.pdf_name) {
+      if (btn) setBusy(btn, false);
+      return toast('Für diese Kampagne ist noch keine Preisliste hinterlegt — Vorlage einrichten (Knopf oben).', 'warn', 9000);
+    }
+    const konfigs = await ensureEmailConfigsLoaded(acc.id);
+    if (!konfigs.length) {
+      if (btn) setBusy(btn, false);
+      return toast('Freshdesk meldet keine Absenderadresse für diesen Mandanten.', 'error', 9000);
+    }
     if (btn) setBusy(btn, false);
-    _ccZeichnen();
-    toast('Vorgemerkt — Ticket #' + erstellt.id + ' im Büro angelegt.', 'success', 5000);
+    _ccVersandDialog(r, v, konfigs);
   } catch (e) {
     if (btn) setBusy(btn, false);
-    toast('Anforderung fehlgeschlagen: ' + (e.message || e), 'error', 9000);
+    toast('Versand vorbereiten: ' + (e.message || e), 'error', 9000);
+  }
+}
+
+/* Der Anrufer sieht den fertigen Text und schickt ihn ab. Kein Rohentwurf zum
+   Ausfüllen: Wer im Minutentakt telefoniert, formuliert nicht — er liest kurz
+   quer und drückt auf Senden. Änderbar bleibt trotzdem alles. */
+function _ccVersandDialog(r, v, konfigs) {
+  const text = _ccPlatzhalterFuellen(v.anschreiben, r);
+  const betreff = _ccPlatzhalterFuellen(v.betreff, r);
+  let host = document.getElementById('ccVersandHost');
+  if (!host) { host = document.createElement('div'); host.id = 'ccVersandHost'; document.body.appendChild(host); }
+  host.innerHTML =
+    '<div class="fixed inset-0 z-[82] bg-black/40 flex items-start justify-center overflow-y-auto p-4" onclick="if(event.target===this)_ccVersandSchliessen()">'
+      + '<div class="bg-white rounded-2xl shadow-xl w-full max-w-xl my-8">'
+        + '<div class="flex items-center justify-between p-4 border-b border-ink-200">'
+          + '<div><h3 class="font-bold text-ink-900">Preisliste senden</h3>'
+          + '<p class="text-[11px] text-ink-500">an ' + escapeHtml(r.ansprechpartner || '') + ' &lt;' + escapeHtml(r.email) + '&gt;</p></div>'
+          + '<button onclick="_ccVersandSchliessen()" class="text-ink-400 hover:text-ink-700"><i data-lucide="x" class="w-5 h-5"></i></button></div>'
+        + '<div class="p-4 space-y-3">'
+          + (konfigs.length > 1
+              ? '<label class="block"><span class="text-[11px] font-semibold text-ink-700">Absender</span>'
+                + '<select id="ccVersandAbsender" class="w-full mt-0.5 px-2.5 py-1.5 border border-ink-300 rounded-lg text-sm bg-white">'
+                + konfigs.map(c => '<option value="' + c.id + '">' + escapeHtml((c.name || '') + ' <' + (c.reply_email || c.to_email || '') + '>') + '</option>').join('')
+                + '</select></label>'
+              : '<input type="hidden" id="ccVersandAbsender" value="' + konfigs[0].id + '">')
+          + '<label class="block"><span class="text-[11px] font-semibold text-ink-700">Betreff</span>'
+            + '<input id="ccVersandBetreff" value="' + escapeAttr(betreff) + '" class="w-full mt-0.5 px-2.5 py-1.5 border border-ink-300 rounded-lg text-sm"></label>'
+          + '<label class="block"><span class="text-[11px] font-semibold text-ink-700">Anschreiben</span>'
+            + '<textarea id="ccVersandText" rows="10" class="w-full mt-0.5 px-2.5 py-2 border border-ink-300 rounded-lg text-[13px]">' + escapeHtml(text) + '</textarea></label>'
+          + '<p class="text-[11px] text-ink-600 inline-flex items-center gap-1.5"><i data-lucide="paperclip" class="w-3.5 h-3.5"></i> Anhang: <b>' + escapeHtml(v.pdf_name) + '</b> · die Signatur wird von Freshdesk angefügt</p>'
+        + '</div>'
+        + '<div class="flex items-center justify-end gap-2 p-4 border-t border-ink-200">'
+          + '<button onclick="_ccVersandSchliessen()" class="px-3 py-2 text-sm text-ink-600 hover:bg-ink-100 rounded-lg">Abbrechen</button>'
+          + '<button onclick="_ccVersandAbsenden(\'' + r.recordId + '\', this)" class="px-4 py-2 text-sm font-bold bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg inline-flex items-center gap-1.5"><i data-lucide="send" class="w-4 h-4"></i> Senden</button>'
+        + '</div>'
+      + '</div>'
+    + '</div>';
+  if (window.lucide) lucide.createIcons();
+}
+function _ccVersandSchliessen() { const h = document.getElementById('ccVersandHost'); if (h) h.innerHTML = ''; }
+
+async function _ccVersandAbsenden(recordId, btn) {
+  const r = CC_STATE.leads.find(x => x.recordId === recordId);
+  const acc = _ccAccount();
+  const v = _CC_VORLAGE;
+  if (!r || !acc || !v) return;
+  const key = APP_KEYS.user?.api_key;
+  const slug = _archivSlugFuer(acc.id);
+  setBusy(btn, true, 'Hole PDF…');
+  try {
+    const res = await fetch(ARCHIV_URL + '/vorlage/' + slug + '/' + encodeURIComponent(_ccVorlageSchluessel()), { headers: { 'X-Hero-Key': key } });
+    if (!res.ok) throw new Error('Die hinterlegte Preisliste ist nicht abrufbar (HTTP ' + res.status + ')');
+    const blob = await res.blob();
+
+    setBusy(btn, true, 'Sende…');
+    const erstellt = await _fdPostMultipart(acc.id, 'tickets/outbound_email', {
+      subject: (document.getElementById('ccVersandBetreff')?.value || '').trim(),
+      description: textToHtmlForFreshdesk((document.getElementById('ccVersandText')?.value || '').trim()),
+      email: String(r.email).toLowerCase(),
+      email_config_id: String(document.getElementById('ccVersandAbsender')?.value || ''),
+      priority: '1',
+      // Offen lassen, nicht geschlossen: Aus dieser Mail SOLL ein Gespräch
+      // werden. Ein geschlossenes Ticket verschwindet aus jeder Sicht, und die
+      // Antwort des Verwalters landet in einem Vorgang, den niemand ansieht.
+      status: '2',
+      tags: 'Kaltakquise',
+    }, [{ blob, name: v.pdf_name || 'Preisliste.pdf' }]);
+    if (!erstellt || !erstellt.id) throw new Error('Freshdesk hat keine Ticketnummer zurückgegeben');
+
+    await _ccSpeichern(recordId, {
+      preisliste_am: nowIso(), ticket_id: String(erstellt.id),
+      status: 'interessiert', gesperrt_bis: '',
+    });
+    setBusy(btn, false);
+    _ccVersandSchliessen();
+    CC_STATE.aktiv = null;
+    _ccZeichnen();
+    toast('Preisliste an ' + r.email + ' gesendet — Ticket #' + erstellt.id, 'success', 6000);
+  } catch (e) {
+    setBusy(btn, false);
+    toast('Versand fehlgeschlagen: ' + (e.message || e), 'error', 10000);
   }
 }
 
