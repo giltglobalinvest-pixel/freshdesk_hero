@@ -824,7 +824,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.78.0';
+const APP_VERSION = 'v2.78.2';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -17775,15 +17775,30 @@ function extractPhoneNumbers(text) {
       // reicht auch wenn schon der „area"-Slot eine echte Local-Number enthält.
       const lastGroup = meaningful[meaningful.length - 1] || '';
       if (localDigits < 5 && lastGroup.length < 5) return;
+      // v2.78.2: Faxnummern taugen zum Anrufen nicht — steht kurz davor „Fax",
+      // gehört die Nummer nicht in eine Kontaktkarte. Bisher landeten sie
+      // gleichberechtigt neben der Durchwahl und wurden gelegentlich gewählt.
+      const stelle = text.indexOf(m);
+      if (stelle > 0 && /fax|telefax/i.test(text.slice(Math.max(0, stelle - 22), stelle))) return;
       found.add(trimmed);
     });
   });
   return Array.from(found);
 }
 
+/* v2.78.2: Die „(0)" in „+49 (0) 711 …" muss RAUS, bevor die Ziffern
+   zusammengezogen werden — sonst entsteht +49071196882904, und der Anruf
+   scheitert. Betraf jeden Anrufen-Link in der App, nicht nur die Anrufliste. */
 function _cleanPhoneForTel(s) {
-  const hasPlus = /^\+/.test(s.trim());
-  return (hasPlus ? '+' : '') + s.replace(/\D/g, '');
+  const roh = String(s || '').trim();
+  const ohneTrunk = roh.replace(/\(\s*0\s*\)/g, '');
+  const hasPlus = /^\+/.test(ohneTrunk);
+  let ziffern = ohneTrunk.replace(/\D/g, '');
+  // Auch ohne Klammern kommt „+49 0711…" vor — eine Null direkt nach der
+  // Landesvorwahl ist immer die überflüssige Verkehrsausscheidungsziffer.
+  if (hasPlus && /^490/.test(ziffern)) ziffern = '49' + ziffern.slice(3);
+  if (!hasPlus) while (ziffern.startsWith('00') && !ziffern.startsWith('0049')) ziffern = ziffern.slice(1);
+  return (hasPlus ? '+' : '') + ziffern;
 }
 
 /* ===================== Übersetzungs-Helper =====================
@@ -41327,6 +41342,12 @@ async function zdbSaveFirmaKontakt(account, firmaData, kontaktData, opts) {
 function _zdbSaveContactLoose(account, c) {
   if (!account || !c) return;
   try {
+    // Einheitliche Schreibweise ab der Quelle — hier kommen die Nummern aus
+    // Signaturen herein, und genau dort steht „+49 (0) …".
+    c = Object.assign({}, c, {
+      telefon: _ccNummerNormalisieren(c.telefon) || c.telefon || '',
+      mobil: _ccNummerNormalisieren(c.mobil) || c.mobil || '',
+    });
     const parts = String(c.name || '').trim().split(/\s+/).filter(Boolean);
     const vorname = c.vorname != null ? c.vorname : (parts.length > 1 ? parts.slice(0, -1).join(' ') : (parts[0] || ''));
     const nachname = c.nachname != null ? c.nachname : (parts.length > 1 ? parts[parts.length - 1] : '');
@@ -41383,7 +41404,12 @@ async function _zdbMigrateAccount(account, log) {
     const parts = String(f.name || '').trim().split(/\s+/).filter(Boolean);
     const vorname = parts.length > 1 ? parts.slice(0, -1).join(' ') : (parts[0] || '');
     const nachname = parts.length > 1 ? parts[parts.length - 1] : '';
-    const kdata = _zdbClean({ vorname, nachname, telefon: f.telefon, mobil: f.mobil, email: f.email, position: f.position, typ: f.kontakt_typ, quelle: 'crawl', freshdesk_contact_id: f.fd_contact_id });
+    // Schon beim Übernehmen vereinheitlichen — was in den Stammdaten landet,
+    // soll nicht später nachbereinigt werden müssen.
+    const kdata = _zdbClean({ vorname, nachname,
+      telefon: _ccNummerNormalisieren(f.telefon) || f.telefon,
+      mobil: _ccNummerNormalisieren(f.mobil) || f.mobil,
+      email: f.email, position: f.position, typ: f.kontakt_typ, quelle: 'crawl', freshdesk_contact_id: f.fd_contact_id });
     if (!kdata.email && !kdata.vorname && !kdata.nachname) continue;
     await _zdbUpsertKontakt(names, kdata, firmaRecId);
     stats.kontakte++; cCount++;
@@ -41568,6 +41594,7 @@ function _zdbPaintView() {
         '<div class="flex-1"></div>' +
         (canEdit && tab === 'kontakte'
           ? '<button onclick="_ccTypenVerwalten()" class="px-2 py-1 rounded-lg text-[12px] bg-white border border-ink-200 text-ink-500 hover:bg-ink-50" title="Kontakttypen verwalten"><i data-lucide="settings-2" class="w-3.5 h-3.5"></i></button>'
+            + '<button onclick="_zdbSammelnummern(this)" class="px-2.5 py-1 rounded-lg text-[12px] font-bold bg-white border border-amber-300 text-amber-800 hover:bg-amber-50 inline-flex items-center gap-1" title="Nummern finden, die bei mehreren Kontakten stehen"><i data-lucide="alert-triangle" class="w-3.5 h-3.5"></i> Prüfen</button>'
             + '<button onclick="_zdbNummernBereinigen(this)" class="px-2.5 py-1 rounded-lg text-[12px] font-bold bg-white border border-ink-300 text-ink-600 hover:bg-ink-50 inline-flex items-center gap-1" title="Telefon und Mobil auf eine Schreibweise bringen"><i data-lucide="wand-2" class="w-3.5 h-3.5"></i> Nummern</button>' : '') +
         (canEdit ? '<button onclick="_zdbNewRecord(\'' + tab + '\')" class="px-2.5 py-1 rounded-lg text-[12px] font-bold bg-emerald-600 hover:bg-emerald-700 text-white inline-flex items-center gap-1"><i data-lucide="plus" class="w-3.5 h-3.5"></i> Neu</button>' : '') +
       '</div>' + searchBox +
@@ -41858,6 +41885,86 @@ async function _zdbNummernBereinigen(btn) {
   setBusy(btn, false);
   _zdbNeuZeichnen();
   toast(n + ' Kontakte bereinigt' + (fehler ? ' · ' + fehler + ' fehlgeschlagen' : ''), fehler ? 'warn' : 'success', 7000);
+}
+
+/* v2.78.1: Sammelnummern in den Stammdaten finden.
+   Steht dieselbe Rufnummer bei mehreren Kontakten, gehört sie in aller Regel
+   keinem von ihnen — es ist die Zentrale des eigenen Hauses oder eine Nummer
+   aus einer zitierten Signatur. Wer sie anruft, landet bei sich selbst.
+
+   Gelöscht wird nichts von allein: Bei einer Hausverwaltung mit drei
+   Ansprechpartnern IST dieselbe Zentrale richtig. Das kann nur ein Mensch
+   entscheiden, also zeigt die Prüfung es und fragt. */
+async function _zdbSammelnummern(btn) {
+  const d = ZDB_VIEW_STATE.data;
+  const acc = _zdbCurrentAccount();
+  if (!d || !acc) return;
+  const nachNummer = new Map();
+  for (const rec of (d.kontakte || [])) {
+    const f = rec.fields || {};
+    for (const feld of ['telefon', 'mobil']) {
+      const nr = _ccNummerNormalisieren(f[feld] || '');
+      if (nr.length < 6) continue;
+      if (!nachNummer.has(nr)) nachNummer.set(nr, []);
+      nachNummer.get(nr).push({ rec, feld });
+    }
+  }
+  const verdaechtig = [...nachNummer.entries()]
+    .filter(([, v]) => v.length >= 3)
+    .sort((a, b) => b[1].length - a[1].length);
+  if (!verdaechtig.length) return toast('Keine Nummer steht bei drei oder mehr Kontakten.', 'success', 6000);
+
+  _ZDB_SAMMEL = verdaechtig;
+  let host = document.getElementById('zdbSammelHost');
+  if (!host) { host = document.createElement('div'); host.id = 'zdbSammelHost'; document.body.appendChild(host); }
+  host.innerHTML =
+    '<div class="fixed inset-0 z-[84] bg-black/40 flex items-start justify-center overflow-y-auto p-4" onclick="if(event.target===this)_zdbSammelSchliessen()">'
+      + '<div class="bg-white rounded-2xl shadow-xl w-full max-w-lg my-8">'
+        + '<div class="flex items-center justify-between p-4 border-b border-ink-200">'
+          + '<div><h3 class="font-bold text-ink-900">Mehrfach vergebene Nummern</h3>'
+          + '<p class="text-[11px] text-ink-500">' + verdaechtig.length + ' Nummern stehen bei je drei oder mehr Kontakten</p></div>'
+          + '<button onclick="_zdbSammelSchliessen()" class="text-ink-400 hover:text-ink-700"><i data-lucide="x" class="w-5 h-5"></i></button></div>'
+        + '<div class="p-4 space-y-3 max-h-[60vh] overflow-y-auto">'
+          + '<p class="text-[11px] text-ink-600">Bei einer Hausverwaltung mit mehreren Ansprechpartnern ist dieselbe Zentrale richtig. Bei zusammengetragenen Kontakten ist es dagegen meist die eigene Nummer aus einer zitierten Signatur — dann anrufen ins Leere.</p>'
+          + verdaechtig.map(([nr, liste], i) =>
+              '<div class="rounded-xl border border-amber-200 bg-amber-50/50 p-3">'
+              + '<p class="font-mono text-[14px] font-bold text-ink-900">' + escapeHtml(nr) + ' <span class="text-[11px] font-sans font-normal text-ink-500">bei ' + liste.length + ' Kontakten</span></p>'
+              + '<ul class="text-[11px] text-ink-700 mt-1 space-y-0.5">'
+              + liste.slice(0, 6).map(x => '<li class="truncate">' + escapeHtml((x.rec.fields || {}).name || '?') + ' <span class="text-ink-400">(' + x.feld + ')</span></li>').join('')
+              + (liste.length > 6 ? '<li class="text-ink-400">… und ' + (liste.length - 6) + ' weitere</li>' : '')
+              + '</ul>'
+              + '<button onclick="_zdbSammelLoeschen(' + i + ', this)" class="mt-2 px-2.5 py-1.5 bg-rose-600 hover:bg-rose-700 text-white rounded-lg text-[11px] font-bold">Bei allen ' + liste.length + ' entfernen</button>'
+              + '</div>').join('')
+        + '</div>'
+        + '<div class="flex justify-end p-4 border-t border-ink-200"><button onclick="_zdbSammelSchliessen()" class="px-4 py-2 text-sm font-bold bg-ink-800 hover:bg-ink-900 text-white rounded-lg">Schließen</button></div>'
+      + '</div>'
+    + '</div>';
+  if (window.lucide) lucide.createIcons();
+}
+
+let _ZDB_SAMMEL = null;
+function _zdbSammelSchliessen() { const h = document.getElementById('zdbSammelHost'); if (h) h.innerHTML = ''; }
+
+async function _zdbSammelLoeschen(i, btn) {
+  const eintrag = (_ZDB_SAMMEL || [])[i];
+  const acc = _zdbCurrentAccount();
+  if (!eintrag || !acc) return;
+  const [nr, liste] = eintrag;
+  if (!confirm('Nummer ' + nr + ' bei allen ' + liste.length + ' Kontakten entfernen?\n\nDie Kontakte selbst bleiben bestehen.')) return;
+  const namen = _zdbTableNames(acc);
+  setBusy(btn, true, '0/' + liste.length);
+  let n = 0;
+  for (const x of liste) {
+    try {
+      await _zdbUpdateSafe(namen.kontakt, x.rec.id, { [x.feld]: '', updated_at: nowIso() });
+      x.rec.fields = Object.assign({}, x.rec.fields, { [x.feld]: '' });
+      n++; setBusy(btn, true, n + '/' + liste.length);
+    } catch (e) { console.warn('[ZDB] Sammelnummer:', e.message); }
+  }
+  setBusy(btn, false);
+  _zdbNeuZeichnen();
+  toast(n + ' Nummern entfernt', 'success', 5000);
+  _zdbSammelnummern();
 }
 
 /* Firma entfernen. Der Korb kennt keine eigenständigen Firmen — jeder Eintrag
@@ -42863,6 +42970,7 @@ function _ccZeichnen() {
       + (APP_KEYS.user?.is_admin
           ? '<button onclick="_ccDublettenPruefen(this)" class="px-3 py-1.5 rounded-lg text-[12px] font-bold bg-white border border-ink-200 text-ink-600 hover:bg-ink-50" title="Dubletten, Werbesperre und Bestandskunden prüfen"><i data-lucide="search-check" class="w-3.5 h-3.5"></i></button>'
             + '<button onclick="_ccVorlageOeffnen()" class="px-3 py-1.5 rounded-lg text-[12px] font-bold bg-white border border-ink-200 text-ink-600 hover:bg-ink-50 inline-flex items-center gap-1" title="Preisliste und Anschreiben für diese Kampagne festlegen"><i data-lucide="file-text" class="w-3.5 h-3.5"></i> Vorlage</button>'
+            + '<button onclick="_ccKampagneLeeren(this)" class="px-3 py-1.5 rounded-lg text-[12px] font-bold bg-white border border-rose-300 text-rose-700 hover:bg-rose-50 inline-flex items-center gap-1" title="Alle Kontakte dieser Kampagne löschen, um frisch zu importieren"><i data-lucide="trash-2" class="w-3.5 h-3.5"></i> Leeren</button>'
             + '<button onclick="_ccImportOeffnen()" class="px-3 py-1.5 rounded-lg text-[12px] font-bold bg-brand-600 hover:bg-brand-700 text-white inline-flex items-center gap-1"><i data-lucide="upload" class="w-3.5 h-3.5"></i> Import</button>'
           : '')
     + '</div>'
@@ -44637,6 +44745,35 @@ async function _ccNummernBereinigen(btn) {
   toast(n + ' Nummern vereinheitlicht', 'success', 6000);
 }
 
+/* Kampagne leeren. Nach einem fehlerhaften Import ist das ehrlicher als
+   nachzubessern: Man weiß nicht mehr, welche Nummer von Hand geprüft wurde und
+   welche aus einer falschen Zuordnung stammt. Die Werbesperre und die
+   dauerhaften Kontakttypen bleiben davon unberührt — sie hängen am Kontakt,
+   nicht an der Kampagne. */
+async function _ccKampagneLeeren(btn) {
+  const acc = _ccAccount();
+  const kampagne = CC_STATE.kampagne || CC_KAMPAGNE_STANDARD;
+  const leads = _ccKampagnenLeads();
+  if (!acc || !leads.length) return toast('Diese Kampagne ist bereits leer.', 'warn', 5000);
+  const bearbeitet = leads.filter(r => _ccStatusVon(r) !== 'offen').length;
+  if (!confirm('Alle ' + leads.length + ' Kontakte aus „' + kampagne + '" löschen?\n\n'
+    + (bearbeitet ? '⚠ ' + bearbeitet + ' davon sind bereits bearbeitet — Notizen, Ergebnisse und Versandvermerke gehen verloren.\n\n' : '')
+    + 'Werbesperren und gemerkte Kontakttypen bleiben erhalten.\n'
+    + 'Danach kannst du frisch importieren.')) return;
+  if (bearbeitet && !confirm('Sicher? ' + bearbeitet + ' bearbeitete Kontakte werden mit gelöscht.')) return;
+
+  setBusy(btn, true, '0/' + leads.length);
+  let n = 0, fehler = 0;
+  for (const r of leads) {
+    try { await airtableDelete(CC_TABLE, r.recordId); n++; }
+    catch (e) { fehler++; console.warn('[CC] Löschen:', e.message); }
+    setBusy(btn, true, (n + fehler) + '/' + leads.length);
+  }
+  setBusy(btn, false);
+  toast(n + ' Kontakte gelöscht' + (fehler ? ' · ' + fehler + ' fehlgeschlagen' : ''), fehler ? 'warn' : 'success', 7000);
+  renderCallcenterPage();
+}
+
 async function _ccNummernSuchen(btn) {
   const acc = _ccAccount();
   const key = APP_KEYS.user?.api_key;
@@ -44660,7 +44797,7 @@ async function _ccNummernSuchen(btn) {
   }
 
   setBusy(btn, true, '0/' + offen.length);
-  let gefunden = 0, geprueft = 0, durchsucht = [];
+  let gefunden = 0, geprueft = 0, durchsucht = [], mehrfach = [];
   try {
     for (let i = 0; i < offen.length; i += 100) {
       const teil = offen.slice(i, i + 100);
@@ -44675,6 +44812,7 @@ async function _ccNummernSuchen(btn) {
       const d = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(d.fehler || ('Archiv HTTP ' + res.status));
       if (Array.isArray(d.durchsucht)) durchsucht = d.durchsucht;
+      if (Array.isArray(d.mehrfach)) for (const nr of d.mehrfach) if (!mehrfach.includes(nr)) mehrfach.push(nr);
       for (const r of teil) {
         geprueft++;
         const t = (d.treffer || {})[String(r.email).toLowerCase()];
@@ -44697,6 +44835,7 @@ async function _ccNummernSuchen(btn) {
     setBusy(btn, false);
     _ccZeichnen();
     toast(gefunden + ' von ' + offen.length + ' Nummern gefunden'
+      + (mehrfach.length ? ' · ' + mehrfach.length + ' Sammelnummer' + (mehrfach.length === 1 ? '' : 'n') + ' verworfen (' + mehrfach.slice(0, 2).join(', ') + ') — sie standen bei mehreren Kontakten' : '')
       + (durchsucht.length ? ' (durchsucht: ' + durchsucht.join(', ') + ')' : '')
       + (ohneMail ? ' · ' + ohneMail + ' weitere haben weder Nummer noch Adresse' : ''),
       gefunden ? 'success' : 'warn', 10000);
