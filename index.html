@@ -824,7 +824,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.71.3';
+const APP_VERSION = 'v2.71.4';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -42306,6 +42306,7 @@ async function renderCallcenterPage() {
   host.innerHTML = '<div class="text-center py-10 text-sm text-ink-500"><span class="spinner inline-block w-4 h-4 border-[2px] text-brand-500"></span> Lade Anrufliste…</div>';
   await _ccLaden();
   _ccZeichnen();
+  _ccAbgleichStarten();
 }
 
 function _ccZeichnen() {
@@ -42385,35 +42386,58 @@ function _ccQuellenFilter(alle) {
     + '</select>';
 }
 
+/* v2.71.4: Echte Tabelle statt Karten mit Tabellenrahmen.
+   Der Anrufer schaut hier stundenlang hin und muss beim Herunterwandern die
+   Nummer treffen, ohne zu suchen: größere Schrift, eine Zeile je Kontakt,
+   Quelle in eigener Spalte statt gestapelt unter dem Firmennamen, Kopfzeile
+   bleibt beim Scrollen stehen. Höhe schlägt Vollständigkeit — was nicht in die
+   Zeile passt, steht im aufgeklappten Bereich. */
 function _ccTabelle(rows) {
-  const trs = rows.map(r => {
+  const ich = (APP_KEYS.user && APP_KEYS.user.name) || '';
+  const trs = rows.map((r, i) => {
     const aktiv = CC_STATE.aktiv === r.recordId;
     const tel = String(r.telefon || '').trim();
-    return '<tr class="' + (aktiv ? 'bg-brand-50/70' : 'hover:bg-ink-50/70') + ' cursor-pointer align-top" onclick="_ccAktiv(\'' + r.recordId + '\')">'
-      + '<td class="px-2 py-2 border-b border-ink-100">' + _ccLed(r) + '</td>'
-      + '<td class="px-2 py-2 border-b border-ink-100 font-semibold text-ink-900">' + escapeHtml(r.firma || '—')
-        + '<div class="font-normal mt-0.5 flex items-center gap-1 flex-wrap">'
-          + (r.ort ? '<span class="text-[10px] text-ink-400">' + escapeHtml(r.ort) + '</span>' : '')
-          + _ccQuelleBadge(r)
-          + (String(r.bestand || '') === 'ja' ? '<span class="text-[10px] px-1.5 py-0.5 rounded border font-semibold bg-emerald-50 text-emerald-700 border-emerald-200" title="Steht bereits in der zentralen DB — kein Neukunde">schon Kunde</span>' : '')
-        + '</div></td>'
-      + '<td class="px-2 py-2 border-b border-ink-100">' + escapeHtml(r.ansprechpartner || '—')
-        + (r.position ? '<div class="text-[10px] text-ink-400">' + escapeHtml(r.position) + '</div>' : '') + '</td>'
-      + '<td class="px-2 py-2 border-b border-ink-100 whitespace-nowrap">'
-        + (tel ? '<a href="tel:' + escapeAttr(tel.replace(/\s/g, '')) + '" onclick="event.stopPropagation()" class="text-brand-700 font-mono text-[13px] font-bold hover:underline">' + escapeHtml(tel) + '</a>' : '<span class="text-ink-300">keine Nummer</span>')
+    const belegt = _ccBelegtVon(r, ich);
+    const zebra = aktiv ? 'bg-brand-50' : (i % 2 ? 'bg-ink-50/40' : 'bg-white');
+    return '<tr class="' + zebra + (belegt ? ' opacity-60' : ' hover:bg-brand-50/60 cursor-pointer')
+        + '" ' + (belegt ? '' : 'onclick="_ccAktiv(\'' + r.recordId + '\')"') + '>'
+      + '<td class="px-2 py-1.5 border-b border-ink-100 w-6">' + _ccLed(r) + '</td>'
+      + '<td class="px-2 py-1.5 border-b border-ink-100">'
+        + '<span class="font-bold text-ink-900 text-[14px]">' + escapeHtml(r.firma || '—') + '</span>'
+        + (String(r.bestand || '') === 'ja' ? ' <span class="text-[10px] px-1 py-0.5 rounded bg-emerald-100 text-emerald-700 font-bold align-middle" title="Steht bereits in der zentralen DB">Kunde</span>' : '')
+        + (r.ort ? ' <span class="text-[12px] text-ink-400">· ' + escapeHtml(r.ort) + '</span>' : '')
+        + (belegt ? ' <span class="text-[11px] text-amber-700 font-semibold">· in Arbeit bei ' + escapeHtml(belegt) + '</span>' : '')
         + '</td>'
-      + '<td class="px-2 py-2 border-b border-ink-100">' + _ccStatusBadge(r)
-        + (r.versuche && +r.versuche > 0 ? '<div class="text-[10px] text-ink-400 mt-0.5">' + r.versuche + '. Versuch</div>' : '') + '</td>'
-      + '<td class="px-2 py-2 border-b border-ink-100 text-[11px] text-ink-600 max-w-[220px]">' + escapeHtml(String(r.notiz || '').slice(0, 120)) + '</td>'
+      + '<td class="px-2 py-1.5 border-b border-ink-100 text-[14px] text-ink-800 whitespace-nowrap">' + escapeHtml(r.ansprechpartner || '—')
+        + (r.position ? '<span class="text-[12px] text-ink-400"> · ' + escapeHtml(r.position) + '</span>' : '') + '</td>'
+      + '<td class="px-2 py-1.5 border-b border-ink-100 whitespace-nowrap">'
+        + (tel ? '<a href="tel:' + escapeAttr(tel.replace(/\s/g, '')) + '" onclick="event.stopPropagation()" class="text-brand-700 font-mono text-[15px] font-bold hover:underline">' + escapeHtml(tel) + '</a>' : '<span class="text-ink-300 text-[13px]">keine Nummer</span>')
+        + '</td>'
+      + '<td class="px-2 py-1.5 border-b border-ink-100 whitespace-nowrap">' + _ccQuelleBadge(r) + '</td>'
+      + '<td class="px-2 py-1.5 border-b border-ink-100 whitespace-nowrap">' + _ccStatusBadge(r)
+        + (r.versuche && +r.versuche > 0 ? ' <span class="text-[11px] text-ink-400">' + r.versuche + '×</span>' : '') + '</td>'
+      + '<td class="px-2 py-1.5 border-b border-ink-100 text-[12px] text-ink-600 max-w-[260px] truncate">' + escapeHtml(String(r.notiz || '')) + '</td>'
       + '</tr>'
-      + (aktiv ? '<tr class="bg-brand-50/70"><td colspan="6" class="px-2 pb-3 border-b border-ink-200">' + _ccArbeitsbereich(r) + '</td></tr>' : '');
+      + (aktiv ? '<tr class="bg-brand-50"><td colspan="7" class="px-2 pb-3 border-b-2 border-brand-200">' + _ccArbeitsbereich(r) + '</td></tr>' : '');
   }).join('');
 
   return '<div class="bg-white rounded-xl border border-ink-200 overflow-hidden">'
-    + '<div class="overflow-x-auto"><table class="w-full text-[12px] border-collapse">'
-    + '<thead><tr>' + ['', 'Firma', 'Ansprechpartner', 'Telefon', 'Status', 'Notiz']
-        .map(h => '<th class="text-left font-semibold text-ink-600 px-2 py-1.5 border-b border-ink-200 bg-ink-50 whitespace-nowrap">' + h + '</th>').join('')
+    + '<div class="overflow-x-auto"><table class="w-full border-collapse">'
+    + '<thead class="sticky top-0 z-10"><tr>' + ['', 'Firma', 'Ansprechpartner', 'Telefon', 'Quelle', 'Status', 'Notiz']
+        .map(h => '<th class="text-left font-bold text-[12px] uppercase tracking-wide text-ink-500 px-2 py-2 border-b-2 border-ink-200 bg-ink-100 whitespace-nowrap">' + h + '</th>').join('')
     + '</tr></thead><tbody>' + trs + '</tbody></table></div></div>';
+}
+
+/* Wer arbeitet gerade an dieser Zeile? Leer, wenn niemand oder ich selbst.
+   Die Sperre verfällt nach 20 Minuten von allein — wer den Browser zuklappt,
+   darf einen Kontakt nicht für immer blockieren. */
+function _ccBelegtVon(r, ich) {
+  const bis = String(r.gesperrt_bis || '').trim();
+  if (!bis) return '';
+  if (new Date(bis).getTime() < Date.now()) return '';
+  const wer = String(r.bearbeiter || '').trim();
+  if (!wer || wer === ich) return '';
+  return wer;
 }
 
 /* Der aufgeklappte Bereich unter der aktiven Zeile: Vorgeschichte, die vier
@@ -42441,14 +42465,44 @@ function _ccArbeitsbereich(r) {
     + '</div></div>';
 }
 
+/* v2.71.4: Öffnen heißt übernehmen. Ohne das rufen zwei Anrufer denselben
+   Verwalter an — und der merkt es. Die Sperre gilt 20 Minuten und verfällt von
+   allein; wer den Browser zuklappt, blockiert niemanden dauerhaft. */
 async function _ccAktiv(recordId) {
-  CC_STATE.aktiv = (CC_STATE.aktiv === recordId) ? null : recordId;
+  const vorher = CC_STATE.aktiv;
+  CC_STATE.aktiv = (vorher === recordId) ? null : recordId;
   _ccZeichnen();
+  // Die vorige Zeile freigeben, die neue übernehmen. Beides im Hintergrund —
+  // die Oberfläche darf darauf nicht warten.
+  if (vorher && vorher !== CC_STATE.aktiv) _ccFreigeben(vorher);
+  if (CC_STATE.aktiv) _ccUebernehmen(CC_STATE.aktiv);
   if (CC_STATE.aktiv && CC_STATE.historie[recordId] === undefined) {
     const r = CC_STATE.leads.find(x => x.recordId === recordId);
     CC_STATE.historie[recordId] = await _ccHistorie(r).catch(() => '');
     if (CC_STATE.aktiv === recordId) _ccZeichnen();
   }
+}
+
+function _ccUebernehmen(recordId) {
+  const bis = new Date(Date.now() + 20 * 60000).toISOString();
+  _ccSpeichern(recordId, { gesperrt_bis: bis, bearbeiter: (APP_KEYS.user && APP_KEYS.user.name) || '' })
+    .catch(e => console.warn('[CC] Übernehmen:', e.message));
+}
+function _ccFreigeben(recordId) {
+  _ccSpeichern(recordId, { gesperrt_bis: '' }).catch(e => console.warn('[CC] Freigeben:', e.message));
+}
+
+/* Stiller Abgleich, damit im Team sichtbar wird, woran die anderen arbeiten.
+   Läuft NICHT, solange eine Zeile offen ist: Ein Neuzeichnen mitten im Tippen
+   würde die Notiz verwerfen, und das wiegt schwerer als ein 40 Sekunden alter
+   Stand bei den übrigen Zeilen. */
+function _ccAbgleichStarten() {
+  if (CC_STATE.timer) clearInterval(CC_STATE.timer);
+  CC_STATE.timer = setInterval(async () => {
+    if (APP_STATE.page !== 'callcenter') { clearInterval(CC_STATE.timer); CC_STATE.timer = null; return; }
+    if (CC_STATE.aktiv || CC_STATE.laden || document.hidden) return;
+    try { await _ccLaden(); _ccZeichnen(); } catch (_) {}
+  }, 40000);
 }
 
 /* Vorgeschichte aus dem Archiv — ohne KI. Zwei Sätze aus Zahlen und Daten sind
@@ -42495,7 +42549,10 @@ async function _ccErgebnis(recordId, status, btn) {
     await _ccSpeichern(recordId, patch);
     // Nach einem abschließenden Ergebnis gleich weiter — die Liste soll sich
     // von oben nach unten leeren, ohne dass jemand suchen muss.
-    if (['interessiert', 'kein_interesse', 'falsch', 'sperre'].includes(status)) CC_STATE.aktiv = null;
+    if (['interessiert', 'kein_interesse', 'falsch', 'sperre'].includes(status)) {
+      CC_STATE.aktiv = null;
+      await _ccSpeichern(recordId, { gesperrt_bis: '' });   // erledigt = niemand arbeitet mehr daran
+    }
     _ccZeichnen();
   } catch (e) {
     if (btn) setBusy(btn, false);
