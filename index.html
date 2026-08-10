@@ -824,7 +824,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.78.2';
+const APP_VERSION = 'v2.79.0';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -41622,7 +41622,96 @@ function _zdbViewSearch(v) {
 }
 
 function _zdbHeadCells(cols) {
-  return cols.map(c => '<th class="text-left font-semibold text-ink-600 px-2 py-1.5 whitespace-nowrap border-b border-ink-200 bg-ink-50">' + escapeHtml(c[1]) + '</th>').join('');
+  return cols.map(c => '<th class="text-left font-semibold text-ink-600 px-2 py-1.5 whitespace-nowrap border-b border-ink-200 bg-ink-50">'
+    + escapeHtml(c[1]) + _zdbSammelKopf(c[0]) + '</th>').join('');
+}
+
+/* === v2.79.0: Sammelaktionen über den Spalten =============================
+   Hundert Kontakte einzeln anzuklicken ist keine Arbeit, die ein Mensch tun
+   sollte. Übersprungen wird, was schon erledigt ist — der Knopf ist also
+   gefahrlos mehrfach drückbar und arbeitet nur den Rest ab.
+
+   Werbung und Korb fehlen hier bewusst: Werbung öffnet je Kontakt ein Fenster
+   mit Vorlagenwahl, und ein Sammel-Zurücklegen wäre eine Löschaktion mit einem
+   Klick. Beides gehört nicht hinter einen Sammelknopf. */
+const CC_SAMMEL = {
+  aktionen: [
+    { art: 'historie', titel: '∑ für alle', hilfe: 'Historie zusammenfassen — überspringt Kontakte, die schon eine haben' },
+    { art: 'fd',       titel: '→ FD alle',  hilfe: 'Nach Freshdesk übertragen — überspringt bereits vorhandene' },
+    { art: 'fs',       titel: '→ FS alle',  hilfe: 'Nach Freshsales übertragen — überspringt bereits übertragene' },
+  ],
+  mailchimp: [
+    { art: 'mc', titel: '→ MC alle', hilfe: 'Nach Mailchimp übertragen — überspringt bereits eingetragene' },
+  ],
+};
+
+function _zdbSammelKopf(spalte) {
+  const liste = CC_SAMMEL[spalte];
+  // Dieselbe Bedingung wie beim „Neu"-Knopf: Ohne geladene Firmen ist die
+  // Ansicht nur lesend.
+  if (!liste || !(ZDB_VIEW_STATE.data && ZDB_VIEW_STATE.data.firmen)) return '';
+  return '<div class="flex gap-1 mt-1">' + liste.map(a =>
+    '<button onclick="_zdbSammelAktion(\'' + a.art + '\', this)" class="px-1.5 py-0.5 rounded border border-ink-300 bg-white hover:bg-ink-100 text-[10px] font-bold text-ink-600" title="' + escapeAttr(a.hilfe) + '">' + escapeHtml(a.titel) + '</button>').join('') + '</div>';
+}
+
+/** Welche Kontakte hat diese Aktion noch nicht erreicht? */
+function _zdbSammelOffen(art) {
+  const d = ZDB_VIEW_STATE.data || {};
+  return (d.kontakte || []).filter(r => {
+    const f = r.fields || {};
+    if (art === 'historie') return !!f.email && !String(f.historie_ki || '').trim();
+    if (art === 'fd')       return !!f.email && !String(f.freshdesk_contact_id || '').trim();
+    if (art === 'fs')       return !!f.email && !String(f.freshsales || '').trim();
+    if (art === 'mc')       return !!f.email && !String(f.mailchimp || '').trim() && _zdbMcBeleg(f);
+    return false;
+  });
+}
+
+async function _zdbSammelAktion(art, btn) {
+  const offen = _zdbSammelOffen(art);
+  const name = { historie: 'Historie zusammenfassen', fd: 'nach Freshdesk übertragen', fs: 'nach Freshsales übertragen', mc: 'nach Mailchimp übertragen' }[art] || art;
+  if (!offen.length) return toast('Nichts zu tun — alle Kontakte sind bereits erledigt.', 'success', 5000);
+  if (!confirm(offen.length + ' Kontakte ' + name + '?\n\n'
+    + 'Bereits erledigte werden übersprungen. Der Lauf kann einige Minuten dauern und lässt sich nicht anhalten.'
+    + (art === 'historie' ? '\n\nJede Zusammenfassung kostet einen KI-Aufruf.' : ''))) return;
+
+  // Einzelmeldungen unterdrücken: Bei hundert Kontakten wären es hundert
+  // Einblendungen, und die letzte verdeckt das Ergebnis.
+  const echterToast = window.toast;
+  window.toast = function () {};
+  let fertig = 0, fehler = 0;
+  setBusy(btn, true, '0/' + offen.length);
+  try {
+    for (const rec of offen) {
+      try {
+        if (art === 'historie') await _ccHistorieFuer(rec.id);
+        else if (art === 'fd')  await _zdbPushFd(rec.id, null);
+        else if (art === 'fs')  await _zdbPushFs(rec.id, null);
+        else if (art === 'mc')  await _zdbPushMc(rec.id, null);
+        fertig++;
+      } catch (e) { fehler++; console.warn('[ZDB-Sammel] ' + art + ':', e.message); }
+      setBusy(btn, true, (fertig + fehler) + '/' + offen.length);
+    }
+  } finally {
+    window.toast = echterToast;
+    setBusy(btn, false);
+  }
+  _zdbNeuZeichnen();
+  toast(fertig + ' von ' + offen.length + ' erledigt' + (fehler ? ' · ' + fehler + ' fehlgeschlagen (siehe Konsole)' : ''),
+    fehler ? 'warn' : 'success', 9000);
+}
+
+/** Historie erzeugen ohne Fenster — für den Sammellauf. */
+async function _ccHistorieFuer(recId) {
+  const k = _zdbSatzVon(recId);
+  if (!k || !k.email) return;
+  const { text, tickets } = await _ccHistorieErzeugenFuer(k);
+  if (!tickets) return;
+  const stempel = text + '\n\n— erzeugt ' + new Date().toLocaleString('de-DE') + ' aus ' + tickets + ' Tickets';
+  await _zdbEnsureTables(k.acc);
+  const namen = _zdbTableNames(k.acc);
+  await _zdbUpdateSafe(namen.kontakt, recId, { historie_ki: stempel, updated_at: nowIso() });
+  k.rec.fields = { ...k.f, historie_ki: stempel };
 }
 /* v2.68.16: Mailchimp-Spalte der zentralen DB.
    Der Ablauf endet hier — der Kontakt ist geprüft und freigegeben, also gehört
@@ -42013,7 +42102,7 @@ async function _zdbHistorieHolen(acc, email) {
   return d.tickets || [];
 }
 
-async function _zdbHistorieErzeugen(k) {
+async function _ccHistorieErzeugenFuer(k) {
   const tickets = await _zdbHistorieHolen(k.acc, k.email.toLowerCase());
   if (!tickets.length) return { text: '', tickets: 0 };
   const stoff = tickets.map(t =>
@@ -42060,7 +42149,7 @@ async function _zdbHistorieNeu(recId, btn) {
   if (!k || !k.email) return;
   if (btn) setBusy(btn, true, 'Lese Archiv…');
   try {
-    const { text, tickets } = await _zdbHistorieErzeugen(k);
+    const { text, tickets } = await _ccHistorieErzeugenFuer(k);
     if (!tickets) {
       if (btn) setBusy(btn, false);
       return toast('Im Archiv liegt zu ' + k.email + ' nichts — diese Adresse hat nie geschrieben.', 'warn', 7000);
