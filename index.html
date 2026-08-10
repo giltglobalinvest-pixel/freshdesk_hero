@@ -824,7 +824,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.75.3';
+const APP_VERSION = 'v2.75.4';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -1172,13 +1172,21 @@ function toast(msg, kind = 'info', ttl = 3500, action = null) {
 function setBusy(btnEl, busy, busyText) {
   if (!btnEl) return;
   if (busy) {
-    btnEl.dataset._origHtml = btnEl.innerHTML;
+    // v2.75.4: Den Ursprungszustand NUR beim ersten Mal merken. Wer den Text
+    // zwischendurch fortschreibt („3/20" → „4/20") oder umbenennt, hätte sonst
+    // den Spinner als „Original" gespeichert — und der Knopf dreht sich nach
+    // dem Zurücksetzen weiter, obwohl der Vorgang längst beendet ist.
+    if (!btnEl.dataset._busy) {
+      btnEl.dataset._origHtml = btnEl.innerHTML;
+      btnEl.dataset._busy = '1';
+    }
     btnEl.disabled = true;
     btnEl.innerHTML = `<span class="spinner"></span><span>${escapeHtml(busyText || 'Lade…')}</span>`;
     btnEl.classList.add('opacity-70');
   } else {
     btnEl.disabled = false;
     if (btnEl.dataset._origHtml) btnEl.innerHTML = btnEl.dataset._origHtml;
+    delete btnEl.dataset._busy;
     btnEl.classList.remove('opacity-70');
   }
   if (window.lucide) lucide.createIcons();
@@ -42462,7 +42470,9 @@ async function _ccMandantWechseln(id) {
   CC_STATE.accountId = id;
   CC_STATE.aktiv = null;
   CC_STATE.historie = {};
+  _CC_VORLAGE = null;                    // Vorlagen hängen am Mandanten
   try { localStorage.setItem('fdh_cc_account', id || ''); } catch (_) {}
+  _ccFilterHolen();                      // jeder Mandant hat seine eigene Arbeitsweise
   await renderCallcenterPage();
 }
 
@@ -42608,7 +42618,12 @@ function _ccMandantWahl(aktuell) {
    Gemerkt wird lokal, nicht am Benutzer: Das ist eine Gewohnheit am jeweiligen
    Gerät, keine Einstellung, die ein Kollege übernehmen sollte. */
 function _ccFilterSchluessel() {
-  return (CC_STATE.accountId || '') + '|' + (CC_STATE.kampagne || CC_KAMPAGNE_STANDARD);
+  // Den TATSÄCHLICH angezeigten Mandanten verwenden, nicht die ausdrückliche
+  // Auswahl: Wer nie umgeschaltet hat, arbeitet auf dem ersten Mandanten, ohne
+  // dass CC_STATE.accountId gesetzt wäre. Sonst wird unter einem anderen
+  // Schlüssel gespeichert als später gesucht — und der Filter ist scheinbar weg.
+  const acc = _ccAccount();
+  return ((acc && acc.id) || '') + '|' + (CC_STATE.kampagne || CC_KAMPAGNE_STANDARD);
 }
 
 function _ccFilterMerken() {
@@ -43845,7 +43860,9 @@ async function _ccVersandAbsenden(recordId, btn) {
       // werden. Ein geschlossenes Ticket verschwindet aus jeder Sicht, und die
       // Antwort des Verwalters landet in einem Vorgang, den niemand ansieht.
       status: '2',
-      tags: 'Kaltakquise',
+      // Freshdesk nimmt Listen im Multipart nur mit Klammern entgegen — als
+      // nackte Zeichenkette antwortet es mit „should be a/an Array".
+      'tags[]': 'Kaltakquise',
     }, [{ blob, name: _ccDateiname(v.pdf_datei, r) }]);
     if (!erstellt || !erstellt.id) throw new Error('Freshdesk hat keine Ticketnummer zurückgegeben');
 
@@ -43859,8 +43876,9 @@ async function _ccVersandAbsenden(recordId, btn) {
     _ccZeichnen();
     toast('Preisliste an ' + r.email + ' gesendet — Ticket #' + erstellt.id, 'success', 6000);
   } catch (e) {
-    setBusy(btn, false);
     toast('Versand fehlgeschlagen: ' + (e.message || e), 'error', 10000);
+  } finally {
+    setBusy(btn, false);
   }
 }
 
