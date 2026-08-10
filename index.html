@@ -824,7 +824,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.75.0';
+const APP_VERSION = 'v2.75.2';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -907,6 +907,7 @@ let APP_KEYS = {
   bkAirtableBaseId: null,    // v2.46.167: Airtable-Base-ID vom Berichtskonverter — Angebote landen dort in App_Angebote
   googleMapsKey:    null,    // v2.46.201: Google Geocoding API (Adresse → Place-ID fürs ERP)
   mailchimpMap:     {},      // v2.69.0: { fdAccountId → { schluessel, liste, listeName } }
+  ccTypen:          null,    // v2.75.1: Kontakttypen der Anrufliste, pflegbar
   sessionToken:     null,
   user:             null,    // { _id, api_key?, name, role, is_admin, ... }
 };
@@ -1497,6 +1498,11 @@ async function loadProjectKeys() {
         if (f.key_name === 'bkAirtableBaseId') APP_KEYS.bkAirtableBaseId = f.key_value || null;
         // v2.46.201: Google-Maps-Key für Geocoding (Adresse → Place-ID, wie BK v7.01)
         if (f.key_name === 'googleMapsKey')    APP_KEYS.googleMapsKey    = f.key_value || null;
+        // v2.75.1: Kontakttypen der Anrufliste (JSON-Liste)
+        if (f.key_name === 'ccTypen') {
+          try { const l = JSON.parse(f.key_value || '[]'); if (Array.isArray(l) && l.length) APP_KEYS.ccTypen = l; }
+          catch (_) { APP_KEYS.ccTypen = null; }
+        }
         // v2.69.0: Mailchimp je Mandant — Schlüssel + gewählte Zielgruppe
         if (f.key_name === 'mailchimpMap') {
           try { APP_KEYS.mailchimpMap = JSON.parse(f.key_value || '{}'); }
@@ -42303,10 +42309,25 @@ let CC_STATE = {
 
 const CC_KAMPAGNE_STANDARD = 'Sonderkonditionen';
 
-/* Kontakttypen. Die Liste ist absichtlich kurz und auf die Frage zugeschnitten,
-   die beim Telefonieren zählt: Darf und soll man hier anrufen? Feinere
-   Unterscheidungen gehören in die zentrale DB, nicht in eine Anrufliste. */
-const CC_TYPEN = ['Hausverwaltung', 'Eigentümer', 'Bauträger', 'Architekt', 'Behörde', 'Lieferant', 'Mitbewerber', 'Privat', 'Sonstige'];
+/* Kontakttypen. Die Vorgabe ist absichtlich kurz und auf die Frage
+   zugeschnitten, die beim Telefonieren zählt: Darf und soll man hier anrufen?
+   Sie ist aber nur der Anfang — jede Branche braucht ihre eigenen Begriffe,
+   deshalb ist die Liste pflegbar und liegt in der Master-Base. */
+const CC_TYPEN_VORGABE = ['Hausverwaltung', 'Eigentümer', 'Bauträger', 'Architekt', 'Behörde', 'Lieferant', 'Mitbewerber', 'Privat', 'Sonstige'];
+
+function _ccTypenListe() {
+  const l = APP_KEYS.ccTypen;
+  return (Array.isArray(l) && l.length) ? l : CC_TYPEN_VORGABE;
+}
+
+async function _ccTypenSpeichern(liste) {
+  const sauber = [...new Set(liste.map(t => String(t).trim()).filter(Boolean))];
+  const keys = await fetchMasterBaseKeys();
+  const da = keys.find(r => r.fields.key_name === 'ccTypen');
+  await writeMasterBaseKey('ccTypen', JSON.stringify(sauber), da?.id);
+  APP_KEYS.ccTypen = sauber;
+  return sauber;
+}
 
 /** Reine Callcenter-Kraft: sieht nur diese eine Seite. Admins nie. */
 function _ccIstCallcenter() {
@@ -42542,10 +42563,12 @@ function _ccZeichnen() {
       + _ccQuellenFilter(alle)
       + _ccTypFilter(alle)
       + (CC_STATE.typ ? '<button onclick="_ccTypAusblenden(this)" class="px-2.5 py-1.5 rounded-lg text-[11px] font-bold bg-white border border-ink-300 text-ink-600 hover:bg-ink-50" title="Alle dieses Typs aus der Kampagne nehmen">Typ ausblenden</button>' : '')
+      + (APP_KEYS.user?.is_admin ? '<button onclick="_ccTypenVerwalten()" class="px-2 py-1.5 rounded-lg text-[11px] bg-white border border-ink-200 text-ink-500 hover:bg-ink-50" title="Kontakttypen verwalten"><i data-lucide="settings-2" class="w-3.5 h-3.5"></i></button>' : '')
       + (alle.some(r => String(r.bestand || '') === 'ja')
           ? '<label class="inline-flex items-center gap-1.5 text-[11px] text-ink-600 cursor-pointer"><input type="checkbox"' + (CC_STATE.ohneBestand ? ' checked' : '') + ' onchange="_ccBestandFilter(this.checked)"> nur Neukunden</label>'
           : '')
       + (ohneNr ? '<label class="inline-flex items-center gap-1.5 text-[11px] text-ink-600 cursor-pointer" title="' + ohneNr + ' Kontakte haben keine brauchbare Nummer"><input type="checkbox"' + (CC_STATE.nurMitNummer ? ' checked' : '') + ' onchange="_ccNummerFilter(this.checked)"> nur mit Nummer <span class="text-ink-400">(' + ohneNr + ' ohne)</span></label>' : '')
+      + (ohneNr && APP_KEYS.user?.is_admin ? '<button onclick="_ccNummernSuchen(this)" class="px-2.5 py-1.5 rounded-lg text-[11px] font-bold bg-white border border-teal-300 text-teal-700 hover:bg-teal-50 inline-flex items-center gap-1" title="Fehlende Nummern im Archiv suchen"><i data-lucide="phone-incoming" class="w-3.5 h-3.5"></i> Nummern suchen</button>' : '')
       + (versteckt ? '<label class="inline-flex items-center gap-1.5 text-[11px] text-ink-600 cursor-pointer"><input type="checkbox"' + (CC_STATE.zeigeVersteckte ? ' checked' : '') + ' onchange="_ccVersteckteFilter(this.checked)"> ausgeblendete zeigen <span class="text-ink-400">(' + versteckt + ')</span></label>' : '')
       + '<input type="search" value="' + escapeAttr(CC_STATE.suche || '') + '" oninput="_ccSuche(this.value)" placeholder="Suchen…" class="ml-auto px-3 py-1.5 border border-ink-200 rounded-lg text-sm w-44">'
       + '<button onclick="_ccDashboardOeffnen()" class="px-3 py-1.5 rounded-lg text-[12px] font-bold bg-white border border-ink-200 text-ink-600 hover:bg-ink-50 inline-flex items-center gap-1" title="Wie läuft die Kampagne?"><i data-lucide="bar-chart-3" class="w-3.5 h-3.5"></i> Statistik</button>'
@@ -42624,6 +42647,76 @@ function _ccTypWahl(v) { CC_STATE.typ = v || ''; CC_STATE.aktiv = null; _ccFilte
 
 /* Typfilter aus den tatsächlich vorkommenden Typen — plus „ohne Angabe", denn
    das ist bei importierten Listen der Normalfall und muss auffindbar bleiben. */
+/* Typen verwalten. Ohne Umbenennen wächst die Liste mit jedem Vertipper zu, und
+   niemand traut sich später, etwas zu ändern — beim Umbenennen ziehen deshalb
+   alle betroffenen Kontakte mit um. */
+async function _ccTypenVerwalten() {
+  const liste = _ccTypenListe();
+  const zaehl = {};
+  CC_STATE.leads.forEach(r => { const t = String(r.typ || '').trim(); if (t) zaehl[t] = (zaehl[t] || 0) + 1; });
+  let host = document.getElementById('ccTypHost');
+  if (!host) { host = document.createElement('div'); host.id = 'ccTypHost'; document.body.appendChild(host); }
+  host.innerHTML =
+    '<div class="fixed inset-0 z-[84] bg-black/40 flex items-start justify-center overflow-y-auto p-4" onclick="if(event.target===this)_ccTypenSchliessen()">'
+      + '<div class="bg-white rounded-2xl shadow-xl w-full max-w-md my-8">'
+        + '<div class="flex items-center justify-between p-4 border-b border-ink-200"><h3 class="font-bold text-ink-900">Kontakttypen</h3>'
+          + '<button onclick="_ccTypenSchliessen()" class="text-ink-400 hover:text-ink-700"><i data-lucide="x" class="w-5 h-5"></i></button></div>'
+        + '<div class="p-4 space-y-1.5">'
+          + liste.map((t, i) => '<div class="flex items-center gap-2">'
+              + '<span class="flex-1 text-[13px] text-ink-800">' + escapeHtml(t) + (zaehl[t] ? ' <span class="text-[11px] text-ink-400">· ' + zaehl[t] + ' Kontakte</span>' : '') + '</span>'
+              + '<button onclick="_ccTypUmbenennen(' + i + ', this)" class="text-ink-400 hover:text-ink-800 p-1" title="Umbenennen"><i data-lucide="pencil" class="w-3.5 h-3.5"></i></button>'
+              + '<button onclick="_ccTypEntfernen(' + i + ', this)" class="text-ink-400 hover:text-rose-700 p-1" title="Aus der Liste nehmen"><i data-lucide="trash-2" class="w-3.5 h-3.5"></i></button>'
+            + '</div>').join('')
+          + '<button onclick="_ccTypHinzufuegen(this)" class="mt-2 px-3 py-1.5 rounded-lg text-[12px] font-bold bg-white border border-ink-300 text-ink-700 hover:bg-ink-50">+ Typ hinzufügen</button>'
+        + '</div>'
+        + '<div class="flex justify-end p-4 border-t border-ink-200"><button onclick="_ccTypenSchliessen()" class="px-4 py-2 text-sm font-bold bg-ink-800 hover:bg-ink-900 text-white rounded-lg">Fertig</button></div>'
+      + '</div>'
+    + '</div>';
+  if (window.lucide) lucide.createIcons();
+}
+function _ccTypenSchliessen() { const h = document.getElementById('ccTypHost'); if (h) h.innerHTML = ''; _ccZeichnen(); }
+
+async function _ccTypHinzufuegen(btn) {
+  const name = (prompt('Neuer Kontakttyp:', '') || '').trim().replace(/\s+/g, ' ').slice(0, 30);
+  if (!name) return;
+  const liste = _ccTypenListe();
+  if (liste.some(t => t.toLowerCase() === name.toLowerCase())) return toast('Gibt es bereits.', 'warn', 4000);
+  setBusy(btn, true);
+  try { await _ccTypenSpeichern(liste.concat(name)); _ccTypenVerwalten(); }
+  catch (e) { setBusy(btn, false); toast('Nicht gespeichert: ' + (e.message || e), 'error', 8000); }
+}
+
+async function _ccTypUmbenennen(i, btn) {
+  const liste = _ccTypenListe();
+  const alt = liste[i];
+  const neu = (prompt('Typ umbenennen:', alt) || '').trim().replace(/\s+/g, ' ').slice(0, 30);
+  if (!neu || neu === alt) return;
+  const betroffen = CC_STATE.leads.filter(r => String(r.typ || '') === alt);
+  if (betroffen.length && !confirm(betroffen.length + ' Kontakte tragen „' + alt + '" — sie werden auf „' + neu + '" umgestellt.')) return;
+  setBusy(btn, true);
+  try {
+    await _ccTypenSpeichern(liste.map(t => (t === alt ? neu : t)));
+    if (betroffen.length) {
+      await _ccStapelAendern(betroffen.map(r => ({ id: r.recordId, fields: { typ: neu, updated_at: nowIso() } })));
+      betroffen.forEach(r => { r.typ = neu; });
+    }
+    _ccTypenVerwalten();
+  } catch (e) { setBusy(btn, false); toast('Umbenennen fehlgeschlagen: ' + (e.message || e), 'error', 9000); }
+}
+
+async function _ccTypEntfernen(i, btn) {
+  const liste = _ccTypenListe();
+  const t = liste[i];
+  const betroffen = CC_STATE.leads.filter(r => String(r.typ || '') === t).length;
+  // Der Typ verschwindet nur aus der AUSWAHL. Ihn auch an den Kontakten zu
+  // löschen wäre stiller Datenverlust — sie behalten ihn und bleiben filterbar.
+  if (!confirm('„' + t + '" aus der Auswahlliste nehmen?'
+      + (betroffen ? '\n\n' + betroffen + ' Kontakte behalten den Typ und bleiben auffindbar — er lässt sich nur nicht mehr neu vergeben.' : ''))) return;
+  setBusy(btn, true);
+  try { await _ccTypenSpeichern(liste.filter((_, j) => j !== i)); _ccTypenVerwalten(); }
+  catch (e) { setBusy(btn, false); toast('Nicht gespeichert: ' + (e.message || e), 'error', 8000); }
+}
+
 function _ccTypFilter(alle) {
   const zaehl = {};
   alle.forEach(r => { const t = String(r.typ || '').trim() || '—'; zaehl[t] = (zaehl[t] || 0) + 1; });
@@ -42777,7 +42870,11 @@ function _ccTabelle(rows) {
         + '<select onclick="event.stopPropagation()" onchange="event.stopPropagation(); _ccTypSetzen(\'' + r.recordId + '\', this.value)" class="px-1 py-0.5 border rounded text-[12px] bg-white '
           + (r.typ ? 'border-ink-300 text-ink-800 font-semibold' : 'border-ink-200 text-ink-400') + '" title="Kontakttyp — wird dauerhaft am Kontakt gemerkt">'
           + '<option value="">— Typ —</option>'
-          + CC_TYPEN.map(t => '<option value="' + escapeAttr(t) + '"' + (String(r.typ || '') === t ? ' selected' : '') + '>' + escapeHtml(t) + '</option>').join('')
+          + _ccTypenListe().map(t => '<option value="' + escapeAttr(t) + '"' + (String(r.typ || '') === t ? ' selected' : '') + '>' + escapeHtml(t) + '</option>').join('')
+          // Neue Typen entstehen dort, wo sie gebraucht werden — mitten im
+          // Durchgehen. Ein Umweg über die Einstellungen würde bedeuten, dass
+          // niemand sie anlegt und stattdessen „Sonstige" wählt.
+          + '<option value="__neu__">+ Neuer Typ …</option>'
         + '</select></td>'
       + '<td class="px-2 py-1.5 border-b border-ink-100 whitespace-nowrap">' + _ccQuelleBadge(r) + '</td>'
       + '<td class="px-2 py-1.5 border-b border-ink-100 whitespace-nowrap">' + _ccStatusBadge(r)
@@ -42998,6 +43095,17 @@ function _ccTypBekannt(map, lead) {
  */
 async function _ccTypSetzen(recordId, wert) {
   const r = CC_STATE.leads.find(x => x.recordId === recordId);
+  if (wert === '__neu__') {
+    const name = (prompt('Neuer Kontakttyp:', '') || '').trim().replace(/\s+/g, ' ').slice(0, 30);
+    if (!name) return _ccZeichnen();
+    const liste = _ccTypenListe();
+    const schon = liste.find(t => t.toLowerCase() === name.toLowerCase());
+    if (!schon) {
+      try { await _ccTypenSpeichern(liste.concat(name)); }
+      catch (e) { toast('Typ konnte nicht gespeichert werden: ' + (e.message || e), 'error', 8000); return _ccZeichnen(); }
+    }
+    wert = schon || name;   // Groß-/Kleinschreibung des vorhandenen Eintrags gewinnt
+  }
   const typ = String(wert || '').trim();
   try { await _ccSpeichern(recordId, { typ }); }
   catch (e) { return toast('Typ nicht gespeichert: ' + (e.message || e), 'error', 7000); }
@@ -44026,6 +44134,77 @@ async function _ccCsvImportieren(btn) {
   } catch (e) {
     setBusy(btn, false);
     toast('Import fehlgeschlagen: ' + (e.message || e), 'error', 9000);
+  }
+}
+
+/* --- Fehlende Telefonnummern nachtragen (v2.75.2) -----------------------
+   Eine Anrufliste ohne Nummer ist kein Arbeitsvorrat. Die ergiebigste Quelle
+   ist der eigene Bestand: In den Signaturen von 144 000 Tickets stehen mehr
+   Durchwahlen als in jeder gekauften Liste — und geprüfte, weil die Leute
+   damit selbst geschrieben haben.
+
+   Gesucht wird nur, wo nichts steht. Eine vorhandene Nummer zu überschreiben
+   wäre anmaßend: Sie kann von Hand korrigiert worden sein. */
+async function _ccNummernSuchen(btn) {
+  const acc = _ccAccount();
+  const key = APP_KEYS.user?.api_key;
+  const slug = acc ? _archivSlugFuer(acc.id) : null;
+  if (!acc) return;
+  if (!key || !slug) return toast('Für diesen Mandanten gibt es kein Archiv.', 'warn', 6000);
+
+  const offen = _ccKampagnenLeads().filter(r =>
+    String(r.versteckt || '') !== 'ja'
+    && _ccNummerNormal(r.telefon).length < 6
+    && String(r.email || '').includes('@'));
+  const ohneMail = _ccKampagnenLeads().filter(r =>
+    String(r.versteckt || '') !== 'ja'
+    && _ccNummerNormal(r.telefon).length < 6
+    && !String(r.email || '').includes('@')).length;
+
+  if (!offen.length) {
+    return toast(ohneMail
+      ? 'Nichts zu suchen: Die ' + ohneMail + ' Kontakte ohne Nummer haben auch keine E-Mail-Adresse — ohne die lässt sich im Archiv nichts zuordnen.'
+      : 'Alle Kontakte haben bereits eine Nummer.', 'warn', 9000);
+  }
+
+  setBusy(btn, true, '0/' + offen.length);
+  let gefunden = 0, geprueft = 0;
+  try {
+    for (let i = 0; i < offen.length; i += 100) {
+      const teil = offen.slice(i, i + 100);
+      const res = await fetch(ARCHIV_URL + '/telefonsuche', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', 'X-Hero-Key': key },
+        body: JSON.stringify({ mandant: slug, emails: teil.map(r => String(r.email).toLowerCase()) }),
+      });
+      const d = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(d.fehler || ('Archiv HTTP ' + res.status));
+      for (const r of teil) {
+        geprueft++;
+        const t = (d.treffer || {})[String(r.email).toLowerCase()];
+        if (!t || !t.nummer) continue;
+        try {
+          await _ccSpeichern(r.recordId, {
+            telefon: t.nummer,
+            dedupe_tel: 't:' + t.nummer,
+            // Herkunft festhalten: Eine aus Signaturen gefischte Nummer ist
+            // etwas anderes als eine, die der Kunde selbst angegeben hat.
+            notiz: (r.notiz ? r.notiz + ' · ' : '') + 'Nr. aus Archiv'
+              + (t.benannt ? '' : ' (' + t.vorkommen + '× ohne Kennzeichnung)'),
+          });
+          gefunden++;
+        } catch (e) { console.warn('[CC] Nummer speichern:', e.message); }
+      }
+      setBusy(btn, true, geprueft + '/' + offen.length);
+    }
+    setBusy(btn, false);
+    _ccZeichnen();
+    toast(gefunden + ' von ' + offen.length + ' Nummern im Archiv gefunden'
+      + (ohneMail ? ' · ' + ohneMail + ' weitere haben weder Nummer noch Adresse' : ''),
+      gefunden ? 'success' : 'warn', 9000);
+  } catch (e) {
+    setBusy(btn, false);
+    toast('Nummernsuche: ' + (e.message || e), 'error', 9000);
   }
 }
 
