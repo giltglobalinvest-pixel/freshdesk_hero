@@ -820,7 +820,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.70.2';
+const APP_VERSION = 'v2.70.3';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -875,7 +875,20 @@ const APP_CONFIG = {
   PROJECT_ID:        'p_1778420971086',
   PROJECT_NAME:      'Freshdesk Hero',
   GITHUB_REPO:       'giltglobalinvest-pixel/freshdesk_hero',
+  // v2.70.3: Feste Basis für geteilte Links. Vorher wurde sie aus
+  // window.location abgeleitet — wer die App über ein altes Lesezeichen oder
+  // eine installierte PWA vom früheren Pfad öffnete, verschickte damit Links
+  // auf eine Adresse, die es nicht mehr gibt. Der Empfänger sah nur 404 und
+  // konnte nicht wissen, woran es lag.
+  APP_BASE_URL:      'https://giltglobalinvest-pixel.github.io/freshdesk_hero/',
 };
+
+/** Basis für Links, die andere öffnen sollen — immer die veröffentlichte App. */
+function appBasisUrl() {
+  const fest = String((typeof APP_CONFIG !== 'undefined' && APP_CONFIG.APP_BASE_URL) || '').trim();
+  if (fest) return fest.endsWith('/') ? fest : fest + '/';
+  return window.location.origin + window.location.pathname.replace(/\/[^\/]*$/, '/');
+}
 
 let APP_KEYS = {
   airtableWriteKey: null,
@@ -13660,7 +13673,7 @@ function buildTicketLink(accountId, ticketId) {
    Format: <app-base>loader.html#t=<accountId>:<ticketId>[&k=<auto-login-key>]
    Mit optionalem &k= meldet sich der Empfänger automatisch ein. */
 function buildAppTicketLink(accountId, ticketId, autoLoginKey) {
-  const base = window.location.origin + window.location.pathname.replace(/\/[^\/]*$/, '/');
+  const base = appBasisUrl();
   let hash = 't=' + encodeURIComponent(accountId) + ':' + ticketId;
   if (autoLoginKey) hash += '&k=' + encodeURIComponent(autoLoginKey);
   return base + 'loader.html#' + hash;
@@ -36499,9 +36512,9 @@ function openWhatsAppInvite(user) {
   const apiKey  = (user?.api_key || '').trim();
   const phoneRaw = (user?.phone || '').trim();
   const phone   = phoneRaw.replace(/\D/g, ''); // nur Ziffern für wa.me
-  // Loader-URL aus aktueller Location ableiten — Standard ist same-origin
-  const baseUrl = window.location.origin + window.location.pathname.replace(/\/[^\/]*$/, '/');
-  const appUrl  = baseUrl + 'loader.html';
+  // Feste Basis: Die Einladung muss auf die veröffentlichte App zeigen, nicht
+  // auf den Pfad, unter dem der Absender die App gerade zufällig offen hat.
+  const appUrl  = appBasisUrl() + 'loader.html';
   const defaultText =
     'Hallo' + (name ? ' ' + name.split(/\s+/)[0] : '') + ',\n\n' +
     'du bist eingeladen für *Freshdesk Hero* — unsere mobile App zur zentralen Verwaltung der Freshdesk-Tickets mit KI-Unterstützung (Spracheingabe, automatische Zusammenfassung, Regeln, Multi-Account).\n\n' +
