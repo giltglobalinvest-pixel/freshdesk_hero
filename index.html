@@ -824,7 +824,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.76.1';
+const APP_VERSION = 'v2.76.2';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -1184,7 +1184,10 @@ function _lsBestand() {
     if (!k) continue;
     const groesse = (k.length + (localStorage.getItem(k) || '').length) * 2;   // UTF-16
     gesamt += groesse;
-    posten.push({ k, groesse, fremd: !/^(fdh_|ang_)/.test(k) });
+    // app_cache_…/<repo> ist der Loader-Zwischenspeicher der jeweiligen App —
+    // der zu Hero gehört uns, die übrigen nicht.
+    const eigen = /^(fdh_|ang_)/.test(k) || k.indexOf('freshdesk_hero') >= 0;
+    posten.push({ k, groesse, fremd: !eigen, cache: k.startsWith('app_cache_') });
   }
   posten.sort((a, b) => b.groesse - a.groesse);
   return { posten, gesamt };
@@ -1210,11 +1213,14 @@ function openSpeicherVerwaltung() {
           + '<p class="text-[11px] text-ink-500">' + _kb(gesamt) + ' belegt · ' + posten.length + ' Einträge · Grenze etwa 5 MB</p></div>'
           + '<button onclick="_lsSchliessen()" class="text-ink-400 hover:text-ink-700"><i data-lucide="x" class="w-5 h-5"></i></button></div>'
         + '<div class="p-4">'
-          + '<p class="text-[11px] text-ink-600 mb-2">Alle Apps unter dieser Adresse teilen sich dieses Kontingent. Einträge mit „andere App" gehören nicht zu Freshdesk Hero — sie zu löschen kann dort Einstellungen oder Entwürfe kosten.</p>'
+          + '<p class="text-[11px] text-ink-600 mb-2">Alle Apps unter dieser Adresse teilen sich dieses Kontingent von etwa 5 MB.</p>'
+          + '<p class="text-[11px] text-ink-600 mb-2"><b>app_cache_…</b> ist der Startspeicher einer App — ihr kompletter Quelltext, damit sie ohne Netz startet. Diese Einträge sind <b>gefahrlos löschbar</b>: Beim nächsten Start lädt die App sich neu. Sie sind auch die üblichen Platzfresser.</p>'
+          + '<p class="text-[11px] text-ink-600 mb-2">Alles Übrige mit „andere App" gehört einer anderen Anwendung — dort können Einstellungen oder Entwürfe daran hängen.</p>'
           + '<div class="max-h-[45vh] overflow-y-auto">' + posten.map(zeile).join('') + '</div>'
         + '</div>'
         + '<div class="flex items-center justify-between gap-2 p-4 border-t border-ink-200">'
-          + '<button onclick="_lsAngeboteLoeschen()" class="px-3 py-2 text-[12px] font-bold text-amber-800 border border-amber-300 hover:bg-amber-50 rounded-lg">Alte Angebots-Entwürfe löschen</button>'
+          + '<button onclick="_lsCachesLeeren()" class="px-3 py-2 text-[12px] font-bold bg-brand-600 hover:bg-brand-700 text-white rounded-lg">App-Zwischenspeicher leeren</button>'
+          + '<button onclick="_lsAngeboteLoeschen()" class="px-3 py-2 text-[12px] font-bold text-amber-800 border border-amber-300 hover:bg-amber-50 rounded-lg">Angebots-Entwürfe</button>'
           + '<button onclick="_lsSchliessen()" class="px-4 py-2 text-sm font-bold bg-ink-800 hover:bg-ink-900 text-white rounded-lg">Schließen</button>'
         + '</div>'
       + '</div>'
@@ -1227,6 +1233,23 @@ function _lsLoeschen(k) {
   try { localStorage.removeItem(k); } catch (_) {}
   openSpeicherVerwaltung();
 }
+/* Startspeicher aller Apps leeren. Gefahrlos: Sie enthalten nur den Quelltext
+   der jeweiligen App, keine Daten. Beim nächsten Start lädt jede sich neu —
+   was nebenbei auch veraltete Fassungen beseitigt. */
+function _lsCachesLeeren() {
+  const { posten } = _lsBestand();
+  const caches = posten.filter(p => p.cache);
+  if (!caches.length) return toast('Keine App-Zwischenspeicher vorhanden.', 'warn', 5000);
+  const summe = caches.reduce((n, p) => n + p.groesse, 0);
+  if (!confirm(caches.length + ' Startspeicher löschen und ' + _kb(summe) + ' freigeben?\n\n'
+    + 'Enthalten ist nur der Quelltext der Apps, keine Daten. Beim nächsten Start lädt jede App sich neu — '
+    + 'das dauert einmalig ein paar Sekunden länger.')) return;
+  let n = 0;
+  for (const p of caches) { try { localStorage.removeItem(p.k); n++; } catch (_) {} }
+  toast(n + ' Startspeicher gelöscht · ' + _kb(summe) + ' frei', 'success', 7000);
+  openSpeicherVerwaltung();
+}
+
 function _lsAngeboteLoeschen() {
   const auf = _lsAufraeumen(500);
   toast(auf.entfernt ? auf.entfernt + ' Entwürfe entfernt (' + _kb(auf.frei * 2) + ' frei)' : 'Keine alten Angebots-Entwürfe vorhanden.', auf.entfernt ? 'success' : 'warn', 6000);
