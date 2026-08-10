@@ -824,7 +824,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.70.4';
+const APP_VERSION = 'v2.71.0';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -2933,6 +2933,21 @@ async function ensureAppTables() {
     { name: 'ticket_id',       type: 'singleLineText' },
     { name: 'created_at',      type: 'singleLineText' },
     { name: 'updated_at',      type: 'singleLineText' },
+  ]);
+  // v2.71.0: Werbesperre. Bewusst eigene Tabelle und nicht ein Feld an der
+  // Kampagne: „Nie wieder anrufen" muss über ALLE Listen und Mandanten hinweg
+  // gelten, auch für zugekaufte Adressen, die nie in der zentralen DB standen.
+  // Hängt der Widerspruch an einer Kampagne, ruft die nächste denselben
+  // Menschen wieder an — und das ist der Fall, der Geld kostet.
+  await ensureTable(CC_SPERR_TABLE, [
+    { name: 'dedupe_key',  type: 'singleLineText' },   // Primary
+    { name: 'name',        type: 'singleLineText' },
+    { name: 'firma',       type: 'singleLineText' },
+    { name: 'email',       type: 'singleLineText' },
+    { name: 'telefon',     type: 'singleLineText' },
+    { name: 'grund',       type: 'singleLineText' },
+    { name: 'von',         type: 'singleLineText' },
+    { name: 'angelegt_am', type: 'singleLineText' },
   ]);
   await ensureTable(WIEDERVORLAGE_TABLE, [
     { name: 'api_key',     type: 'singleLineText' },
@@ -42013,6 +42028,7 @@ function _zdbPermHintHtml() {
      wird. */
 
 const CC_TABLE = 'Kampagne';
+const CC_SPERR_TABLE = 'Werbesperre';
 const CC_TYPES = {
   firma: 'singleLineText', account_id: 'singleLineText', kampagne: 'singleLineText',
   ansprechpartner: 'singleLineText', telefon: 'singleLineText', email: 'singleLineText',
@@ -42194,14 +42210,15 @@ function _ccZeichnen() {
       + _ccQuellenFilter(alle)
       + '<input type="search" value="' + escapeAttr(CC_STATE.suche || '') + '" oninput="_ccSuche(this.value)" placeholder="Suchen…" class="ml-auto px-3 py-1.5 border border-ink-200 rounded-lg text-sm w-44">'
       + '<button onclick="renderCallcenterPage()" class="px-3 py-1.5 rounded-lg text-[12px] font-bold bg-white border border-ink-200 text-ink-600 hover:bg-ink-50" title="Liste neu laden"><i data-lucide="refresh-cw" class="w-3.5 h-3.5"></i></button>'
+      + (APP_KEYS.user?.is_admin
+          ? '<button onclick="_ccDublettenPruefen(this)" class="px-3 py-1.5 rounded-lg text-[12px] font-bold bg-white border border-ink-200 text-ink-600 hover:bg-ink-50" title="Dubletten, Werbesperre und Bestandskunden prüfen"><i data-lucide="search-check" class="w-3.5 h-3.5"></i></button>'
+            + '<button onclick="_ccImportOeffnen()" class="px-3 py-1.5 rounded-lg text-[12px] font-bold bg-brand-600 hover:bg-brand-700 text-white inline-flex items-center gap-1"><i data-lucide="upload" class="w-3.5 h-3.5"></i> Import</button>'
+          : '')
     + '</div>'
     + (rows.length ? _ccTabelle(rows) : '<div class="bg-white rounded-xl border border-ink-200 p-8 text-center text-sm text-ink-500">'
         + (alle.length ? 'Hier ist nichts mehr zu tun.' : 'Noch keine Leads in der Kampagne.'
-           + (APP_KEYS.user?.is_admin ? '<br><button onclick="_ccImportAusZentralerDb(this)" class="mt-3 px-3 py-2 bg-brand-600 hover:bg-brand-700 text-white rounded-lg text-[12px] font-bold">Kontakte aus der zentralen DB übernehmen</button>' : ''))
-        + '</div>')
-    + (APP_KEYS.user?.is_admin && alle.length
-        ? '<div class="mt-3 text-right"><button onclick="_ccImportAusZentralerDb(this)" class="px-3 py-1.5 bg-white border border-ink-200 text-ink-600 hover:bg-ink-50 rounded-lg text-[11px] font-semibold">Weitere Kontakte übernehmen</button></div>'
-        : '');
+           + (APP_KEYS.user?.is_admin ? '<br><button onclick="_ccImportOeffnen()" class="mt-3 px-3 py-2 bg-brand-600 hover:bg-brand-700 text-white rounded-lg text-[12px] font-bold">Kontakte importieren</button>' : ''))
+        + '</div>');
   if (window.lucide) lucide.createIcons();
 }
 
@@ -42291,6 +42308,7 @@ function _ccArbeitsbereich(r) {
     + '<div class="flex items-center gap-2 flex-wrap">'
       + '<input id="ccNotiz_' + r.recordId + '" value="' + escapeAttr(r.notiz || '') + '" onclick="event.stopPropagation()" onblur="_ccNotizSpeichern(\'' + r.recordId + '\', this.value)" placeholder="Was wurde gesagt? Wenige Worte genügen." class="flex-1 min-w-[200px] px-2.5 py-1.5 border border-ink-300 rounded-lg text-[12px]">'
       + '<button onclick="event.stopPropagation(); _ccPreislisteAnfordern(\'' + r.recordId + '\', this)" class="px-3 py-1.5 rounded-lg text-[12px] font-bold bg-brand-600 hover:bg-brand-700 text-white inline-flex items-center gap-1.5"><i data-lucide="mail" class="w-3.5 h-3.5"></i> Preisliste senden</button>'
+      + '<button onclick="event.stopPropagation(); _ccInZentraleDb(\'' + r.recordId + '\', this)" class="px-3 py-1.5 rounded-lg text-[12px] font-bold bg-white border border-indigo-300 text-indigo-700 hover:bg-indigo-50 inline-flex items-center gap-1.5" title="Aus dem Lead einen Stammdatensatz machen — erst wenn jemand angebissen hat"><i data-lucide="database" class="w-3.5 h-3.5"></i> In zentrale DB</button>'
     + '</div></div>';
 }
 
@@ -42336,6 +42354,12 @@ async function _ccErgebnis(recordId, status, btn) {
   if (!r) return;
   if (status === 'sperre' && !confirm('„' + (r.firma || r.ansprechpartner || 'Dieser Kontakt') + '" dauerhaft von Anrufen ausschließen?\n\nDas gilt für alle künftigen Kampagnen und lässt sich hier nicht rückgängig machen.')) return;
   if (btn) setBusy(btn, true);
+  // Der Widerspruch gehört in die mandantenübergreifende Sperrliste, nicht nur
+  // an diese Kampagne — sonst ruft die nächste Liste denselben Menschen wieder an.
+  if (status === 'sperre') {
+    try { await _ccSperren(r, 'Widerspruch am Telefon'); }
+    catch (e) { if (btn) setBusy(btn, false); return toast('Sperre konnte nicht gespeichert werden: ' + (e.message || e) + ' — bitte erneut versuchen.', 'error', 10000); }
+  }
   const patch = { status, letzter_versuch: nowIso(), bearbeiter: (APP_KEYS.user && APP_KEYS.user.name) || '' };
   if (['kein_kontakt', 'rueckruf'].includes(status)) patch.versuche = String((parseInt(r.versuche, 10) || 0) + 1);
   try {
@@ -42402,23 +42426,436 @@ async function _ccPreislisteAnfordern(recordId, btn) {
   }
 }
 
+/* ================= IMPORT (v2.71.0) =====================================
+   Leads kommen aus mehreren Quellen: aus der zentralen DB eines beliebigen
+   Mandanten (Liftaro-Kontakte für eine Aszendio-Kampagne sind ausdrücklich
+   gewollt) oder als CSV von außen. Keine davon geht durch den Korb — der ist
+   zum Prüfen einzelner Kontakte da, und Tausende prüft niemand einzeln. */
+
+/** Airtable nimmt 10 Datensätze je Anfrage. Einzeln wären 2000 Zeilen vier
+    Minuten; so sind es zwanzig Sekunden. */
+async function _ccStapelSchreiben(saetze) {
+  const url = 'https://api.airtable.com/v0/' + APP_CONFIG.APP_BASE_ID + '/' + encodeURIComponent(CC_TABLE);
+  let geschrieben = 0;
+  for (let i = 0; i < saetze.length; i += 10) {
+    const teil = saetze.slice(i, i + 10).map(f => ({ fields: f }));
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { Authorization: 'Bearer ' + APP_KEYS.airtableWriteKey, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ records: teil, typecast: true }),
+    });
+    if (res.status === 429) { await new Promise(r => setTimeout(r, 1200)); i -= 10; continue; }
+    if (!res.ok) throw new Error('Airtable ' + res.status + ': ' + (await res.text()).slice(0, 180));
+    geschrieben += teil.length;
+  }
+  return geschrieben;
+}
+
+/* --- Werbesperre ------------------------------------------------------- */
+
+let _CC_SPERRE = null;   // Set der gesperrten dedupe_keys
+
+async function _ccSperrlisteLaden(neu) {
+  if (_CC_SPERRE && !neu) return _CC_SPERRE;
+  const rows = await airtableRead(CC_SPERR_TABLE, {}).catch(() => []);
+  _CC_SPERRE = new Set((rows || []).map(r => (r.fields || {}).dedupe_key).filter(Boolean));
+  return _CC_SPERRE;
+}
+
+async function _ccSperren(lead, grund) {
+  const key = _ccDedupeKey(lead);
+  if (!key) return false;
+  const sperre = await _ccSperrlisteLaden();
+  if (sperre.has(key)) return true;
+  await airtableWriteWithAutoField(CC_SPERR_TABLE, {
+    dedupe_key: key, name: lead.ansprechpartner || '', firma: lead.firma || '',
+    email: lead.email || '', telefon: lead.telefon || '', grund: grund || 'Widerspruch am Telefon',
+    von: (APP_KEYS.user && APP_KEYS.user.name) || '', angelegt_am: nowIso(),
+  }, { dedupe_key: 'singleLineText', name: 'singleLineText', firma: 'singleLineText', email: 'singleLineText', telefon: 'singleLineText', grund: 'singleLineText', von: 'singleLineText', angelegt_am: 'singleLineText' });
+  sperre.add(key);
+  return true;
+}
+
+/* --- CSV --------------------------------------------------------------- */
+
+/* Eigener Parser statt Fremdbibliothek: Es geht um Trennzeichen, Anführungs-
+   zeichen und Zeilenumbrüche in Feldern — mehr braucht eine Adressliste nicht. */
+function _ccCsvParsen(text, trenner) {
+  const t = trenner || (((text.split('\n')[0] || '').split(';').length > (text.split('\n')[0] || '').split(',').length) ? ';' : ',');
+  const zeilen = [];
+  let feld = '', zeile = [], inQuote = false;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (inQuote) {
+      if (c === '"') { if (text[i + 1] === '"') { feld += '"'; i++; } else inQuote = false; }
+      else feld += c;
+      continue;
+    }
+    if (c === '"') { inQuote = true; continue; }
+    if (c === t) { zeile.push(feld); feld = ''; continue; }
+    if (c === '\r') continue;
+    if (c === '\n') { zeile.push(feld); zeilen.push(zeile); zeile = []; feld = ''; continue; }
+    feld += c;
+  }
+  if (feld.length || zeile.length) { zeile.push(feld); zeilen.push(zeile); }
+  return zeilen.filter(z => z.some(x => String(x).trim()));
+}
+
+/* Excel schreibt in Deutschland regelmäßig Windows-1252 statt UTF-8. Ohne diese
+   Erkennung stünde in der Anrufliste „Grundstücksgemeinschaft" — und der
+   Anrufer läse es vor. */
+function _ccTextAusDatei(puffer) {
+  const utf8 = new TextDecoder('utf-8').decode(puffer);
+  if (!utf8.includes('�')) return utf8;
+  try { return new TextDecoder('windows-1252').decode(puffer); } catch (_) { return utf8; }
+}
+
+const CC_FELDER = [
+  ['firma', 'Firma'], ['ansprechpartner', 'Ansprechpartner'], ['telefon', 'Telefon'],
+  ['email', 'E-Mail'], ['position', 'Position'], ['ort', 'Ort'],
+];
+
+/* Spalten anhand der Überschrift raten. Spart bei einer typischen Exportdatei
+   sämtliche Handgriffe — falsch geraten wird im Dialog sichtbar und ist mit
+   einem Klick zu ändern. */
+function _ccSpalteRaten(kopf) {
+  const muster = {
+    firma: /firma|company|unternehmen|organisation|name der/i,
+    ansprechpartner: /ansprech|kontakt|contact|vorname|nachname|^name$|person/i,
+    telefon: /telefon|phone|tel\.?$|mobil|handy|nummer/i,
+    email: /mail|e-?mail/i,
+    position: /position|funktion|rolle|title|abteilung/i,
+    ort: /ort|stadt|city|plz|standort/i,
+  };
+  const zu = {};
+  CC_FELDER.forEach(([k]) => {
+    const i = kopf.findIndex(h => muster[k].test(String(h || '')));
+    zu[k] = i >= 0 ? String(i) : '';
+  });
+  return zu;
+}
+
+function _ccImportOeffnen() {
+  const alle = APP_STATE.accounts || [];
+  const acc = _ccAccount();
+  let host = document.getElementById('ccImportHost');
+  if (!host) { host = document.createElement('div'); host.id = 'ccImportHost'; document.body.appendChild(host); }
+  host.innerHTML =
+    '<div class="fixed inset-0 z-[80] bg-black/40 flex items-start justify-center overflow-y-auto p-4" onclick="if(event.target===this)_ccImportSchliessen()">'
+      + '<div class="bg-white rounded-2xl shadow-xl w-full max-w-lg my-8">'
+        + '<div class="flex items-center justify-between p-4 border-b border-ink-200">'
+          + '<div><h3 class="font-bold text-ink-900">Kontakte importieren</h3>'
+          + '<p class="text-[11px] text-ink-500">Ziel: Anrufliste ' + escapeHtml(acc ? (acc.name || '') : '') + '</p></div>'
+          + '<button onclick="_ccImportSchliessen()" class="text-ink-400 hover:text-ink-700"><i data-lucide="x" class="w-5 h-5"></i></button></div>'
+        + '<div class="p-4 space-y-3">'
+          + '<div class="rounded-xl border border-ink-200 p-3">'
+            + '<p class="text-[12px] font-bold text-ink-800 mb-1">Aus einer zentralen DB</p>'
+            + '<p class="text-[11px] text-ink-500 mb-2">Auch von einem anderen Mandanten — Liftaro-Kontakte für eine Aszendio-Kampagne sind ausdrücklich möglich.</p>'
+            + '<div class="flex gap-2 flex-wrap">'
+              + '<select id="ccQuellMandant" class="flex-1 min-w-[180px] px-2.5 py-1.5 border border-ink-300 rounded-lg text-sm bg-white">'
+                + alle.map(a => '<option value="' + escapeAttr(a.id) + '"' + (acc && a.id === acc.id ? ' selected' : '') + '>' + escapeHtml(a.name || a.id) + '</option>').join('')
+              + '</select>'
+              + '<button onclick="_ccImportAusZentralerDb(this)" class="px-3 py-1.5 bg-brand-600 hover:bg-brand-700 text-white rounded-lg text-[12px] font-bold">Übernehmen</button>'
+            + '</div>'
+          + '</div>'
+          + '<div class="rounded-xl border border-ink-200 p-3">'
+            + '<p class="text-[12px] font-bold text-ink-800 mb-1">Aus einer CSV-Datei</p>'
+            + '<p class="text-[11px] text-ink-500 mb-2">Zugekaufte Listen, Messekontakte, Recherche. Komma oder Semikolon, Umlaute in UTF-8 oder Windows-1252 — beides wird erkannt.</p>'
+            + '<input type="file" id="ccCsvDatei" accept=".csv,.txt,text/csv" onchange="_ccCsvGewaehlt(this)" class="w-full text-[12px]">'
+          + '</div>'
+          + '<div id="ccImportMeldung" class="text-[11px]"></div>'
+        + '</div>'
+      + '</div>'
+    + '</div>';
+  if (window.lucide) lucide.createIcons();
+}
+function _ccImportSchliessen() { const h = document.getElementById('ccImportHost'); if (h) h.innerHTML = ''; }
+
+async function _ccCsvGewaehlt(input) {
+  const datei = input && input.files && input.files[0];
+  if (!datei) return;
+  const meld = document.getElementById('ccImportMeldung');
+  try {
+    const zeilen = _ccCsvParsen(_ccTextAusDatei(await datei.arrayBuffer()));
+    if (zeilen.length < 2) throw new Error('Die Datei enthält keine Datenzeilen.');
+    _ccZuordnungOeffnen(zeilen, datei.name);
+  } catch (e) {
+    if (meld) meld.innerHTML = '<span class="text-red-700">' + escapeHtml(e.message || String(e)) + '</span>';
+  }
+}
+
+let _CC_IMPORT = null;
+
+function _ccZuordnungOeffnen(zeilen, dateiname) {
+  const kopf = zeilen[0].map(x => String(x || '').trim());
+  _CC_IMPORT = { kopf, zeilen: zeilen.slice(1), dateiname, zuordnung: _ccSpalteRaten(kopf) };
+  const host = document.getElementById('ccImportHost');
+  const spaltenWahl = (feld) => '<select data-cc-map="' + feld + '" onchange="_ccZuordnungGeaendert()" class="w-full px-2 py-1 border border-ink-300 rounded text-[12px] bg-white">'
+    + '<option value="">— nicht übernehmen —</option>'
+    + kopf.map((h, i) => '<option value="' + i + '"' + (_CC_IMPORT.zuordnung[feld] === String(i) ? ' selected' : '') + '>' + escapeHtml(h || ('Spalte ' + (i + 1))) + '</option>').join('')
+    + '</select>';
+  host.innerHTML =
+    '<div class="fixed inset-0 z-[80] bg-black/40 flex items-start justify-center overflow-y-auto p-4" onclick="if(event.target===this)_ccImportSchliessen()">'
+      + '<div class="bg-white rounded-2xl shadow-xl w-full max-w-2xl my-8">'
+        + '<div class="flex items-center justify-between p-4 border-b border-ink-200">'
+          + '<div><h3 class="font-bold text-ink-900">Spalten zuordnen</h3>'
+          + '<p class="text-[11px] text-ink-500">' + escapeHtml(dateiname) + ' · ' + _CC_IMPORT.zeilen.length + ' Zeilen</p></div>'
+          + '<button onclick="_ccImportSchliessen()" class="text-ink-400 hover:text-ink-700"><i data-lucide="x" class="w-5 h-5"></i></button></div>'
+        + '<div class="p-4">'
+          + '<div class="grid grid-cols-2 gap-3 mb-3">'
+            + CC_FELDER.map(([k, label]) => '<label class="block"><span class="text-[11px] font-semibold text-ink-700">' + label
+                + (k === 'firma' || k === 'telefon' ? '' : '') + '</span>' + spaltenWahl(k) + '</label>').join('')
+          + '</div>'
+          + '<label class="block mb-3"><span class="text-[11px] font-semibold text-ink-700">Quelle — Name dieser Liste</span>'
+            + '<input id="ccQuelleName" value="' + escapeAttr(dateiname.replace(/\.(csv|txt)$/i, '')) + '" class="w-full mt-0.5 px-2.5 py-1.5 border border-ink-300 rounded-lg text-sm">'
+            + '<span class="text-[10px] text-ink-500">Steht später als Stichwort an jedem Kontakt und im Filter oben.</span></label>'
+          + '<div id="ccVorschau"></div>'
+        + '</div>'
+        + '<div class="flex items-center justify-end gap-2 p-4 border-t border-ink-200">'
+          + '<button onclick="_ccImportSchliessen()" class="px-3 py-2 text-sm text-ink-600 hover:bg-ink-100 rounded-lg">Abbrechen</button>'
+          + '<button onclick="_ccCsvImportieren(this)" class="px-4 py-2 text-sm font-bold bg-brand-600 hover:bg-brand-700 text-white rounded-lg">Importieren</button>'
+        + '</div>'
+      + '</div>'
+    + '</div>';
+  _ccZuordnungGeaendert();
+  if (window.lucide) lucide.createIcons();
+}
+
+function _ccZuordnungLesen() {
+  const z = {};
+  document.querySelectorAll('[data-cc-map]').forEach(el => { z[el.getAttribute('data-cc-map')] = el.value; });
+  return z;
+}
+
+function _ccZeileZuLead(zeile, zuordnung) {
+  const hol = (feld) => { const i = zuordnung[feld]; return i === '' || i == null ? '' : String(zeile[+i] == null ? '' : zeile[+i]).trim(); };
+  return { firma: hol('firma'), ansprechpartner: hol('ansprechpartner'), telefon: hol('telefon'),
+           email: hol('email'), position: hol('position'), ort: hol('ort') };
+}
+
+/* Vorschau mit ehrlicher Zählung: Wie viele Zeilen sind überhaupt anrufbar,
+   wie viele Dubletten stecken in der Datei selbst, wie viele stehen schon in
+   der Liste. Wer das erst nach dem Import erfährt, hat die Liste bereits
+   verdorben. */
+function _ccZuordnungGeaendert() {
+  if (!_CC_IMPORT) return;
+  const z = _ccZuordnungLesen();
+  _CC_IMPORT.zuordnung = z;
+  const vorhanden = new Set(CC_STATE.leads.map(l => l.dedupe_key).filter(Boolean));
+  const inDatei = new Set();
+  let brauchbar = 0, ohneKennung = 0, doppeltDatei = 0, schonDa = 0;
+  const beispiele = [];
+  for (const zeile of _CC_IMPORT.zeilen) {
+    const lead = _ccZeileZuLead(zeile, z);
+    const key = _ccDedupeKey(lead);
+    if (!key) { ohneKennung++; continue; }
+    if (inDatei.has(key)) { doppeltDatei++; continue; }
+    inDatei.add(key);
+    if (vorhanden.has(key)) { schonDa++; continue; }
+    brauchbar++;
+    if (beispiele.length < 3) beispiele.push(lead);
+  }
+  const el = document.getElementById('ccVorschau');
+  if (!el) return;
+  el.innerHTML =
+    '<div class="rounded-lg border border-ink-200 bg-ink-50/60 p-2.5 text-[11px] text-ink-700">'
+      + '<b class="text-ink-900">' + brauchbar + '</b> werden angelegt'
+      + (schonDa ? ' · ' + schonDa + ' schon in der Liste' : '')
+      + (doppeltDatei ? ' · ' + doppeltDatei + ' Dubletten in der Datei' : '')
+      + (ohneKennung ? ' · <span class="text-amber-800">' + ohneKennung + ' ohne E-Mail und Telefon (übersprungen)</span>' : '')
+      + (beispiele.length ? '<div class="mt-1.5 space-y-0.5">' + beispiele.map(b =>
+          '<div class="font-mono text-[10px] text-ink-500 truncate">' + escapeHtml([b.firma, b.ansprechpartner, b.telefon, b.email].filter(Boolean).join(' · ')) + '</div>').join('') + '</div>' : '')
+    + '</div>';
+}
+
+async function _ccCsvImportieren(btn) {
+  if (!_CC_IMPORT) return;
+  const acc = _ccAccount();
+  if (!acc) return;
+  const quelle = (document.getElementById('ccQuelleName')?.value || 'CSV').trim() || 'CSV';
+  const z = _ccZuordnungLesen();
+  setBusy(btn, true, 'Prüfe…');
+  try {
+    const sperre = await _ccSperrlisteLaden(true);
+    const vorhanden = new Set(CC_STATE.leads.map(l => l.dedupe_key).filter(Boolean));
+    const jetzt = nowIso();
+    const saetze = [];
+    let uebersprungen = 0, gesperrt = 0;
+    for (const zeile of _CC_IMPORT.zeilen) {
+      const lead = _ccZeileZuLead(zeile, z);
+      const key = _ccDedupeKey(lead);
+      if (!key || vorhanden.has(key)) { uebersprungen++; continue; }
+      if (sperre.has(key)) { gesperrt++; continue; }
+      vorhanden.add(key);
+      saetze.push(Object.assign({}, lead, {
+        account_id: acc.id, kampagne: 'Sonderkonditionen', quelle,
+        dedupe_key: key, status: 'offen', versuche: '0', created_at: jetzt, updated_at: jetzt,
+      }));
+    }
+    if (!saetze.length) {
+      setBusy(btn, false);
+      return toast('Nichts zu importieren — alles bereits vorhanden, gesperrt oder ohne Kennung.', 'warn', 8000);
+    }
+    setBusy(btn, true, '0/' + saetze.length);
+    const n = await _ccStapelSchreiben(saetze);
+    setBusy(btn, false);
+    _ccImportSchliessen();
+    toast(n + ' Kontakte importiert als „' + quelle + '"'
+      + (uebersprungen ? ' · ' + uebersprungen + ' übersprungen' : '')
+      + (gesperrt ? ' · ' + gesperrt + ' wegen Werbesperre ausgelassen' : ''), 'success', 9000);
+    renderCallcenterPage();
+  } catch (e) {
+    setBusy(btn, false);
+    toast('Import fehlgeschlagen: ' + (e.message || e), 'error', 9000);
+  }
+}
+
+/* --- Dublettenprüfung --------------------------------------------------- */
+
+/* Nach dem Import, bewusst als eigener Schritt: Dubletten innerhalb der Liste,
+   Treffer gegen die Werbesperre, und wer bereits Kunde ist. Das Ergebnis wird
+   angezeigt, bevor etwas passiert — automatisches Löschen bei zugekauften
+   Listen ist genau die Sorte Hilfsbereitschaft, die man später bereut. */
+async function _ccDublettenPruefen(btn) {
+  const acc = _ccAccount();
+  if (!acc) return;
+  setBusy(btn, true, 'Prüfe…');
+  try {
+    const sperre = await _ccSperrlisteLaden(true);
+    const gesehen = new Map();
+    const doppelt = [], gesperrt = [];
+    for (const l of _ccSortiert(CC_STATE.leads)) {
+      const key = l.dedupe_key || _ccDedupeKey(l);
+      if (!key) continue;
+      if (sperre.has(key)) gesperrt.push(l);
+      if (gesehen.has(key)) doppelt.push(l); else gesehen.set(key, l);
+    }
+    // Bestandskunden: Abgleich gegen die zentrale DB desselben Mandanten.
+    let bestand = 0;
+    try {
+      const namen = _zdbTableNames(acc);
+      const kontakte = await _zdbRead(namen.kontakt, {});
+      const bekannt = new Set();
+      (kontakte || []).forEach(k => {
+        const f = k.fields || {};
+        const key = _ccDedupeKey({ email: f.email, telefon: f.telefon || f.mobil });
+        if (key) bekannt.add(key);
+      });
+      CC_STATE.leads.forEach(l => { if (bekannt.has(l.dedupe_key)) bestand++; });
+      CC_STATE.bestand = bekannt;
+    } catch (e) { console.warn('[CC] Bestandsabgleich:', e.message); }
+    setBusy(btn, false);
+    _ccPruefErgebnis(doppelt, gesperrt, bestand);
+  } catch (e) {
+    setBusy(btn, false);
+    toast('Prüfung fehlgeschlagen: ' + (e.message || e), 'error', 9000);
+  }
+}
+
+function _ccPruefErgebnis(doppelt, gesperrt, bestand) {
+  let host = document.getElementById('ccImportHost');
+  if (!host) { host = document.createElement('div'); host.id = 'ccImportHost'; document.body.appendChild(host); }
+  const liste = (arr) => arr.slice(0, 8).map(l => '<li class="truncate">' + escapeHtml([l.firma, l.ansprechpartner, l.email || l.telefon].filter(Boolean).join(' · ')) + '</li>').join('')
+    + (arr.length > 8 ? '<li class="text-ink-400">… und ' + (arr.length - 8) + ' weitere</li>' : '');
+  host.innerHTML =
+    '<div class="fixed inset-0 z-[80] bg-black/40 flex items-start justify-center overflow-y-auto p-4" onclick="if(event.target===this)_ccImportSchliessen()">'
+      + '<div class="bg-white rounded-2xl shadow-xl w-full max-w-lg my-8">'
+        + '<div class="flex items-center justify-between p-4 border-b border-ink-200"><h3 class="font-bold text-ink-900">Prüfung der Liste</h3>'
+          + '<button onclick="_ccImportSchliessen()" class="text-ink-400 hover:text-ink-700"><i data-lucide="x" class="w-5 h-5"></i></button></div>'
+        + '<div class="p-4 space-y-3 text-[12px] text-ink-700">'
+          + '<p><b>' + CC_STATE.leads.length + '</b> Kontakte in der Liste · <b>' + bestand + '</b> davon bereits in der zentralen DB.</p>'
+          + (gesperrt.length
+              ? '<div class="rounded-lg border border-rose-200 bg-rose-50 p-2.5"><p class="font-bold text-rose-800 mb-1">' + gesperrt.length + ' mit Werbesperre</p>'
+                + '<ul class="text-[11px] text-rose-700 space-y-0.5">' + liste(gesperrt) + '</ul>'
+                + '<button onclick="_ccGesperrteEntfernen(this)" class="mt-2 px-2.5 py-1.5 bg-rose-600 hover:bg-rose-700 text-white rounded-lg text-[11px] font-bold">Aus der Liste entfernen</button></div>'
+              : '<p class="text-emerald-700">Keine Werbesperre betroffen.</p>')
+          + (doppelt.length
+              ? '<div class="rounded-lg border border-amber-200 bg-amber-50 p-2.5"><p class="font-bold text-amber-800 mb-1">' + doppelt.length + ' Dubletten</p>'
+                + '<ul class="text-[11px] text-amber-800 space-y-0.5">' + liste(doppelt) + '</ul>'
+                + '<button onclick="_ccDublettenEntfernen(this)" class="mt-2 px-2.5 py-1.5 bg-amber-600 hover:bg-amber-700 text-white rounded-lg text-[11px] font-bold">Zweitvorkommen entfernen</button></div>'
+              : '<p class="text-emerald-700">Keine Dubletten.</p>')
+        + '</div>'
+        + '<div class="flex justify-end p-4 border-t border-ink-200"><button onclick="_ccImportSchliessen()" class="px-4 py-2 text-sm font-bold bg-ink-800 hover:bg-ink-900 text-white rounded-lg">Schließen</button></div>'
+      + '</div>'
+    + '</div>';
+  _CC_PRUEF = { doppelt, gesperrt };
+  if (window.lucide) lucide.createIcons();
+}
+
+let _CC_PRUEF = null;
+
+async function _ccZeilenEntfernen(saetze, btn, was) {
+  if (!saetze || !saetze.length) return;
+  setBusy(btn, true, '0/' + saetze.length);
+  let n = 0;
+  for (const l of saetze) {
+    try { await airtableDelete(CC_TABLE, l.recordId); n++; setBusy(btn, true, n + '/' + saetze.length); }
+    catch (e) { console.warn('[CC] Löschen:', e.message); }
+  }
+  setBusy(btn, false);
+  _ccImportSchliessen();
+  toast(n + ' ' + was + ' entfernt', 'success', 5000);
+  renderCallcenterPage();
+}
+function _ccGesperrteEntfernen(btn) { _ccZeilenEntfernen(_CC_PRUEF && _CC_PRUEF.gesperrt, btn, 'gesperrte Kontakte'); }
+function _ccDublettenEntfernen(btn) { _ccZeilenEntfernen(_CC_PRUEF && _CC_PRUEF.doppelt, btn, 'Dubletten'); }
+
+/* --- Beißt an: in die zentrale DB ---------------------------------------- */
+
+/* Erst hier wird aus einem Lead ein Stammdatensatz. Das ist der Sinn der
+   Trennung: Zugekaufte Adressen haben in den Stammdaten nichts verloren,
+   solange niemand mit ihnen gesprochen hat. */
+async function _ccInZentraleDb(recordId, btn) {
+  const r = CC_STATE.leads.find(x => x.recordId === recordId);
+  const acc = _ccAccount();
+  if (!r || !acc) return;
+  if (btn) setBusy(btn, true, 'Übernehme…');
+  try {
+    const teile = String(r.ansprechpartner || '').trim().split(/\s+/).filter(Boolean);
+    const res = await zdbSaveFirmaKontakt(acc,
+      r.firma ? { name: r.firma, ort: r.ort || '', quelle: 'Kaltakquise · ' + (r.quelle || '') } : null,
+      {
+        vorname: teile.length > 1 ? teile.slice(0, -1).join(' ') : (teile[0] || ''),
+        nachname: teile.length > 1 ? teile[teile.length - 1] : '',
+        email: r.email || '', telefon: r.telefon || '', position: r.position || '',
+        quelle: 'Kaltakquise · ' + (r.quelle || ''),
+      },
+      { erzwingen: true });
+    if (!res || !res.kontaktId) throw new Error('Kontakt wurde nicht angelegt');
+    await _ccSpeichern(recordId, { notiz: (r.notiz ? r.notiz + ' · ' : '') + 'in zentrale DB übernommen' });
+    if (btn) setBusy(btn, false);
+    _ccZeichnen();
+    toast('In die zentrale DB übernommen.', 'success', 4000);
+  } catch (e) {
+    if (btn) setBusy(btn, false);
+    toast('Übernahme fehlgeschlagen: ' + (e.message || e), 'error', 9000);
+  }
+}
+
 /* Leads aus der zentralen DB übernehmen — nur für Admins, nicht für die
    Agentur. Dubletten werden über E-Mail bzw. normalisierte Nummer erkannt;
    ohne beides kann ein Datensatz nicht sauber unterschieden werden und wird
    übersprungen, statt die Liste mit Unbrauchbarem zu füllen. */
 async function _ccImportAusZentralerDb(btn) {
-  const acc = _ccAccount();
-  if (!acc) return;
-  if (!confirm('Kontakte aus der zentralen DB von ' + (acc.name || '') + ' in die Anrufliste übernehmen?\n\nBereits vorhandene werden übersprungen.')) return;
+  const ziel = _ccAccount();
+  if (!ziel) return;
+  // Quelle darf ein ANDERER Mandant sein — Liftaro-Kontakte für eine
+  // Aszendio-Kampagne sind ausdrücklich gewollt. Geschrieben wird immer in die
+  // Kampagne des aktuell gewählten Mandanten.
+  const quellId = document.getElementById('ccQuellMandant')?.value || ziel.id;
+  const quelle = (APP_STATE.accounts || []).find(a => a.id === quellId) || ziel;
+  const fremd = quelle.id !== ziel.id;
   setBusy(btn, true, 'Lese…');
   try {
-    const namen = _zdbTableNames(acc);
+    const namen = _zdbTableNames(quelle);
     const kontakte = await _zdbRead(namen.kontakt, {});
     const firmen = await _zdbRead(namen.firma, {});
     const firmaName = {}; (firmen || []).forEach(f => { firmaName[f.id] = (f.fields && f.fields.name) || ''; });
+    const sperre = await _ccSperrlisteLaden(true);
     const vorhanden = new Set(CC_STATE.leads.map(l => l.dedupe_key).filter(Boolean));
     const jetzt = nowIso();
-    let neu = 0, doppelt = 0, unbrauchbar = 0;
+    const saetze = [];
+    let doppelt = 0, unbrauchbar = 0, gesperrt = 0;
     for (const k of (kontakte || [])) {
       const f = k.fields || {};
       const lead = {
@@ -42429,16 +42866,26 @@ async function _ccImportAusZentralerDb(btn) {
       const key = _ccDedupeKey(lead);
       if (!key) { unbrauchbar++; continue; }
       if (vorhanden.has(key)) { doppelt++; continue; }
+      if (sperre.has(key)) { gesperrt++; continue; }
       vorhanden.add(key);
-      await airtableWriteWithAutoField(CC_TABLE, Object.assign({}, lead, {
-        account_id: acc.id, kampagne: 'Sonderkonditionen', quelle: 'zentrale-db',
+      saetze.push(Object.assign({}, lead, {
+        account_id: ziel.id, kampagne: 'Sonderkonditionen',
+        // Bei fremder Herkunft steht sie im Stichwort — sonst weiß später
+        // niemand mehr, warum ein Liftaro-Kunde in der Aszendio-Liste steht.
+        quelle: fremd ? ('Zentrale DB · ' + (quelle.name || quelle.id)) : 'zentrale-db',
         dedupe_key: key, status: 'offen', versuche: '0', created_at: jetzt, updated_at: jetzt,
-      }), CC_TYPES);
-      neu++;
-      setBusy(btn, true, neu + ' neu…');
+      }));
     }
+    if (!saetze.length) {
+      setBusy(btn, false);
+      return toast('Nichts zu übernehmen — alles bereits vorhanden, gesperrt oder ohne Kennung.', 'warn', 8000);
+    }
+    setBusy(btn, true, '0/' + saetze.length);
+    const n = await _ccStapelSchreiben(saetze);
     setBusy(btn, false);
-    toast(neu + ' übernommen · ' + doppelt + ' schon vorhanden · ' + unbrauchbar + ' ohne Nummer und Adresse übersprungen', 'success', 8000);
+    _ccImportSchliessen();
+    toast(n + ' übernommen · ' + doppelt + ' schon vorhanden · ' + unbrauchbar + ' ohne Nummer und Adresse'
+      + (gesperrt ? ' · ' + gesperrt + ' wegen Werbesperre ausgelassen' : ''), 'success', 9000);
     renderCallcenterPage();
   } catch (e) {
     setBusy(btn, false);
