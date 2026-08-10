@@ -824,7 +824,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.76.2';
+const APP_VERSION = 'v2.77.0';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -42498,6 +42498,36 @@ function _ccKennungen(lead) {
   };
 }
 
+/* Einheitliche Schreibweise für Telefonnummern.
+
+   Bewusst OHNE Gruppierung: Die Vorwahl ist in Deutschland zwei bis fünf
+   Ziffern lang, und ohne das amtliche Verzeichnis lässt sie sich nicht
+   bestimmen. Eine falsch gesetzte Lücke sieht aber aus wie eine falsche
+   Nummer — und dann ruft jemand nicht an. Also lieber durchgehend als falsch
+   gruppiert; für den Anruf zählt ohnehin nur die Ziffernfolge. */
+function _ccNummerNormalisieren(roh) {
+  const text = String(roh || '');
+  // Die „(0)" in „+49 (0) 711 …" ersetzt genau das, was +49 schon sagt.
+  let d = text.replace(/\(\s*0\s*\)/g, '').replace(/\D/g, '');
+  if (!d) return '';
+  if (d.startsWith('0049')) d = '0' + d.slice(4);
+  else if (d.startsWith('49') && text.trim().startsWith('+')) d = '0' + d.slice(2);
+  while (d.startsWith('00') && !d.startsWith('0049')) d = d.slice(1);
+  // Ohne führende Null ist es eine Durchwahl ohne Vorwahl — die bleibt, wie sie
+  // ist, statt ihr eine Null vorzusetzen, die niemand geprüft hat.
+  return d;
+}
+
+/** Sieht die Nummer nach einer brauchbaren deutschen Rufnummer aus? */
+function _ccNummerVerdaechtig(nr) {
+  const d = _ccNummerNormalisieren(nr);
+  if (!d) return 'keine Nummer';
+  if (!d.startsWith('0')) return 'ohne Vorwahl';
+  if (d.length < 8) return 'zu kurz';
+  if (d.length > 14) return 'zu lang';
+  return '';
+}
+
 function _ccDedupeKey(lead) {
   const k = _ccKennungen(lead);
   return k.mail || k.tel;
@@ -42704,6 +42734,7 @@ function _ccZeichnen() {
           ? '<label class="inline-flex items-center gap-1.5 text-[11px] text-ink-600 cursor-pointer"><input type="checkbox"' + (CC_STATE.ohneBestand ? ' checked' : '') + ' onchange="_ccBestandFilter(this.checked)"> nur Neukunden</label>'
           : '')
       + (ohneNr ? '<label class="inline-flex items-center gap-1.5 text-[11px] text-ink-600 cursor-pointer" title="' + ohneNr + ' Kontakte haben keine brauchbare Nummer"><input type="checkbox"' + (CC_STATE.nurMitNummer ? ' checked' : '') + ' onchange="_ccNummerFilter(this.checked)"> nur mit Nummer <span class="text-ink-400">(' + ohneNr + ' ohne)</span></label>' : '')
+      + (APP_KEYS.user?.is_admin ? '<button onclick="_ccNummernBereinigen(this)" class="px-2.5 py-1.5 rounded-lg text-[11px] font-bold bg-white border border-ink-300 text-ink-600 hover:bg-ink-50 inline-flex items-center gap-1" title="Alle Nummern auf eine Schreibweise bringen"><i data-lucide="wand-2" class="w-3.5 h-3.5"></i> Nummern bereinigen</button>' : '')
       + (ohneNr && APP_KEYS.user?.is_admin ? '<button onclick="_ccNummernSuchen(this)" class="px-2.5 py-1.5 rounded-lg text-[11px] font-bold bg-white border border-teal-300 text-teal-700 hover:bg-teal-50 inline-flex items-center gap-1" title="Fehlende Nummern im Archiv suchen"><i data-lucide="phone-incoming" class="w-3.5 h-3.5"></i> Nummern suchen</button>' : '')
       + (versteckt ? '<label class="inline-flex items-center gap-1.5 text-[11px] text-ink-600 cursor-pointer"><input type="checkbox"' + (CC_STATE.zeigeVersteckte ? ' checked' : '') + ' onchange="_ccVersteckteFilter(this.checked)"> ausgeblendete zeigen <span class="text-ink-400">(' + versteckt + ')</span></label>' : '')
       + '<button onclick="_ccZustandSpeichernKnopf(this)" class="px-2.5 py-1.5 rounded-lg text-[11px] font-bold bg-white border border-brand-300 text-brand-700 hover:bg-brand-50 inline-flex items-center gap-1" title="Diese Auswahl beim nächsten Öffnen wieder verwenden"><i data-lucide="bookmark" class="w-3.5 h-3.5"></i> Filter merken</button>'
@@ -43043,7 +43074,14 @@ function _ccTabelle(rows) {
       + '<td class="px-2 py-1.5 border-b border-ink-100 text-[14px] text-ink-800 whitespace-nowrap">' + escapeHtml(r.ansprechpartner || '—')
         + (r.position ? '<span class="text-[12px] text-ink-400"> · ' + escapeHtml(r.position) + '</span>' : '') + '</td>'
       + '<td class="px-2 py-1.5 border-b border-ink-100 whitespace-nowrap">'
-        + (tel ? '<a href="tel:' + escapeAttr(tel.replace(/\s/g, '')) + '" onclick="event.stopPropagation()" class="text-brand-700 font-mono text-[15px] font-bold hover:underline">' + escapeHtml(tel) + '</a>' : '<span class="text-ink-300 text-[13px]">keine Nummer</span>')
+        + (tel
+            ? '<span class="inline-flex items-center gap-1">'
+              + '<a href="tel:' + escapeAttr(_ccNummerNormalisieren(tel)) + '" onclick="event.stopPropagation()" class="' + (_ccNummerVerdaechtig(tel) ? 'text-rose-700' : 'text-brand-700') + ' font-mono text-[15px] font-bold hover:underline" title="' + escapeAttr(_ccNummerVerdaechtig(tel) || 'anrufen') + '">' + escapeHtml(tel) + '</a>'
+              + (_ccNummerVerdaechtig(tel) ? '<span class="text-[10px] px-1 py-0.5 rounded bg-rose-50 text-rose-700 border border-rose-200">' + escapeHtml(_ccNummerVerdaechtig(tel)) + '</span>' : '')
+              + '<button onclick="event.stopPropagation(); _ccNummerBearbeiten(\'' + r.recordId + '\')" class="text-ink-300 hover:text-ink-700 p-0.5" title="Nummer berichtigen"><i data-lucide="pencil" class="w-3 h-3"></i></button>'
+              + '</span>'
+            : '<span class="inline-flex items-center gap-1"><span class="text-ink-300 text-[13px]">keine Nummer</span>'
+              + '<button onclick="event.stopPropagation(); _ccNummerBearbeiten(\'' + r.recordId + '\')" class="text-ink-300 hover:text-ink-700 p-0.5" title="Nummer eintragen"><i data-lucide="pencil" class="w-3 h-3"></i></button></span>')
         + '</td>'
       + '<td class="px-1 py-1 border-b border-ink-100 whitespace-nowrap">'
         + '<select onclick="event.stopPropagation()" onchange="event.stopPropagation(); _ccTypSetzen(\'' + r.recordId + '\', this.value)" class="px-1 py-0.5 border rounded text-[12px] bg-white '
@@ -44361,6 +44399,57 @@ async function _ccCsvImportieren(btn) {
 
    Gesucht wird nur, wo nichts steht. Eine vorhandene Nummer zu überschreiben
    wäre anmaßend: Sie kann von Hand korrigiert worden sein. */
+/* Nummer von Hand berichtigen. Die Eingabe wird normalisiert, aber nicht
+   erzwungen: Wer bewusst eine Durchwahl ohne Vorwahl einträgt, soll das können
+   — die Zeile weist ihn darauf hin, statt es stillschweigend zu ändern. */
+async function _ccNummerBearbeiten(recordId) {
+  const r = CC_STATE.leads.find(x => x.recordId === recordId);
+  if (!r) return;
+  const eingabe = prompt('Telefonnummer für „' + (r.firma || r.ansprechpartner || '') + '":', r.telefon || '');
+  if (eingabe === null) return;
+  const neu = _ccNummerNormalisieren(eingabe);
+  if (eingabe.trim() && !neu) return toast('Darin steckt keine Ziffernfolge.', 'warn', 5000);
+  try {
+    await _ccSpeichern(recordId, {
+      telefon: neu,
+      dedupe_tel: neu.length >= 6 ? 't:' + neu : '',
+      notiz: (r.notiz ? String(r.notiz).replace(/ · Nr\. aus Archiv[^·]*/g, '') : '') || '',
+    });
+    _ccZeichnen();
+    const hinweis = _ccNummerVerdaechtig(neu);
+    toast(neu ? ('Nummer gespeichert: ' + neu + (hinweis ? ' — Hinweis: ' + hinweis : '')) : 'Nummer entfernt',
+      hinweis ? 'warn' : 'success', hinweis ? 8000 : 4000);
+  } catch (e) { toast('Nicht gespeichert: ' + (e.message || e), 'error', 8000); }
+}
+
+/* Alle Nummern der Kampagne auf eine Schreibweise bringen. Geschrieben wird nur,
+   wo sich tatsächlich etwas ändert — sonst liefe der Lauf über hundert Zeilen
+   und schriebe hundertmal dasselbe zurück. */
+async function _ccNummernBereinigen(btn) {
+  const leads = _ccKampagnenLeads();
+  const zuTun = [];
+  for (const r of leads) {
+    const alt = String(r.telefon || '');
+    const neu = _ccNummerNormalisieren(alt);
+    if (neu && neu !== alt) zuTun.push([r, neu]);
+  }
+  if (!zuTun.length) return toast('Alle Nummern sind bereits einheitlich.', 'success', 5000);
+  const beispiele = zuTun.slice(0, 3).map(([r, n]) => (r.telefon || '') + ' → ' + n).join('\n');
+  if (!confirm(zuTun.length + ' Nummern werden vereinheitlicht, zum Beispiel:\n\n' + beispiele
+    + '\n\nDoppelte Nullen aus „+49 (0)" werden dabei berichtigt.')) return;
+  setBusy(btn, true, '0/' + zuTun.length);
+  let n = 0;
+  for (const [r, neu] of zuTun) {
+    try {
+      await _ccSpeichern(r.recordId, { telefon: neu, dedupe_tel: neu.length >= 6 ? 't:' + neu : '' });
+      n++; setBusy(btn, true, n + '/' + zuTun.length);
+    } catch (e) { console.warn('[CC] Nummer bereinigen:', e.message); }
+  }
+  setBusy(btn, false);
+  _ccZeichnen();
+  toast(n + ' Nummern vereinheitlicht', 'success', 6000);
+}
+
 async function _ccNummernSuchen(btn) {
   const acc = _ccAccount();
   const key = APP_KEYS.user?.api_key;
