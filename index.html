@@ -693,7 +693,7 @@
       <i data-lucide="users" class="w-4 h-4 text-ink-500"></i> Benutzer
     </button>
     <button onclick="navTo('callcenter'); closeMenu();" class="w-full text-left px-3 py-2 text-sm hover:bg-ink-50 flex items-center gap-2">
-      <i data-lucide="phone-call" class="w-4 h-4 text-brand-600"></i> Anrufliste
+      <i data-lucide="phone-outgoing" class="w-4 h-4 text-brand-600"></i> Anrufliste
     </button>
     <button onclick="navTo('rules'); closeMenu();" class="w-full text-left px-3 py-2 text-sm hover:bg-ink-50 flex items-center gap-2">
       <i data-lucide="sparkles" class="w-4 h-4 text-purple-500"></i> KI-Regeln
@@ -785,6 +785,10 @@
         <i data-lucide="contact" class="w-5 h-5"></i>
         <span class="text-[10px] font-medium">Kontakte</span>
       </button>
+      <button data-nav="callcenter" onclick="navTo('callcenter')" class="flex-1 py-2 flex flex-col items-center gap-0.5 text-ink-500">
+        <i data-lucide="phone-outgoing" class="w-5 h-5"></i>
+        <span class="text-[10px] font-medium">Anrufe</span>
+      </button>
       <button data-nav="profile"  onclick="navTo('profile')"  class="flex-1 py-2 flex flex-col items-center gap-0.5 text-ink-500">
         <i data-lucide="user" class="w-5 h-5"></i>
         <span class="text-[10px] font-medium">Profil</span>
@@ -820,7 +824,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.70.3';
+const APP_VERSION = 'v2.70.4';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -8411,7 +8415,7 @@ function setActiveNav(name) {
 }
 function navTo(page) {
   APP_STATE.page = page;
-  setActiveNav(['tickets','tasks','accounts','contacts','profile'].includes(page) ? page : '');
+  setActiveNav(['tickets','tasks','accounts','contacts','callcenter','profile'].includes(page) ? page : '');
   // v2.46.63: FAB nur auf Seiten zeigen wo "Neue Email schreiben" sinnvoll ist
   const fab = document.getElementById('newEmailFab');
   if (fab) {
