@@ -824,7 +824,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.79.0';
+const APP_VERSION = 'v2.79.1';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -41686,7 +41686,7 @@ async function _zdbSammelAktion(art, btn) {
       try {
         if (art === 'historie') await _ccHistorieFuer(rec.id);
         else if (art === 'fd')  await _zdbPushFd(rec.id, null);
-        else if (art === 'fs')  await _zdbPushFs(rec.id, null);
+        else if (art === 'fs')  await _zdbPushFs(rec.id, null, { ohneRueckfrage: true, still: true });
         else if (art === 'mc')  await _zdbPushMc(rec.id, null);
         fertig++;
       } catch (e) { fehler++; console.warn('[ZDB-Sammel] ' + art + ':', e.message); }
@@ -41834,7 +41834,7 @@ async function _zdbPushFd(recId, btn) {
 }
 
 /* → FS: nutzt den bestehenden Freshsales-Weg und vermerkt es am Kontakt. */
-async function _zdbPushFs(recId, btn) {
+async function _zdbPushFs(recId, btn, opts) {
   const k = _zdbSatzVon(recId);
   if (!k) return;
   if (!k.email) return toast('Ohne E-Mail-Adresse kein Freshsales-Push.', 'warn', 5000);
@@ -41842,10 +41842,16 @@ async function _zdbPushFs(recId, btn) {
   if (!CONTACTS_STATE.results.find(x => String(x.email || '').toLowerCase() === email)) {
     CONTACTS_STATE.results.push({ _accountId: k.acc.id, email: k.email, name: k.name, phone: k.telefon, mobile: k.mobil, job_title: k.position, address: '' });
   }
-  await _pushContactToFs(email, btn);
+  // Vermerk NUR bei Erfolg — vorher wurde er auch gesetzt, wenn der Push
+  // scheiterte. Dann sah die Spalte grün aus, und in Freshsales stand nichts.
+  const erg = await _pushContactToFs(email, btn, opts) || {};
+  if (!erg.ok) {
+    if (!(opts && opts.still)) toast('Freshsales: ' + (erg.grund || 'fehlgeschlagen'), 'error', 8000);
+    throw new Error(erg.grund || 'Freshsales-Push fehlgeschlagen');
+  }
   try {
     const namen = _zdbTableNames(k.acc);
-    const stempel = 'gepusht ' + new Date().toLocaleString('de-DE') + ' via Hero';
+    const stempel = (erg.vorhanden ? 'vorhanden ' : 'gepusht ') + new Date().toLocaleString('de-DE') + ' via Hero';
     await _zdbUpdateSafe(namen.kontakt, recId, { freshsales: stempel, updated_at: nowIso() });
     k.rec.fields = { ...k.f, freshsales: stempel };
     _zdbNeuZeichnen();
@@ -47542,12 +47548,18 @@ async function _resolveJobTitleNow(email, btn) {
 /* v2.46.130: FD-only Kontakt in Freshsales pushen (Quick-Action ohne Edit-Modal).
    Holt aktuelle FD-Stammdaten + hydrierte Felder, baut FS-Contact-Payload, legt an,
    invalidiert den Sync-Cache, re-rendert mit ✓ sync. */
-async function _pushContactToFs(email, btn) {
+/* v2.79.1: Erst nachsehen, dann anlegen.
+   Freshsales weist Doppelte mit 400 ab („Contact is not unique"). Beim
+   Einzelklick war das ein Ärgernis, beim Sammellauf scheiterte damit fast
+   alles — die Kontakte gab es dort längst. Existiert einer, wird er
+   aktualisiert statt neu angelegt. */
+async function _pushContactToFs(email, btn, opts) {
+  opts = opts || {};
   const c = CONTACTS_STATE.results.find(x => String(x.email || '').toLowerCase() === email);
-  if (!c) return;
-  if (!c.email) { toast('Kontakt hat keine Email — kein FS-Push möglich.', 'warn'); return; }
+  if (!c) return { ok: false, grund: 'Kontakt nicht im Speicher' };
+  if (!c.email) { if (!opts.still) toast('Kontakt hat keine Email — kein FS-Push möglich.', 'warn'); return { ok: false, grund: 'keine E-Mail' }; }
   const acc = (APP_STATE.accounts || []).find(a => a.id === c._accountId);
-  if (!acc || !accountHasFreshsales(acc)) { toast('Dieser Mandant hat kein Freshsales aktiviert.', 'warn', 4000); return; }
+  if (!acc || !accountHasFreshsales(acc)) { if (!opts.still) toast('Dieser Mandant hat kein Freshsales aktiviert.', 'warn', 4000); return { ok: false, grund: 'Freshsales nicht aktiviert' }; }
   // Name-Split: „Grewe, Adrian" → first=Adrian, last=Grewe / „Adrian Grewe" → first=Adrian, last=Grewe
   let firstName = '', lastName = '';
   const rawName = String(c.name || '').trim();
@@ -47598,10 +47610,27 @@ async function _pushContactToFs(email, btn) {
     (c.job_title ? 'Job:    ' + c.job_title + '\n' : '') +
     (c.company_name ? 'Firma:  ' + c.company_name + '\n' : '') +
     (street ? 'Adresse: ' + street + (zipcode ? ', ' + zipcode + ' ' + city : '') + '\n' : '');
-  if (!confirm(preview)) return;
+  if (!opts.ohneRueckfrage && !confirm(preview)) return { ok: false, grund: 'abgebrochen' };
   setBusy(btn, true, 'Push…');
   try {
-    const created = await createFreshsalesContact(c._accountId, fields);
+    // Vorhandenen Kontakt suchen — Freshsales lehnt ein zweites Anlegen ab.
+    let vorhanden = null;
+    try { vorhanden = await freshsalesLookupContact(c._accountId, c.email); } catch (_) {}
+    let created;
+    if (vorhanden && vorhanden.id) {
+      // Nur Lücken füllen: Was drüben gepflegt ist, gehört nicht überschrieben.
+      const patch = {};
+      for (const k of Object.keys(fields)) {
+        if (fields[k] == null || fields[k] === '') continue;
+        if (vorhanden[k] == null || vorhanden[k] === '') patch[k] = fields[k];
+      }
+      if (Object.keys(patch).length) {
+        try { await freshsalesUpdateContact(c._accountId, vorhanden.id, patch); } catch (e) { console.warn('[FS] Update:', e.message); }
+      }
+      created = { id: vorhanden.id, _vorhanden: true };
+    } else {
+      created = await createFreshsalesContact(c._accountId, fields);
+    }
     if (!created?.id) throw new Error('FS lieferte keine Contact-ID zurück');
     // Caches updaten — Sync-Status wird sofort grün
     const cacheKey = c._accountId + '|' + String(c.email).toLowerCase();
@@ -47611,11 +47640,13 @@ async function _pushContactToFs(email, btn) {
       hasFs: true, inFs: true, fsContactId: created.id,
     }));
     setBusy(btn, false);
-    toast('In Freshsales angelegt — FS #' + created.id, 'success', 5000);
-    _renderContactsResults();
+    if (!opts.still) toast(created._vorhanden ? 'War bereits in Freshsales — FS #' + created.id + ' aktualisiert' : 'In Freshsales angelegt — FS #' + created.id, 'success', 5000);
+    if (!opts.still) _renderContactsResults();
+    return { ok: true, id: created.id, vorhanden: !!created._vorhanden };
   } catch (e) {
     setBusy(btn, false);
-    toast('FS-Anlage fehlgeschlagen: ' + (e.message || e), 'error', 7000);
+    if (!opts.still) toast('FS-Anlage fehlgeschlagen: ' + (e.message || e), 'error', 7000);
+    return { ok: false, grund: e.message || String(e) };
   }
 }
 
