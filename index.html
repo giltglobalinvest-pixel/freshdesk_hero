@@ -824,7 +824,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.71.1';
+const APP_VERSION = 'v2.71.2';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -2923,6 +2923,8 @@ async function ensureAppTables() {
     { name: 'ort',             type: 'singleLineText' },
     { name: 'quelle',          type: 'singleLineText' },   // zentrale-db | archiv | gekauft | …
     { name: 'dedupe_key',      type: 'singleLineText' },   // E-Mail bzw. normalisierte Nummer
+    { name: 'dedupe_tel',      type: 'singleLineText' },   // zweite Kennung, damit beide greifen
+    { name: 'bestand',         type: 'singleLineText' },   // 'ja' = steht schon in der zentralen DB
     { name: 'status',          type: 'singleLineText' },
     { name: 'versuche',        type: 'singleLineText' },
     { name: 'letzter_versuch', type: 'singleLineText' },
@@ -42080,7 +42082,8 @@ const CC_TYPES = {
   firma: 'singleLineText', account_id: 'singleLineText', kampagne: 'singleLineText',
   ansprechpartner: 'singleLineText', telefon: 'singleLineText', email: 'singleLineText',
   position: 'singleLineText', ort: 'singleLineText', quelle: 'singleLineText',
-  dedupe_key: 'singleLineText', status: 'singleLineText', versuche: 'singleLineText',
+  dedupe_key: 'singleLineText', dedupe_tel: 'singleLineText', bestand: 'singleLineText',
+  status: 'singleLineText', versuche: 'singleLineText',
   letzter_versuch: 'singleLineText', notiz: 'multilineText', bearbeiter: 'singleLineText',
   gesperrt_bis: 'singleLineText', preisliste_am: 'singleLineText', ticket_id: 'singleLineText',
   created_at: 'singleLineText', updated_at: 'singleLineText',
@@ -42112,11 +42115,62 @@ function _ccNummerNormal(nr) {
   return n.replace(/\D/g, '');
 }
 
-function _ccDedupeKey(lead) {
+/* v2.71.2: BEIDE Kennungen, nicht nur die bevorzugte. Stand dieselbe Person in
+   einem System mit Adresse und im anderen nur mit Nummer, entstanden vorher
+   zwei Einträge — bei aus Signaturen gewachsenen Beständen kein Randfall.
+
+   Die Nummer muss mindestens sechs Ziffern haben: Eine vierstellige Durchwahl
+   ist keine Identität und würde ganze Firmen zu einer Person verschmelzen. */
+function _ccKennungen(lead) {
   const mail = String(lead.email || '').trim().toLowerCase();
-  if (mail) return 'm:' + mail;
   const nr = _ccNummerNormal(lead.telefon);
-  return nr ? 't:' + nr : '';
+  return {
+    mail: mail && mail.includes('@') ? 'm:' + mail : '',
+    tel: nr.length >= 6 ? 't:' + nr : '',
+  };
+}
+
+function _ccDedupeKey(lead) {
+  const k = _ccKennungen(lead);
+  return k.mail || k.tel;
+}
+
+/** Alle bekannten Kennungen einer Leadliste — für den Dublettenabgleich. */
+function _ccKennungsSatz(leads) {
+  const s = new Set();
+  (leads || []).forEach(l => {
+    if (l.dedupe_key) s.add(l.dedupe_key);
+    if (l.dedupe_tel) s.add(l.dedupe_tel);
+    const k = _ccKennungen(l);
+    if (k.mail) s.add(k.mail);
+    if (k.tel) s.add(k.tel);
+  });
+  return s;
+}
+
+/** Trifft eine der beiden Kennungen auf Bekanntes? */
+function _ccSchonBekannt(satz, lead) {
+  const k = _ccKennungen(lead);
+  return !!((k.mail && satz.has(k.mail)) || (k.tel && satz.has(k.tel)));
+}
+function _ccKennungenMerken(satz, lead) {
+  const k = _ccKennungen(lead);
+  if (k.mail) satz.add(k.mail);
+  if (k.tel) satz.add(k.tel);
+}
+
+/** Kennungen aller Kontakte in der zentralen DB eines Mandanten. */
+async function _ccBestandsKennungen(acc) {
+  try {
+    const namen = _zdbTableNames(acc);
+    const kontakte = await _zdbRead(namen.kontakt, {});
+    const s = new Set();
+    (kontakte || []).forEach(k => {
+      const f = k.fields || {};
+      _ccKennungenMerken(s, { email: f.email, telefon: f.telefon || f.mobil });
+    });
+    return s;
+  } catch (e) { console.warn('[CC] Bestandskennungen:', e.message); return new Set(); }
 }
 
 function _ccStatusVon(r) {
@@ -42210,6 +42264,7 @@ function _ccSichtbar() {
   if (CC_STATE.filter === 'offen') l = l.filter(r => ['offen', 'rueckruf', 'kein_kontakt'].includes(_ccStatusVon(r)));
   else if (CC_STATE.filter === 'interessiert') l = l.filter(r => _ccStatusVon(r) === 'interessiert');
   if (CC_STATE.quelle) l = l.filter(r => String(r.quelle || '').toLowerCase() === CC_STATE.quelle);
+  if (CC_STATE.ohneBestand) l = l.filter(r => String(r.bestand || '') !== 'ja');
   const q = String(CC_STATE.suche || '').trim().toLowerCase();
   if (q) l = l.filter(r => [r.firma, r.ansprechpartner, r.telefon, r.email, r.ort].join(' ').toLowerCase().includes(q));
   return _ccSortiert(l);
@@ -42255,6 +42310,9 @@ function _ccZeichnen() {
     + '<div class="flex items-center gap-2 flex-wrap mb-3">'
       + reiter('offen', 'Zu tun', offen) + reiter('interessiert', 'Interessiert', interessiert) + reiter('alle', 'Alle', alle.length)
       + _ccQuellenFilter(alle)
+      + (alle.some(r => String(r.bestand || '') === 'ja')
+          ? '<label class="inline-flex items-center gap-1.5 text-[11px] text-ink-600 cursor-pointer px-2"><input type="checkbox"' + (CC_STATE.ohneBestand ? ' checked' : '') + ' onchange="_ccBestandFilter(this.checked)"> nur Neukunden</label>'
+          : '')
       + '<input type="search" value="' + escapeAttr(CC_STATE.suche || '') + '" oninput="_ccSuche(this.value)" placeholder="Suchen…" class="ml-auto px-3 py-1.5 border border-ink-200 rounded-lg text-sm w-44">'
       + '<button onclick="renderCallcenterPage()" class="px-3 py-1.5 rounded-lg text-[12px] font-bold bg-white border border-ink-200 text-ink-600 hover:bg-ink-50" title="Liste neu laden"><i data-lucide="refresh-cw" class="w-3.5 h-3.5"></i></button>'
       + (APP_KEYS.user?.is_admin
@@ -42285,6 +42343,7 @@ function _ccMandantWahl(aktuell) {
 function _ccFilter(k) { CC_STATE.filter = k; CC_STATE.aktiv = null; _ccZeichnen(); }
 function _ccSuche(v) { CC_STATE.suche = v; _ccZeichnen(); }
 function _ccQuelleFilter(v) { CC_STATE.quelle = v || ''; CC_STATE.aktiv = null; _ccZeichnen(); }
+function _ccBestandFilter(an) { CC_STATE.ohneBestand = !!an; CC_STATE.aktiv = null; _ccZeichnen(); }
 
 /* Auswahl nur aus den Quellen, die tatsächlich vorkommen — eine Liste mit
    Einträgen, die null Treffer haben, sieht nach Fehler aus. Erscheint erst,
@@ -42314,6 +42373,7 @@ function _ccTabelle(rows) {
         + '<div class="font-normal mt-0.5 flex items-center gap-1 flex-wrap">'
           + (r.ort ? '<span class="text-[10px] text-ink-400">' + escapeHtml(r.ort) + '</span>' : '')
           + _ccQuelleBadge(r)
+          + (String(r.bestand || '') === 'ja' ? '<span class="text-[10px] px-1.5 py-0.5 rounded border font-semibold bg-emerald-50 text-emerald-700 border-emerald-200" title="Steht bereits in der zentralen DB — kein Neukunde">schon Kunde</span>' : '')
         + '</div></td>'
       + '<td class="px-2 py-2 border-b border-ink-100">' + escapeHtml(r.ansprechpartner || '—')
         + (r.position ? '<div class="text-[10px] text-ink-400">' + escapeHtml(r.position) + '</div>' : '') + '</td>'
@@ -42688,17 +42748,17 @@ function _ccZuordnungGeaendert() {
   if (!_CC_IMPORT) return;
   const z = _ccZuordnungLesen();
   _CC_IMPORT.zuordnung = z;
-  const vorhanden = new Set(CC_STATE.leads.map(l => l.dedupe_key).filter(Boolean));
+  const vorhanden = _ccKennungsSatz(CC_STATE.leads);
   const inDatei = new Set();
   let brauchbar = 0, ohneKennung = 0, doppeltDatei = 0, schonDa = 0;
   const beispiele = [];
   for (const zeile of _CC_IMPORT.zeilen) {
     const lead = _ccZeileZuLead(zeile, z);
-    const key = _ccDedupeKey(lead);
-    if (!key) { ohneKennung++; continue; }
-    if (inDatei.has(key)) { doppeltDatei++; continue; }
-    inDatei.add(key);
-    if (vorhanden.has(key)) { schonDa++; continue; }
+    const kenn = _ccKennungen(lead);
+    if (!kenn.mail && !kenn.tel) { ohneKennung++; continue; }
+    if (_ccSchonBekannt(inDatei, lead)) { doppeltDatei++; continue; }
+    _ccKennungenMerken(inDatei, lead);
+    if (_ccSchonBekannt(vorhanden, lead)) { schonDa++; continue; }
     brauchbar++;
     if (beispiele.length < 3) beispiele.push(lead);
   }
@@ -42724,19 +42784,24 @@ async function _ccCsvImportieren(btn) {
   setBusy(btn, true, 'Prüfe…');
   try {
     const sperre = await _ccSperrlisteLaden(true);
-    const vorhanden = new Set(CC_STATE.leads.map(l => l.dedupe_key).filter(Boolean));
+    const vorhanden = _ccKennungsSatz(CC_STATE.leads);
+    const bestand = await _ccBestandsKennungen(acc);
     const jetzt = nowIso();
     const saetze = [];
-    let uebersprungen = 0, gesperrt = 0;
+    let uebersprungen = 0, gesperrt = 0, bekannt = 0;
     for (const zeile of _CC_IMPORT.zeilen) {
       const lead = _ccZeileZuLead(zeile, z);
-      const key = _ccDedupeKey(lead);
-      if (!key || vorhanden.has(key)) { uebersprungen++; continue; }
-      if (sperre.has(key)) { gesperrt++; continue; }
-      vorhanden.add(key);
+      const kenn = _ccKennungen(lead);
+      if ((!kenn.mail && !kenn.tel) || _ccSchonBekannt(vorhanden, lead)) { uebersprungen++; continue; }
+      if (_ccSchonBekannt(sperre, lead)) { gesperrt++; continue; }
+      _ccKennungenMerken(vorhanden, lead);
+      const istBestand = _ccSchonBekannt(bestand, lead);
+      if (istBestand) bekannt++;
       saetze.push(Object.assign({}, lead, {
         account_id: acc.id, kampagne: 'Sonderkonditionen', quelle,
-        dedupe_key: key, status: 'offen', versuche: '0', created_at: jetzt, updated_at: jetzt,
+        dedupe_key: kenn.mail || kenn.tel, dedupe_tel: kenn.tel,
+        bestand: istBestand ? 'ja' : '',
+        status: 'offen', versuche: '0', created_at: jetzt, updated_at: jetzt,
       }));
     }
     if (!saetze.length) {
@@ -42749,7 +42814,8 @@ async function _ccCsvImportieren(btn) {
     _ccImportSchliessen();
     toast(n + ' Kontakte importiert als „' + quelle + '"'
       + (uebersprungen ? ' · ' + uebersprungen + ' übersprungen' : '')
-      + (gesperrt ? ' · ' + gesperrt + ' wegen Werbesperre ausgelassen' : ''), 'success', 9000);
+      + (gesperrt ? ' · ' + gesperrt + ' wegen Werbesperre ausgelassen' : '')
+      + (bekannt ? ' · ' + bekannt + ' davon bereits Kunde' : ''), 'success', 9000);
     renderCallcenterPage();
   } catch (e) {
     setBusy(btn, false);
@@ -42769,29 +42835,32 @@ async function _ccDublettenPruefen(btn) {
   setBusy(btn, true, 'Prüfe…');
   try {
     const sperre = await _ccSperrlisteLaden(true);
-    const gesehen = new Map();
+    const gesehen = new Set();
     const doppelt = [], gesperrt = [];
     for (const l of _ccSortiert(CC_STATE.leads)) {
-      const key = l.dedupe_key || _ccDedupeKey(l);
-      if (!key) continue;
-      if (sperre.has(key)) gesperrt.push(l);
-      if (gesehen.has(key)) doppelt.push(l); else gesehen.set(key, l);
+      const kenn = _ccKennungen(l);
+      if (!kenn.mail && !kenn.tel) continue;
+      if (_ccSchonBekannt(sperre, l)) gesperrt.push(l);
+      if (_ccSchonBekannt(gesehen, l)) doppelt.push(l); else _ccKennungenMerken(gesehen, l);
     }
-    // Bestandskunden: Abgleich gegen die zentrale DB desselben Mandanten.
-    let bestand = 0;
-    try {
-      const namen = _zdbTableNames(acc);
-      const kontakte = await _zdbRead(namen.kontakt, {});
-      const bekannt = new Set();
-      (kontakte || []).forEach(k => {
-        const f = k.fields || {};
-        const key = _ccDedupeKey({ email: f.email, telefon: f.telefon || f.mobil });
-        if (key) bekannt.add(key);
-      });
-      CC_STATE.leads.forEach(l => { if (bekannt.has(l.dedupe_key)) bestand++; });
-      CC_STATE.bestand = bekannt;
-    } catch (e) { console.warn('[CC] Bestandsabgleich:', e.message); }
+    // Bestandskunden gegen die zentrale DB des Mandanten — und das Ergebnis am
+    // Datensatz festhalten. Nur zu zählen hilft dem Anrufer nicht: Er drückt
+    // diesen Knopf nie, er sieht nur die Zeile.
+    setBusy(btn, true, 'Gleiche ab…');
+    const bekannt = await _ccBestandsKennungen(acc);
+    const zuMarkieren = [];
+    CC_STATE.leads.forEach(l => {
+      const ist = _ccSchonBekannt(bekannt, l) ? 'ja' : '';
+      if (String(l.bestand || '') !== ist) zuMarkieren.push([l, ist]);
+    });
+    let n = 0;
+    for (const [l, ist] of zuMarkieren) {
+      try { await _ccSpeichern(l.recordId, { bestand: ist }); n++; setBusy(btn, true, n + '/' + zuMarkieren.length); }
+      catch (e) { console.warn('[CC] Bestand vermerken:', e.message); }
+    }
+    const bestand = CC_STATE.leads.filter(l => String(l.bestand || '') === 'ja').length;
     setBusy(btn, false);
+    _ccZeichnen();
     _ccPruefErgebnis(doppelt, gesperrt, bestand);
   } catch (e) {
     setBusy(btn, false);
@@ -42899,10 +42968,14 @@ async function _ccImportAusZentralerDb(btn) {
     const firmen = await _zdbRead(namen.firma, {});
     const firmaName = {}; (firmen || []).forEach(f => { firmaName[f.id] = (f.fields && f.fields.name) || ''; });
     const sperre = await _ccSperrlisteLaden(true);
-    const vorhanden = new Set(CC_STATE.leads.map(l => l.dedupe_key).filter(Boolean));
+    const vorhanden = _ccKennungsSatz(CC_STATE.leads);
+    // Wer beim ZIEL-Mandanten schon Kunde ist, wird gekennzeichnet — nicht
+    // ausgelassen. Ein Bestandskunde darf angerufen werden, der Anrufer muss es
+    // nur wissen, bevor er den Neukunden-Text aufsagt.
+    const bestand = await _ccBestandsKennungen(ziel);
     const jetzt = nowIso();
     const saetze = [];
-    let doppelt = 0, unbrauchbar = 0, gesperrt = 0;
+    let doppelt = 0, unbrauchbar = 0, gesperrt = 0, bekannt = 0;
     for (const k of (kontakte || [])) {
       const f = k.fields || {};
       const lead = {
@@ -42910,17 +42983,21 @@ async function _ccImportAusZentralerDb(btn) {
         ansprechpartner: f.name || [f.vorname, f.nachname].filter(Boolean).join(' '),
         telefon: f.telefon || f.mobil || '', email: f.email || '', position: f.position || '',
       };
-      const key = _ccDedupeKey(lead);
-      if (!key) { unbrauchbar++; continue; }
-      if (vorhanden.has(key)) { doppelt++; continue; }
-      if (sperre.has(key)) { gesperrt++; continue; }
-      vorhanden.add(key);
+      const kenn = _ccKennungen(lead);
+      if (!kenn.mail && !kenn.tel) { unbrauchbar++; continue; }
+      if (_ccSchonBekannt(vorhanden, lead)) { doppelt++; continue; }
+      if (_ccSchonBekannt(sperre, lead)) { gesperrt++; continue; }
+      _ccKennungenMerken(vorhanden, lead);
+      const istBestand = _ccSchonBekannt(bestand, lead);
+      if (istBestand) bekannt++;
       saetze.push(Object.assign({}, lead, {
         account_id: ziel.id, kampagne: 'Sonderkonditionen',
         // Bei fremder Herkunft steht sie im Stichwort — sonst weiß später
         // niemand mehr, warum ein Liftaro-Kunde in der Aszendio-Liste steht.
         quelle: fremd ? ('Zentrale DB · ' + (quelle.name || quelle.id)) : 'zentrale-db',
-        dedupe_key: key, status: 'offen', versuche: '0', created_at: jetzt, updated_at: jetzt,
+        dedupe_key: kenn.mail || kenn.tel, dedupe_tel: kenn.tel,
+        bestand: istBestand ? 'ja' : '',
+        status: 'offen', versuche: '0', created_at: jetzt, updated_at: jetzt,
       }));
     }
     if (!saetze.length) {
@@ -42932,7 +43009,8 @@ async function _ccImportAusZentralerDb(btn) {
     setBusy(btn, false);
     _ccImportSchliessen();
     toast(n + ' übernommen · ' + doppelt + ' schon vorhanden · ' + unbrauchbar + ' ohne Nummer und Adresse'
-      + (gesperrt ? ' · ' + gesperrt + ' wegen Werbesperre ausgelassen' : ''), 'success', 9000);
+      + (gesperrt ? ' · ' + gesperrt + ' wegen Werbesperre ausgelassen' : '')
+      + (bekannt ? ' · ' + bekannt + ' davon bereits Kunde' : ''), 'success', 9000);
     renderCallcenterPage();
   } catch (e) {
     setBusy(btn, false);
