@@ -824,7 +824,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.74.2';
+const APP_VERSION = 'v2.74.3';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -2985,6 +2985,7 @@ async function ensureAppTables() {
     { name: 'pdf_seite',   type: 'singleLineText' },
     { name: 'pdf_modus',   type: 'singleLineText' },   // ersetzen | aufdruck
     { name: 'pdf_empf_json', type: 'multilineText' },  // erkannter Empfängerblock
+    { name: 'pdf_datei',   type: 'singleLineText' },   // Muster für den Anhang-Dateinamen
     { name: 'updated_at',  type: 'singleLineText' },
   ]);
   await ensureTable(CC_TYP_TABLE, [
@@ -42249,7 +42250,7 @@ const CC_VORLAGE_TYPEN = {
   anschreiben: 'multilineText', pdf_name: 'singleLineText', updated_at: 'singleLineText',
   pdf_text: 'singleLineText', pdf_ecke: 'singleLineText', pdf_x: 'singleLineText',
   pdf_y: 'singleLineText', pdf_size: 'singleLineText', pdf_seite: 'singleLineText',
-  pdf_modus: 'singleLineText', pdf_empf_json: 'multilineText',
+  pdf_modus: 'singleLineText', pdf_empf_json: 'multilineText', pdf_datei: 'singleLineText',
 };
 
 /* Platzhalter im Anschreiben. Bewusst wenige und selbsterklärend — eine
@@ -43177,6 +43178,7 @@ const CC_PDF_ECKEN = {
 
 const CC_PDF_STANDARD = {
   pdf_modus: 'ersetzen',
+  pdf_datei: 'Preisliste {firma}.pdf',
   pdf_text: '{firma}',
   pdf_ecke: 'oben-rechts',
   pdf_x: '20', pdf_y: '20', pdf_size: '11', pdf_seite: '1',
@@ -43251,12 +43253,18 @@ async function _ccPdfPersonalisieren(bytes, werte, e) {
   return await doc.save();
 }
 
-/* Dateiname mit Firma. Er ist das Erste, was der Empfänger sieht — und das
-   Einzige, was nach dem Herunterladen im Ordner übrig bleibt. */
-function _ccDateiname(vorlagenName, firma) {
-  const basis = String(vorlagenName || 'Preisliste.pdf').replace(/\.pdf$/i, '');
-  const f = String(firma || '').replace(/[^\wÄÖÜäöüß \-]+/g, '').trim().slice(0, 60);
-  return (f ? basis + ' — ' + f : basis) + '.pdf';
+/* Dateiname aus einem eigenen Muster — NICHT aus dem Namen der hochgeladenen
+   Datei. Die stammt von einem anderen Kunden, und sein Name stünde sonst im
+   Anhang: Das ist das Erste, was der Empfänger sieht, noch vor dem Öffnen. */
+function _ccDateiname(muster, werte) {
+  const roh = _ccPlatzhalterFuellen(String(muster || CC_PDF_STANDARD.pdf_datei), werte || {});
+  const sauber = roh
+    .replace(/\.pdf$/i, '')
+    .replace(/[\\/:*?"<>|]+/g, ' ')     // in Dateinamen unzulässig
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 90);
+  return (sauber || 'Preisliste') + '.pdf';
 }
 
 /** Vorlage aus dem Worker holen — als ArrayBuffer, für die Personalisierung. */
@@ -43298,6 +43306,7 @@ function _ccPdfEinstellungenLesen() {
     pdf_size:  w('ccPdfSize', CC_PDF_STANDARD.pdf_size),
     pdf_seite: w('ccPdfSeite', CC_PDF_STANDARD.pdf_seite),
     pdf_modus: w('ccPdfModus', CC_PDF_STANDARD.pdf_modus),
+    pdf_datei: w('ccPdfDatei', CC_PDF_STANDARD.pdf_datei),
     // Der erkannte Block ist Analyse-Ergebnis, kein Eingabefeld — er kommt
     // unverändert aus dem Zustand und darf beim Speichern nicht verloren gehen.
     pdf_empf_json: (_CC_VORLAGE && _CC_VORLAGE.pdf_empf_json) || '',
@@ -43332,6 +43341,9 @@ async function _ccVorlageOeffnen() {
             + '<p class="text-[12px] font-bold text-ink-800 mb-1">Personalisierung der Preisliste</p>'
             + '<p class="text-[11px] text-ink-500 mb-2">Die hochgeladene Datei bleibt unverändert — beim Versand entsteht je Empfänger eine eigene Fassung.</p>'
             + '<div id="ccVorlageAdressat">' + _ccVorlageAdressatHtml(v) + '</div>'
+            + '<label class="block mt-2"><span class="text-[11px] font-semibold text-ink-700">Dateiname des Anhangs</span>'
+              + '<input id="ccPdfDatei" value="' + escapeAttr(v.pdf_datei || CC_PDF_STANDARD.pdf_datei) + '" class="w-full mt-0.5 px-2.5 py-1.5 border border-ink-300 rounded-lg text-sm">'
+              + '<span class="text-[10px] text-ink-500">Der Name der hochgeladenen Datei wird NICHT verwendet — er stammt von einem anderen Kunden.</span></label>'
             + '<details class="mt-1"><summary class="text-[11px] text-ink-500 cursor-pointer select-none">Position anpassen</summary>'
             + '<div class="grid grid-cols-2 sm:grid-cols-5 gap-2 mt-2">'
               + '<label class="block"><span class="text-[10px] font-semibold text-ink-600">Ecke</span>'
@@ -43572,7 +43584,7 @@ function _ccVersandDialog(r, v, konfigs) {
             + '<input id="ccVersandBetreff" value="' + escapeAttr(betreff) + '" class="w-full mt-0.5 px-2.5 py-1.5 border border-ink-300 rounded-lg text-sm"></label>'
           + '<label class="block"><span class="text-[11px] font-semibold text-ink-700">Anschreiben</span>'
             + '<textarea id="ccVersandText" rows="10" class="w-full mt-0.5 px-2.5 py-2 border border-ink-300 rounded-lg text-[13px]">' + escapeHtml(text) + '</textarea></label>'
-          + '<p class="text-[11px] text-ink-600 inline-flex items-center gap-1.5"><i data-lucide="paperclip" class="w-3.5 h-3.5"></i> Anhang: <b>' + escapeHtml(v.pdf_name) + '</b> · die Signatur wird von Freshdesk angefügt</p>'
+          + '<p class="text-[11px] text-ink-600 inline-flex items-center gap-1.5"><i data-lucide="paperclip" class="w-3.5 h-3.5"></i> Anhang: <b>' + escapeHtml(_ccDateiname(v.pdf_datei, r)) + '</b> · die Signatur wird von Freshdesk angefügt</p>'
         + '</div>'
         + '<div class="flex items-center justify-end gap-2 p-4 border-t border-ink-200">'
           + '<button onclick="_ccVersandSchliessen()" class="px-3 py-2 text-sm text-ink-600 hover:bg-ink-100 rounded-lg">Abbrechen</button>'
@@ -43622,7 +43634,7 @@ async function _ccVersandAbsenden(recordId, btn) {
       // Antwort des Verwalters landet in einem Vorgang, den niemand ansieht.
       status: '2',
       tags: 'Kaltakquise',
-    }, [{ blob, name: _ccDateiname(v.pdf_name, r.firma) }]);
+    }, [{ blob, name: _ccDateiname(v.pdf_datei, r) }]);
     if (!erstellt || !erstellt.id) throw new Error('Freshdesk hat keine Ticketnummer zurückgegeben');
 
     await _ccSpeichern(recordId, {
