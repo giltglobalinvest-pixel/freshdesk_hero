@@ -824,7 +824,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.77.0';
+const APP_VERSION = 'v2.77.2';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -41025,6 +41025,11 @@ async function _checkFsForEmail(accountId, email) {
    bisherigen Zielen. Tabellen werden bei Bedarf via Meta-API automatisch angelegt.
    ============================================================================ */
 const ZDB_BASE_ID = APP_CONFIG.APP_BASE_ID;
+/* v2.77.2: Nur noch die ANFANGSBELEGUNG des Airtable-Auswahlfelds. Gepflegt
+   wird die gemeinsame Liste aus den Einstellungen (_ccTypenListe) — dieselbe,
+   die die Anrufliste benutzt. Zwei getrennte Vorräte führten dazu, dass ein in
+   der Kampagne gesetzter Typ in den Stammdaten nicht ankam.
+   Neue Werte legt Airtable dank typecast von selbst als Option an. */
 const ZDB_TYP_OPTIONS = ['Kunde', 'Interessent', 'Lieferant', 'Partner', 'Sonstige'];
 const ZDB_ENABLED_KEY = 'fdh_zdb_enabled_accounts';
 const _ZDB_TABLE_CACHE = new Map();   // slug → {slug, firma:{id,name}, kontakt:{id,name}}
@@ -41560,7 +41565,11 @@ function _zdbPaintView() {
       '</div>' +
       '<p class="text-[10px] text-ink-500 font-mono mt-1 truncate">' + escapeHtml(names.firma) + ' · ' + escapeHtml(names.kontakt) + '</p>' +
       '<div class="flex gap-1 mt-2 items-center flex-wrap">' + tabBtn('kontakte', 'Kontakte') + tabBtn('firmen', 'Firmen') + tabBtn('mailchimp', '\u{1F4E7} Mailchimp') + konfTab +
-        (canEdit ? '<div class="flex-1"></div><button onclick="_zdbNewRecord(\'' + tab + '\')" class="px-2.5 py-1 rounded-lg text-[12px] font-bold bg-emerald-600 hover:bg-emerald-700 text-white inline-flex items-center gap-1"><i data-lucide="plus" class="w-3.5 h-3.5"></i> Neu</button>' : '') +
+        '<div class="flex-1"></div>' +
+        (canEdit && tab === 'kontakte'
+          ? '<button onclick="_ccTypenVerwalten()" class="px-2 py-1 rounded-lg text-[12px] bg-white border border-ink-200 text-ink-500 hover:bg-ink-50" title="Kontakttypen verwalten"><i data-lucide="settings-2" class="w-3.5 h-3.5"></i></button>'
+            + '<button onclick="_zdbNummernBereinigen(this)" class="px-2.5 py-1 rounded-lg text-[12px] font-bold bg-white border border-ink-300 text-ink-600 hover:bg-ink-50 inline-flex items-center gap-1" title="Telefon und Mobil auf eine Schreibweise bringen"><i data-lucide="wand-2" class="w-3.5 h-3.5"></i> Nummern</button>' : '') +
+        (canEdit ? '<button onclick="_zdbNewRecord(\'' + tab + '\')" class="px-2.5 py-1 rounded-lg text-[12px] font-bold bg-emerald-600 hover:bg-emerald-700 text-white inline-flex items-center gap-1"><i data-lucide="plus" class="w-3.5 h-3.5"></i> Neu</button>' : '') +
       '</div>' + searchBox +
     '</div>' +
     '<div id="zdbBody">' + _zdbBodyHtml() + '</div>';
@@ -41806,6 +41815,51 @@ async function _zdbZurueckInKorb(recId, btn, ausblenden) {
   if (btn) setBusy(btn, false);
 }
 
+/* v2.77.1: Nummern in den Stammdaten vereinheitlichen.
+   Die Bereinigung in der Anrufliste half nur dort — die zentrale DB behielt die
+   fehlerhaften Nummern, und der nächste Import holte sie zurück. Der Fehler
+   gehört an die Quelle, und die ist hier. */
+async function _zdbNummernBereinigen(btn) {
+  const d = ZDB_VIEW_STATE.data;
+  const acc = _zdbCurrentAccount();
+  if (!d || !acc) return;
+  const namen = _zdbTableNames(acc);
+  const zuTun = [];
+  for (const rec of (d.kontakte || [])) {
+    const f = rec.fields || {};
+    const patch = {};
+    for (const feld of ['telefon', 'mobil']) {
+      const alt = String(f[feld] || '');
+      if (!alt.trim()) continue;
+      const neu = _ccNummerNormalisieren(alt);
+      if (neu && neu !== alt) patch[feld] = neu;
+    }
+    if (Object.keys(patch).length) zuTun.push([rec, patch]);
+  }
+  if (!zuTun.length) return toast('Alle Nummern sind bereits einheitlich.', 'success', 5000);
+
+  const beispiele = zuTun.slice(0, 3).map(([rec, p]) => {
+    const f = rec.fields || {};
+    return Object.keys(p).map(k => (f[k] || '') + ' → ' + p[k]).join(', ');
+  }).join('\n');
+  if (!confirm(zuTun.length + ' Kontakte bekommen vereinheitlichte Nummern, zum Beispiel:\n\n' + beispiele
+    + '\n\nDoppelte Nullen aus „+49 (0)" werden dabei berichtigt.')) return;
+
+  setBusy(btn, true, '0/' + zuTun.length);
+  let n = 0, fehler = 0;
+  for (const [rec, patch] of zuTun) {
+    try {
+      await _zdbUpdateSafe(namen.kontakt, rec.id, Object.assign({}, patch, { updated_at: nowIso() }));
+      rec.fields = Object.assign({}, rec.fields, patch);
+      n++;
+    } catch (e) { fehler++; console.warn('[ZDB] Nummer:', e.message); }
+    setBusy(btn, true, (n + fehler) + '/' + zuTun.length);
+  }
+  setBusy(btn, false);
+  _zdbNeuZeichnen();
+  toast(n + ' Kontakte bereinigt' + (fehler ? ' · ' + fehler + ' fehlgeschlagen' : ''), fehler ? 'warn' : 'success', 7000);
+}
+
 /* Firma entfernen. Der Korb kennt keine eigenständigen Firmen — jeder Eintrag
    dort ist ein Kontakt mit einem Firmennamen als Text. „Zurück in den Korb"
    ergibt für eine Firma also keinen Sinn; sie wird entfernt, und die
@@ -41956,6 +42010,64 @@ function _zdbHistorieModal(recId, text) {
   if (window.lucide) lucide.createIcons();
 }
 function _zdbHistorieSchliessen() { const h = document.getElementById('zdbHistHost'); if (h) h.innerHTML = ''; }
+
+/* v2.77.2: Kontakttyp direkt in der Stammdatentabelle wählbar — dieselbe
+   Liste wie in der Anrufliste. Der Typ soll HIER gepflegt werden; die Kampagne
+   übernimmt ihn dann beim Import, statt dass ihn jemand zweimal setzt. */
+function _zdbTypZelle(r, f) {
+  const typen = _ccTypenListe();
+  const akt = String(f.typ || '');
+  const liste = typen.includes(akt) || !akt ? typen : typen.concat(akt);
+  return '<select onclick="event.stopPropagation()" onchange="event.stopPropagation(); _zdbTypSetzen(\'' + r.id + '\', this.value)" class="px-1 py-0.5 border rounded text-[12px] bg-white '
+    + (akt ? 'border-ink-300 text-ink-800 font-semibold' : 'border-ink-200 text-ink-400') + '" title="Kontakttyp">'
+    + '<option value="">— Typ —</option>'
+    + liste.map(t => '<option value="' + escapeAttr(t) + '"' + (akt === t ? ' selected' : '') + '>' + escapeHtml(t) + '</option>').join('')
+    + '<option value="__neu__">+ Neuer Typ …</option>'
+    + '</select>';
+}
+
+async function _zdbTypSetzen(recId, wert) {
+  const acc = _zdbCurrentAccount();
+  const d = ZDB_VIEW_STATE.data;
+  const rec = (d && d.kontakte || []).find(x => x.id === recId);
+  if (!acc || !rec) return;
+  if (wert === '__neu__') {
+    const name = (prompt('Neuer Kontakttyp:', '') || '').trim().replace(/\s+/g, ' ').slice(0, 30);
+    if (!name) return _zdbNeuZeichnen();
+    const liste = _ccTypenListe();
+    const schon = liste.find(t => t.toLowerCase() === name.toLowerCase());
+    if (!schon) {
+      try { await _ccTypenSpeichern(liste.concat(name)); }
+      catch (e) { toast('Typ nicht gespeichert: ' + (e.message || e), 'error', 8000); return _zdbNeuZeichnen(); }
+    }
+    wert = schon || name;
+  }
+  const typ = String(wert || '').trim();
+  try {
+    const namen = _zdbTableNames(acc);
+    await _zdbUpdateSafe(namen.kontakt, recId, { typ, updated_at: nowIso() });
+    rec.fields = Object.assign({}, rec.fields, { typ });
+    _zdbNeuZeichnen();
+    // Auch dauerhaft merken, damit künftige Kampagnen ihn ohne Nachfrage kennen.
+    try {
+      const f = rec.fields || {};
+      const lead = { email: f.email, telefon: f.telefon || f.mobil, ansprechpartner: f.name, firma: '' };
+      const map = await _ccTypenLaden();
+      const k = _ccKennungen(lead);
+      for (const key of [k.mail, k.tel].filter(Boolean)) {
+        const da = map.get(key);
+        if (da && da.recordId) await airtableUpdateWithAutoField(CC_TYP_TABLE, da.recordId, { typ, gesetzt_am: nowIso() }, _CC_TYP_FELDER);
+        else {
+          const neu = await airtableWriteWithAutoField(CC_TYP_TABLE, {
+            dedupe_key: key, typ, name: f.name || '', firma: '',
+            von: (APP_KEYS.user && APP_KEYS.user.name) || '', gesetzt_am: nowIso(),
+          }, _CC_TYP_FELDER);
+          map.set(key, { typ, recordId: neu && neu.id });
+        }
+      }
+    } catch (e) { console.warn('[ZDB] Typ merken:', e.message); }
+  } catch (e) { toast('Typ nicht gespeichert: ' + (e.message || e), 'error', 8000); }
+}
 
 /* v2.69.3: Von der Kontaktzeile direkt zur Firma. Der Klick auf die Zeile
    öffnet den Kontakt — für die Firma gab es bisher keinen Weg außer über den
@@ -42183,6 +42295,7 @@ function _zdbKontakteBody(d) {
         (c[0] === 'mailchimp' ? _zdbMcZelle(r, f)
          : c[0] === 'aktionen' ? _zdbAktionenZelle(r, f)
          : c[0] === 'firma' ? _zdbFirmaZelle(f, cells.firma)
+         : c[0] === 'typ' ? _zdbTypZelle(r, f)
          : escapeHtml(String(cells[c[0]] || ''))) + '</td>').join('') + '</tr>';
   }).join('');
   return '<div class="bg-white rounded-xl border border-ink-200 p-4">' + chip +
@@ -42286,7 +42399,12 @@ function _zdbOpenEditModal(kind, recId, f) {
   if (kind === 'firma') {
     fieldsHtml = _ZDB_FIRMA_EDIT.map(c => inp(c[0], c[1], f[c[0]])).join('');
   } else {
-    const typOpts = ['', 'Kunde', 'Interessent', 'Lieferant', 'Partner', 'Sonstige'].map(o => '<option' + (String(f.typ || '') === o ? ' selected' : '') + '>' + escapeHtml(o) + '</option>').join('');
+    // Gemeinsame Typliste — plus der aktuelle Wert, falls er (noch) nicht
+    // darin steht: Sonst fiele er beim Speichern still weg.
+    const _typen = _ccTypenListe();
+    const _akt = String(f.typ || '');
+    const typOpts = [''].concat(_typen, (_akt && !_typen.includes(_akt)) ? [_akt] : [])
+      .map(o => '<option' + (_akt === o ? ' selected' : '') + '>' + escapeHtml(o) + '</option>').join('');
     const curFirma = (f.firma || [])[0] || '';
     const firmaOpts = '<option value="">— keine —</option>' + (d.firmen || []).map(fr => '<option value="' + escapeAttr(fr.id) + '"' + (fr.id === curFirma ? ' selected' : '') + '>' + escapeHtml((fr.fields && fr.fields.name) || fr.id) + '</option>').join('');
     fieldsHtml =
@@ -43352,7 +43470,10 @@ async function _ccTypSetzen(recordId, wert) {
     const acc = _ccAccount();
     if (acc && typ) {
       const gefunden = await _zdbKontaktFinden(acc, { email: r.email, name: r.ansprechpartner });
-      if (gefunden && gefunden.hit && ZDB_TYP_OPTIONS.includes(typ)) {
+      // Keine Beschränkung mehr auf den alten Vorrat: Airtable legt unbekannte
+      // Werte per typecast selbst an, und „Hausverwaltung" gehört genauso in
+      // die Stammdaten wie in die Kampagne.
+      if (gefunden && gefunden.hit) {
         await _zdbUpdateSafe(gefunden.namen.kontakt.name, gefunden.hit.id, { typ, updated_at: nowIso() });
       }
     }
@@ -45296,7 +45417,7 @@ function _korbKontaktDaten(r) {
     nachname: teile.length > 1 ? teile[teile.length - 1] : '',
     email: r.email || '', telefon: r.telefon || '', mobil: r.mobil || '', position: r.position || '',
     // Typ nur übernehmen, wenn er zum Wertevorrat der zentralen DB passt
-    typ: ZDB_TYP_OPTIONS.includes(r.kontakt_typ) ? r.kontakt_typ : '',
+    typ: r.kontakt_typ || '',
     quelle: _korbQuelle(r), freshdesk_contact_id: r.fd_contact_id || '',
   };
 }
