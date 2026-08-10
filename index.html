@@ -824,7 +824,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.75.7';
+const APP_VERSION = 'v2.76.0';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -1122,6 +1122,51 @@ function relTime(iso) {
   if (sec < 86400) return Math.floor(sec/3600)  + ' h';
   if (sec < 604800)return Math.floor(sec/86400) + ' d';
   return d.toLocaleDateString('de', { day:'2-digit', month:'2-digit', year:'2-digit' });
+}
+
+/* === v2.76.0: Schreiben in den lokalen Speicher, das nicht still scheitert ===
+   Hero legt je Ticket den kompletten Angebots-Chat unter fdh_ang_state_* ab und
+   räumt nie auf. Nach einigen Monaten ist das Kontingent voll — und dann
+   scheitert JEDES setItem, auch die zwei Zeilen für einen Filter. Weil alle
+   Aufrufer das in try/catch verschluckt haben, sah es aus, als würde einfach
+   nichts gespeichert.
+
+   Deshalb: bei vollem Speicher die ältesten Angebots-Entwürfe wegräumen und
+   erneut versuchen — und melden, was passiert ist. */
+function _lsAufraeumen(anzahl) {
+  const kandidaten = [];
+  for (let i = 0; i < localStorage.length; i++) {
+    const k = localStorage.key(i);
+    if (!k || !/^fdh_ang_(state|stamm)_/.test(k)) continue;
+    let alter = 0;
+    try { alter = Date.parse((JSON.parse(localStorage.getItem(k) || '{}') || {}).savedAt || '') || 0; } catch (_) {}
+    kandidaten.push({ k, alter, groesse: (localStorage.getItem(k) || '').length });
+  }
+  // Älteste zuerst, undatierte gelten als am ältesten. Die fünf jüngsten
+  // Entwürfe bleiben in jedem Fall stehen — daran arbeitet vielleicht jemand.
+  kandidaten.sort((a, b) => a.alter - b.alter);
+  const weg = kandidaten.slice(0, Math.max(0, kandidaten.length - 5)).slice(0, anzahl || 20);
+  let frei = 0;
+  for (const c of weg) { try { localStorage.removeItem(c.k); frei += c.groesse; } catch (_) {} }
+  return { entfernt: weg.length, frei };
+}
+
+/** Schreibt und sagt ehrlich, ob es geklappt hat. */
+function lsSetzen(schluessel, wert) {
+  try {
+    localStorage.setItem(schluessel, wert);
+    return { ok: true };
+  } catch (e) {
+    const voll = /quota|exceeded|full/i.test(String(e && (e.name + ' ' + e.message)));
+    if (!voll) return { ok: false, grund: e.message || String(e) };
+    const auf = _lsAufraeumen(30);
+    try {
+      localStorage.setItem(schluessel, wert);
+      return { ok: true, aufgeraeumt: auf };
+    } catch (e2) {
+      return { ok: false, grund: 'Speicher voll — ' + auf.entfernt + ' alte Entwürfe entfernt, es reicht trotzdem nicht.', aufgeraeumt: auf };
+    }
+  }
 }
 
 function toast(msg, kind = 'info', ttl = 3500, action = null) {
@@ -42471,7 +42516,7 @@ async function _ccMandantWechseln(id) {
   CC_STATE.aktiv = null;
   CC_STATE.historie = {};
   _CC_VORLAGE = null;                    // Vorlagen hängen am Mandanten
-  try { localStorage.setItem('fdh_cc_account', id || ''); } catch (_) {}
+  lsSetzen('fdh_cc_account', id || '');
   _ccZustandMerken();                    // Mandantenwechsel gehört zum gemerkten Zustand
   await renderCallcenterPage();
 }
@@ -42623,7 +42668,7 @@ const CC_ZUSTAND_KEY = 'fdh_cc_zustand';
 function _ccZustandMerken() {
   try {
     const acc = _ccAccount();
-    localStorage.setItem(CC_ZUSTAND_KEY, JSON.stringify({
+    return lsSetzen(CC_ZUSTAND_KEY, JSON.stringify({
       accountId: (acc && acc.id) || '',
       kampagne: CC_STATE.kampagne || CC_KAMPAGNE_STANDARD,
       filter: CC_STATE.filter || 'offen',
@@ -42633,7 +42678,7 @@ function _ccZustandMerken() {
       nurMitNummer: !!CC_STATE.nurMitNummer,
       zeigeVersteckte: !!CC_STATE.zeigeVersteckte,
     }));
-  } catch (_) {}
+  } catch (e) { return { ok: false, grund: e.message || String(e) }; }
 }
 
 /** Beim ersten Aufbau je Sitzung alles zurückholen. */
@@ -42660,11 +42705,14 @@ function _ccZustandHolen() {
    Gespeichert wird ohnehin bei jeder Änderung; dieser Knopf ist dafür da, dass
    man es SIEHT. Eine unsichtbare Automatik, der man nicht glaubt, ist keine. */
 function _ccZustandSpeichernKnopf(btn) {
-  _ccZustandMerken();
-  let bestaetigt = null;
-  try { bestaetigt = JSON.parse(localStorage.getItem(CC_ZUSTAND_KEY) || 'null'); } catch (_) {}
-  if (!bestaetigt) {
-    return toast('Speichern nicht möglich — dieser Browser erlaubt keinen lokalen Speicher (privates Fenster?).', 'error', 9000);
+  const erg = _ccZustandMerken() || {};
+  if (!erg.ok) {
+    return toast('Speichern fehlgeschlagen: ' + (erg.grund || 'unbekannt')
+      + ' — unter Einstellungen lässt sich der lokale Speicher aufräumen.', 'error', 12000);
+  }
+  if (erg.aufgeraeumt && erg.aufgeraeumt.entfernt) {
+    toast('Der lokale Speicher war voll — ' + erg.aufgeraeumt.entfernt + ' alte Angebots-Entwürfe entfernt ('
+      + Math.round(erg.aufgeraeumt.frei / 1024) + ' KB frei). Deshalb wurde bisher nichts gemerkt.', 'warn', 12000);
   }
   const acc = _ccAccount();
   const teile = [
@@ -42835,7 +42883,7 @@ async function _ccKampagneUmbenennen(btn) {
     if (aenderungen.length) await _ccStapelAendern(aenderungen);
     betroffen.forEach(r => { r.kampagne = neu; });
     CC_STATE.kampagne = neu;
-    try { localStorage.setItem('fdh_cc_kampagne', neu); } catch (_) {}
+    lsSetzen('fdh_cc_kampagne', neu);
     if (btn) setBusy(btn, false);
     _ccZeichnen();
     toast(existiert ? betroffen.length + ' Kontakte nach „' + neu + '" verschoben' : 'Kampagne heißt jetzt „' + neu + '"', 'success', 5000);
@@ -42858,7 +42906,7 @@ function _ccKampagneWechseln(wert) {
   CC_STATE.aktiv = null;
   CC_STATE.typ = ''; CC_STATE.quelle = '';
   _CC_VORLAGE = null;   // je Kampagne eine eigene
-  try { localStorage.setItem('fdh_cc_kampagne', CC_STATE.kampagne); } catch (_) {}
+  lsSetzen('fdh_cc_kampagne', CC_STATE.kampagne);
   _ccZustandMerken();     // Kampagnenwechsel gehört zum gemerkten Zustand
   _ccZeichnen();
 }
