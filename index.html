@@ -824,7 +824,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.74.1';
+const APP_VERSION = 'v2.74.2';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -26612,7 +26612,7 @@ function _renderRestructureTitleModal(accountId, ticketId, ticket, preset, extra
           '<div id="rstPreview" class="bg-sky-50 border border-sky-200 rounded-xl p-3 text-sm font-semibold text-sky-900 break-words"></div>' +
           '<label class="flex items-center gap-2 text-[11px] text-ink-700 cursor-pointer">' +
             '<input id="rstAddNote" type="checkbox" checked class="w-4 h-4 accent-sky-600">' +
-            'Als Notiz dokumentieren („Titel automatisch strukturiert")' +
+            'Als interne Notiz dokumentieren (alter und neuer Titel)' +
           '</label>' +
           '<div id="rstErr" class="hidden bg-red-50 border border-red-200 rounded-xl p-3 text-sm text-red-800"></div>' +
         '</div>' +
@@ -26661,6 +26661,17 @@ async function processRestructureTitle(btn) {
     return setErr('Bitte mindestens ein Feld ausfüllen.');
   }
   const newTitle = buildTitleFromPreset(preset, ticketId, values);
+  // v2.74.2: Den bisherigen Titel VOR dem Überschreiben festhalten. Danach ist
+  // er nirgends mehr zu finden — Freshdesk führt keine Historie über Betreffe,
+  // und genau deshalb sieht man später in die Notiz.
+  const altTitle = (function () {
+    const c = APP_STATE.ticketCache?.get?.(accountId + '|' + ticketId);
+    if (c && c.subject) return c.subject;
+    const t = (APP_STATE.pageState?.tickets || []).find(x => x._accountId === accountId && x.id === ticketId);
+    if (t && t.subject) return t.subject;
+    if (CURRENT_TICKET && CURRENT_TICKET.id === ticketId) return CURRENT_TICKET.subject || '';
+    return '';
+  })();
   setBusy(btn, true, 'Speichere…');
   try {
     await proxyJson('/freshdesk/' + encodeURIComponent(accountId) + '/api/v2/tickets/' + ticketId, {
@@ -26685,8 +26696,12 @@ async function processRestructureTitle(btn) {
       const valuesText = (preset.fields || [])
         .map(f => f.label + ': ' + escapeHtml(values[f.key] || '—'))
         .join('<br>');
-      const noteBody = '🏷 Titel strukturiert (' + escapeHtml(preset.label) + '): <b>' + escapeHtml(newTitle) + '</b>' +
-        (valuesText ? '<br>' + valuesText : '');
+      const noteBody = '🏷 Titel strukturiert (' + escapeHtml(preset.label) + ')'
+        + '<br><br><b>Vorher:</b> ' + (altTitle ? escapeHtml(altTitle) : '<i>nicht ermittelbar</i>')
+        + '<br><b>Nachher:</b> ' + escapeHtml(newTitle)
+        + (valuesText ? '<br><br>' + valuesText : '')
+        + '<br><br><span style="color:#6b7280">Geändert von ' + escapeHtml((APP_KEYS.user && APP_KEYS.user.name) || '?')
+        + ' am ' + escapeHtml(new Date().toLocaleString('de-DE')) + '</span>';
       proxyJson('/freshdesk/' + encodeURIComponent(accountId) + '/api/v2/tickets/' + ticketId + '/notes', {
         method: 'POST',
         body: JSON.stringify({ body: noteBody, private: true })
@@ -42482,6 +42497,7 @@ async function renderCallcenterPage() {
     catch (_) { CC_STATE.kampagne = CC_KAMPAGNE_STANDARD; }
   }
   host.innerHTML = '<div class="text-center py-10 text-sm text-ink-500"><span class="spinner inline-block w-4 h-4 border-[2px] text-brand-500"></span> Lade Anrufliste…</div>';
+  _ccFilterHolen();
   await _ccLaden();
   _ccZeichnen();
   _ccAbgleichStarten();
@@ -42551,13 +42567,51 @@ function _ccMandantWahl(aktuell) {
     + '</select>';
 }
 
-function _ccFilter(k) { CC_STATE.filter = k; CC_STATE.aktiv = null; _ccZeichnen(); }
+/* v2.74.2: Filter überleben das Neuladen — je Mandant UND Kampagne getrennt.
+   Wer eine Liste in Etappen abarbeitet, stellt sonst jedes Mal dasselbe wieder
+   ein. Der Suchbegriff wird bewusst NICHT gemerkt: Er gehört zu einer einzelnen
+   Nachfrage, nicht zur Arbeitsweise, und eine unsichtbar fortwirkende Suche
+   ließe die halbe Liste verschwinden.
+
+   Gemerkt wird lokal, nicht am Benutzer: Das ist eine Gewohnheit am jeweiligen
+   Gerät, keine Einstellung, die ein Kollege übernehmen sollte. */
+function _ccFilterSchluessel() {
+  return (CC_STATE.accountId || '') + '|' + (CC_STATE.kampagne || CC_KAMPAGNE_STANDARD);
+}
+
+function _ccFilterMerken() {
+  try {
+    const alle = JSON.parse(localStorage.getItem('fdh_cc_filter') || '{}');
+    alle[_ccFilterSchluessel()] = {
+      filter: CC_STATE.filter, quelle: CC_STATE.quelle || '', typ: CC_STATE.typ || '',
+      ohneBestand: !!CC_STATE.ohneBestand, nurMitNummer: !!CC_STATE.nurMitNummer,
+      zeigeVersteckte: !!CC_STATE.zeigeVersteckte,
+    };
+    localStorage.setItem('fdh_cc_filter', JSON.stringify(alle));
+  } catch (_) {}
+}
+
+function _ccFilterHolen() {
+  try {
+    const alle = JSON.parse(localStorage.getItem('fdh_cc_filter') || '{}');
+    const g = alle[_ccFilterSchluessel()];
+    if (!g) return;
+    CC_STATE.filter = g.filter || 'offen';
+    CC_STATE.quelle = g.quelle || '';
+    CC_STATE.typ = g.typ || '';
+    CC_STATE.ohneBestand = !!g.ohneBestand;
+    CC_STATE.nurMitNummer = !!g.nurMitNummer;
+    CC_STATE.zeigeVersteckte = !!g.zeigeVersteckte;
+  } catch (_) {}
+}
+
+function _ccFilter(k) { CC_STATE.filter = k; CC_STATE.aktiv = null; _ccFilterMerken(); _ccZeichnen(); }
 function _ccSuche(v) { CC_STATE.suche = v; _ccZeichnen(); }
-function _ccQuelleFilter(v) { CC_STATE.quelle = v || ''; CC_STATE.aktiv = null; _ccZeichnen(); }
-function _ccBestandFilter(an) { CC_STATE.ohneBestand = !!an; CC_STATE.aktiv = null; _ccZeichnen(); }
-function _ccNummerFilter(an) { CC_STATE.nurMitNummer = !!an; CC_STATE.aktiv = null; _ccZeichnen(); }
-function _ccVersteckteFilter(an) { CC_STATE.zeigeVersteckte = !!an; CC_STATE.aktiv = null; _ccZeichnen(); }
-function _ccTypWahl(v) { CC_STATE.typ = v || ''; CC_STATE.aktiv = null; _ccZeichnen(); }
+function _ccQuelleFilter(v) { CC_STATE.quelle = v || ''; CC_STATE.aktiv = null; _ccFilterMerken(); _ccZeichnen(); }
+function _ccBestandFilter(an) { CC_STATE.ohneBestand = !!an; CC_STATE.aktiv = null; _ccFilterMerken(); _ccZeichnen(); }
+function _ccNummerFilter(an) { CC_STATE.nurMitNummer = !!an; CC_STATE.aktiv = null; _ccFilterMerken(); _ccZeichnen(); }
+function _ccVersteckteFilter(an) { CC_STATE.zeigeVersteckte = !!an; CC_STATE.aktiv = null; _ccFilterMerken(); _ccZeichnen(); }
+function _ccTypWahl(v) { CC_STATE.typ = v || ''; CC_STATE.aktiv = null; _ccFilterMerken(); _ccZeichnen(); }
 
 /* Typfilter aus den tatsächlich vorkommenden Typen — plus „ohne Angabe", denn
    das ist bei importierten Listen der Normalfall und muss auffindbar bleiben. */
@@ -42660,6 +42714,7 @@ function _ccKampagneWechseln(wert) {
   CC_STATE.typ = ''; CC_STATE.quelle = '';
   _CC_VORLAGE = null;   // je Kampagne eine eigene
   try { localStorage.setItem('fdh_cc_kampagne', CC_STATE.kampagne); } catch (_) {}
+  _ccFilterHolen();       // jede Kampagne hat ihre eigene Arbeitsweise
   _ccZeichnen();
 }
 
