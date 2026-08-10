@@ -824,7 +824,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.75.4';
+const APP_VERSION = 'v2.75.5';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -42472,7 +42472,7 @@ async function _ccMandantWechseln(id) {
   CC_STATE.historie = {};
   _CC_VORLAGE = null;                    // Vorlagen hängen am Mandanten
   try { localStorage.setItem('fdh_cc_account', id || ''); } catch (_) {}
-  _ccFilterHolen();                      // jeder Mandant hat seine eigene Arbeitsweise
+  _ccZustandMerken();                    // Mandantenwechsel gehört zum gemerkten Zustand
   await renderCallcenterPage();
 }
 
@@ -42524,20 +42524,14 @@ function _ccSichtbar() {
 async function renderCallcenterPage() {
   const host = $('pageContent');
   if (!host) return;
-  // Zuletzt gewählten Mandanten wiederherstellen — wer eine Kampagne abarbeitet,
-  // will nach jedem Neuladen dort weitermachen und nicht beim ersten Mandanten.
-  if (!CC_STATE.accountId) {
-    try {
-      const g = localStorage.getItem('fdh_cc_account');
-      if (g && (APP_STATE.accounts || []).some(a => a.id === g)) CC_STATE.accountId = g;
-    } catch (_) {}
-  }
-  if (!CC_STATE.kampagne) {
-    try { CC_STATE.kampagne = localStorage.getItem('fdh_cc_kampagne') || CC_KAMPAGNE_STANDARD; }
-    catch (_) { CC_STATE.kampagne = CC_KAMPAGNE_STANDARD; }
+  // Einmal je Sitzung den zuletzt benutzten Zustand zurückholen — Mandant,
+  // Kampagne und Filter zusammen. Danach nie wieder, sonst würde jede
+  // Aktualisierung der Liste die laufende Auswahl überschreiben.
+  if (!CC_STATE._geholt) {
+    CC_STATE._geholt = true;
+    _ccZustandHolen();
   }
   host.innerHTML = '<div class="text-center py-10 text-sm text-ink-500"><span class="spinner inline-block w-4 h-4 border-[2px] text-brand-500"></span> Lade Anrufliste…</div>';
-  _ccFilterHolen();
   await _ccLaden();
   _ccZeichnen();
   _ccAbgleichStarten();
@@ -42617,32 +42611,41 @@ function _ccMandantWahl(aktuell) {
 
    Gemerkt wird lokal, nicht am Benutzer: Das ist eine Gewohnheit am jeweiligen
    Gerät, keine Einstellung, die ein Kollege übernehmen sollte. */
-function _ccFilterSchluessel() {
-  // Den TATSÄCHLICH angezeigten Mandanten verwenden, nicht die ausdrückliche
-  // Auswahl: Wer nie umgeschaltet hat, arbeitet auf dem ersten Mandanten, ohne
-  // dass CC_STATE.accountId gesetzt wäre. Sonst wird unter einem anderen
-  // Schlüssel gespeichert als später gesucht — und der Filter ist scheinbar weg.
-  const acc = _ccAccount();
-  return ((acc && acc.id) || '') + '|' + (CC_STATE.kampagne || CC_KAMPAGNE_STANDARD);
-}
+/* v2.75.5: EIN gespeicherter Zustand statt eines zusammengesetzten Schlüssels.
+   Vorher lag der Filter unter „Mandant|Kampagne" — unterschied sich beim Lesen
+   nur eines der beiden (umbenannte Kampagne, noch nicht ausdrücklich gewählter
+   Mandant), wurde still die Vorgabe genommen. Für „ich will nach dem Neuladen
+   weiterarbeiten wie vorher" ist das die falsche Genauigkeit: Ein Zustand, der
+   alles zusammen hält, kann gar nicht danebengreifen. */
+const CC_ZUSTAND_KEY = 'fdh_cc_zustand';
 
-function _ccFilterMerken() {
+function _ccZustandMerken() {
   try {
-    const alle = JSON.parse(localStorage.getItem('fdh_cc_filter') || '{}');
-    alle[_ccFilterSchluessel()] = {
-      filter: CC_STATE.filter, quelle: CC_STATE.quelle || '', typ: CC_STATE.typ || '',
-      ohneBestand: !!CC_STATE.ohneBestand, nurMitNummer: !!CC_STATE.nurMitNummer,
+    const acc = _ccAccount();
+    localStorage.setItem(CC_ZUSTAND_KEY, JSON.stringify({
+      accountId: (acc && acc.id) || '',
+      kampagne: CC_STATE.kampagne || CC_KAMPAGNE_STANDARD,
+      filter: CC_STATE.filter || 'offen',
+      quelle: CC_STATE.quelle || '',
+      typ: CC_STATE.typ || '',
+      ohneBestand: !!CC_STATE.ohneBestand,
+      nurMitNummer: !!CC_STATE.nurMitNummer,
       zeigeVersteckte: !!CC_STATE.zeigeVersteckte,
-    };
-    localStorage.setItem('fdh_cc_filter', JSON.stringify(alle));
+    }));
   } catch (_) {}
 }
 
-function _ccFilterHolen() {
+/** Beim ersten Aufbau je Sitzung alles zurückholen. */
+function _ccZustandHolen() {
   try {
-    const alle = JSON.parse(localStorage.getItem('fdh_cc_filter') || '{}');
-    const g = alle[_ccFilterSchluessel()];
+    const g = JSON.parse(localStorage.getItem(CC_ZUSTAND_KEY) || 'null');
     if (!g) return;
+    // Mandant nur übernehmen, wenn es ihn noch gibt — sonst zeigte die Liste
+    // auf einen Zugang, der zwischenzeitlich entzogen wurde.
+    if (g.accountId && (APP_STATE.accounts || []).some(a => a.id === g.accountId)) {
+      CC_STATE.accountId = g.accountId;
+    }
+    if (g.kampagne) CC_STATE.kampagne = g.kampagne;
     CC_STATE.filter = g.filter || 'offen';
     CC_STATE.quelle = g.quelle || '';
     CC_STATE.typ = g.typ || '';
@@ -42652,13 +42655,13 @@ function _ccFilterHolen() {
   } catch (_) {}
 }
 
-function _ccFilter(k) { CC_STATE.filter = k; CC_STATE.aktiv = null; _ccFilterMerken(); _ccZeichnen(); }
+function _ccFilter(k) { CC_STATE.filter = k; CC_STATE.aktiv = null; _ccZustandMerken(); _ccZeichnen(); }
 function _ccSuche(v) { CC_STATE.suche = v; _ccZeichnen(); }
-function _ccQuelleFilter(v) { CC_STATE.quelle = v || ''; CC_STATE.aktiv = null; _ccFilterMerken(); _ccZeichnen(); }
-function _ccBestandFilter(an) { CC_STATE.ohneBestand = !!an; CC_STATE.aktiv = null; _ccFilterMerken(); _ccZeichnen(); }
-function _ccNummerFilter(an) { CC_STATE.nurMitNummer = !!an; CC_STATE.aktiv = null; _ccFilterMerken(); _ccZeichnen(); }
-function _ccVersteckteFilter(an) { CC_STATE.zeigeVersteckte = !!an; CC_STATE.aktiv = null; _ccFilterMerken(); _ccZeichnen(); }
-function _ccTypWahl(v) { CC_STATE.typ = v || ''; CC_STATE.aktiv = null; _ccFilterMerken(); _ccZeichnen(); }
+function _ccQuelleFilter(v) { CC_STATE.quelle = v || ''; CC_STATE.aktiv = null; _ccZustandMerken(); _ccZeichnen(); }
+function _ccBestandFilter(an) { CC_STATE.ohneBestand = !!an; CC_STATE.aktiv = null; _ccZustandMerken(); _ccZeichnen(); }
+function _ccNummerFilter(an) { CC_STATE.nurMitNummer = !!an; CC_STATE.aktiv = null; _ccZustandMerken(); _ccZeichnen(); }
+function _ccVersteckteFilter(an) { CC_STATE.zeigeVersteckte = !!an; CC_STATE.aktiv = null; _ccZustandMerken(); _ccZeichnen(); }
+function _ccTypWahl(v) { CC_STATE.typ = v || ''; CC_STATE.aktiv = null; _ccZustandMerken(); _ccZeichnen(); }
 
 /* Typfilter aus den tatsächlich vorkommenden Typen — plus „ohne Angabe", denn
    das ist bei importierten Listen der Normalfall und muss auffindbar bleiben. */
@@ -42831,7 +42834,7 @@ function _ccKampagneWechseln(wert) {
   CC_STATE.typ = ''; CC_STATE.quelle = '';
   _CC_VORLAGE = null;   // je Kampagne eine eigene
   try { localStorage.setItem('fdh_cc_kampagne', CC_STATE.kampagne); } catch (_) {}
-  _ccFilterHolen();       // jede Kampagne hat ihre eigene Arbeitsweise
+  _ccZustandMerken();     // Kampagnenwechsel gehört zum gemerkten Zustand
   _ccZeichnen();
 }
 
