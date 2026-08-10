@@ -824,7 +824,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.73.1';
+const APP_VERSION = 'v2.74.0';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -2977,6 +2977,14 @@ async function ensureAppTables() {
     { name: 'betreff',     type: 'singleLineText' },
     { name: 'anschreiben', type: 'multilineText'  },
     { name: 'pdf_name',    type: 'singleLineText' },
+    { name: 'pdf_text',    type: 'singleLineText' },   // Aufdruck auf der Preisliste
+    { name: 'pdf_ecke',    type: 'singleLineText' },
+    { name: 'pdf_x',       type: 'singleLineText' },
+    { name: 'pdf_y',       type: 'singleLineText' },
+    { name: 'pdf_size',    type: 'singleLineText' },
+    { name: 'pdf_seite',   type: 'singleLineText' },
+    { name: 'pdf_modus',   type: 'singleLineText' },   // ersetzen | aufdruck
+    { name: 'pdf_empf_json', type: 'multilineText' },  // erkannter Empfängerblock
     { name: 'updated_at',  type: 'singleLineText' },
   ]);
   await ensureTable(CC_TYP_TABLE, [
@@ -42129,6 +42137,9 @@ const CC_VORLAGE_TABLE = 'Kampagne_Vorlage';
 const CC_VORLAGE_TYPEN = {
   kampagne: 'singleLineText', account_id: 'singleLineText', betreff: 'singleLineText',
   anschreiben: 'multilineText', pdf_name: 'singleLineText', updated_at: 'singleLineText',
+  pdf_text: 'singleLineText', pdf_ecke: 'singleLineText', pdf_x: 'singleLineText',
+  pdf_y: 'singleLineText', pdf_size: 'singleLineText', pdf_seite: 'singleLineText',
+  pdf_modus: 'singleLineText', pdf_empf_json: 'multilineText',
 };
 
 /* Platzhalter im Anschreiben. Bewusst wenige und selbsterklärend — eine
@@ -42899,6 +42910,8 @@ async function _ccVorlageLaden(neu) {
   _CC_VORLAGE = r
     ? Object.assign({ recordId: r.id, _kampagne: kampagne }, r.fields)
     : { recordId: null, _kampagne: kampagne, betreff: 'Ihre Preisliste — Sonderkonditionen', anschreiben: CC_ANSCHREIBEN_STANDARD, pdf_name: '' };
+  // Fehlende Aufdruck-Einstellungen mit sinnvollen Vorgaben füllen
+  for (const k of Object.keys(CC_PDF_STANDARD)) if (!_CC_VORLAGE[k]) _CC_VORLAGE[k] = CC_PDF_STANDARD[k];
   return _CC_VORLAGE;
 }
 
@@ -42918,6 +42931,227 @@ function _ccPlatzhalterFuellen(text, r) {
     '{gueltig_bis}': '31.12.' + new Date().getFullYear(),
   };
   return String(text || '').replace(/\{[a-z_]+\}/g, m => (m in werte ? werte[m] : m));
+}
+
+/* --- Personalisierung der Preisliste (v2.74.0) --------------------------
+   Der Firmenname wird IN die hochgeladene Vorlage geschrieben, nicht daneben.
+   pdf-lib legt dafür eine Textebene auf die vorhandene Seite — im Gegensatz
+   zum Weg über Seitenbilder bleiben Schärfe, Textauswahl und Dateigröße des
+   Originals erhalten. */
+
+const PDFLIB_URL = 'https://cdnjs.cloudflare.com/ajax/libs/pdf-lib/1.17.1/pdf-lib.min.js';
+
+/* Textzeilen einer Seite samt Position. pdf.js liefert Textstücke, keine
+   Zeilen — Wörter derselben Zeile kommen einzeln und müssen über ihre
+   Grundlinie zusammengefasst werden. Beide Bibliotheken rechnen im selben
+   Koordinatensystem (Ursprung unten links), das erspart Umrechnungen. */
+async function _ccPdfZeilen(bytes, seiteNr) {
+  await _ensurePdfLibs();
+  if (!window.pdfjsLib) throw new Error('PDF-Bibliothek konnte nicht geladen werden');
+  const doc = await window.pdfjsLib.getDocument({ data: bytes.slice(0) }).promise;
+  const nr = seiteNr < 0 ? doc.numPages + 1 + seiteNr : Math.min(seiteNr || 1, doc.numPages);
+  const seite = await doc.getPage(Math.max(1, nr));
+  const inhalt = await seite.getTextContent();
+  const roh = [];
+  for (const it of (inhalt.items || [])) {
+    const t = String(it.str || '');
+    if (!t.trim()) continue;
+    const tr = it.transform || [1, 0, 0, 1, 0, 0];
+    const groesse = Math.abs(tr[3]) || Math.hypot(tr[1], tr[3]) || 10;
+    roh.push({ text: t, x: tr[4], y: tr[5], breite: it.width || 0, groesse });
+  }
+  roh.sort((a, b) => (Math.abs(a.y - b.y) > 2 ? b.y - a.y : a.x - b.x));
+  const zeilen = [];
+  for (const s of roh) {
+    const letzte = zeilen[zeilen.length - 1];
+    if (letzte && Math.abs(letzte.y - s.y) <= 2) {
+      letzte.text += (s.x - (letzte.x + letzte.breite) > s.groesse * 0.3 ? ' ' : '') + s.text;
+      letzte.breite = (s.x + s.breite) - letzte.x;
+      letzte.groesse = Math.max(letzte.groesse, s.groesse);
+    } else {
+      zeilen.push({ text: s.text, x: s.x, y: s.y, breite: s.breite, groesse: s.groesse });
+    }
+  }
+  return { zeilen, seiten: doc.numPages, seitenNr: Math.max(1, nr) };
+}
+
+/* Die KI sagt, welche Zeilen die Empfängeranschrift bilden. Warum überhaupt
+   eine KI: Anschriften stehen je nach Vorlage an verschiedenen Stellen, mal mit
+   Firmenzeile, mal mit „z.Hd.", mal mit Postfach. Eine Regel dafür wäre eine
+   Sammlung von Sonderfällen, die beim nächsten Layout wieder bricht. */
+async function _ccAdressatErkennen(zeilen) {
+  const liste = zeilen.slice(0, 60).map((z, i) => i + ': ' + z.text).join('\n');
+  const sys = 'Du bekommst die Textzeilen der ersten Seite eines Geschäftsbriefs mit Zeilennummern.\n'
+    + 'Finde den EMPFÄNGERBLOCK — die Anschrift des Adressaten, an den der Brief gerichtet ist.\n'
+    + 'NICHT der Absender (steht meist im Kopf, in der Fußzeile oder in einer kleinen Rücksendezeile über der Anschrift).\n'
+    + 'NICHT die Betreffzeile, keine Überschrift, keine Tabelle.\n'
+    + 'Antworte AUSSCHLIESSLICH mit JSON: {"von": <Zeilennummer>, "bis": <Zeilennummer>, "text": "<die Zeilen, mit \\n getrennt>", "sicher": true|false}\n'
+    + 'Findest du keinen Empfängerblock, antworte {"von":-1,"bis":-1,"text":"","sicher":false}.';
+  const data = await proxyJson('/anthropic/v1/messages', {
+    method: 'POST',
+    body: JSON.stringify({
+      model: 'claude-sonnet-4-5-20250929', max_tokens: 500, system: sys,
+      messages: [{ role: 'user', content: liste }],
+    }),
+  });
+  const roh = (data.content && data.content[0] && data.content[0].text || '').trim();
+  let o = null;
+  try { o = parseAIJson(roh); } catch (_) { try { o = JSON.parse(roh.replace(/^```(?:json)?|```$/g, '').trim()); } catch (_2) {} }
+  if (!o || typeof o.von !== 'number' || o.von < 0) return null;
+  const von = Math.max(0, o.von), bis = Math.min(zeilen.length - 1, Math.max(von, o.bis));
+  const teil = zeilen.slice(von, bis + 1);
+  if (!teil.length) return null;
+  // Umschließendes Rechteck mit etwas Luft — Buchstaben mit Unterlänge ragen
+  // unter die Grundlinie, ohne Zuschlag bliebe ein Rest des alten Namens stehen.
+  const x = Math.min(...teil.map(z => z.x));
+  const rechts = Math.max(...teil.map(z => z.x + z.breite));
+  const unten = Math.min(...teil.map(z => z.y));
+  const oben = Math.max(...teil.map(z => z.y + z.groesse));
+  return {
+    rect: { x: x - 2, y: unten - 3, w: (rechts - x) + 6, h: (oben - unten) + 6 },
+    x0: teil[0].x, basis: teil[0].y,      // wo die erste Zeile begann bzw. saß
+    zeilen: teil.length,
+    groesse: Math.round(teil[0].groesse * 10) / 10,
+    original: teil.map(z => z.text).join('\n'),
+    sicher: o.sicher !== false,
+  };
+}
+
+const CC_PDF_ECKEN = {
+  'oben-links':   'oben links',
+  'oben-rechts':  'oben rechts',
+  'oben-mitte':   'oben mittig',
+  'unten-links':  'unten links',
+  'unten-rechts': 'unten rechts',
+};
+
+const CC_PDF_STANDARD = {
+  pdf_modus: 'ersetzen',
+  pdf_text: '{firma}',
+  pdf_ecke: 'oben-rechts',
+  pdf_x: '20', pdf_y: '20', pdf_size: '11', pdf_seite: '1',
+};
+
+/**
+ * Firmennamen in die Vorlage schreiben.
+ * @param {ArrayBuffer} bytes  Original-PDF
+ * @param {object} werte       { firma, name, ort, gueltig_bis … }
+ * @param {object} e           Einstellungen der Vorlage
+ */
+async function _ccPdfPersonalisieren(bytes, werte, e) {
+  await _loadScriptOnce(PDFLIB_URL);
+  const lib = window.PDFLib;
+  if (!lib) throw new Error('PDF-Bibliothek konnte nicht geladen werden');
+  const doc = await lib.PDFDocument.load(bytes);
+  const seiten = doc.getPages();
+  if (!seiten.length) throw new Error('Die Vorlage hat keine Seiten');
+
+  const nr = parseInt(e.pdf_seite || '1', 10) || 1;
+  const seite = nr < 0 ? seiten[seiten.length + nr] : seiten[Math.min(nr, seiten.length) - 1];
+  const roh = _ccPlatzhalterFuellen(e.pdf_text || CC_PDF_STANDARD.pdf_text, werte);
+  // WinAnsi deckt deutsche Umlaute ab; alles darüber hinaus würde pdf-lib beim
+  // Zeichnen abbrechen — deshalb vorher ersetzen statt hinterher raten.
+  const saeubern = (t) => String(t).replace(/[^\x20-\xFF]/g, '?');
+  const font = await doc.embedFont(lib.StandardFonts.HelveticaBold);
+
+  /* Betriebsart „ersetzen": Die Vorlage trägt bereits eine Anschrift. Sie wird
+     überdeckt und an derselben Stelle neu geschrieben — dieselbe Zeilenhöhe,
+     derselbe linke Rand. Ein Aufdruck daneben wäre falsch: Dann stünde auf der
+     Preisliste weiterhin der Name des anderen Kunden. */
+  let empf = null;
+  try { empf = e.pdf_empf_json ? JSON.parse(e.pdf_empf_json) : null; } catch (_) {}
+  if ((e.pdf_modus || 'ersetzen') === 'ersetzen' && empf && empf.rect) {
+    const zeilenText = roh.split('\n').map(z => saeubern(z.trim())).filter(Boolean);
+    if (!zeilenText.length) return new Uint8Array(bytes);
+    const gr = Math.max(6, Math.min(28, parseFloat(empf.groesse) || parseFloat(e.pdf_size) || 11));
+    seite.drawRectangle({
+      x: empf.rect.x, y: empf.rect.y, width: empf.rect.w, height: empf.rect.h,
+      color: lib.rgb(1, 1, 1),
+    });
+    let y = empf.basis;
+    for (const z of zeilenText) {
+      seite.drawText(z, { x: empf.x0, y, size: gr, font, color: lib.rgb(0, 0, 0) });
+      y -= gr * 1.25;
+    }
+    return await doc.save();
+  }
+
+  const text = roh.replace(/\s+/g, ' ').trim();
+  if (!text) return new Uint8Array(bytes);
+  const sicher = saeubern(text);
+  const groesse = Math.max(6, Math.min(28, parseFloat(e.pdf_size || '11') || 11));
+  const mm = (v) => (parseFloat(v) || 0) * 2.8346;   // Millimeter → Punkte
+  const breite = font.widthOfTextAtSize(sicher, groesse);
+  const { width, height } = seite.getSize();
+  const dx = mm(e.pdf_x), dy = mm(e.pdf_y);
+
+  let x, y;
+  switch (e.pdf_ecke || CC_PDF_STANDARD.pdf_ecke) {
+    case 'oben-links':   x = dx;                       y = height - dy; break;
+    case 'oben-mitte':   x = (width - breite) / 2;     y = height - dy; break;
+    case 'unten-links':  x = dx;                       y = dy;          break;
+    case 'unten-rechts': x = width - breite - dx;      y = dy;          break;
+    default:             x = width - breite - dx;      y = height - dy;
+  }
+
+  seite.drawText(sicher, {
+    x, y, size: groesse, font,
+    color: lib.rgb(0.10, 0.20, 0.33),   // dasselbe Navy wie die Aszendio-Angebote
+  });
+  return await doc.save();
+}
+
+/* Dateiname mit Firma. Er ist das Erste, was der Empfänger sieht — und das
+   Einzige, was nach dem Herunterladen im Ordner übrig bleibt. */
+function _ccDateiname(vorlagenName, firma) {
+  const basis = String(vorlagenName || 'Preisliste.pdf').replace(/\.pdf$/i, '');
+  const f = String(firma || '').replace(/[^\wÄÖÜäöüß \-]+/g, '').trim().slice(0, 60);
+  return (f ? basis + ' — ' + f : basis) + '.pdf';
+}
+
+/** Vorlage aus dem Worker holen — als ArrayBuffer, für die Personalisierung. */
+async function _ccVorlagePdfHolen() {
+  const acc = _ccAccount();
+  const key = APP_KEYS.user?.api_key;
+  const slug = acc ? _archivSlugFuer(acc.id) : null;
+  const res = await fetch(ARCHIV_URL + '/vorlage/' + slug + '/' + encodeURIComponent(_ccVorlageSchluessel()), { headers: { 'X-Hero-Key': key } });
+  if (!res.ok) throw new Error('Die hinterlegte Preisliste ist nicht abrufbar (HTTP ' + res.status + ')');
+  return await res.arrayBuffer();
+}
+
+/** Probeansicht mit einem Beispielnamen — öffnet das Ergebnis in einem Tab. */
+async function _ccPdfVorschau(btn) {
+  setBusy(btn, true, 'Baue…');
+  try {
+    const bytes = await _ccVorlagePdfHolen();
+    const e = _ccPdfEinstellungenLesen();
+    const neu = await _ccPdfPersonalisieren(bytes, {
+      firma: 'Muster Hausverwaltung GmbH', ansprechpartner: 'Erika Musterfrau', ort: 'Stuttgart',
+    }, e);
+    const url = URL.createObjectURL(new Blob([neu], { type: 'application/pdf' }));
+    window.open(url, '_blank');
+    setTimeout(() => URL.revokeObjectURL(url), 60000);
+    setBusy(btn, false);
+  } catch (err) {
+    setBusy(btn, false);
+    toast('Vorschau: ' + (err.message || err), 'error', 9000);
+  }
+}
+
+function _ccPdfEinstellungenLesen() {
+  const w = (id, fallback) => (document.getElementById(id)?.value ?? fallback);
+  return {
+    pdf_text:  w('ccPdfText', CC_PDF_STANDARD.pdf_text),
+    pdf_ecke:  w('ccPdfEcke', CC_PDF_STANDARD.pdf_ecke),
+    pdf_x:     w('ccPdfX', CC_PDF_STANDARD.pdf_x),
+    pdf_y:     w('ccPdfY', CC_PDF_STANDARD.pdf_y),
+    pdf_size:  w('ccPdfSize', CC_PDF_STANDARD.pdf_size),
+    pdf_seite: w('ccPdfSeite', CC_PDF_STANDARD.pdf_seite),
+    pdf_modus: w('ccPdfModus', CC_PDF_STANDARD.pdf_modus),
+    // Der erkannte Block ist Analyse-Ergebnis, kein Eingabefeld — er kommt
+    // unverändert aus dem Zustand und darf beim Speichern nicht verloren gehen.
+    pdf_empf_json: (_CC_VORLAGE && _CC_VORLAGE.pdf_empf_json) || '',
+  };
 }
 
 /* --- Einrichtung ------------------------------------------------------- */
@@ -42943,6 +43177,27 @@ async function _ccVorlageOeffnen() {
                 : 'Noch keine Datei hinterlegt. Ohne sie kann nicht versendet werden.') + '</p>'
             + '<input type="file" id="ccVorlagePdf" accept="application/pdf,.pdf" onchange="_ccVorlagePdfHochladen(this)" class="w-full text-[12px]">'
             + '<div id="ccVorlagePdfMeldung" class="text-[11px] mt-1"></div>'
+          + '</div>'
+          + '<div class="rounded-xl border border-ink-200 p-3">'
+            + '<p class="text-[12px] font-bold text-ink-800 mb-1">Personalisierung der Preisliste</p>'
+            + '<p class="text-[11px] text-ink-500 mb-2">Die hochgeladene Datei bleibt unverändert — beim Versand entsteht je Empfänger eine eigene Fassung.</p>'
+            + '<div id="ccVorlageAdressat">' + _ccVorlageAdressatHtml(v) + '</div>'
+            + '<details class="mt-1"><summary class="text-[11px] text-ink-500 cursor-pointer select-none">Position anpassen</summary>'
+            + '<div class="grid grid-cols-2 sm:grid-cols-5 gap-2 mt-2">'
+              + '<label class="block"><span class="text-[10px] font-semibold text-ink-600">Ecke</span>'
+                + '<select id="ccPdfEcke" class="w-full mt-0.5 px-1.5 py-1 border border-ink-300 rounded text-[12px] bg-white">'
+                + Object.keys(CC_PDF_ECKEN).map(k => '<option value="' + k + '"' + ((v.pdf_ecke || CC_PDF_STANDARD.pdf_ecke) === k ? ' selected' : '') + '>' + escapeHtml(CC_PDF_ECKEN[k]) + '</option>').join('')
+                + '</select></label>'
+              + '<label class="block"><span class="text-[10px] font-semibold text-ink-600">Abstand X (mm)</span>'
+                + '<input id="ccPdfX" type="number" min="0" max="120" value="' + escapeAttr(v.pdf_x || CC_PDF_STANDARD.pdf_x) + '" class="w-full mt-0.5 px-1.5 py-1 border border-ink-300 rounded text-[12px]"></label>'
+              + '<label class="block"><span class="text-[10px] font-semibold text-ink-600">Abstand Y (mm)</span>'
+                + '<input id="ccPdfY" type="number" min="0" max="200" value="' + escapeAttr(v.pdf_y || CC_PDF_STANDARD.pdf_y) + '" class="w-full mt-0.5 px-1.5 py-1 border border-ink-300 rounded text-[12px]"></label>'
+              + '<label class="block"><span class="text-[10px] font-semibold text-ink-600">Schriftgröße</span>'
+                + '<input id="ccPdfSize" type="number" min="6" max="28" value="' + escapeAttr(v.pdf_size || CC_PDF_STANDARD.pdf_size) + '" class="w-full mt-0.5 px-1.5 py-1 border border-ink-300 rounded text-[12px]"></label>'
+              + '<label class="block"><span class="text-[10px] font-semibold text-ink-600">Seite</span>'
+                + '<input id="ccPdfSeite" type="number" value="' + escapeAttr(v.pdf_seite || CC_PDF_STANDARD.pdf_seite) + '" class="w-full mt-0.5 px-1.5 py-1 border border-ink-300 rounded text-[12px]" title="1 = erste Seite, -1 = letzte"></label>'
+            + '</div></details>'
+            + '<button onclick="_ccPdfVorschau(this)" class="mt-2 px-3 py-1.5 rounded-lg text-[12px] font-bold bg-white border border-ink-300 text-ink-700 hover:bg-ink-50 inline-flex items-center gap-1.5"><i data-lucide="eye" class="w-3.5 h-3.5"></i> Probeansicht mit Beispielfirma</button>'
           + '</div>'
           + '<label class="block"><span class="text-[11px] font-semibold text-ink-700">Betreff</span>'
             + '<input id="ccVorlageBetreff" value="' + escapeAttr(v.betreff || '') + '" class="w-full mt-0.5 px-2.5 py-1.5 border border-ink-300 rounded-lg text-sm"></label>'
@@ -42985,10 +43240,71 @@ async function _ccVorlagePdfHochladen(input) {
     const d = await res.json().catch(() => ({}));
     if (!res.ok) throw new Error(d.fehler || ('HTTP ' + res.status));
     if (_CC_VORLAGE) _CC_VORLAGE.pdf_name = datei.name;
-    if (meld) meld.innerHTML = '<span class="text-emerald-700">' + escapeHtml(datei.name) + ' hochgeladen (' + Math.round((d.bytes || 0) / 1024) + ' KB). Jetzt noch die Vorlage speichern.</span>';
+    if (meld) meld.innerHTML = '<span class="text-emerald-700">' + escapeHtml(datei.name) + ' hochgeladen (' + Math.round((d.bytes || 0) / 1024) + ' KB).</span> <span class="text-ink-500">Suche die Anschrift …</span>';
+    await _ccAdressatAnalysieren(await datei.arrayBuffer(), meld);
   } catch (e) {
     if (meld) meld.innerHTML = '<span class="text-red-700">' + escapeHtml(e.message || String(e)) + '</span>';
   }
+}
+
+/* Anschrift in der hochgeladenen Vorlage suchen und das Ergebnis zeigen.
+   Bewusst mit Anzeige des gefundenen Textes: Eine automatische Erkennung, die
+   man nicht nachprüfen kann, ist keine Hilfe — beim ersten falschen Treffer
+   ginge die Preisliste mit dem Namen eines fremden Kunden hinaus. */
+async function _ccAdressatAnalysieren(bytes, meld) {
+  const zeigen = (html) => { if (meld) meld.innerHTML = html; };
+  try {
+    const { zeilen, seitenNr } = await _ccPdfZeilen(bytes, 1);
+    if (!zeilen.length) throw new Error('Die Vorlage enthält keinen auslesbaren Text (vermutlich ein Scan)');
+    const treffer = await _ccAdressatErkennen(zeilen);
+    if (!treffer) {
+      if (_CC_VORLAGE) { _CC_VORLAGE.pdf_empf_json = ''; _CC_VORLAGE.pdf_modus = 'aufdruck'; }
+      zeigen('<span class="text-amber-800">Hochgeladen. Eine Anschrift konnte ich nicht sicher finden — es wird stattdessen eine Zeile aufgedruckt. Position unten prüfen.</span>');
+      _ccVorlageAbschnittNeu();
+      return;
+    }
+    treffer.seite = seitenNr;
+    if (_CC_VORLAGE) {
+      _CC_VORLAGE.pdf_empf_json = JSON.stringify(treffer);
+      _CC_VORLAGE.pdf_modus = 'ersetzen';
+      _CC_VORLAGE.pdf_seite = String(seitenNr);
+    }
+    zeigen('<span class="text-emerald-700">Hochgeladen und Anschrift gefunden.</span>');
+    _ccVorlageAbschnittNeu();
+  } catch (e) {
+    if (_CC_VORLAGE) { _CC_VORLAGE.pdf_empf_json = ''; _CC_VORLAGE.pdf_modus = 'aufdruck'; }
+    zeigen('<span class="text-amber-800">Hochgeladen, aber die Analyse scheiterte: ' + escapeHtml(e.message || String(e)) + '</span>');
+    _ccVorlageAbschnittNeu();
+  }
+}
+
+/** Den Aufdruck-/Adressat-Abschnitt neu zeichnen, ohne den Dialog zu schließen. */
+function _ccVorlageAbschnittNeu() {
+  const el = document.getElementById('ccVorlageAdressat');
+  if (el) { el.innerHTML = _ccVorlageAdressatHtml(_CC_VORLAGE || {}); if (window.lucide) lucide.createIcons(); }
+}
+
+function _ccVorlageAdressatHtml(v) {
+  let empf = null;
+  try { empf = v.pdf_empf_json ? JSON.parse(v.pdf_empf_json) : null; } catch (_) {}
+  const modus = v.pdf_modus || (empf ? 'ersetzen' : 'aufdruck');
+  return '<input type="hidden" id="ccPdfModus" value="' + escapeAttr(modus) + '">'
+    + (empf
+        ? '<div class="rounded-lg border border-emerald-200 bg-emerald-50/60 p-2.5 mb-2">'
+            + '<p class="text-[11px] font-bold text-emerald-900 mb-1">Gefundene Anschrift in der Vorlage' + (empf.sicher ? '' : ' <span class="font-normal">(unsicher — bitte prüfen)</span>') + '</p>'
+            + '<pre class="text-[11px] text-ink-700 whitespace-pre-wrap font-sans">' + escapeHtml(empf.original) + '</pre>'
+            + '<p class="text-[10px] text-emerald-800 mt-1">Diese Zeilen werden bei jedem Versand überdeckt und durch den Empfänger ersetzt.</p>'
+            + '<button onclick="_ccAdressatVerwerfen()" class="mt-1.5 text-[10px] text-ink-500 underline">Falsch erkannt — stattdessen nur aufdrucken</button>'
+          + '</div>'
+        : '<p class="text-[11px] text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-2.5 py-1.5 mb-2">Keine Anschrift erkannt — es wird eine Zeile aufgedruckt.</p>')
+    + '<label class="block"><span class="text-[11px] font-semibold text-ink-700">' + (empf ? 'Ersetzen durch' : 'Aufdruck') + '</span>'
+      + '<textarea id="ccPdfText" rows="' + (empf ? 3 : 1) + '" class="w-full mt-0.5 px-2.5 py-1.5 border border-ink-300 rounded-lg text-sm">' + escapeHtml(v.pdf_text || CC_PDF_STANDARD.pdf_text) + '</textarea>'
+      + '<span class="text-[10px] text-ink-500">' + (empf ? 'Mehrere Zeilen möglich — je Zeile eine Zeile im PDF.' : 'Eine Zeile, an der unten gewählten Position.') + '</span></label>';
+}
+
+function _ccAdressatVerwerfen() {
+  if (_CC_VORLAGE) { _CC_VORLAGE.pdf_empf_json = ''; _CC_VORLAGE.pdf_modus = 'aufdruck'; }
+  _ccVorlageAbschnittNeu();
 }
 
 async function _ccVorlageKi(btn) {
@@ -43034,6 +43350,7 @@ async function _ccVorlageSpeichern(btn) {
     pdf_name: (_CC_VORLAGE && _CC_VORLAGE.pdf_name) || '',
     updated_at: nowIso(),
   };
+  Object.assign(felder, _ccPdfEinstellungenLesen());
   setBusy(btn, true, 'Speichere…');
   try {
     if (_CC_VORLAGE && _CC_VORLAGE.recordId) await airtableUpdateWithAutoField(CC_VORLAGE_TABLE, _CC_VORLAGE.recordId, felder, CC_VORLAGE_TYPEN);
@@ -43128,7 +43445,20 @@ async function _ccVersandAbsenden(recordId, btn) {
   try {
     const res = await fetch(ARCHIV_URL + '/vorlage/' + slug + '/' + encodeURIComponent(_ccVorlageSchluessel()), { headers: { 'X-Hero-Key': key } });
     if (!res.ok) throw new Error('Die hinterlegte Preisliste ist nicht abrufbar (HTTP ' + res.status + ')');
-    const blob = await res.blob();
+    const roh = await res.arrayBuffer();
+
+    setBusy(btn, true, 'Personalisiere…');
+    let blob;
+    try {
+      blob = new Blob([await _ccPdfPersonalisieren(roh, r, v)], { type: 'application/pdf' });
+    } catch (e) {
+      // Lieber die unpersonalisierte Liste als gar keine — aber ausdrücklich
+      // sagen, dass der Aufdruck fehlt. Stillschweigend wäre es schlimmer:
+      // Der Empfänger bekäme etwas anderes, als am Bildschirm stand.
+      console.warn('[CC] Personalisierung:', e.message);
+      toast('Aufdruck nicht möglich (' + (e.message || e) + ') — die Liste geht ohne Firmennamen raus.', 'warn', 9000);
+      blob = new Blob([roh], { type: 'application/pdf' });
+    }
 
     setBusy(btn, true, 'Sende…');
     const erstellt = await _fdPostMultipart(acc.id, 'tickets/outbound_email', {
@@ -43142,7 +43472,7 @@ async function _ccVersandAbsenden(recordId, btn) {
       // Antwort des Verwalters landet in einem Vorgang, den niemand ansieht.
       status: '2',
       tags: 'Kaltakquise',
-    }, [{ blob, name: v.pdf_name || 'Preisliste.pdf' }]);
+    }, [{ blob, name: _ccDateiname(v.pdf_name, r.firma) }]);
     if (!erstellt || !erstellt.id) throw new Error('Freshdesk hat keine Ticketnummer zurückgegeben');
 
     await _ccSpeichern(recordId, {
