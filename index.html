@@ -824,7 +824,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.75.5';
+const APP_VERSION = 'v2.75.6';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -44223,17 +44223,21 @@ async function _ccNummernSuchen(btn) {
   }
 
   setBusy(btn, true, '0/' + offen.length);
-  let gefunden = 0, geprueft = 0;
+  let gefunden = 0, geprueft = 0, durchsucht = [];
   try {
     for (let i = 0; i < offen.length; i += 100) {
       const teil = offen.slice(i, i + 100);
       const res = await fetch(ARCHIV_URL + '/telefonsuche', {
         method: 'POST',
         headers: { 'content-type': 'application/json', 'X-Hero-Key': key },
-        body: JSON.stringify({ mandant: slug, emails: teil.map(r => String(r.email).toLowerCase()) }),
+        // Bewusst OHNE Mandant: Die Kontakte einer Aszendio-Kampagne stammen
+        // regelmäßig aus dem Bestand von Aufzugshandwerk — dort liegt zu
+        // derselben Adresse ein Vielfaches an Nachrichten.
+        body: JSON.stringify({ emails: teil.map(r => String(r.email).toLowerCase()) }),
       });
       const d = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(d.fehler || ('Archiv HTTP ' + res.status));
+      if (Array.isArray(d.durchsucht)) durchsucht = d.durchsucht;
       for (const r of teil) {
         geprueft++;
         const t = (d.treffer || {})[String(r.email).toLowerCase()];
@@ -44245,6 +44249,7 @@ async function _ccNummernSuchen(btn) {
             // Herkunft festhalten: Eine aus Signaturen gefischte Nummer ist
             // etwas anderes als eine, die der Kunde selbst angegeben hat.
             notiz: (r.notiz ? r.notiz + ' · ' : '') + 'Nr. aus Archiv'
+              + (t.mandant ? ' ' + t.mandant : '')
               + (t.benannt ? '' : ' (' + t.vorkommen + '× ohne Kennzeichnung)'),
           });
           gefunden++;
@@ -44254,9 +44259,10 @@ async function _ccNummernSuchen(btn) {
     }
     setBusy(btn, false);
     _ccZeichnen();
-    toast(gefunden + ' von ' + offen.length + ' Nummern im Archiv gefunden'
+    toast(gefunden + ' von ' + offen.length + ' Nummern gefunden'
+      + (durchsucht.length ? ' (durchsucht: ' + durchsucht.join(', ') + ')' : '')
       + (ohneMail ? ' · ' + ohneMail + ' weitere haben weder Nummer noch Adresse' : ''),
-      gefunden ? 'success' : 'warn', 9000);
+      gefunden ? 'success' : 'warn', 10000);
   } catch (e) {
     setBusy(btn, false);
     toast('Nummernsuche: ' + (e.message || e), 'error', 9000);
