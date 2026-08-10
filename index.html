@@ -824,7 +824,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.71.4';
+const APP_VERSION = 'v2.72.0';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -2947,6 +2947,8 @@ async function ensureAppTables() {
     { name: 'dedupe_key',      type: 'singleLineText' },   // E-Mail bzw. normalisierte Nummer
     { name: 'dedupe_tel',      type: 'singleLineText' },   // zweite Kennung, damit beide greifen
     { name: 'bestand',         type: 'singleLineText' },   // 'ja' = steht schon in der zentralen DB
+    { name: 'typ',             type: 'singleLineText' },   // Hausverwaltung, Lieferant, Behörde …
+    { name: 'versteckt',       type: 'singleLineText' },   // 'ja' = aus dieser Kampagne genommen
     { name: 'status',          type: 'singleLineText' },
     { name: 'versuche',        type: 'singleLineText' },
     { name: 'letzter_versuch', type: 'singleLineText' },
@@ -42105,6 +42107,7 @@ const CC_TYPES = {
   ansprechpartner: 'singleLineText', telefon: 'singleLineText', email: 'singleLineText',
   position: 'singleLineText', ort: 'singleLineText', quelle: 'singleLineText',
   dedupe_key: 'singleLineText', dedupe_tel: 'singleLineText', bestand: 'singleLineText',
+  typ: 'singleLineText', versteckt: 'singleLineText',
   status: 'singleLineText', versuche: 'singleLineText',
   letzter_versuch: 'singleLineText', notiz: 'multilineText', bearbeiter: 'singleLineText',
   gesperrt_bis: 'singleLineText', preisliste_am: 'singleLineText', ticket_id: 'singleLineText',
@@ -42121,7 +42124,17 @@ const CC_STATUS = {
   sperre:         { label: 'keine Anrufe',    cls: 'bg-rose-100 text-rose-700 border-rose-300' },
 };
 
-let CC_STATE = { leads: [], aktiv: null, laden: false, filter: 'offen', historie: {} };
+let CC_STATE = {
+  leads: [], aktiv: null, laden: false, filter: 'offen', historie: {},
+  kampagne: '', typ: '', nurMitNummer: false, zeigeVersteckte: false,
+};
+
+const CC_KAMPAGNE_STANDARD = 'Sonderkonditionen';
+
+/* Kontakttypen. Die Liste ist absichtlich kurz und auf die Frage zugeschnitten,
+   die beim Telefonieren zählt: Darf und soll man hier anrufen? Feinere
+   Unterscheidungen gehören in die zentrale DB, nicht in eine Anrufliste. */
+const CC_TYPEN = ['Hausverwaltung', 'Eigentümer', 'Bauträger', 'Architekt', 'Behörde', 'Lieferant', 'Mitbewerber', 'Privat', 'Sonstige'];
 
 /** Reine Callcenter-Kraft: sieht nur diese eine Seite. Admins nie. */
 function _ccIstCallcenter() {
@@ -42281,14 +42294,27 @@ function _ccSortiert(liste) {
   });
 }
 
+/** Alle Leads der aktuell gewählten Kampagne — Grundmenge für Zählung und Liste. */
+function _ccKampagnenLeads() {
+  const k = CC_STATE.kampagne || CC_KAMPAGNE_STANDARD;
+  return CC_STATE.leads.filter(r => (String(r.kampagne || CC_KAMPAGNE_STANDARD) === k));
+}
+
 function _ccSichtbar() {
-  let l = CC_STATE.leads;
+  let l = _ccKampagnenLeads();
+  // Ausgeblendete zuerst weg: Sie sollen in keiner Zählung und keinem anderen
+  // Filter auftauchen, sonst stimmen die Zahlen über der Liste nicht.
+  if (!CC_STATE.zeigeVersteckte) l = l.filter(r => String(r.versteckt || '') !== 'ja');
   if (CC_STATE.filter === 'offen') l = l.filter(r => ['offen', 'rueckruf', 'kein_kontakt'].includes(_ccStatusVon(r)));
   else if (CC_STATE.filter === 'interessiert') l = l.filter(r => _ccStatusVon(r) === 'interessiert');
   if (CC_STATE.quelle) l = l.filter(r => String(r.quelle || '').toLowerCase() === CC_STATE.quelle);
+  if (CC_STATE.typ) l = l.filter(r => String(r.typ || '') === CC_STATE.typ);
   if (CC_STATE.ohneBestand) l = l.filter(r => String(r.bestand || '') !== 'ja');
+  // Ohne Nummer ist ein Kontakt für eine ANRUFliste wertlos — er bleibt in der
+  // Kampagne (die Adresse taugt für Post), gehört aber nicht in den Arbeitsstapel.
+  if (CC_STATE.nurMitNummer) l = l.filter(r => _ccNummerNormal(r.telefon).length >= 6);
   const q = String(CC_STATE.suche || '').trim().toLowerCase();
-  if (q) l = l.filter(r => [r.firma, r.ansprechpartner, r.telefon, r.email, r.ort].join(' ').toLowerCase().includes(q));
+  if (q) l = l.filter(r => [r.firma, r.ansprechpartner, r.telefon, r.email, r.ort, r.typ].join(' ').toLowerCase().includes(q));
   return _ccSortiert(l);
 }
 
@@ -42303,6 +42329,10 @@ async function renderCallcenterPage() {
       if (g && (APP_STATE.accounts || []).some(a => a.id === g)) CC_STATE.accountId = g;
     } catch (_) {}
   }
+  if (!CC_STATE.kampagne) {
+    try { CC_STATE.kampagne = localStorage.getItem('fdh_cc_kampagne') || CC_KAMPAGNE_STANDARD; }
+    catch (_) { CC_STATE.kampagne = CC_KAMPAGNE_STANDARD; }
+  }
   host.innerHTML = '<div class="text-center py-10 text-sm text-ink-500"><span class="spinner inline-block w-4 h-4 border-[2px] text-brand-500"></span> Lade Anrufliste…</div>';
   await _ccLaden();
   _ccZeichnen();
@@ -42313,9 +42343,11 @@ function _ccZeichnen() {
   const host = $('pageContent');
   if (!host) return;
   const acc = _ccAccount();
-  const alle = CC_STATE.leads;
+  const alle = _ccKampagnenLeads().filter(r => CC_STATE.zeigeVersteckte || String(r.versteckt || '') !== 'ja');
   const offen = alle.filter(r => ['offen', 'rueckruf', 'kein_kontakt'].includes(_ccStatusVon(r))).length;
   const interessiert = alle.filter(r => _ccStatusVon(r) === 'interessiert').length;
+  const ohneNr = alle.filter(r => _ccNummerNormal(r.telefon).length < 6).length;
+  const versteckt = _ccKampagnenLeads().filter(r => String(r.versteckt || '') === 'ja').length;
   const rows = _ccSichtbar();
 
   const reiter = (key, text, n) => '<button onclick="_ccFilter(\'' + key + '\')" class="px-3 py-1.5 rounded-lg text-[12px] font-bold '
@@ -42328,14 +42360,18 @@ function _ccZeichnen() {
         + '<h2 class="text-lg font-bold text-ink-900">Anrufliste</h2>'
         + '<p class="text-[12px] text-ink-500">Der Reihe nach von oben. Eine Zeile antippen öffnet den Anruf.</p>'
       + '</div>'
-      + _ccMandantWahl(acc)
+      + '<div class="flex items-center gap-2">' + _ccKampagnenWahl() + _ccMandantWahl(acc) + '</div>'
     + '</div>'
     + '<div class="flex items-center gap-2 flex-wrap mb-3">'
       + reiter('offen', 'Zu tun', offen) + reiter('interessiert', 'Interessiert', interessiert) + reiter('alle', 'Alle', alle.length)
       + _ccQuellenFilter(alle)
+      + _ccTypFilter(alle)
+      + (CC_STATE.typ ? '<button onclick="_ccTypAusblenden(this)" class="px-2.5 py-1.5 rounded-lg text-[11px] font-bold bg-white border border-ink-300 text-ink-600 hover:bg-ink-50" title="Alle dieses Typs aus der Kampagne nehmen">Typ ausblenden</button>' : '')
       + (alle.some(r => String(r.bestand || '') === 'ja')
-          ? '<label class="inline-flex items-center gap-1.5 text-[11px] text-ink-600 cursor-pointer px-2"><input type="checkbox"' + (CC_STATE.ohneBestand ? ' checked' : '') + ' onchange="_ccBestandFilter(this.checked)"> nur Neukunden</label>'
+          ? '<label class="inline-flex items-center gap-1.5 text-[11px] text-ink-600 cursor-pointer"><input type="checkbox"' + (CC_STATE.ohneBestand ? ' checked' : '') + ' onchange="_ccBestandFilter(this.checked)"> nur Neukunden</label>'
           : '')
+      + (ohneNr ? '<label class="inline-flex items-center gap-1.5 text-[11px] text-ink-600 cursor-pointer" title="' + ohneNr + ' Kontakte haben keine brauchbare Nummer"><input type="checkbox"' + (CC_STATE.nurMitNummer ? ' checked' : '') + ' onchange="_ccNummerFilter(this.checked)"> nur mit Nummer <span class="text-ink-400">(' + ohneNr + ' ohne)</span></label>' : '')
+      + (versteckt ? '<label class="inline-flex items-center gap-1.5 text-[11px] text-ink-600 cursor-pointer"><input type="checkbox"' + (CC_STATE.zeigeVersteckte ? ' checked' : '') + ' onchange="_ccVersteckteFilter(this.checked)"> ausgeblendete zeigen <span class="text-ink-400">(' + versteckt + ')</span></label>' : '')
       + '<input type="search" value="' + escapeAttr(CC_STATE.suche || '') + '" oninput="_ccSuche(this.value)" placeholder="Suchen…" class="ml-auto px-3 py-1.5 border border-ink-200 rounded-lg text-sm w-44">'
       + '<button onclick="renderCallcenterPage()" class="px-3 py-1.5 rounded-lg text-[12px] font-bold bg-white border border-ink-200 text-ink-600 hover:bg-ink-50" title="Liste neu laden"><i data-lucide="refresh-cw" class="w-3.5 h-3.5"></i></button>'
       + (APP_KEYS.user?.is_admin
@@ -42367,6 +42403,56 @@ function _ccFilter(k) { CC_STATE.filter = k; CC_STATE.aktiv = null; _ccZeichnen(
 function _ccSuche(v) { CC_STATE.suche = v; _ccZeichnen(); }
 function _ccQuelleFilter(v) { CC_STATE.quelle = v || ''; CC_STATE.aktiv = null; _ccZeichnen(); }
 function _ccBestandFilter(an) { CC_STATE.ohneBestand = !!an; CC_STATE.aktiv = null; _ccZeichnen(); }
+function _ccNummerFilter(an) { CC_STATE.nurMitNummer = !!an; CC_STATE.aktiv = null; _ccZeichnen(); }
+function _ccVersteckteFilter(an) { CC_STATE.zeigeVersteckte = !!an; CC_STATE.aktiv = null; _ccZeichnen(); }
+function _ccTypWahl(v) { CC_STATE.typ = v || ''; CC_STATE.aktiv = null; _ccZeichnen(); }
+
+/* Typfilter aus den tatsächlich vorkommenden Typen — plus „ohne Angabe", denn
+   das ist bei importierten Listen der Normalfall und muss auffindbar bleiben. */
+function _ccTypFilter(alle) {
+  const zaehl = {};
+  alle.forEach(r => { const t = String(r.typ || '').trim() || '—'; zaehl[t] = (zaehl[t] || 0) + 1; });
+  const keys = Object.keys(zaehl).sort();
+  if (keys.length < 2) return '';
+  return '<select onchange="_ccTypWahl(this.value)" class="px-2.5 py-1.5 border border-ink-200 rounded-lg text-[12px] bg-white font-semibold text-ink-700" title="Nach Kontakttyp filtern">'
+    + '<option value="">Alle Typen</option>'
+    + keys.map(t => '<option value="' + escapeAttr(t === '—' ? '' : t) + '"' + (CC_STATE.typ === t ? ' selected' : '') + '>'
+        + escapeHtml(t === '—' ? 'ohne Typ' : t) + ' (' + zaehl[t] + ')</option>').join('')
+    + '</select>';
+}
+
+/* Kampagnenwahl. Eine Anrufliste ist eine Kampagne — mehrere nebeneinander sind
+   der Normalfall, nicht die Ausnahme. Die Zuordnung steckt am Lead, damit
+   derselbe Kontakt in zwei Kampagnen stehen darf, ohne dass die Dublettenprüfung
+   der einen die andere leert. */
+function _ccKampagnenWahl() {
+  const acc = _ccAccount();
+  const meine = CC_STATE.leads.filter(r => !acc || r.account_id === acc.id);
+  const zaehl = {};
+  meine.forEach(r => { const k = String(r.kampagne || CC_KAMPAGNE_STANDARD); zaehl[k] = (zaehl[k] || 0) + 1; });
+  const aktuell = CC_STATE.kampagne || CC_KAMPAGNE_STANDARD;
+  if (!zaehl[aktuell]) zaehl[aktuell] = 0;
+  const keys = Object.keys(zaehl).sort();
+  return '<select onchange="_ccKampagneWechseln(this.value)" class="px-3 py-2 border border-ink-200 rounded-lg text-sm font-bold text-ink-800 bg-white" title="Kampagne">'
+    + keys.map(k => '<option value="' + escapeAttr(k) + '"' + (k === aktuell ? ' selected' : '') + '>' + escapeHtml(k) + ' (' + zaehl[k] + ')</option>').join('')
+    + '<option value="__neu__">+ Neue Kampagne …</option>'
+    + '</select>';
+}
+
+function _ccKampagneWechseln(wert) {
+  if (wert === '__neu__') {
+    const name = (prompt('Name der neuen Kampagne:', '') || '').trim();
+    if (!name) return _ccZeichnen();
+    if (name === '__neu__') return _ccZeichnen();
+    CC_STATE.kampagne = name;
+  } else {
+    CC_STATE.kampagne = wert;
+  }
+  CC_STATE.aktiv = null;
+  CC_STATE.typ = ''; CC_STATE.quelle = '';
+  try { localStorage.setItem('fdh_cc_kampagne', CC_STATE.kampagne); } catch (_) {}
+  _ccZeichnen();
+}
 
 /* Auswahl nur aus den Quellen, die tatsächlich vorkommen — eine Liste mit
    Einträgen, die null Treffer haben, sieht nach Fehler aus. Erscheint erst,
@@ -42398,7 +42484,8 @@ function _ccTabelle(rows) {
     const aktiv = CC_STATE.aktiv === r.recordId;
     const tel = String(r.telefon || '').trim();
     const belegt = _ccBelegtVon(r, ich);
-    const zebra = aktiv ? 'bg-brand-50' : (i % 2 ? 'bg-ink-50/40' : 'bg-white');
+    const aus = String(r.versteckt || '') === 'ja';
+    const zebra = aktiv ? 'bg-brand-50' : (aus ? 'bg-ink-100/70 opacity-60' : (i % 2 ? 'bg-ink-50/40' : 'bg-white'));
     return '<tr class="' + zebra + (belegt ? ' opacity-60' : ' hover:bg-brand-50/60 cursor-pointer')
         + '" ' + (belegt ? '' : 'onclick="_ccAktiv(\'' + r.recordId + '\')"') + '>'
       + '<td class="px-2 py-1.5 border-b border-ink-100 w-6">' + _ccLed(r) + '</td>'
@@ -42413,17 +42500,21 @@ function _ccTabelle(rows) {
       + '<td class="px-2 py-1.5 border-b border-ink-100 whitespace-nowrap">'
         + (tel ? '<a href="tel:' + escapeAttr(tel.replace(/\s/g, '')) + '" onclick="event.stopPropagation()" class="text-brand-700 font-mono text-[15px] font-bold hover:underline">' + escapeHtml(tel) + '</a>' : '<span class="text-ink-300 text-[13px]">keine Nummer</span>')
         + '</td>'
+      + '<td class="px-2 py-1.5 border-b border-ink-100 whitespace-nowrap text-[12px] text-ink-600">' + escapeHtml(r.typ || '—') + '</td>'
       + '<td class="px-2 py-1.5 border-b border-ink-100 whitespace-nowrap">' + _ccQuelleBadge(r) + '</td>'
       + '<td class="px-2 py-1.5 border-b border-ink-100 whitespace-nowrap">' + _ccStatusBadge(r)
         + (r.versuche && +r.versuche > 0 ? ' <span class="text-[11px] text-ink-400">' + r.versuche + '×</span>' : '') + '</td>'
-      + '<td class="px-2 py-1.5 border-b border-ink-100 text-[12px] text-ink-600 max-w-[260px] truncate">' + escapeHtml(String(r.notiz || '')) + '</td>'
+      + '<td class="px-2 py-1.5 border-b border-ink-100 text-[12px] text-ink-600 max-w-[240px] truncate">' + escapeHtml(String(r.notiz || '')) + '</td>'
+      + '<td class="px-1 py-1.5 border-b border-ink-100 w-8 text-right">'
+        + '<button onclick="event.stopPropagation(); _ccVerstecken(\'' + r.recordId + '\', ' + (String(r.versteckt || '') === 'ja' ? 'false' : 'true') + ', this)" class="text-ink-300 hover:text-ink-700 p-1" title="' + (String(r.versteckt || '') === 'ja' ? 'Wieder aufnehmen' : 'Aus dieser Kampagne ausblenden') + '"><i data-lucide="' + (String(r.versteckt || '') === 'ja' ? 'eye' : 'eye-off') + '" class="w-4 h-4"></i></button>'
+        + '</td>'
       + '</tr>'
-      + (aktiv ? '<tr class="bg-brand-50"><td colspan="7" class="px-2 pb-3 border-b-2 border-brand-200">' + _ccArbeitsbereich(r) + '</td></tr>' : '');
+      + (aktiv ? '<tr class="bg-brand-50"><td colspan="9" class="px-2 pb-3 border-b-2 border-brand-200">' + _ccArbeitsbereich(r) + '</td></tr>' : '');
   }).join('');
 
   return '<div class="bg-white rounded-xl border border-ink-200 overflow-hidden">'
     + '<div class="overflow-x-auto"><table class="w-full border-collapse">'
-    + '<thead class="sticky top-0 z-10"><tr>' + ['', 'Firma', 'Ansprechpartner', 'Telefon', 'Quelle', 'Status', 'Notiz']
+    + '<thead class="sticky top-0 z-10"><tr>' + ['', 'Firma', 'Ansprechpartner', 'Telefon', 'Typ', 'Quelle', 'Status', 'Notiz', '']
         .map(h => '<th class="text-left font-bold text-[12px] uppercase tracking-wide text-ink-500 px-2 py-2 border-b-2 border-ink-200 bg-ink-100 whitespace-nowrap">' + h + '</th>').join('')
     + '</tr></thead><tbody>' + trs + '</tbody></table></div></div>';
 }
@@ -42459,7 +42550,11 @@ function _ccArbeitsbereich(r) {
       + erg('sperre',         'Nie wieder anrufen', 'bg-white border border-rose-300 text-rose-700 hover:bg-rose-50')
     + '</div>'
     + '<div class="flex items-center gap-2 flex-wrap">'
-      + '<input id="ccNotiz_' + r.recordId + '" value="' + escapeAttr(r.notiz || '') + '" onclick="event.stopPropagation()" onblur="_ccNotizSpeichern(\'' + r.recordId + '\', this.value)" placeholder="Was wurde gesagt? Wenige Worte genügen." class="flex-1 min-w-[200px] px-2.5 py-1.5 border border-ink-300 rounded-lg text-[12px]">'
+      + '<select onclick="event.stopPropagation()" onchange="_ccTypSetzen(\'' + r.recordId + '\', this.value)" class="px-2 py-1.5 border border-ink-300 rounded-lg text-[12px] bg-white" title="Kontakttyp">'
+        + '<option value="">Typ …</option>'
+        + CC_TYPEN.map(t => '<option value="' + escapeAttr(t) + '"' + (String(r.typ || '') === t ? ' selected' : '') + '>' + escapeHtml(t) + '</option>').join('')
+        + '</select>'
+      + '<input id="ccNotiz_' + r.recordId + '" value="' + escapeAttr(r.notiz || '') + '" onclick="event.stopPropagation()" onblur="_ccNotizSpeichern(\'' + r.recordId + '\', this.value)" placeholder="Was wurde gesagt? Wenige Worte genügen." class="flex-1 min-w-[180px] px-2.5 py-1.5 border border-ink-300 rounded-lg text-[12px]">'
       + '<button onclick="event.stopPropagation(); _ccPreislisteAnfordern(\'' + r.recordId + '\', this)" class="px-3 py-1.5 rounded-lg text-[12px] font-bold bg-brand-600 hover:bg-brand-700 text-white inline-flex items-center gap-1.5"><i data-lucide="mail" class="w-3.5 h-3.5"></i> Preisliste senden</button>'
       + '<button onclick="event.stopPropagation(); _ccInZentraleDb(\'' + r.recordId + '\', this)" class="px-3 py-1.5 rounded-lg text-[12px] font-bold bg-white border border-indigo-300 text-indigo-700 hover:bg-indigo-50 inline-flex items-center gap-1.5" title="Aus dem Lead einen Stammdatensatz machen — erst wenn jemand angebissen hat"><i data-lucide="database" class="w-3.5 h-3.5"></i> In zentrale DB</button>'
     + '</div></div>';
@@ -42558,6 +42653,47 @@ async function _ccErgebnis(recordId, status, btn) {
     if (btn) setBusy(btn, false);
     toast('Konnte nicht gespeichert werden: ' + (e.message || e), 'error', 8000);
   }
+}
+
+/* Ausblenden statt löschen: Ein gelöschter Kontakt kommt beim nächsten Import
+   wieder — ein ausgeblendeter bleibt draußen, weil die Dublettenprüfung ihn
+   weiterhin kennt. Deshalb ist Ausblenden hier die richtige Geste, nicht die
+   bequemere. */
+async function _ccVerstecken(recordId, aus, btn) {
+  if (btn) setBusy(btn, true);
+  try {
+    await _ccSpeichern(recordId, { versteckt: aus ? 'ja' : '' });
+    if (CC_STATE.aktiv === recordId) CC_STATE.aktiv = null;
+    if (btn) setBusy(btn, false);
+    _ccZeichnen();
+  } catch (e) {
+    if (btn) setBusy(btn, false);
+    toast('Nicht gespeichert: ' + (e.message || e), 'error', 7000);
+  }
+}
+
+/** Alle eines Typs auf einmal ausblenden — der Weg, ganze Gruppen aus einer
+    Kampagne zu nehmen, ohne hundertmal zu klicken. */
+async function _ccTypAusblenden(btn) {
+  const typ = CC_STATE.typ;
+  if (!typ) return toast('Erst einen Typ im Filter wählen.', 'warn', 5000);
+  const treffer = _ccKampagnenLeads().filter(r => String(r.typ || '') === typ && String(r.versteckt || '') !== 'ja');
+  if (!treffer.length) return toast('Nichts auszublenden.', 'warn', 4000);
+  if (!confirm(treffer.length + ' Kontakte vom Typ „' + typ + '" aus der Kampagne „' + (CC_STATE.kampagne || CC_KAMPAGNE_STANDARD) + '" ausblenden?\n\nSie bleiben erhalten und sind über „ausgeblendete zeigen" wieder erreichbar.')) return;
+  setBusy(btn, true, '0/' + treffer.length);
+  let n = 0;
+  for (const r of treffer) {
+    try { await _ccSpeichern(r.recordId, { versteckt: 'ja' }); n++; setBusy(btn, true, n + '/' + treffer.length); }
+    catch (e) { console.warn('[CC] Ausblenden:', e.message); }
+  }
+  setBusy(btn, false);
+  _ccZeichnen();
+  toast(n + ' Kontakte ausgeblendet', 'success', 5000);
+}
+
+async function _ccTypSetzen(recordId, wert) {
+  try { await _ccSpeichern(recordId, { typ: wert || '' }); _ccZeichnen(); }
+  catch (e) { toast('Typ nicht gespeichert: ' + (e.message || e), 'error', 7000); }
 }
 
 async function _ccNotizSpeichern(recordId, wert) {
@@ -42707,7 +42843,7 @@ function _ccTextAusDatei(puffer) {
 
 const CC_FELDER = [
   ['firma', 'Firma'], ['ansprechpartner', 'Ansprechpartner'], ['telefon', 'Telefon'],
-  ['email', 'E-Mail'], ['position', 'Position'], ['ort', 'Ort'],
+  ['email', 'E-Mail'], ['position', 'Position'], ['ort', 'Ort'], ['typ', 'Kontakttyp'],
 ];
 
 /* Spalten anhand der Überschrift raten. Spart bei einer typischen Exportdatei
@@ -42721,6 +42857,7 @@ function _ccSpalteRaten(kopf) {
     email: /mail|e-?mail/i,
     position: /position|funktion|rolle|title|abteilung/i,
     ort: /ort|stadt|city|plz|standort/i,
+    typ: /typ|kategorie|branche|art$|segment/i,
   };
   const zu = {};
   CC_FELDER.forEach(([k]) => {
@@ -42740,7 +42877,7 @@ function _ccImportOeffnen() {
       + '<div class="bg-white rounded-2xl shadow-xl w-full max-w-lg my-8">'
         + '<div class="flex items-center justify-between p-4 border-b border-ink-200">'
           + '<div><h3 class="font-bold text-ink-900">Kontakte importieren</h3>'
-          + '<p class="text-[11px] text-ink-500">Ziel: Anrufliste ' + escapeHtml(acc ? (acc.name || '') : '') + '</p></div>'
+          + '<p class="text-[11px] text-ink-500">Ziel: Kampagne „' + escapeHtml(CC_STATE.kampagne || CC_KAMPAGNE_STANDARD) + '" · ' + escapeHtml(acc ? (acc.name || '') : '') + '</p></div>'
           + '<button onclick="_ccImportSchliessen()" class="text-ink-400 hover:text-ink-700"><i data-lucide="x" class="w-5 h-5"></i></button></div>'
         + '<div class="p-4 space-y-3">'
           + '<div class="rounded-xl border border-ink-200 p-3">'
@@ -42825,7 +42962,7 @@ function _ccZuordnungLesen() {
 function _ccZeileZuLead(zeile, zuordnung) {
   const hol = (feld) => { const i = zuordnung[feld]; return i === '' || i == null ? '' : String(zeile[+i] == null ? '' : zeile[+i]).trim(); };
   return { firma: hol('firma'), ansprechpartner: hol('ansprechpartner'), telefon: hol('telefon'),
-           email: hol('email'), position: hol('position'), ort: hol('ort') };
+           email: hol('email'), position: hol('position'), ort: hol('ort'), typ: hol('typ') };
 }
 
 /* Vorschau mit ehrlicher Zählung: Wie viele Zeilen sind überhaupt anrufbar,
@@ -42836,7 +42973,7 @@ function _ccZuordnungGeaendert() {
   if (!_CC_IMPORT) return;
   const z = _ccZuordnungLesen();
   _CC_IMPORT.zuordnung = z;
-  const vorhanden = _ccKennungsSatz(CC_STATE.leads);
+  const vorhanden = _ccKennungsSatz(_ccKampagnenLeads());
   const inDatei = new Set();
   let brauchbar = 0, ohneKennung = 0, doppeltDatei = 0, schonDa = 0;
   const beispiele = [];
@@ -42872,7 +43009,7 @@ async function _ccCsvImportieren(btn) {
   setBusy(btn, true, 'Prüfe…');
   try {
     const sperre = await _ccSperrlisteLaden(true);
-    const vorhanden = _ccKennungsSatz(CC_STATE.leads);
+    const vorhanden = _ccKennungsSatz(_ccKampagnenLeads());
     const bestand = await _ccBestandsKennungen(acc);
     const jetzt = nowIso();
     const saetze = [];
@@ -42886,7 +43023,7 @@ async function _ccCsvImportieren(btn) {
       const istBestand = _ccSchonBekannt(bestand, lead);
       if (istBestand) bekannt++;
       saetze.push(Object.assign({}, lead, {
-        account_id: acc.id, kampagne: 'Sonderkonditionen', quelle,
+        account_id: acc.id, kampagne: CC_STATE.kampagne || CC_KAMPAGNE_STANDARD, quelle,
         dedupe_key: kenn.mail || kenn.tel, dedupe_tel: kenn.tel,
         bestand: istBestand ? 'ja' : '',
         status: 'offen', versuche: '0', created_at: jetzt, updated_at: jetzt,
@@ -43056,7 +43193,7 @@ async function _ccImportAusZentralerDb(btn) {
     const firmen = await _zdbRead(namen.firma, {});
     const firmaName = {}; (firmen || []).forEach(f => { firmaName[f.id] = (f.fields && f.fields.name) || ''; });
     const sperre = await _ccSperrlisteLaden(true);
-    const vorhanden = _ccKennungsSatz(CC_STATE.leads);
+    const vorhanden = _ccKennungsSatz(_ccKampagnenLeads());
     // Wer beim ZIEL-Mandanten schon Kunde ist, wird gekennzeichnet — nicht
     // ausgelassen. Ein Bestandskunde darf angerufen werden, der Anrufer muss es
     // nur wissen, bevor er den Neukunden-Text aufsagt.
@@ -43070,6 +43207,7 @@ async function _ccImportAusZentralerDb(btn) {
         firma: ((f.firma || []).map(id => firmaName[id]).filter(Boolean))[0] || f.name || '',
         ansprechpartner: f.name || [f.vorname, f.nachname].filter(Boolean).join(' '),
         telefon: f.telefon || f.mobil || '', email: f.email || '', position: f.position || '',
+        typ: f.typ || '',
       };
       const kenn = _ccKennungen(lead);
       if (!kenn.mail && !kenn.tel) { unbrauchbar++; continue; }
@@ -43079,7 +43217,7 @@ async function _ccImportAusZentralerDb(btn) {
       const istBestand = _ccSchonBekannt(bestand, lead);
       if (istBestand) bekannt++;
       saetze.push(Object.assign({}, lead, {
-        account_id: ziel.id, kampagne: 'Sonderkonditionen',
+        account_id: ziel.id, kampagne: CC_STATE.kampagne || CC_KAMPAGNE_STANDARD,
         // Bei fremder Herkunft steht sie im Stichwort — sonst weiß später
         // niemand mehr, warum ein Liftaro-Kunde in der Aszendio-Liste steht.
         quelle: fremd ? ('Zentrale DB · ' + (quelle.name || quelle.id)) : 'zentrale-db',
