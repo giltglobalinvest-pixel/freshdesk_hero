@@ -824,7 +824,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.71.0';
+const APP_VERSION = 'v2.71.1';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -10206,6 +10206,9 @@ function renderTicketList(tickets) {
                     <button data-action="snooze" data-account-id="${escapeAttr(t._accountId)}" data-ticket-id="${t.id}" class="hidden sm:inline-flex text-indigo-500 active:text-indigo-700 hover:bg-indigo-50 -m-1 p-1 rounded shrink-0" title="Auf Wiedervorlage (bei dir ausblenden)">
                       <i data-lucide="clock" class="w-4 h-4"></i>
                     </button>
+                    <button data-action="snooze14" data-account-id="${escapeAttr(t._accountId)}" data-ticket-id="${t.id}" class="hidden sm:inline-flex text-indigo-500 active:text-indigo-700 hover:bg-indigo-50 -m-1 p-1 rounded shrink-0" title="Sofort 2 Wochen ausblenden (ohne Nachfrage)">
+                      <i data-lucide="calendar-clock" class="w-4 h-4"></i>
+                    </button>
                     <button data-action="whatsapp" data-account-id="${escapeAttr(t._accountId)}" data-ticket-id="${t.id}" class="hidden sm:inline-flex text-emerald-600 active:text-emerald-800 hover:bg-emerald-50 -m-1 p-1 rounded shrink-0" title="Per WhatsApp an Kollegen schicken">
                       <i data-lucide="message-circle" class="w-4 h-4"></i>
                     </button>
@@ -13180,6 +13183,10 @@ function attachSwipeToCards() {
           if (_openSwipedContent) _resetSwipe();
           openWiedervorlagePicker(accId, tId, true);
         }
+        else if (action === 'snooze14') {
+          if (_openSwipedContent) _resetSwipe();
+          wvSofort(accId, tId, 14, btn);
+        }
         else if (action === 'copyLink') {
           if (_openSwipedContent) _resetSwipe();
           copyTicketLink(accId, tId, btn);
@@ -13255,6 +13262,7 @@ function openCardActionsSheet(accountId, ticketId) {
           ${row('check-circle-2',   'emerald', 'Schließen (Status: Geschlossen)',`closeCardActionsSheet(); ticketActionClose('${escapeAttr(accountId)}', ${ticketId}, null)`, 'Ticket im Freshdesk schließen')}
           ${row('ban',              'red',     'Als SPAM markieren',             `closeCardActionsSheet(); ticketActionSpam('${escapeAttr(accountId)}', ${ticketId}, null)`, 'In den Papierkorb verschieben')}
           ${row('clock',            'indigo',  'Auf Wiedervorlage…',             `closeCardActionsSheet(); openWiedervorlagePicker('${escapeAttr(accountId)}', ${ticketId}, true)`, 'Aus meiner Sicht ausblenden bis…')}
+          ${row('calendar-clock',   'indigo',  '2 Wochen ausblenden',            `closeCardActionsSheet(); wvSofort('${escapeAttr(accountId)}', ${ticketId}, 14, null)`, 'Ohne Nachfrage — häufigster Fall')}
           ${row('text-cursor-input','sky',     'Titel strukturieren',            `closeCardActionsSheet(); openRestructureTitleModal('${escapeAttr(accountId)}', ${ticketId})`, 'ANFRAGE Nr | Standort | Fabriknummer')}
           ${accountHasAngebotsModul((APP_STATE.accounts || []).find(a => a.id === accountId))
             ? row('file-text', 'indigo', 'Angebot erstellen', `closeCardActionsSheet(); openAngebotsModal('${escapeAttr(accountId)}', ${ticketId})`, 'KI-gestützter Verkaufsbrief mit Pauschalpreis')
@@ -13477,6 +13485,44 @@ async function setWiedervorlageDays(days) {
     if (fromList) refreshTicketsListFromCache();
     else if (CURRENT_TICKET && CURRENT_TICKET.id === ticketId) closeModal();
   } catch (e) { toast('Fehler: ' + e.message, 'error', 6000); }
+}
+
+/* v2.71.1: Wiedervorlage ohne Zwischendialog. Der Weg über die Auswahl ist bei
+   vielen Tickets hintereinander zu langsam — drei Klicks für etwas, das fast
+   immer dieselbe Frist bekommt.
+
+   Rückgängig steckt in der Meldung: Ohne Nachfrage muss der Fehlgriff billig
+   sein, sonst ist der schnelle Weg keine Erleichterung, sondern ein Risiko. */
+async function wvSofort(accountId, ticketId, tage, btn) {
+  accountId = String(accountId || '');
+  ticketId = parseInt(ticketId, 10);
+  if (!accountId || !ticketId) return;
+  const vorher = getWiedervorlage(accountId, ticketId);
+  if (btn) setBusy(btn, true);
+  try {
+    await addWiedervorlage(accountId, ticketId, _daysToFrist(tage, { morning: true }), 'manuell');
+    if (btn) setBusy(btn, false);
+    toast('#' + ticketId + ' für ' + tage + ' Tage ausgeblendet', 'success', 6000, {
+      label: 'Rückgängig',
+      onClick: () => _wvZuruecknehmen(accountId, ticketId, vorher),
+    });
+    if (APP_STATE.page === 'tickets') refreshTicketsListFromCache();
+    if (CURRENT_TICKET && CURRENT_TICKET.id === ticketId) closeModal();
+  } catch (e) {
+    if (btn) setBusy(btn, false);
+    toast('Wiedervorlage fehlgeschlagen: ' + (e.message || e), 'error', 8000);
+  }
+}
+
+async function _wvZuruecknehmen(accountId, ticketId, vorher) {
+  try {
+    // Stand von vorher wiederherstellen, nicht bloß löschen — sonst reißt ein
+    // Rückgängig eine ältere Wiedervorlage mit weg.
+    if (vorher && vorher.frist_am) await addWiedervorlage(accountId, ticketId, vorher.frist_am, vorher.grund || 'manuell');
+    else await removeWiedervorlage(accountId, ticketId);
+    toast('#' + ticketId + ' wieder sichtbar', 'success', 4000);
+    if (APP_STATE.page === 'tickets') refreshTicketsListFromCache();
+  } catch (e) { toast('Rückgängig fehlgeschlagen: ' + (e.message || e), 'error', 7000); }
 }
 
 async function setWiedervorlageCustom() {
@@ -14126,6 +14172,7 @@ function _ticketActionBarIcons(accountId, ticketId) {
     btn('radar',          'violet',  'Signaturen dieses Tickets crawlen (Kontakte erfassen · mit Rückmeldung)', `_crawlTicketManual('${accIdAttr}', ${ticketId}, this)`),
     `<span class="shrink-0 w-px h-5 bg-ink-200 mx-0.5"></span>`,
     btn('clock',          'indigo',  'Auf Wiedervorlage / aus meiner Sicht ausblenden',        `openWiedervorlagePicker('${accIdAttr}', ${ticketId})`),
+    btn('calendar-clock', 'indigo',  'Sofort 2 Wochen ausblenden (ohne Nachfrage)',            `wvSofort('${accIdAttr}', ${ticketId}, 14, this)`),
     btn('text-cursor-input', 'sky',  'Titel als „ANFRAGE Nr | Standort | Fabriknr" strukturieren', `openRestructureTitleModal('${accIdAttr}', ${ticketId})`),
     // v2.46.70: Angebots-Button nur für Aufzug-Service-Accounts (Aufzugshandwerk/Aszendio)
     (accountHasAngebotsModul(acc) ? btn('file-text', 'indigo', 'Angebot erstellen (KI-gestützt)', `openAngebotsModal('${accIdAttr}', ${ticketId})`) : ''),
