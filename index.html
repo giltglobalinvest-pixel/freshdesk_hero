@@ -824,7 +824,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.74.3';
+const APP_VERSION = 'v2.75.0';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -2942,7 +2942,11 @@ async function ensureAppTables() {
     { name: 'telefon',         type: 'singleLineText' },
     { name: 'email',           type: 'singleLineText' },
     { name: 'position',        type: 'singleLineText' },
+    { name: 'strasse',         type: 'singleLineText' },
+    { name: 'plz',             type: 'singleLineText' },
     { name: 'ort',             type: 'singleLineText' },
+    { name: 'anrede',          type: 'singleLineText' },   // von der KI gebildet, einmal je Kontakt
+    { name: 'zhd',             type: 'singleLineText' },
     { name: 'quelle',          type: 'singleLineText' },   // zentrale-db | archiv | gekauft | …
     { name: 'dedupe_key',      type: 'singleLineText' },   // E-Mail bzw. normalisierte Nummer
     { name: 'dedupe_tel',      type: 'singleLineText' },   // zweite Kennung, damit beide greifen
@@ -42257,8 +42261,11 @@ const CC_VORLAGE_TYPEN = {
    Vorlagensprache, die man nachschlagen muss, wird nicht benutzt. */
 const CC_PLATZHALTER = [
   ['{firma}', 'Firmenname'], ['{name}', 'Ansprechpartner'], ['{vorname}', 'Vorname'],
-  ['{anrede}', 'Sehr geehrte(r) Herr/Frau … bzw. Damen und Herren'],
-  ['{position}', 'Position'], ['{ort}', 'Ort'], ['{gueltig_bis}', 'Gültigkeitsdatum'],
+  ['{nachname}', 'Nachname'],
+  ['{anrede}', 'Sehr geehrte Frau Mayer, — von der KI gebildet'],
+  ['{zhd}', 'z. Hd. Frau Anja Mayer — für den Anschriftenblock'],
+  ['{strasse}', 'Straße'], ['{plz}', 'PLZ'], ['{ort}', 'Ort'],
+  ['{position}', 'Position'], ['{gueltig_bis}', 'Gültigkeitsdatum'],
 ];
 
 const CC_ANSCHREIBEN_STANDARD =
@@ -42270,6 +42277,7 @@ const CC_TYPES = {
   firma: 'singleLineText', account_id: 'singleLineText', kampagne: 'singleLineText',
   ansprechpartner: 'singleLineText', telefon: 'singleLineText', email: 'singleLineText',
   position: 'singleLineText', ort: 'singleLineText', quelle: 'singleLineText',
+  strasse: 'singleLineText', plz: 'singleLineText', anrede: 'singleLineText', zhd: 'singleLineText',
   dedupe_key: 'singleLineText', dedupe_tel: 'singleLineText', bestand: 'singleLineText',
   typ: 'singleLineText', versteckt: 'singleLineText',
   status: 'singleLineText', versuche: 'singleLineText',
@@ -43066,11 +43074,61 @@ async function _ccVorlageLaden(neu) {
   return _CC_VORLAGE;
 }
 
-/** Anrede aus dem, was bekannt ist. Nie raten: Ohne Namen bleibt es förmlich. */
-function _ccAnrede(r) {
-  const n = String(r.ansprechpartner || '').trim();
-  if (!n || !n.includes(' ')) return 'Sehr geehrte Damen und Herren,';
-  return 'Sehr geehrte/r ' + n + ',';
+/* Anrede und Anschriftenzeile von der KI bilden lassen.
+   Warum nicht selbst rechnen: „Sehr geehrte/r Anja Mayer" ist im deutschen
+   Geschäftsbrief schlicht falsch — es gehört Herr/Frau und NUR der Nachname
+   hinein. Das setzt voraus, das Geschlecht am Vornamen zu erkennen, und dafür
+   ist eine Namensliste die schlechtere Lösung als ein Sprachmodell: Sie kennt
+   „Andrea" nicht als italienischen Männernamen und scheitert an jedem Namen,
+   den sie nicht enthält.
+
+   Das Ergebnis wird am Kontakt gespeichert — ein Name ändert sich nicht, und
+   niemand soll dieselbe Frage zweimal bezahlen. */
+async function _ccAnredeErmitteln(r) {
+  const vorhanden = String(r.anrede || '').trim();
+  if (vorhanden) return { anrede: vorhanden, zhd: String(r.zhd || '').trim() };
+
+  const name = String(r.ansprechpartner || '').trim();
+  if (!name || !name.includes(' ')) {
+    // Ohne vollständigen Namen wird nicht geraten.
+    const f = { anrede: 'Sehr geehrte Damen und Herren,', zhd: name ? ('z. Hd. ' + name) : '' };
+    try { await _ccSpeichern(r.recordId, f); } catch (_) {}
+    return f;
+  }
+
+  const sys = 'Du bildest die Anrede für einen deutschen Geschäftsbrief.\n'
+    + 'Erkenne am Vornamen, ob die Person männlich oder weiblich ist.\n'
+    + 'Antworte AUSSCHLIESSLICH mit JSON:\n'
+    + '{"anrede":"Sehr geehrter Herr Langer,","zhd":"z. Hd. Herrn Niklas Langer"}\n'
+    + 'REGELN:\n'
+    + '- In der Anrede steht NUR der Nachname, niemals der Vorname.\n'
+    + '- Männlich: "Sehr geehrter Herr <Nachname>," · Weiblich: "Sehr geehrte Frau <Nachname>,"\n'
+    + '- Die Anrede endet mit einem Komma.\n'
+    + '- In "zhd" steht der volle Name mit Anrede im Akkusativ: "z. Hd. Herrn Max Muster" bzw. "z. Hd. Frau Anja Mayer". KEIN "Sehr geehrte".\n'
+    + '- Akademische Titel (Dr., Prof.) übernehmen, wenn sie im Namen stehen.\n'
+    + '- Ist das Geschlecht nicht eindeutig bestimmbar, antworte {"anrede":"Sehr geehrte Damen und Herren,","zhd":"z. Hd. <voller Name>"}.\n'
+    + '- Ist der Eintrag gar kein Personenname (Firma, Abteilung, E-Mail), ebenso.';
+  try {
+    const data = await proxyJson('/anthropic/v1/messages', {
+      method: 'POST',
+      body: JSON.stringify({
+        model: 'claude-sonnet-4-5-20250929', max_tokens: 200, system: sys,
+        messages: [{ role: 'user', content: name + (r.position ? ' (' + r.position + ')' : '') }],
+      }),
+    });
+    const roh = (data.content && data.content[0] && data.content[0].text || '').trim();
+    let o = null;
+    try { o = parseAIJson(roh); } catch (_) { try { o = JSON.parse(roh.replace(/^```(?:json)?|```$/g, '').trim()); } catch (_2) {} }
+    if (o && o.anrede) {
+      const f = { anrede: String(o.anrede).trim(), zhd: String(o.zhd || '').trim() };
+      try { await _ccSpeichern(r.recordId, f); } catch (_) {}
+      return f;
+    }
+  } catch (e) { console.warn('[CC] Anrede:', e.message); }
+
+  // Scheitert die KI, wird förmlich gegrüßt statt falsch — „Sehr geehrte/r"
+  // liest sich wie ein Serienbrief, und genau das soll es nicht sein.
+  return { anrede: 'Sehr geehrte Damen und Herren,', zhd: 'z. Hd. ' + name };
 }
 
 function _ccPlatzhalterFuellen(text, r) {
@@ -43078,7 +43136,14 @@ function _ccPlatzhalterFuellen(text, r) {
   const werte = {
     '{firma}': r.firma || '', '{name}': r.ansprechpartner || '',
     '{vorname}': teile.length > 1 ? teile.slice(0, -1).join(' ') : (teile[0] || ''),
-    '{anrede}': _ccAnrede(r), '{position}': r.position || '', '{ort}': r.ort || '',
+    '{nachname}': teile.length > 1 ? teile[teile.length - 1] : '',
+    // Anrede und z.Hd. stehen bereits am Datensatz — sie werden VOR dem Öffnen
+    // des Versanddialogs ermittelt, nicht hier: Platzhalter füllen muss ohne
+    // Wartezeit gehen, sonst flackert die Vorschau.
+    '{anrede}': String(r.anrede || '').trim() || 'Sehr geehrte Damen und Herren,',
+    '{zhd}': String(r.zhd || '').trim(),
+    '{position}': r.position || '', '{ort}': r.ort || '',
+    '{strasse}': r.strasse || '', '{plz}': r.plz || '',
     '{gueltig_bis}': '31.12.' + new Date().getFullYear(),
   };
   return String(text || '').replace(/\{[a-z_]+\}/g, m => (m in werte ? werte[m] : m));
@@ -43179,7 +43244,7 @@ const CC_PDF_ECKEN = {
 const CC_PDF_STANDARD = {
   pdf_modus: 'ersetzen',
   pdf_datei: 'Preisliste {firma}.pdf',
-  pdf_text: '{firma}',
+  pdf_text: '{firma}\n{zhd}\n{strasse}\n{plz} {ort}',
   pdf_ecke: 'oben-rechts',
   pdf_x: '20', pdf_y: '20', pdf_size: '11', pdf_seite: '1',
 };
@@ -43550,6 +43615,11 @@ async function _ccPreislisteAnfordern(recordId, btn) {
       if (btn) setBusy(btn, false);
       return toast('Freshdesk meldet keine Absenderadresse für diesen Mandanten.', 'error', 9000);
     }
+    if (!String(r.anrede || '').trim()) {
+      if (btn) setBusy(btn, true, 'Anrede…');
+      const a = await _ccAnredeErmitteln(r);
+      Object.assign(r, a);
+    }
     if (btn) setBusy(btn, false);
     _ccVersandDialog(r, v, konfigs);
   } catch (e) {
@@ -43747,7 +43817,8 @@ function _ccTextAusDatei(puffer) {
 
 const CC_FELDER = [
   ['firma', 'Firma'], ['ansprechpartner', 'Ansprechpartner'], ['telefon', 'Telefon'],
-  ['email', 'E-Mail'], ['position', 'Position'], ['ort', 'Ort'], ['typ', 'Kontakttyp'],
+  ['email', 'E-Mail'], ['position', 'Position'],
+  ['strasse', 'Straße'], ['plz', 'PLZ'], ['ort', 'Ort'], ['typ', 'Kontakttyp'],
 ];
 
 /* Spalten anhand der Überschrift raten. Spart bei einer typischen Exportdatei
@@ -43760,7 +43831,9 @@ function _ccSpalteRaten(kopf) {
     telefon: /telefon|phone|tel\.?$|mobil|handy|nummer/i,
     email: /mail|e-?mail/i,
     position: /position|funktion|rolle|title|abteilung/i,
-    ort: /ort|stadt|city|plz|standort/i,
+    strasse: /stra(ss|ß)e|str\.?$|adresse|anschrift/i,
+    plz: /plz|postleitzahl|zip/i,
+    ort: /^ort|stadt|city|standort/i,
     typ: /typ|kategorie|branche|art$|segment/i,
   };
   const zu = {};
@@ -43866,7 +43939,8 @@ function _ccZuordnungLesen() {
 function _ccZeileZuLead(zeile, zuordnung) {
   const hol = (feld) => { const i = zuordnung[feld]; return i === '' || i == null ? '' : String(zeile[+i] == null ? '' : zeile[+i]).trim(); };
   return { firma: hol('firma'), ansprechpartner: hol('ansprechpartner'), telefon: hol('telefon'),
-           email: hol('email'), position: hol('position'), ort: hol('ort'), typ: hol('typ') };
+           email: hol('email'), position: hol('position'), ort: hol('ort'),
+           strasse: hol('strasse'), plz: hol('plz'), typ: hol('typ') };
 }
 
 /* Vorschau mit ehrlicher Zählung: Wie viele Zeilen sind überhaupt anrufbar,
@@ -44225,7 +44299,12 @@ async function _ccImportAusZentralerDb(btn) {
     const namen = _zdbTableNames(quelle);
     const kontakte = await _zdbRead(namen.kontakt, {});
     const firmen = await _zdbRead(namen.firma, {});
-    const firmaName = {}; (firmen || []).forEach(f => { firmaName[f.id] = (f.fields && f.fields.name) || ''; });
+    const firmaName = {}, firmaAdr = {};
+    (firmen || []).forEach(f => {
+      const ff = f.fields || {};
+      firmaName[f.id] = ff.name || '';
+      firmaAdr[f.id] = { strasse: ff.strasse || '', plz: ff.plz || '', ort: ff.ort || '' };
+    });
     const sperre = await _ccSperrlisteLaden(true);
     const vorhanden = _ccKennungsSatz(_ccKampagnenLeads());
     // Wer beim ZIEL-Mandanten schon Kunde ist, wird gekennzeichnet — nicht
@@ -44238,10 +44317,13 @@ async function _ccImportAusZentralerDb(btn) {
     let doppelt = 0, unbrauchbar = 0, gesperrt = 0, bekannt = 0;
     for (const k of (kontakte || [])) {
       const f = k.fields || {};
+      const _fid = (f.firma || [])[0];
+      const _adr = (_fid && firmaAdr[_fid]) || {};
       const lead = {
         firma: ((f.firma || []).map(id => firmaName[id]).filter(Boolean))[0] || f.name || '',
         ansprechpartner: f.name || [f.vorname, f.nachname].filter(Boolean).join(' '),
         telefon: f.telefon || f.mobil || '', email: f.email || '', position: f.position || '',
+        strasse: _adr.strasse || '', plz: _adr.plz || '', ort: _adr.ort || '',
         typ: f.typ || '',
       };
       // Ein früher vergebener Typ schlägt den aus der Quelle — er wurde von
