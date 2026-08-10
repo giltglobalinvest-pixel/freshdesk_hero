@@ -824,7 +824,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.75.2';
+const APP_VERSION = 'v2.75.3';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -43706,6 +43706,16 @@ async function _ccVorlageSpeichern(btn) {
 /* Versand: personalisiertes Anschreiben + feste Preisliste als PDF, über
    Freshdesk hinaus. Der Rückläufer wird damit automatisch ein Ticket, landet im
    Archiv und ist durchsuchbar — die Nacharbeit braucht keine eigene Mechanik. */
+/* Zeitlimit um einen Aufruf legen. Ohne das bleibt ein Knopf bei „Vorbereiten…"
+   für immer stehen, wenn der Proxy aus dem Kaltstart nicht zurückkommt — und
+   der Anrufer weiß nicht, ob er warten oder klicken soll. */
+function _mitZeitlimit(versprechen, ms, was) {
+  return Promise.race([
+    versprechen,
+    new Promise((_, ab) => setTimeout(() => ab(new Error(was + ' antwortet nicht (nach ' + Math.round(ms / 1000) + ' s abgebrochen)')), ms)),
+  ]);
+}
+
 async function _ccPreislisteAnfordern(recordId, btn) {
   const r = CC_STATE.leads.find(x => x.recordId === recordId);
   const acc = _ccAccount();
@@ -43713,33 +43723,47 @@ async function _ccPreislisteAnfordern(recordId, btn) {
   if (!String(r.email || '').trim()) return toast('Ohne E-Mail-Adresse lässt sich nichts senden — bitte im Gespräch erfragen und eintragen.', 'warn', 7000);
   if (btn) setBusy(btn, true, 'Vorbereiten…');
   try {
-    const v = await _ccVorlageLaden();
+    const v = await _mitZeitlimit(_ccVorlageLaden(), 20000, 'Airtable');
     if (!v || !v.pdf_name) {
-      if (btn) setBusy(btn, false);
       return toast('Für diese Kampagne ist noch keine Preisliste hinterlegt — Vorlage einrichten (Knopf oben).', 'warn', 9000);
     }
-    const konfigs = await ensureEmailConfigsLoaded(acc.id);
+    const konfigs = await _mitZeitlimit(ensureEmailConfigsLoaded(acc.id), 30000, 'Freshdesk');
     if (!konfigs.length) {
-      if (btn) setBusy(btn, false);
       return toast('Freshdesk meldet keine Absenderadresse für diesen Mandanten.', 'error', 9000);
     }
+    // Signatur laden — sie gehört in die Vorschau, denn sie geht mit hinaus.
+    let sig = '';
+    try {
+      if (btn) setBusy(btn, true, 'Signatur…');
+      const me = await _mitZeitlimit(fetchAgentMe(acc.id), 20000, 'Freshdesk');
+      sig = (me && me.signature) || '';
+    } catch (e) { console.warn('[CC] Signatur:', e.message); }
     if (!String(r.anrede || '').trim()) {
       if (btn) setBusy(btn, true, 'Anrede…');
-      const a = await _ccAnredeErmitteln(r);
-      Object.assign(r, a);
+      try {
+        Object.assign(r, await _mitZeitlimit(_ccAnredeErmitteln(r), 25000, 'Die KI'));
+      } catch (e) {
+        // Lieber förmlich als gar nicht: Der Versand darf nicht an der Anrede
+        // scheitern, und im Dialog steht sie zum Überschreiben.
+        console.warn('[CC] Anrede:', e.message);
+        r.anrede = 'Sehr geehrte Damen und Herren,';
+        toast('Anrede konnte nicht gebildet werden — bitte im Text prüfen.', 'warn', 7000);
+      }
     }
-    if (btn) setBusy(btn, false);
-    _ccVersandDialog(r, v, konfigs);
+    _ccVersandDialog(r, v, konfigs, sig);
   } catch (e) {
-    if (btn) setBusy(btn, false);
     toast('Versand vorbereiten: ' + (e.message || e), 'error', 9000);
+  } finally {
+    // In jedem Fall — auch bei Abbruch, Zeitüberschreitung oder Fehler.
+    if (btn) setBusy(btn, false);
   }
 }
 
 /* Der Anrufer sieht den fertigen Text und schickt ihn ab. Kein Rohentwurf zum
    Ausfüllen: Wer im Minutentakt telefoniert, formuliert nicht — er liest kurz
    quer und drückt auf Senden. Änderbar bleibt trotzdem alles. */
-function _ccVersandDialog(r, v, konfigs) {
+function _ccVersandDialog(r, v, konfigs, signatur) {
+  window._CC_SIG = String(signatur || '');
   const text = _ccPlatzhalterFuellen(v.anschreiben, r);
   const betreff = _ccPlatzhalterFuellen(v.betreff, r);
   let host = document.getElementById('ccVersandHost');
@@ -43762,7 +43786,15 @@ function _ccVersandDialog(r, v, konfigs) {
             + '<input id="ccVersandBetreff" value="' + escapeAttr(betreff) + '" class="w-full mt-0.5 px-2.5 py-1.5 border border-ink-300 rounded-lg text-sm"></label>'
           + '<label class="block"><span class="text-[11px] font-semibold text-ink-700">Anschreiben</span>'
             + '<textarea id="ccVersandText" rows="10" class="w-full mt-0.5 px-2.5 py-2 border border-ink-300 rounded-lg text-[13px]">' + escapeHtml(text) + '</textarea></label>'
-          + '<p class="text-[11px] text-ink-600 inline-flex items-center gap-1.5"><i data-lucide="paperclip" class="w-3.5 h-3.5"></i> Anhang: <b>' + escapeHtml(_ccDateiname(v.pdf_datei, r)) + '</b> · die Signatur wird von Freshdesk angefügt</p>'
+          + '<p class="text-[11px] text-ink-600 inline-flex items-center gap-1.5"><i data-lucide="paperclip" class="w-3.5 h-3.5"></i> Anhang: <b>' + escapeHtml(_ccDateiname(v.pdf_datei, r)) + '</b></p>'
+          // Signaturvorschau: Sie hängt an jeder Mail und ist das, was der
+          // Empfänger als Absender liest — sie ungesehen mitzuschicken wäre
+          // genau die Art Überraschung, die man beim Kunden nicht will.
+          + (window._CC_SIG
+              ? '<details class="rounded-lg border border-ink-200 bg-ink-50/60"><summary class="text-[11px] font-semibold text-ink-700 cursor-pointer select-none px-2.5 py-1.5">Signatur ansehen — deine Hero-Signatur, wird angehängt</summary>'
+                + '<div class="px-2.5 pb-2.5 pt-1 max-h-48 overflow-y-auto bg-white border-t border-ink-200 text-[12px]">' + window._CC_SIG + '</div></details>'
+              : '<p class="text-[11px] text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-2.5 py-1.5">Du hast für diesen Mandanten <b>keine eigene Signatur</b> in Hero hinterlegt — die Mail ginge ohne Absenderangabe hinaus. '
+                + '<button onclick="_ccVersandSchliessen(); openSignatureEditor(\'' + escapeAttr(_ccAccount()?.id || '') + '\')" class="font-semibold underline">Jetzt anlegen</button></p>')
         + '</div>'
         + '<div class="flex items-center justify-end gap-2 p-4 border-t border-ink-200">'
           + '<button onclick="_ccVersandSchliessen()" class="px-3 py-2 text-sm text-ink-600 hover:bg-ink-100 rounded-lg">Abbrechen</button>'
@@ -43803,7 +43835,9 @@ async function _ccVersandAbsenden(recordId, btn) {
     setBusy(btn, true, 'Sende…');
     const erstellt = await _fdPostMultipart(acc.id, 'tickets/outbound_email', {
       subject: (document.getElementById('ccVersandBetreff')?.value || '').trim(),
-      description: textToHtmlForFreshdesk((document.getElementById('ccVersandText')?.value || '').trim()),
+      description: appendSignatureHtml(
+        textToHtmlForFreshdesk((document.getElementById('ccVersandText')?.value || '').trim()),
+        window._CC_SIG || ''),
       email: String(r.email).toLowerCase(),
       email_config_id: String(document.getElementById('ccVersandAbsender')?.value || ''),
       priority: '1',
