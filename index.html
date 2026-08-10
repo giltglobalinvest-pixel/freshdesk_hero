@@ -824,7 +824,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.74.0';
+const APP_VERSION = 'v2.74.1';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -9733,7 +9733,23 @@ function _assigneeBadgeDropdown(t) {
           `<option value="ki:${escapeAttr(k.api_key)}" ${kiTagName === k.name ? 'selected' : ''}>${(k.role || '').toLowerCase() === 'ki' ? '\u{1F916}' : '\u{1F464}'} ${escapeHtml(k.name)}</option>`).join('')}</optgroup>` : ''}
         ${agents.map(a => `<option value="${a.id}" ${a.id === t.responder_id && !kiTagName ? 'selected' : ''}>${escapeHtml(a.name)}</option>`).join('')}
       </select>
-    </span>`;
+    </span>${kiTagName ? _fdhAnstossKnopf(t) : ''}`;
+}
+
+/* v2.74.1: Anstoßen direkt an der Karte, nicht im Menü darunter.
+   Der Knopf sitzt neben dem Bearbeiter-Chip — dort schaut man beim Zuweisen
+   ohnehin hin, und zwei Klicks für „mach das jetzt" sind einer zu viel.
+   Daneben steht, was aus der Übergabe geworden ist: Ohne diese Rückmeldung
+   drückt man im Zweifel ein zweites Mal, weil man nichts passieren sieht. */
+function _fdhAnstossKnopf(t) {
+  const stand = _fdhAuftragStand(t._accountId, t.id);
+  return '<span class="inline-flex items-center gap-1 ml-1" onclick="event.stopPropagation()">'
+    + '<button onclick="_fdhKiAnstossen(\'' + escapeAttr(t._accountId) + '\', ' + t.id + ', this)" '
+      + 'class="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-bold uppercase tracking-wider bg-violet-600 hover:bg-violet-700 active:bg-violet-800 text-white shrink-0" '
+      + 'title="Auftrag an den KI-Mitarbeiter geben">'
+      + '<i data-lucide="bot" class="w-2.5 h-2.5"></i> Anstoßen</button>'
+    + (stand ? _fdhAuftragBadge(stand) : '')
+    + '</span>';
 }
 
 function _groupBadgeDropdown(t) {
@@ -10058,6 +10074,16 @@ function _renderTicketListFd(tickets) {
 }
 
 function renderTicketList(tickets) {
+  // v2.74.1: Auftragsstand im Hintergrund nachladen und die Liste danach EINMAL
+  // neu zeichnen. Nicht davor warten: Die Tickets sollen sofort dastehen, der
+  // Stand ist Beiwerk.
+  _fdhAuftragStandLaden(tickets).then(() => {
+    if (APP_STATE.page === 'tickets' && _FDH_AUFTRAG_STAND.size && !window._fdhStandGezeichnet) {
+      window._fdhStandGezeichnet = true;
+      refreshTicketsListFromCache();
+      setTimeout(() => { window._fdhStandGezeichnet = false; }, 3000);
+    }
+  }).catch(() => {});
   // Client-Filter LIVE bei jedem Render — so verschwinden Tickets, die sich gerade
   // geändert haben (Status via Card-Swipe / KI-Regel / extern in Freshdesk geändert),
   // sofort aus der Liste wenn sie nicht mehr zum aktuellen Filter passen — ohne dass
@@ -15818,6 +15844,12 @@ async function _fdhKiAnstossen(accountId, ticketId, btn) {
   }, true).catch(() => false);
   if (btn) setBusy(btn, false);
   if (ASSIGNEE_CTX) closeAssigneeModal();
+  // Sofort nachsehen, was daraus geworden ist — der Knopf soll seine Wirkung
+  // zeigen, nicht erst beim nächsten Neuladen.
+  const _t = _fdhTicketAusCache(accountId, ticketId);
+  _fdhAuftragStandLaden(_t ? [_t] : [], true).then(() => {
+    if (APP_STATE.page === 'tickets') refreshTicketsListFromCache();
+  }).catch(() => {});
   // _fdhWeckSenden meldet nur den direkten Weckruf. Der Briefkasten ist der
   // verlässliche Teil — deshalb kein „fehlgeschlagen", wenn bloß die
   // Steuerzentrale gerade nicht läuft.
@@ -18605,6 +18637,69 @@ async function _fdhMentionWecken(accountId, ticketId, ticket, text) {
    schnelle Weg, wenn beide gerade da sind.
    Angemeldet wird mit dem Hero-Login des Benutzers; ein gemeinsames Geheimnis
    im öffentlich lesbaren index.html wäre keines. */
+/* === v2.74.1: Auftragsstand in der Ticketliste ==========================
+   Bisher verschwand der Auftrag nach dem Anstoßen in einer Blackbox. Wer nicht
+   sieht, dass etwas angekommen ist, drückt ein zweites Mal — oder traut der
+   Sache gar nicht erst.
+
+   Gelesen wird über /auftraege/stand, NICHT über den Abholweg: Der würde die
+   Aufträge als „in Arbeit" markieren und der Steuerzentrale wegnehmen, bloß
+   weil jemand die Liste ansieht. */
+
+const _FDH_AUFTRAG_STAND = new Map();   // 'slug#ticketId' → Auftrag
+let _fdhStandGeholt = 0;
+
+const _FDH_AUFTRAG_ZUSTAND = {
+  offen:      { text: 'übergeben', cls: 'bg-amber-100 text-amber-800 border-amber-300', tipp: 'Liegt im Briefkasten, noch nicht abgeholt' },
+  in_arbeit:  { text: 'in Arbeit', cls: 'bg-emerald-100 text-emerald-800 border-emerald-300', tipp: 'Von der Steuerzentrale abgeholt' },
+  erledigt:   { text: 'erledigt',  cls: 'bg-ink-100 text-ink-600 border-ink-300', tipp: 'Zurückgemeldet' },
+  abgelaufen: { text: 'verfallen', cls: 'bg-rose-100 text-rose-700 border-rose-300', tipp: 'Binnen 24 Stunden nicht abgeholt' },
+};
+
+function _fdhAuftragStand(accountId, ticketId) {
+  const slug = _archivSlugFuer(accountId);
+  return slug ? _FDH_AUFTRAG_STAND.get(slug + '#' + ticketId) : null;
+}
+
+function _fdhAuftragBadge(a) {
+  const z = _FDH_AUFTRAG_ZUSTAND[a.status];
+  if (!z) return '';
+  const zeit = (a.erledigt_am || a.geholt_am || a.angelegt_am || '').slice(11, 16);
+  return '<span class="text-[10px] px-1.5 py-0.5 rounded border font-semibold whitespace-nowrap ' + z.cls + '" '
+    + 'title="' + escapeAttr(z.tipp + (a.bearbeiter ? ' · ' + a.bearbeiter : '') + (a.hinweis ? ' · ' + a.hinweis : '')) + '">'
+    + (a.status === 'in_arbeit' ? '<span class="inline-block w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse mr-1 align-middle"></span>' : '')
+    + escapeHtml(z.text) + (zeit ? ' ' + zeit : '') + '</span>';
+}
+
+/** Stand für die gerade sichtbaren Tickets holen — eine Anfrage je Mandant. */
+async function _fdhAuftragStandLaden(tickets, erzwingen) {
+  const key = APP_KEYS.user?.api_key;
+  if (!key) return;
+  // Höchstens alle 20 Sekunden, sonst feuert jedes Neuzeichnen der Liste.
+  if (!erzwingen && Date.now() - _fdhStandGeholt < 20000) return;
+  const nachSlug = new Map();
+  for (const t of (tickets || [])) {
+    if (!Array.isArray(t.tags) || !t.tags.some(x => String(x).startsWith('KI:'))) continue;
+    const slug = _archivSlugFuer(t._accountId);
+    if (!slug) continue;
+    if (!nachSlug.has(slug)) nachSlug.set(slug, []);
+    nachSlug.get(slug).push(t.id);
+  }
+  if (!nachSlug.size) return;
+  _fdhStandGeholt = Date.now();
+  await Promise.all([...nachSlug.entries()].map(async ([slug, ids]) => {
+    try {
+      const p = new URLSearchParams({ mandant: slug, tickets: ids.slice(0, 200).join(',') });
+      const res = await fetch(ARCHIV_URL + '/auftraege/stand?' + p.toString(), { headers: { 'X-Hero-Key': key } });
+      if (!res.ok) return;
+      const d = await res.json();
+      for (const a of (d.auftraege || [])) {
+        if (a.ticket_id) _FDH_AUFTRAG_STAND.set(slug + '#' + a.ticket_id, a);
+      }
+    } catch (_) { /* Ohne Stand bleibt der Knopf trotzdem benutzbar */ }
+  }));
+}
+
 async function _fdhAuftragEinreihen(auftrag) {
   const key = APP_KEYS.user?.api_key;
   const slug = _archivSlugFuer(auftrag._accountId);
