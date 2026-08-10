@@ -824,7 +824,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.72.0';
+const APP_VERSION = 'v2.72.2';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -2965,6 +2965,17 @@ async function ensureAppTables() {
   // gelten, auch für zugekaufte Adressen, die nie in der zentralen DB standen.
   // Hängt der Widerspruch an einer Kampagne, ruft die nächste denselben
   // Menschen wieder an — und das ist der Fall, der Geld kostet.
+  // v2.72.2: Kontakttypen dauerhaft, unabhängig von Kampagne und Quelle.
+  // Wer einmal als „Lieferant" erkannt wurde, soll bei jedem künftigen Import
+  // sofort so dastehen — sonst macht jemand dieselbe Arbeit zum zweiten Mal.
+  await ensureTable(CC_TYP_TABLE, [
+    { name: 'dedupe_key',  type: 'singleLineText' },   // Primary
+    { name: 'typ',         type: 'singleLineText' },
+    { name: 'name',        type: 'singleLineText' },
+    { name: 'firma',       type: 'singleLineText' },
+    { name: 'von',         type: 'singleLineText' },
+    { name: 'gesetzt_am',  type: 'singleLineText' },
+  ]);
   await ensureTable(CC_SPERR_TABLE, [
     { name: 'dedupe_key',  type: 'singleLineText' },   // Primary
     { name: 'name',        type: 'singleLineText' },
@@ -42102,6 +42113,7 @@ function _zdbPermHintHtml() {
 
 const CC_TABLE = 'Kampagne';
 const CC_SPERR_TABLE = 'Werbesperre';
+const CC_TYP_TABLE = 'Kontakttyp';
 const CC_TYPES = {
   firma: 'singleLineText', account_id: 'singleLineText', kampagne: 'singleLineText',
   ansprechpartner: 'singleLineText', telefon: 'singleLineText', email: 'singleLineText',
@@ -42360,7 +42372,9 @@ function _ccZeichnen() {
         + '<h2 class="text-lg font-bold text-ink-900">Anrufliste</h2>'
         + '<p class="text-[12px] text-ink-500">Der Reihe nach von oben. Eine Zeile antippen öffnet den Anruf.</p>'
       + '</div>'
-      + '<div class="flex items-center gap-2">' + _ccKampagnenWahl() + _ccMandantWahl(acc) + '</div>'
+      + '<div class="flex items-center gap-2">' + _ccKampagnenWahl()
+        + '<button onclick="_ccKampagneUmbenennen(this)" class="px-2 py-2 rounded-lg border border-ink-200 bg-white text-ink-500 hover:bg-ink-50 hover:text-ink-800" title="Kampagne umbenennen"><i data-lucide="pencil" class="w-4 h-4"></i></button>'
+        + _ccMandantWahl(acc) + '</div>'
     + '</div>'
     + '<div class="flex items-center gap-2 flex-wrap mb-3">'
       + reiter('offen', 'Zu tun', offen) + reiter('interessiert', 'Interessiert', interessiert) + reiter('alle', 'Alle', alle.length)
@@ -42439,6 +42453,62 @@ function _ccKampagnenWahl() {
     + '</select>';
 }
 
+/** Stapelweise ändern — dieselbe Zehnergrenze wie beim Anlegen. */
+async function _ccStapelAendern(aenderungen) {
+  const url = 'https://api.airtable.com/v0/' + APP_CONFIG.APP_BASE_ID + '/' + encodeURIComponent(CC_TABLE);
+  let n = 0;
+  for (let i = 0; i < aenderungen.length; i += 10) {
+    const teil = aenderungen.slice(i, i + 10);
+    for (let versuch = 0; versuch < 4; versuch++) {
+      const res = await fetch(url, {
+        method: 'PATCH',
+        headers: { Authorization: 'Bearer ' + APP_KEYS.airtableWriteKey, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ records: teil, typecast: true }),
+      });
+      if (res.status === 429) { await new Promise(r => setTimeout(r, 1200)); continue; }
+      if (!res.ok) throw new Error('Airtable ' + res.status + ': ' + (await res.text()).slice(0, 200));
+      n += teil.length;
+      break;
+    }
+  }
+  return n;
+}
+
+/* Kampagne umbenennen. Der Name steht an jedem Lead — es ist also keine
+   Beschriftung, sondern die Zuordnung selbst. Trägt man einen bestehenden Namen
+   ein, werden beide Kampagnen zusammengeführt; das wird ausdrücklich gefragt,
+   denn rückgängig machen lässt es sich nur durch erneutes Umbenennen von Hand. */
+async function _ccKampagneUmbenennen(btn) {
+  const acc = _ccAccount();
+  const alt = CC_STATE.kampagne || CC_KAMPAGNE_STANDARD;
+  const betroffen = CC_STATE.leads.filter(r =>
+    (!acc || r.account_id === acc.id) && String(r.kampagne || CC_KAMPAGNE_STANDARD) === alt);
+  const neu = (prompt('Kampagne umbenennen:', alt) || '').trim();
+  if (!neu || neu === alt) return;
+  if (neu === '__neu__') return toast('Dieser Name ist nicht zulässig.', 'warn', 4000);
+
+  const existiert = CC_STATE.leads.some(r =>
+    (!acc || r.account_id === acc.id) && String(r.kampagne || CC_KAMPAGNE_STANDARD) === neu);
+  if (existiert && !confirm('Eine Kampagne „' + neu + '" gibt es bereits.\n\n'
+      + betroffen.length + ' Kontakte aus „' + alt + '" würden dorthin verschoben — die beiden Kampagnen sind danach eine.\n\nFortfahren?')) return;
+
+  if (btn) setBusy(btn, true, 'Benenne um…');
+  try {
+    const aenderungen = betroffen.map(r => ({ id: r.recordId, fields: { kampagne: neu, updated_at: nowIso() } }));
+    if (aenderungen.length) await _ccStapelAendern(aenderungen);
+    betroffen.forEach(r => { r.kampagne = neu; });
+    CC_STATE.kampagne = neu;
+    try { localStorage.setItem('fdh_cc_kampagne', neu); } catch (_) {}
+    if (btn) setBusy(btn, false);
+    _ccZeichnen();
+    toast(existiert ? betroffen.length + ' Kontakte nach „' + neu + '" verschoben' : 'Kampagne heißt jetzt „' + neu + '"', 'success', 5000);
+  } catch (e) {
+    if (btn) setBusy(btn, false);
+    // Teilweise umbenannt ist der unangenehme Fall — deshalb ausdrücklich sagen.
+    toast('Umbenennen fehlgeschlagen: ' + (e.message || e) + ' — bitte Liste neu laden und prüfen.', 'error', 10000);
+  }
+}
+
 function _ccKampagneWechseln(wert) {
   if (wert === '__neu__') {
     const name = (prompt('Name der neuen Kampagne:', '') || '').trim();
@@ -42500,7 +42570,12 @@ function _ccTabelle(rows) {
       + '<td class="px-2 py-1.5 border-b border-ink-100 whitespace-nowrap">'
         + (tel ? '<a href="tel:' + escapeAttr(tel.replace(/\s/g, '')) + '" onclick="event.stopPropagation()" class="text-brand-700 font-mono text-[15px] font-bold hover:underline">' + escapeHtml(tel) + '</a>' : '<span class="text-ink-300 text-[13px]">keine Nummer</span>')
         + '</td>'
-      + '<td class="px-2 py-1.5 border-b border-ink-100 whitespace-nowrap text-[12px] text-ink-600">' + escapeHtml(r.typ || '—') + '</td>'
+      + '<td class="px-1 py-1 border-b border-ink-100 whitespace-nowrap">'
+        + '<select onclick="event.stopPropagation()" onchange="event.stopPropagation(); _ccTypSetzen(\'' + r.recordId + '\', this.value)" class="px-1 py-0.5 border rounded text-[12px] bg-white '
+          + (r.typ ? 'border-ink-300 text-ink-800 font-semibold' : 'border-ink-200 text-ink-400') + '" title="Kontakttyp — wird dauerhaft am Kontakt gemerkt">'
+          + '<option value="">— Typ —</option>'
+          + CC_TYPEN.map(t => '<option value="' + escapeAttr(t) + '"' + (String(r.typ || '') === t ? ' selected' : '') + '>' + escapeHtml(t) + '</option>').join('')
+        + '</select></td>'
       + '<td class="px-2 py-1.5 border-b border-ink-100 whitespace-nowrap">' + _ccQuelleBadge(r) + '</td>'
       + '<td class="px-2 py-1.5 border-b border-ink-100 whitespace-nowrap">' + _ccStatusBadge(r)
         + (r.versuche && +r.versuche > 0 ? ' <span class="text-[11px] text-ink-400">' + r.versuche + '×</span>' : '') + '</td>'
@@ -42550,10 +42625,6 @@ function _ccArbeitsbereich(r) {
       + erg('sperre',         'Nie wieder anrufen', 'bg-white border border-rose-300 text-rose-700 hover:bg-rose-50')
     + '</div>'
     + '<div class="flex items-center gap-2 flex-wrap">'
-      + '<select onclick="event.stopPropagation()" onchange="_ccTypSetzen(\'' + r.recordId + '\', this.value)" class="px-2 py-1.5 border border-ink-300 rounded-lg text-[12px] bg-white" title="Kontakttyp">'
-        + '<option value="">Typ …</option>'
-        + CC_TYPEN.map(t => '<option value="' + escapeAttr(t) + '"' + (String(r.typ || '') === t ? ' selected' : '') + '>' + escapeHtml(t) + '</option>').join('')
-        + '</select>'
       + '<input id="ccNotiz_' + r.recordId + '" value="' + escapeAttr(r.notiz || '') + '" onclick="event.stopPropagation()" onblur="_ccNotizSpeichern(\'' + r.recordId + '\', this.value)" placeholder="Was wurde gesagt? Wenige Worte genügen." class="flex-1 min-w-[180px] px-2.5 py-1.5 border border-ink-300 rounded-lg text-[12px]">'
       + '<button onclick="event.stopPropagation(); _ccPreislisteAnfordern(\'' + r.recordId + '\', this)" class="px-3 py-1.5 rounded-lg text-[12px] font-bold bg-brand-600 hover:bg-brand-700 text-white inline-flex items-center gap-1.5"><i data-lucide="mail" class="w-3.5 h-3.5"></i> Preisliste senden</button>'
       + '<button onclick="event.stopPropagation(); _ccInZentraleDb(\'' + r.recordId + '\', this)" class="px-3 py-1.5 rounded-lg text-[12px] font-bold bg-white border border-indigo-300 text-indigo-700 hover:bg-indigo-50 inline-flex items-center gap-1.5" title="Aus dem Lead einen Stammdatensatz machen — erst wenn jemand angebissen hat"><i data-lucide="database" class="w-3.5 h-3.5"></i> In zentrale DB</button>'
@@ -42691,10 +42762,79 @@ async function _ccTypAusblenden(btn) {
   toast(n + ' Kontakte ausgeblendet', 'success', 5000);
 }
 
-async function _ccTypSetzen(recordId, wert) {
-  try { await _ccSpeichern(recordId, { typ: wert || '' }); _ccZeichnen(); }
-  catch (e) { toast('Typ nicht gespeichert: ' + (e.message || e), 'error', 7000); }
+/* --- Kontakttyp, dauerhaft ---------------------------------------------- */
+
+let _CC_TYPEN_MAP = null;   // dedupe_key → Typ
+
+async function _ccTypenLaden(neu) {
+  if (_CC_TYPEN_MAP && !neu) return _CC_TYPEN_MAP;
+  const rows = await airtableRead(CC_TYP_TABLE, {}).catch(() => []);
+  _CC_TYPEN_MAP = new Map();
+  (rows || []).forEach(r => {
+    const f = r.fields || {};
+    if (f.dedupe_key && f.typ) _CC_TYPEN_MAP.set(f.dedupe_key, { typ: f.typ, recordId: r.id });
+  });
+  return _CC_TYPEN_MAP;
 }
+
+/** Bekannter Typ zu einem Lead — über beide Kennungen, erste Übereinstimmung. */
+function _ccTypBekannt(map, lead) {
+  const k = _ccKennungen(lead);
+  const t = (k.mail && map.get(k.mail)) || (k.tel && map.get(k.tel));
+  return t ? t.typ : '';
+}
+
+/**
+ * Typ setzen — an drei Stellen, absichtlich:
+ *  1. am Lead, damit die Zeile sofort stimmt,
+ *  2. in der Typ-Tabelle unter BEIDEN Kennungen, damit ihn jeder künftige
+ *     Import wiederfindet, egal ob er die Adresse oder die Nummer mitbringt,
+ *  3. am Kontakt der zentralen DB, falls es ihn dort gibt.
+ * Nur die erste Stelle darf den Vorgang scheitern lassen; die anderen sind
+ * Bequemlichkeit für später und dürfen den Anrufer nicht aufhalten.
+ */
+async function _ccTypSetzen(recordId, wert) {
+  const r = CC_STATE.leads.find(x => x.recordId === recordId);
+  const typ = String(wert || '').trim();
+  try { await _ccSpeichern(recordId, { typ }); }
+  catch (e) { return toast('Typ nicht gespeichert: ' + (e.message || e), 'error', 7000); }
+  _ccZeichnen();
+  if (!r) return;
+
+  const map = await _ccTypenLaden().catch(() => new Map());
+  const k = _ccKennungen(r);
+  for (const key of [k.mail, k.tel].filter(Boolean)) {
+    try {
+      const da = map.get(key);
+      if (da && da.recordId) {
+        await airtableUpdateWithAutoField(CC_TYP_TABLE, da.recordId, { typ, gesetzt_am: nowIso() }, _CC_TYP_FELDER);
+        map.set(key, { typ, recordId: da.recordId });
+      } else {
+        const neu = await airtableWriteWithAutoField(CC_TYP_TABLE, {
+          dedupe_key: key, typ, name: r.ansprechpartner || '', firma: r.firma || '',
+          von: (APP_KEYS.user && APP_KEYS.user.name) || '', gesetzt_am: nowIso(),
+        }, _CC_TYP_FELDER);
+        map.set(key, { typ, recordId: neu && neu.id });
+      }
+    } catch (e) { console.warn('[CC] Typ merken:', e.message); }
+  }
+
+  // Zusätzlich in der zentralen DB, falls der Kontakt dort geführt wird.
+  try {
+    const acc = _ccAccount();
+    if (acc && typ) {
+      const gefunden = await _zdbKontaktFinden(acc, { email: r.email, name: r.ansprechpartner });
+      if (gefunden && gefunden.hit && ZDB_TYP_OPTIONS.includes(typ)) {
+        await _zdbUpdateSafe(gefunden.namen.kontakt.name, gefunden.hit.id, { typ, updated_at: nowIso() });
+      }
+    }
+  } catch (e) { console.warn('[CC] Typ in zentrale DB:', e.message); }
+}
+
+const _CC_TYP_FELDER = {
+  dedupe_key: 'singleLineText', typ: 'singleLineText', name: 'singleLineText',
+  firma: 'singleLineText', von: 'singleLineText', gesetzt_am: 'singleLineText',
+};
 
 async function _ccNotizSpeichern(recordId, wert) {
   const r = CC_STATE.leads.find(x => x.recordId === recordId);
@@ -43011,11 +43151,14 @@ async function _ccCsvImportieren(btn) {
     const sperre = await _ccSperrlisteLaden(true);
     const vorhanden = _ccKennungsSatz(_ccKampagnenLeads());
     const bestand = await _ccBestandsKennungen(acc);
+    const typen = await _ccTypenLaden(true);
     const jetzt = nowIso();
     const saetze = [];
     let uebersprungen = 0, gesperrt = 0, bekannt = 0;
     for (const zeile of _CC_IMPORT.zeilen) {
       const lead = _ccZeileZuLead(zeile, z);
+      const gemerkt = _ccTypBekannt(typen, lead);
+      if (gemerkt) lead.typ = gemerkt;
       const kenn = _ccKennungen(lead);
       if ((!kenn.mail && !kenn.tel) || _ccSchonBekannt(vorhanden, lead)) { uebersprungen++; continue; }
       if (_ccSchonBekannt(sperre, lead)) { gesperrt++; continue; }
@@ -43198,6 +43341,7 @@ async function _ccImportAusZentralerDb(btn) {
     // ausgelassen. Ein Bestandskunde darf angerufen werden, der Anrufer muss es
     // nur wissen, bevor er den Neukunden-Text aufsagt.
     const bestand = await _ccBestandsKennungen(ziel);
+    const typen = await _ccTypenLaden(true);
     const jetzt = nowIso();
     const saetze = [];
     let doppelt = 0, unbrauchbar = 0, gesperrt = 0, bekannt = 0;
@@ -43209,6 +43353,10 @@ async function _ccImportAusZentralerDb(btn) {
         telefon: f.telefon || f.mobil || '', email: f.email || '', position: f.position || '',
         typ: f.typ || '',
       };
+      // Ein früher vergebener Typ schlägt den aus der Quelle — er wurde von
+      // Hand gesetzt, die Quelle rät nur.
+      const gemerkt = _ccTypBekannt(typen, lead);
+      if (gemerkt) lead.typ = gemerkt;
       const kenn = _ccKennungen(lead);
       if (!kenn.mail && !kenn.tel) { unbrauchbar++; continue; }
       if (_ccSchonBekannt(vorhanden, lead)) { doppelt++; continue; }
