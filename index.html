@@ -824,7 +824,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.82.1';
+const APP_VERSION = 'v2.82.2';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -45911,6 +45911,7 @@ function _korbArchivCrawlOeffnen() {
           + '<button onclick="_korbCrawlSchliessen()" class="text-ink-400 hover:text-ink-700"><i data-lucide="x" class="w-5 h-5"></i></button></div>'
         + '<div class="p-4 space-y-3">'
           + '<p class="text-[11px] text-ink-600">Gelesen wird der Signaturblock der eingehenden Nachrichten — Firma, Anschrift, Position und Telefonnummer. '
+          + 'Gelesen wird dabei <b>nur, was der Absender selbst geschrieben hat</b>; alles ab „Von:" ist zitierte Vormail und trägt eine fremde Signatur. '
           + '<b>Absender ohne erkennbare Firma werden nicht übernommen</b>, ebenso Automaten und Großanbieter wie PayPal oder DHL. '
           + 'Jeder Absender wird nur einmal ausgewertet; ein zweiter Lauf macht dort weiter, wo der erste aufgehört hat.</p>'
           + '<div class="grid grid-cols-3 gap-2">'
@@ -45926,9 +45927,17 @@ function _korbArchivCrawlOeffnen() {
             + '<label class="block"><span class="text-[10px] font-semibold text-ink-600">seit Jahr</span>'
               + '<input id="korbCrawlSeit" type="number" min="2012" max="2030" value="' + (new Date().getFullYear() - 4) + '" class="w-full mt-0.5 px-1.5 py-1 border border-ink-300 rounded text-[12px]"></label>'
           + '</div>'
+          + '<label class="flex items-start gap-2 text-[11px] text-ink-700 cursor-pointer">'
+            + '<input type="checkbox" id="korbCrawlNurNummer" checked class="mt-0.5">'
+            + '<span><b>Nur mit Telefonnummer übernehmen.</b> Ohne Nummer ist ein Kontakt für die Akquise wertlos. '
+            + 'Er geht nicht verloren: Er wird als „ohne Nummer" vermerkt und lässt sich später mit „Nachzügler holen" nachziehen.</span></label>'
+          + '<label class="flex items-start gap-2 text-[11px] text-ink-700 cursor-pointer">'
+            + '<input type="checkbox" id="korbCrawlNachholen" class="mt-0.5">'
+            + '<span><b>Nachzügler holen</b> — statt neuer Absender die, bei denen zuletzt nur die Nummer fehlte.</span></label>'
           + '<div class="flex gap-2 flex-wrap">'
             + '<button onclick="_korbCrawlZaehlen(this)" class="px-3 py-1.5 rounded-lg text-[12px] font-bold bg-white border border-ink-300 text-ink-700 hover:bg-ink-50">Wie viele offen?</button>'
             + '<button onclick="_korbCrawlStarten(this)" class="px-3 py-1.5 bg-violet-600 hover:bg-violet-700 text-white rounded-lg text-[12px] font-bold">Crawlen starten</button>'
+            + '<button onclick="_korbCrawlZuruecksetzen(this)" class="ml-auto px-3 py-1.5 rounded-lg text-[11px] font-bold bg-white border border-rose-300 text-rose-700 hover:bg-rose-50" title="Alle Vermerke verwerfen, damit alle Absender noch einmal gelesen werden">Stand zurücksetzen</button>'
           + '</div>'
           + '<div id="korbCrawlMeldung" class="text-[11px]"></div>'
         + '</div>'
@@ -45947,7 +45956,29 @@ function _korbCrawlParameter(zaehlen) {
     seit: (document.getElementById('korbCrawlSeit')?.value || '2020') + '-01-01',
     limit: 200,
     zaehlen: !!zaehlen,
+    nur_mit_nummer: !!document.getElementById('korbCrawlNurNummer')?.checked,
+    nachholen: !!document.getElementById('korbCrawlNachholen')?.checked,
   };
+}
+
+/* Wenn sich die Signaturauswertung ändert, sind die alten Vermerke im Weg: Sie
+   sagen „schon erledigt" für Adressen, die damals falsch gelesen wurden. */
+async function _korbCrawlZuruecksetzen(btn) {
+  const meld = document.getElementById('korbCrawlMeldung');
+  const mandant = document.getElementById('korbCrawlMandant')?.value || '';
+  if (!mandant) return toast('Bitte einen Mandanten wählen.', 'warn', 4000);
+  if (!confirm('Alle Crawl-Vermerke für „' + mandant + '" verwerfen?\n\n'
+    + 'Danach werden beim nächsten Lauf wieder ALLE Absender gelesen — auch die, '
+    + 'die schon einmal dran waren.\n\nDie Kontakte im Korb bleiben unangetastet.')) return;
+  setBusy(btn, true, 'Setze zurück…');
+  try {
+    const d = await _korbCrawlAufruf({ mandant, zuruecksetzen: true });
+    setBusy(btn, false);
+    if (meld) meld.innerHTML = '<span class="text-ink-700"><b>' + (d.zurueckgesetzt || 0) + '</b> Vermerke verworfen — der nächste Lauf beginnt von vorn.</span>';
+  } catch (e) {
+    setBusy(btn, false);
+    if (meld) meld.innerHTML = '<span class="text-red-700">' + escapeHtml(e.message || String(e)) + '</span>';
+  }
 }
 
 async function _korbCrawlAufruf(koerper) {
@@ -45969,9 +46000,13 @@ async function _korbCrawlZaehlen(btn) {
   try {
     const d = await _korbCrawlAufruf(_korbCrawlParameter(true));
     setBusy(btn, false);
-    if (meld) meld.innerHTML = '<span class="text-ink-700"><b>' + d.offen + '</b> Absender wurden noch nicht ausgewertet'
+    const nachholen = !!document.getElementById('korbCrawlNachholen')?.checked;
+    if (meld) meld.innerHTML = '<span class="text-ink-700"><b>' + d.offen + '</b> '
+      + (nachholen ? 'Nachzügler stehen an' : 'Absender wurden noch nicht ausgewertet')
       + (d.aussortiert ? ' · ' + d.aussortiert + ' Automaten und Großanbieter fallen weg' : '')
-      + '. Je Lauf werden bis zu 200 bearbeitet.</span>';
+      + '. Je Lauf werden bis zu 200 bearbeitet.'
+      + (!nachholen && d.ohne_nummer_wartend ? '<br>' + d.ohne_nummer_wartend + ' warten mit Firma, aber ohne Nummer — über „Nachzügler holen" erreichbar.' : '')
+      + '</span>';
   } catch (e) {
     setBusy(btn, false);
     if (meld) meld.innerHTML = '<span class="text-red-700">' + escapeHtml(e.message || String(e)) + '</span>';
@@ -45988,7 +46023,9 @@ async function _korbCrawlStarten(btn) {
     const roh = d.kontakte || [];
     if (!roh.length) {
       setBusy(btn, false);
-      if (meld) meld.innerHTML = '<span class="text-ink-700">' + d.geprueft + ' Absender geprüft, keiner mit erkennbarer Firma. '
+      if (meld) meld.innerHTML = '<span class="text-ink-700">' + d.geprueft + ' Absender geprüft, keiner übernommen'
+        + ((d.ohne_firma || 0) ? ' · ' + d.ohne_firma + ' ohne erkennbare Firma' : '')
+        + ((d.ohne_nummer || 0) ? ' · ' + d.ohne_nummer + ' ohne Telefonnummer' : '') + '. '
         + (d.fertig ? 'Es sind keine offenen Absender mehr da.' : 'Nächster Lauf macht weiter.') + '</span>';
       return;
     }
@@ -46024,6 +46061,7 @@ async function _korbCrawlStarten(btn) {
     setBusy(btn, false);
     if (meld) meld.innerHTML = '<span class="text-emerald-700"><b>' + neu + '</b> neu im Korb</span>'
       + ' <span class="text-ink-600">· ' + d.geprueft + ' Absender geprüft · ' + (d.ohne_firma || 0) + ' ohne erkennbare Firma ausgelassen'
+      + ((d.ohne_nummer || 0) ? ' · ' + d.ohne_nummer + ' ohne Telefonnummer zurückgestellt' : '')
       + (doppelt ? ' · ' + doppelt + ' Dubletten' : '') + (gesperrt ? ' · ' + gesperrt + ' gesperrt' : '')
       + ((d.verworfene_nummern || []).length ? ' · ' + d.verworfene_nummern.length + ' Sammelnummern verworfen' : '')
       + '</span><br><span class="text-ink-500">Erneut starten, um die nächsten 200 zu bearbeiten.</span>';
