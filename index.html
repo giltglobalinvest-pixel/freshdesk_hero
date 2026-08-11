@@ -824,7 +824,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.83.1';
+const APP_VERSION = 'v2.83.2';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -33277,19 +33277,50 @@ function _angHatFabriknummer(s) {
   return !/^(unbekannt|unknown|keine?|nicht bekannt|n\.?a\.?|entf(ä|ae)llt|\?+|-+)$/i.test(f);
 }
 
-/** Nächste freie Nummer eines Kreises aus App_Angebote. */
-async function _angNaechsteNummer(feld, nurHero) {
-  if (!APP_KEYS.bkAirtableBaseId || !APP_KEYS.airtableWriteKey) return 1;
+/* Startwerte des ANG-Kreises je Firma — identisch zu ANGEBOT_HARDCODED_START
+   in der Servicebox. Beide Apps müssen dieselbe Zahl kennen, sonst vergibt
+   Hero eine Nummer unterhalb des Bereichs, den die Servicebox verwendet. */
+const _ANG_START_JE_FIRMA = { aszendio: 2480, aufzug: 2480, aufzugshandwerk: 2480 };
+
+/** Startwert einer Firma — bevorzugt aus der Firmen-Tabelle des Berichtskonverters. */
+async function _angStartFuerFirma(firmaSlug) {
+  const fest = +(_ANG_START_JE_FIRMA[String(firmaSlug || '').toLowerCase()] || 0);
   try {
+    const url = 'https://api.airtable.com/v0/' + APP_KEYS.bkAirtableBaseId + '/Firmen'
+      + '?filterByFormula=' + encodeURIComponent("{slug}='" + String(firmaSlug).replace(/'/g, "\\'") + "'")
+      + '&maxRecords=1';
+    const r = await fetch(url, { headers: { 'Authorization': 'Bearer ' + APP_KEYS.airtableWriteKey } });
+    if (r.ok) {
+      const d = await r.json();
+      const v = +((d.records || [])[0]?.fields?.angebot_start_num) || 0;
+      return Math.max(v, fest, 1);
+    }
+  } catch (_) {}
+  return Math.max(fest, 1);
+}
+
+/* Nächste freie Nummer eines Kreises — JE FIRMA.
+
+   Die Servicebox zählt pro Firma und beginnt bei `angebot_start_num`. Hero hat
+   bis v2.83.1 das globale Maximum genommen; damit hätte eine Firma Nummern
+   bekommen, die aus dem Bereich einer anderen stammen. Beide Apps müssen nach
+   derselben Regel zählen, sonst schreiben sie sich gegenseitig in den Kreis. */
+async function _angNaechsteNummer(feld, firmaSlug, nurHero) {
+  if (!APP_KEYS.bkAirtableBaseId || !APP_KEYS.airtableWriteKey) return 1;
+  const start = (feld === 'app_angebot_num') ? await _angStartFuerFirma(firmaSlug) : 1;
+  try {
+    const bedingungen = ["{firma}='" + String(firmaSlug || '').replace(/'/g, "\\'") + "'"];
+    if (nurHero) bedingungen.push("{source_app}='freshdesk_hero'");
     const url = 'https://api.airtable.com/v0/' + APP_KEYS.bkAirtableBaseId + '/App_Angebote'
       + '?fields[]=' + encodeURIComponent(feld)
-      + (nurHero ? '&filterByFormula=' + encodeURIComponent("{source_app}='freshdesk_hero'") : '')
+      + '&filterByFormula=' + encodeURIComponent('AND(' + bedingungen.join(',') + ')')
       + '&sort[0][field]=' + encodeURIComponent(feld) + '&sort[0][direction]=desc&maxRecords=1';
     const res = await fetch(url, { headers: { 'Authorization': 'Bearer ' + APP_KEYS.airtableWriteKey } });
-    if (!res.ok) return 1;
+    if (!res.ok) return start;
     const d = await res.json();
-    return (+((d.records || [])[0]?.fields?.[feld]) || 0) + 1;
-  } catch (_) { return 1; }
+    const max = +((d.records || [])[0]?.fields?.[feld]) || 0;
+    return Math.max(max + 1, start);
+  } catch (_) { return start; }
 }
 
 /** Die Nummer, wie sie auf Papier und in der Liste steht. */
@@ -33306,10 +33337,11 @@ async function _angNummerSichern(s) {
   if (!s || s.angebotNummer != null) return;
   if (!APP_KEYS.bkAirtableBaseId) return;
   const erpFaehig = _angHatFabriknummer(s);
+  const firmaSlug = _erpFirmaSlugForAccount(s.account || {}) || '';
   s.angebotKreis = erpFaehig ? 'ang' : 'fdh';
   s.angebotNummer = erpFaehig
-    ? await _angNaechsteNummer('app_angebot_num', false)
-    : await _angNaechsteNummer('fdh_angebot_num', true);
+    ? await _angNaechsteNummer('app_angebot_num', firmaSlug, false)
+    : await _angNaechsteNummer('fdh_angebot_num', firmaSlug, true);
   s.angebotNr = (erpFaehig ? 'ANG-' : 'FDH-') + s.angebotNummer;
   if (!erpFaehig) {
     toast('Ohne Fabriknummer: Angebot ' + s.angebotNr + ' läuft im Hero-Nummernkreis. '
