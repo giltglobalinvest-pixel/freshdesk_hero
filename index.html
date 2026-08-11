@@ -824,7 +824,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.80.0';
+const APP_VERSION = 'v2.80.2';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -17262,8 +17262,23 @@ const _ARCHIV_ZEITWOERTER = /(letzte|letzten|letzter|letztes|neueste|neuesten|ne
 
 /* Aus der Frage die bedeutungstragenden Wörter ziehen. „bestellung" UND „kone"
    trifft die Bestellungen — „kone" allein trifft jede Mahnung. */
+/* v2.80.2: Anführungszeichen bedeuten „genau so".
+   Vorher wurden sie hier weggeputzt, der Rest in Einzelwörter zerlegt und an
+   jedes ein Stern gehängt — aus „Lange Straße" wurde Lange* Straße*, und das
+   traf „Langer" und „Strasse" irgendwo im Ticket. Wer in Anführungszeichen
+   sucht, will genau diese Wortfolge und nichts Ähnliches.
+
+   Zitiertes wird deshalb unangetastet durchgereicht: keine Füllwortfilterung,
+   keine Mindestlänge, kein Stern. */
 function _archivBegriffe(text) {
-  return String(text || '')
+  const roh = String(text || '');
+  const phrasen = [];
+  const rest = roh.replace(/"([^"]+)"/g, (_, p) => {
+    const t = p.replace(/\s+/g, ' ').trim();
+    if (t) phrasen.push(t);
+    return ' ';
+  });
+  const woerter = rest
     .replace(/[^\p{L}\p{N}\s*@.-]/gu, ' ')
     .split(/\s+/)
     .map(w => w.trim())
@@ -17272,6 +17287,7 @@ function _archivBegriffe(text) {
     // praktisch nie tut, und die Suche liefe ins Leere.
     .filter(w => w.length >= 3 && !_ARCHIV_FUELLWOERTER.has(w.toLowerCase()) && !_ARCHIV_ZEITWOERTER.test(w))
     .slice(0, 6);
+  return { phrasen, woerter };
 }
 
 async function _archivSucheAnzeigen(text, kiBegriff) {
@@ -17302,9 +17318,20 @@ async function _archivSucheAnzeigen(text, kiBegriff) {
     };
 
     // Erst die ganze Frage, UND-verknüpft — das ist die präzise Antwort.
-    const woerter = _archivBegriffe(text);
-    gesucht = mitStern(woerter);
+    const { phrasen, woerter } = _archivBegriffe(text);
+    // Zitiertes bleibt Phrase, der Rest bekommt den Stern für Zusammensetzungen.
+    gesucht = phrasen.map(p => '"' + p + '"').concat(woerter.length ? [mitStern(woerter)] : []).join(' ');
     let treffer = gesucht ? sammeln(await archivSuchen(gesucht, opts)) : [];
+
+    // Bei einer ausdrücklich zitierten Wortfolge NICHT lockern: Wer „Lange
+    // Straße" sucht, will keine Treffer für „Langer" — dann ist „nichts
+    // gefunden" die richtige Antwort und keine Notlösung.
+    if (!treffer.length && phrasen.length) {
+      box.innerHTML = '<p class="text-[11px] text-emerald-900">Die Wortfolge '
+        + phrasen.map(p => '<b>„' + escapeHtml(p) + '"</b>').join(' und ')
+        + ' kommt im Archiv nicht vor. Ohne Anführungszeichen suchen, um ähnliche Treffer zu bekommen.</p>';
+      return;
+    }
 
     // Nichts gefunden? Schrittweise lockern statt leer ausgehen lassen:
     // erst der KI-Begriff, sonst das längste Wort der Frage.
@@ -42101,6 +42128,9 @@ async function _zdbHistorieHolen(acc, email) {
   const slug = _archivSlugFuer(acc.id);
   if (!key) throw new Error('Nicht angemeldet.');
   if (!slug) throw new Error('Für „' + (acc.name || acc.id) + '" gibt es kein Archiv.');
+  // Nur das Archiv DIESES Mandanten: Die Vorgeschichte eines Kunden gehört zu
+  // der Firma, mit der er geschrieben hat, und bleibt zwischen den Mandanten
+  // getrennt.
   const p = new URLSearchParams({ email, mandant: slug, limit: '20' });
   const res = await fetch(ARCHIV_URL + '/historie?' + p.toString(), { headers: { 'X-Hero-Key': key } });
   const d = await res.json().catch(() => ({}));
@@ -44638,9 +44668,16 @@ function _ccImportOeffnen() {
             + '<p class="text-[11px] text-ink-500 mb-2">Absender aus 144 000 Tickets — Menschen, die selbst geschrieben haben. Wer öfter geschrieben hat, ist der lohnendere Anruf.</p>'
             + '<div class="grid grid-cols-3 gap-2 mb-2">'
               + '<label class="block"><span class="text-[10px] font-semibold text-ink-600">Mandant</span>'
+                // Kein „alle": Kontakte aus dem Archiv sind Kunden EINER Firma.
+                // Vorbelegt ist der Mandant der Kampagne — alles andere ist eine
+                // bewusste Entscheidung und soll auch so aussehen.
                 + '<select id="ccArchivMandant" class="w-full mt-0.5 px-1.5 py-1 border border-ink-300 rounded text-[12px] bg-white">'
-                + '<option value="">alle</option>'
-                + (APP_STATE.accounts || []).map(a => { const sl = _archivSlugFuer(a.id); return sl ? '<option value="' + escapeAttr(sl) + '">' + escapeHtml(a.name || sl) + '</option>' : ''; }).join('')
+                + (APP_STATE.accounts || []).map(a => {
+                    const sl = _archivSlugFuer(a.id);
+                    if (!sl) return '';
+                    const gewaehlt = acc && a.id === acc.id ? ' selected' : '';
+                    return '<option value="' + escapeAttr(sl) + '"' + gewaehlt + '>' + escapeHtml(a.name || sl) + '</option>';
+                  }).join('')
                 + '</select></label>'
               + '<label class="block"><span class="text-[10px] font-semibold text-ink-600">ab Tickets</span>'
                 + '<input id="ccArchivMin" type="number" min="1" max="99" value="2" class="w-full mt-0.5 px-1.5 py-1 border border-ink-300 rounded text-[12px]" title="Wie oft muss jemand geschrieben haben?"></label>'
@@ -45240,7 +45277,8 @@ function _ccTypWahlLesen() {
 function _ccArchivParameter() {
   const p = new URLSearchParams();
   const m = document.getElementById('ccArchivMandant')?.value || '';
-  if (m) p.set('mandant', m);
+  if (!m) throw new Error('Bitte einen Mandanten wählen — Archivkontakte gehören zu genau einer Firma.');
+  p.set('mandant', m);
   p.set('min', String(Math.max(1, parseInt(document.getElementById('ccArchivMin')?.value || '2', 10) || 2)));
   p.set('seit', (document.getElementById('ccArchivSeit')?.value || '2020') + '-01-01');
   return p;
@@ -45278,6 +45316,10 @@ async function _ccImportAusArchiv(btn) {
     const d = await res.json();
     if (!res.ok) throw new Error(d.fehler || ('HTTP ' + res.status));
     const roh = d.kontakte || [];
+    // Klarname statt Kürzel — „Archiv · Aufzugshandwerk GmbH" liest sich in der
+    // Zeile besser als „Archiv · aufzugshandwerk".
+    const quellSlug = document.getElementById('ccArchivMandant')?.value || '';
+    const quellName = ((APP_STATE.accounts || []).find(a => _archivSlugFuer(a.id) === quellSlug) || {}).name || quellSlug;
     if (!roh.length) { setBusy(btn, false); return toast('Keine Absender mit diesen Bedingungen gefunden.', 'warn', 7000); }
 
     const sperre = await _ccSperrlisteLaden(true);
@@ -45305,7 +45347,7 @@ async function _ccImportAusArchiv(btn) {
         account_id: acc.id, kampagne: CC_STATE.kampagne || CC_KAMPAGNE_STANDARD,
         // Anzahl und letzter Kontakt stehen in der Notiz — daran erkennt der
         // Anrufer sofort, wie warm der Kontakt ist.
-        quelle: 'Archiv · ' + (k.mandant || ''),
+        quelle: 'Archiv · ' + (quellName || k.mandant || ''),
         notiz: k.anzahl + ' Vorgänge, zuletzt ' + String(k.zuletzt || '').slice(0, 7),
         dedupe_key: kenn.mail, dedupe_tel: '',
         bestand: istBestand ? 'ja' : '',
