@@ -824,7 +824,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.82.3';
+const APP_VERSION = 'v2.82.4';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -45629,6 +45629,7 @@ const CRAWL_STATE = {
   list: [],               // aktuell geladene gecrawlte Kontakte (für die Ansicht)
   types: null,            // ContactTypes-Liste
   filterTyp: '',
+  zeigeMax: 300,      // wie viele Karten gezeichnet werden — der Rest per Knopf
   showHidden: false,      // v2.46.215: Spam/ausgeblendete Kontakte mit anzeigen
   nurOffene: true,        // v2.68.6: Standardansicht = nur Wartende (die brauchen Aufmerksamkeit)
 };
@@ -45871,7 +45872,11 @@ async function showCrawledContacts(btn) {
   if (btn) setBusy(btn, true);
   try {
     const [recs] = await Promise.all([
-      airtableRead(CRAWLED_TABLE, { sort: [{ field: 'crawled_at', direction: 'desc' }], maxRecords: 500 }),
+      // v2.82.4: kein 500er-Deckel mehr. Aufzugshandwerk allein hat 3922
+      // verschiedene Absender im Archiv — mit der alten Grenze wären alles
+      // darüber hinaus stillschweigend unsichtbar geblieben, und im Korb hätte
+      // eine Zahl gestanden, die nichts mit dem Bestand zu tun hat.
+      airtableRead(CRAWLED_TABLE, { sort: [{ field: 'crawled_at', direction: 'desc' }], maxRecords: 20000 }),
       loadContactTypes(),
     ]);
     CRAWL_STATE.list = recs.map(r => Object.assign({ recordId: r.id }, r.fields));
@@ -45924,10 +45929,13 @@ function _korbArchivCrawlOeffnen() {
                 }).join('')
               + '</select></label>'
             + '<label class="block"><span class="text-[10px] font-semibold text-ink-600">ab Vorgängen</span>'
-              + '<input id="korbCrawlMin" type="number" min="1" max="99" value="2" class="w-full mt-0.5 px-1.5 py-1 border border-ink-300 rounded text-[12px]"></label>'
+              + '<input id="korbCrawlMin" type="number" min="1" max="99" value="1" class="w-full mt-0.5 px-1.5 py-1 border border-ink-300 rounded text-[12px]"></label>'
             + '<label class="block"><span class="text-[10px] font-semibold text-ink-600">seit Jahr</span>'
-              + '<input id="korbCrawlSeit" type="number" min="2012" max="2030" value="' + (new Date().getFullYear() - 4) + '" class="w-full mt-0.5 px-1.5 py-1 border border-ink-300 rounded text-[12px]"></label>'
+              + '<input id="korbCrawlSeit" type="number" min="2012" max="2030" value="' + (new Date().getFullYear() - 9) + '" class="w-full mt-0.5 px-1.5 py-1 border border-ink-300 rounded text-[12px]"></label>'
           + '</div>'
+          + '<p class="text-[10px] text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-2 py-1.5">'
+            + 'Diese beiden Felder bestimmen, wie groß der Vorrat überhaupt ist. Aufzugshandwerk hat 3922 verschiedene Absender seit 2018 — '
+            + 'mit „ab 2 Vorgängen, seit 2022" bleiben davon nur 1379 übrig. Wer alles will, lässt beides auf 1 bzw. dem Anfangsjahr stehen.</p>'
           + '<label class="flex items-start gap-2 text-[11px] text-ink-700 cursor-pointer">'
             + '<input type="checkbox" id="korbCrawlNurNummer" checked class="mt-0.5">'
             + '<span><b>Nur mit Telefonnummer übernehmen.</b> Ohne Nummer ist ein Kontakt für die Akquise wertlos. '
@@ -46079,6 +46087,10 @@ function _renderCrawledContacts() {
   const types = CRAWL_STATE.types || [];
   const scoped = _crawlMandantScoped();       // v2.46.218: auf gewählten Mandanten begrenzt
   const list = _crawlVisible();
+  /* Gezeichnet wird nur der Anfang. Der Korb kann tausende Karten enthalten;
+     alle auf einmal in den DOM zu legen macht die Seite unbenutzbar. Der Index i
+     bleibt gültig, weil er sich weiterhin auf `_crawlVisible()` bezieht. */
+  const sichtbar = list.slice(0, CRAWL_STATE.zeigeMax || 300);
   const hiddenCount = scoped.filter(r => r.hidden === 'spam').length;
   const softHiddenCount = scoped.filter(r => r.hidden === 'hidden').length; // v2.46.286
   const accId = CONTACTS_STATE.searchAccountId;
@@ -46126,7 +46138,7 @@ function _renderCrawledContacts() {
         '</div>' : '') +
       '<p class="text-[10px] text-violet-700 mt-1">Aus Ticket-Signaturen erfasst. Push-Buttons legen an bzw. aktualisieren — FD/FS nutzen die bestehenden Flows, MC = Mailchimp-Upsert.</p>' +
     '</div>' +
-    (list.length ? list.map((r, i) =>
+    (list.length ? sichtbar.map((r, i) =>
       '<div class="' + (r.hidden === 'spam' ? 'bg-rose-50 border-rose-200' : r.hidden === 'hidden' ? 'bg-ink-50 border-ink-200 opacity-60' : 'bg-white border-ink-200') + ' rounded-xl border p-3 mb-2 transition">' +
         '<div class="flex items-start gap-2 flex-wrap">' +
           '<div class="flex-1 min-w-[220px] cursor-pointer" onclick="_crawlDetail(' + i + ')" title="Vollständige Kontaktdetails anzeigen">' +
@@ -46176,7 +46188,11 @@ function _renderCrawledContacts() {
           '</div>' +
         '</div>' +
       '</div>'
-    ).join('') : '<div class="bg-white rounded-xl border border-dashed border-ink-300 p-6 text-center text-ink-500 text-sm">' + (CRAWL_STATE.nurOffene ? 'Nichts Offenes im Korb' : 'Noch nichts im Korb') + (mandantName ? ' für „' + escapeHtml(mandantName) + '"' : '') + (CRAWL_STATE.filterTyp ? ' mit diesem Typ' : '') + '. Öffne Tickets — Signaturen werden automatisch gescannt.</div>');
+    ).join('') : '<div class="bg-white rounded-xl border border-dashed border-ink-300 p-6 text-center text-ink-500 text-sm">' + (CRAWL_STATE.nurOffene ? 'Nichts Offenes im Korb' : 'Noch nichts im Korb') + (mandantName ? ' für „' + escapeHtml(mandantName) + '"' : '') + (CRAWL_STATE.filterTyp ? ' mit diesem Typ' : '') + '. Öffne Tickets — Signaturen werden automatisch gescannt.</div>')
+    + (list.length > sichtbar.length
+        ? '<div class="text-center py-3"><button onclick="CRAWL_STATE.zeigeMax=(CRAWL_STATE.zeigeMax||300)+300;_renderCrawledContacts()" class="px-4 py-2 bg-violet-600 hover:bg-violet-700 text-white rounded-lg text-[12px] font-bold">Weitere 300 anzeigen</button>'
+          + '<p class="text-[11px] text-ink-500 mt-1">' + sichtbar.length + ' von ' + list.length + ' gezeigt</p></div>'
+        : '');
   if (window.lucide) lucide.createIcons();
 }
 
