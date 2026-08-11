@@ -824,7 +824,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.83.0';
+const APP_VERSION = 'v2.83.1';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -29815,7 +29815,9 @@ async function openAngebotsChatModal(accountId, ticketId, forcedRestore) {
       // v2.83.0: Identität des geladenen Angebots übernehmen. Ohne das trug das
       // PDF eine andere Nummer als der Datensatz, aus dem es stammt.
       if (restored.angebotNummer != null) window._ANG_CHAT.angebotNummer = restored.angebotNummer;
-      if (restored.bkRecordId) window._ANG_CHAT.bkRecordId = restored.bkRecordId;
+      if (restored.angebotKreis) window._ANG_CHAT.angebotKreis = restored.angebotKreis;
+      if (restored.angebotNr)    window._ANG_CHAT.angebotNr    = restored.angebotNr;
+      if (restored.bkRecordId)   window._ANG_CHAT.bkRecordId   = restored.bkRecordId;
     }
     _renderAngChatShell();
     const subj = ticket.subject || '';
@@ -30041,7 +30043,7 @@ async function _angLoadKundenPreishistorie(kundeName, exclTicketId) {
       let positionen = [];
       try { positionen = JSON.parse(f.positionen_json || '[]'); } catch (_) {}
       const datum = f.erstellt_am || '';
-      const angNr = 'ANG-' + (f.app_angebot_num || '?');
+      const angNr = f.angebot_nr || 'ANG-' + (f.app_angebot_num || f.fdh_angebot_num || '?');
       out.angebote++;
       for (const p of positionen) {
         const preis = +p.vp || +p.einzelpreis || 0;
@@ -30227,12 +30229,15 @@ function _angMapBkFieldsToRestore(f, recordId) {
     history:   [],
     iteration: 1,
     savedAt:   f.erstellt_am || '',
-    fromBK:    'ANG-' + (f.app_angebot_num || '?'),
+    fromBK:    f.angebot_nr || 'ANG-' + (f.app_angebot_num || f.fdh_angebot_num || '?'),
     /* v2.83.0: Die Nummer gehört zum wiederhergestellten Angebot. Bis hierher
        ging sie verloren — das PDF fiel deshalb auf „ANG-FDH-<Ticket>" zurück,
        während im Chat „ANG-2709 geladen" stand und beim Speichern eine dritte
        Nummer gezogen wurde. Drei Nummern für ein Angebot. */
-    angebotNummer: (f.app_angebot_num != null ? f.app_angebot_num : null),
+    angebotNummer: (f.app_angebot_num != null ? f.app_angebot_num
+                    : (f.fdh_angebot_num != null ? f.fdh_angebot_num : null)),
+    angebotKreis:  (f.app_angebot_num != null ? 'ang' : (f.fdh_angebot_num != null ? 'fdh' : null)),
+    angebotNr:     f.angebot_nr || null,
     bkRecordId:    recordId || null,
   };
 }
@@ -32726,9 +32731,10 @@ async function _angChatGenerateOffer(s, userText) {
   // damit PDF-Nummer und BK-Archiv-Nummer übereinstimmen.
   // v2.46.303: NUR für neue Angebote — bereits existierende (aus dem BK wiederhergestellte)
   // behalten ihr Verhalten von vorher (keine neue Nummer reservieren/aufzwingen).
-  if (s.angebotNummer == null && !s._restored && APP_KEYS.bkAirtableBaseId) {
-    try { s.angebotNummer = await _bkNextAppAngebotNum(APP_KEYS.bkAirtableBaseId); } catch (_) { s.angebotNummer = null; }
-  }
+  // v2.83.1: KEINE Reservierung mehr an dieser Stelle. Hier ist die
+  // Fabriknummer noch nicht bekannt — das Angebot bekäme womöglich eine
+  // Nummer aus dem falschen Kreis. Vergeben wird in _angNummerSichern(),
+  // kurz bevor das erste PDF entsteht.
   _angTlEnd(_tlCtx, 'ok');
   const sysPrompt =
     'Du erstellst SCHLANK STRUKTURIERTE Aufzug-Service-Angebote im Stil von Aufzugshandwerk GmbH (Referenz-Beispiel). ' +
@@ -33247,14 +33253,69 @@ async function _angChatCallApi(s) {
 /* v2.46.181: KOMPLETT NEU — kein HTML-Dump mehr in den Reply-Body.
    Stattdessen: Send-Vorschau-Modal mit editierbarem Email-Text, dem
    generierten BK-PDF als echtem Anhang und Signatur-Option. */
-/* v2.83.0: Nummer festmachen, BEVOR etwas Kundensichtbares entsteht.
-   Bis hierher konnte ein Angebot als „ANG-FDH-3112" beim Kunden landen und
-   später als „ANG-2709" im Berichtskonverter stehen — zwei Nummern für
-   dasselbe Papier, und die auf dem PDF gab es in keinem System. */
+/* ===== Zwei Nummernkreise ================================================
+   Die Regel dahinter ist keine Formsache, sondern folgt aus dem ERP: Dort
+   hängt jedes Angebot an einer Anlage, und eine Anlage ohne Fabriknummer legt
+   niemand an. Ein Angebot ohne Fabriknummer kann im ERP also gar nicht
+   existieren — es lebt ausschließlich in Hero und der Servicebox.
+
+   Deshalb bekommt es einen eigenen Kreis: FDH-1, FDH-2, … Wer die Nummer auf
+   dem Papier sieht, weiß damit sofort, ob es im ERP einen Vorgang dazu gibt.
+   Angebote MIT Fabriknummer laufen weiter im gemeinsamen Kreis ANG-…, den sich
+   Hero und die Servicebox teilen.
+
+   Vergeben wird so spät wie möglich — erst wenn etwas Kundensichtbares
+   entsteht. Früher wäre die Fabriknummer oft noch nicht bekannt und das
+   Angebot bekäme die falsche Sorte Nummer. Einmal vergeben, bleibt sie: Eine
+   Nummer nachträglich zu ändern, nachdem das PDF beim Kunden liegt, wäre
+   schlimmer als eine Nummer aus dem falschen Kreis. */
+
+/** Taugt die Fabriknummer, um im ERP eine Anlage zu bestimmen oder anzulegen? */
+function _angHatFabriknummer(s) {
+  const f = String((s && s.collected && s.collected.fabriknummer) || '').trim();
+  if (f.length < 3) return false;
+  return !/^(unbekannt|unknown|keine?|nicht bekannt|n\.?a\.?|entf(ä|ae)llt|\?+|-+)$/i.test(f);
+}
+
+/** Nächste freie Nummer eines Kreises aus App_Angebote. */
+async function _angNaechsteNummer(feld, nurHero) {
+  if (!APP_KEYS.bkAirtableBaseId || !APP_KEYS.airtableWriteKey) return 1;
+  try {
+    const url = 'https://api.airtable.com/v0/' + APP_KEYS.bkAirtableBaseId + '/App_Angebote'
+      + '?fields[]=' + encodeURIComponent(feld)
+      + (nurHero ? '&filterByFormula=' + encodeURIComponent("{source_app}='freshdesk_hero'") : '')
+      + '&sort[0][field]=' + encodeURIComponent(feld) + '&sort[0][direction]=desc&maxRecords=1';
+    const res = await fetch(url, { headers: { 'Authorization': 'Bearer ' + APP_KEYS.airtableWriteKey } });
+    if (!res.ok) return 1;
+    const d = await res.json();
+    return (+((d.records || [])[0]?.fields?.[feld]) || 0) + 1;
+  } catch (_) { return 1; }
+}
+
+/** Die Nummer, wie sie auf Papier und in der Liste steht. */
+function _angNrText(s) {
+  if (!s) return '';
+  if (s.angebotNr) return s.angebotNr;
+  if (s.angebotNummer != null) return (s.angebotKreis === 'fdh' ? 'FDH-' : 'ANG-') + s.angebotNummer;
+  // Noch nicht vergeben — als Platzhalter der Ticketbezug, nie als echte Nummer.
+  return 'FDH-Entwurf-' + (s.ticketId || '?');
+}
+
+/** Nummer festmachen, BEVOR etwas Kundensichtbares entsteht. */
 async function _angNummerSichern(s) {
   if (!s || s.angebotNummer != null) return;
   if (!APP_KEYS.bkAirtableBaseId) return;
-  try { s.angebotNummer = await _bkNextAppAngebotNum(APP_KEYS.bkAirtableBaseId); } catch (_) {}
+  const erpFaehig = _angHatFabriknummer(s);
+  s.angebotKreis = erpFaehig ? 'ang' : 'fdh';
+  s.angebotNummer = erpFaehig
+    ? await _angNaechsteNummer('app_angebot_num', false)
+    : await _angNaechsteNummer('fdh_angebot_num', true);
+  s.angebotNr = (erpFaehig ? 'ANG-' : 'FDH-') + s.angebotNummer;
+  if (!erpFaehig) {
+    toast('Ohne Fabriknummer: Angebot ' + s.angebotNr + ' läuft im Hero-Nummernkreis. '
+      + 'Im ERP kann es nicht angelegt werden — dort braucht jedes Angebot eine Anlage, '
+      + 'und eine Anlage braucht eine Fabriknummer.', 'info', 10000);
+  }
 }
 
 async function angChatExecuteFinal(btn) {
@@ -33280,10 +33341,10 @@ async function angChatExecuteFinal(btn) {
     mailText = [c.anschreiben_anrede || 'Sehr geehrte Damen und Herren,', c.anschreiben_body].filter(Boolean).join('\n\n');
   } else {
     mailText = (c.anschreiben_anrede || 'Sehr geehrte Damen und Herren,') + '\n\n' +
-      'vielen Dank für Ihre Anfrage. Anbei erhalten Sie unser Angebot ANG-' + (s.angebotNummer != null ? s.angebotNummer : ('FDH-' + s.ticketId)) + ' als PDF.\n\n' +
+      'vielen Dank für Ihre Anfrage. Anbei erhalten Sie unser Angebot ' + _angNrText(s) + ' als PDF.\n\n' +
       'Eine kurze Antwort auf diese E-Mail genügt uns als Auftragsbestätigung.';
   }
-  const pdfName = 'Angebot-ANG-' + (s.angebotNummer != null ? s.angebotNummer : ('FDH-' + s.ticketId)) + '.pdf';
+  const pdfName = 'Angebot-' + _angNrText(s) + '.pdf';
   const pdfKb = Math.round(pdfBlob.size / 1024);
   // v2.46.185: Ticket-Anhänge sammeln — auswählbar zum Mitsenden (z.B. TÜV-Mängelbericht)
   const ticketAtts = [];
@@ -33502,7 +33563,7 @@ async function angChatConfirmSend(btn) {
         if (sig && typeof appendSignatureHtml === 'function') bodyHtml = appendSignatureHtml(bodyHtml, sig);
       } catch (_) {}
     }
-    const pdfName = 'Angebot-ANG-' + (s.angebotNummer != null ? s.angebotNummer : ('FDH-' + s.ticketId)) + '.pdf';
+    const pdfName = 'Angebot-' + _angNrText(s) + '.pdf';
     const sendAtts = [{ blob: s._sendPdfBlob, name: pdfName }];
     // v2.46.185: ausgewählte Ticket-Anhänge (z.B. TÜV-Mängelbericht) laden + mitsenden
     const checked = Array.from(document.querySelectorAll('[data-send-att-idx]:checked'))
@@ -33596,7 +33657,7 @@ async function angChatConfirmSend(btn) {
     _angPersistState();  // v2.46.196: VERSENDET = gespeichert — das ist ab jetzt die Referenz-Version
     closeAngSendPreview();
     closeAngebotsChatModal();
-    toast('Angebot ANG-' + (s.angebotNummer != null ? s.angebotNummer : ('FDH-' + s.ticketId)) + ' mit PDF-Anhang versendet' + bkNote, 'success', 6000);
+    toast('Angebot ' + _angNrText(s) + ' mit PDF-Anhang versendet' + bkNote, 'success', 6000);
     if (!APP_KEYS.bkAirtableBaseId) {
       toast('Hinweis: NICHT im Berichtskonverter gespeichert — Base-ID fehlt (Admin → Einstellungen → ERP-Block)', 'warn', 10000);
     } else if (bkError) {
@@ -33638,7 +33699,7 @@ async function angChatShowPdfOnly(btn) {
   const html = _renderAngebotHtml(ctx);
   const w = window.open('', '_blank');
   if (!w) { toast('Browser hat Popup blockiert', 'warn'); return; }
-  w.document.write('<!DOCTYPE html><html><head><meta charset="utf-8"><title>Angebot ANG-' + (s.angebotNummer != null ? s.angebotNummer : ('FDH-' + s.ticketId)) + '</title></head><body>' + html + '<script>setTimeout(function(){window.print();},400);<\/script></body></html>');
+  w.document.write('<!DOCTYPE html><html><head><meta charset="utf-8"><title>Angebot ' + _angNrText(s) + '</title></head><body>' + html + '<script>setTimeout(function(){window.print();},400);<\/script></body></html>');
   w.document.close();
   toast('PDF-Druck-Dialog öffnet — Cmd+P → „Als PDF speichern"', 'success', 4000);
 }
@@ -35616,6 +35677,8 @@ async function _angebotSaveAirtable(ctx, status) {
    Schreibt in {bkAirtableBaseId}/App_Angebote so dass es in dessen Liste
    erscheint. Markiert mit source_app='freshdesk_hero' + freshdesk_ticket_id.
    KEIN Push ins ERP (bewusst weggelassen — nur Berichtskonverter-Listing). */
+/* Alt — bleibt als dünne Hülle, damit ältere Aufrufe nicht ins Leere laufen.
+   Die Vergabe läuft über _angNummerSichern / _angNaechsteNummer. */
 async function _bkNextAppAngebotNum(bkBaseId) {
   if (!bkBaseId || !APP_KEYS.airtableWriteKey) return 1;
   try {
@@ -35663,8 +35726,15 @@ async function _bkErpBezugSetzen(recordId, s) {
   catch (e) { console.warn('[BK-Save] Anlagensuche:', e.message); return; }
   if (!anlage) {
     s._erpBezug = { fehlt: 'Anlage zu Fabriknummer ' + fab };
-    toast('Im Berichtskonverter gespeichert — aber im ERP gibt es keine Anlage mit der Fabriknummer '
-      + fab + '. Ohne Anlage kein ERP-Push aus der Servicebox.', 'warn', 11000);
+    // Anlegen ist ein Eingriff ins ERP — das entscheidet der Mensch, nicht der
+    // Speichervorgang. Wir bieten den vorhandenen Dialog an, mehr nicht.
+    if (confirm('Angebot ' + _angNrText(s) + ' ist gespeichert.\n\n'
+      + 'Im ERP gibt es aber keine Anlage mit der Fabriknummer ' + fab + '. '
+      + 'Ohne Anlage nimmt das ERP kein Angebot an.\n\n'
+      + 'Jetzt eine Anlage im ERP anlegen?')) {
+      try { openErpAnlageCreate(fab); }
+      catch (e) { toast('Anlage-Dialog: ' + (e.message || e), 'error', 6000); }
+    }
     return;
   }
   const kdNr = anlage.kunde?.kundennummer || anlage.kundennummer || '';
@@ -35707,13 +35777,13 @@ async function _bkSaveAngebotToBK(chatState) {
   const rec = _fdhChatToBkRec(s);
   if (!rec) throw new Error('Mapper lieferte nichts');
   const account = s.account || {};
-  // v2.46.302: bereits reservierte Nummer verwenden (matcht die PDF-Nummer); sonst frisch ziehen
-  const angNum = (s.angebotNummer != null) ? s.angebotNummer : await _bkNextAppAngebotNum(APP_KEYS.bkAirtableBaseId);
-  s.angebotNummer = angNum;
+  // Nummer kommt aus _angNummerSichern — dieselbe, die auf dem PDF steht, und
+  // aus dem Kreis, der zur ERP-Fähigkeit des Angebots passt.
+  await _angNummerSichern(s);
+  const angNum = s.angebotNummer;
   const istAenderung = !!s.bkRecordId;
   const fdUrl = account.domain ? ('https://' + account.domain + '.freshdesk.com/a/tickets/' + s.ticketId) : '';
   const fields = Object.assign({}, rec, {
-    app_angebot_num:      angNum,
     status:               'fertig',
     source_app:           'freshdesk_hero',
     freshdesk_ticket_id:  String(s.ticketId || ''),
@@ -35727,12 +35797,21 @@ async function _bkSaveAngebotToBK(chatState) {
   // seiner eigenen App; bei false reicht der Default „unchecked" — und wir
   // vermeiden Auto-Create-Sonderfälle für Checkbox-Typen).
   if (!fields.gesamtpreis_ausblenden) delete fields.gesamtpreis_ausblenden;
+  // Nur der Nummernkreis des Angebots wird geschrieben — das jeweils andere
+  // Feld bleibt weg statt als null zu gehen.
+  Object.keys(fields).forEach(k => { if (fields[k] === null) delete fields[k]; });
   // v2.46.301: reines FDH-Render-Flag — NICHT ins Berichtskonverter-Archiv schreiben
   // (die BK-App-Tabelle App_Angebote kennt das Feld nicht → sonst 422 UNKNOWN_FIELD_NAME).
   // Das App-PDF berücksichtigt es ohnehin direkt über _fdhChatToBkRec.
   delete fields.gesamtsumme_weglassen;
   const defaults = {
     app_angebot_num:      'number',
+    fdh_angebot_num:      'number',
+    angebot_nr:           'singleLineText',
+    anlage_id:            'singleLineText',
+    kunde_nummer:         'singleLineText',
+    kontakt_id:           'singleLineText',
+    erp_firma_slug:       'singleLineText',
     firma:                'singleLineText',
     bearbeiter:           'singleLineText',
     angebot_typ:          'singleLineText',
@@ -36202,7 +36281,7 @@ async function _buildAngebotPdf(rec) {
   // RECHTS: Datum + Angebot-Nr. (gleiche y-Höhe wie Empfänger-Block)
   doc.setFontSize(8.5); doc.setTextColor(...GREY_L);
   const today = rec.erstellt_am || new Date().toISOString().slice(0,10);
-  const angNr = 'ANG-' + (rec.app_angebot_num||'?');
+  const angNr = rec.angebot_nr || ('ANG-' + (rec.app_angebot_num || rec.fdh_angebot_num || '?'));
   const metaY = 40;
   doc.text('Datum:', mr-50, metaY);
   doc.setTextColor(...GREY);
@@ -36545,7 +36624,11 @@ function _fdhChatToBkRec(chatState) {
     '$1\n\n'
   );
   return {
-    app_angebot_num:      (s.angebotNummer != null ? s.angebotNummer : ('FDH-' + (s.ticketId || '?'))),
+    app_angebot_num:      (s.angebotKreis === 'fdh' ? null : s.angebotNummer),
+    fdh_angebot_num:      (s.angebotKreis === 'fdh' ? s.angebotNummer : null),
+    // Die Nummer als Text — beide Kreise in einem Feld, damit Liste und PDF
+    // dasselbe zeigen und niemand aus einer nackten Zahl den Kreis raten muss.
+    angebot_nr:           _angNrText(s),
     // v2.67.7: Ticket-Nr. mitgeben, damit sie im PDF-Kopf erscheint — vom
     // ausgedruckten Angebot aus findet man so direkt das zugehörige Ticket.
     freshdesk_ticket_id:  String(s.ticketId || ''),
