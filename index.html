@@ -824,7 +824,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.82.2';
+const APP_VERSION = 'v2.82.3';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -45851,8 +45851,9 @@ async function _crawlTypChange(recordId, val) {
     const name = prompt('Neuer Kontakttyp (z.B. Hausverwaltung, Sub, TÜV):');
     if (!name || !name.trim()) { _renderCrawledContacts(); return; }
     try {
-      await airtableWriteWithAutoField(CONTACT_TYPES_TABLE, { name: name.trim() }, { name: 'singleLineText' });
-      await loadContactTypes(true);
+      // In dieselbe Liste wie die zentrale DB und die Anrufliste — sonst kennt
+      // den neuen Typ außerhalb des Korbs niemand.
+      await _ccTypenSpeichern(_ccTypenListe().concat(name.trim()));
       val = name.trim();
     } catch (e) { toast('Typ anlegen fehlgeschlagen: ' + e.message, 'error', 6000); return; }
   }
@@ -46084,8 +46085,16 @@ function _renderCrawledContacts() {
   const mandantName = (accId && accId !== 'all')
     ? (((APP_STATE.accounts || []).find(a => String(a.id) === String(accId)) || {}).name || accId)
     : '';
+  /* v2.82.3: EINE Typenliste. Vorher pflegte der Korb eine eigene Airtable-
+     Tabelle „ContactTypes" (drei Einträge), die zentrale DB dagegen die Liste
+     aus der Typenverwaltung (achtzehn). Wer im Korb einordnete, hatte die
+     Hälfte der Auswahl nicht — und der Typ ging beim Übernehmen verloren, weil
+     ihn drüben niemand kannte. Alte Einträge bleiben sichtbar, damit bereits
+     gesetzte Typen nicht aus den Auswahlfeldern verschwinden. */
+  const typListe = [...new Set(_ccTypenListe().concat(types.map(t => t.name)))].filter(Boolean);
   const typOpts = (sel) => '<option value="">(kein Typ)</option>' +
-    types.map(t => '<option value="' + escapeAttr(t.name) + '"' + (sel === t.name ? ' selected' : '') + '>' + escapeHtml(t.name) + '</option>').join('') +
+    [...new Set(sel ? typListe.concat(sel) : typListe)]
+      .map(t => '<option value="' + escapeAttr(t) + '"' + (sel === t ? ' selected' : '') + '>' + escapeHtml(t) + '</option>').join('') +
     '<option value="__new__">➕ Neuer Typ…</option>';
   host.innerHTML =
     '<div id="crawlRoot" class="bg-gradient-to-br from-violet-50 to-indigo-50 border border-violet-200 rounded-xl p-3 mb-2">' +
@@ -46097,7 +46106,7 @@ function _renderCrawledContacts() {
         (mandantName ? '<span class="text-[10px] font-bold px-1.5 py-0.5 rounded bg-white border border-violet-300 text-violet-700 inline-flex items-center gap-1"><i data-lucide="building-2" class="w-3 h-3"></i> ' + escapeHtml(mandantName) + '</span>' : '') +
         '<select onchange="CRAWL_STATE.filterTyp=this.value;_renderCrawledContacts()" class="ml-auto px-2 py-1 border border-violet-300 rounded-lg text-[11px] bg-white">' +
           '<option value="">Alle Typen</option>' +
-          types.map(t => '<option value="' + escapeAttr(t.name) + '"' + (CRAWL_STATE.filterTyp === t.name ? ' selected' : '') + '>' + escapeHtml(t.name) + '</option>').join('') +
+          typListe.map(t => '<option value="' + escapeAttr(t) + '"' + (CRAWL_STATE.filterTyp === t ? ' selected' : '') + '>' + escapeHtml(t) + '</option>').join('') +
         '</select>' +
         (APP_KEYS.user?.is_admin ? '<button onclick="_korbArchivCrawlOeffnen()" class="px-2 py-1 bg-violet-600 hover:bg-violet-700 text-white rounded-lg text-[11px] font-bold inline-flex items-center gap-1" title="Signaturen im Archiv auswerten und Kontakte in den Korb legen"><i data-lucide="database-zap" class="w-3 h-3"></i> Archiv crawlen</button>' : '') +
         '<button onclick="showCrawledContacts(this)" class="px-2 py-1 bg-white border border-violet-300 text-violet-700 rounded-lg text-[11px] font-bold" title="Neu laden">↻</button>' +
