@@ -824,7 +824,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.82.4';
+const APP_VERSION = 'v2.82.5';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -45943,6 +45943,12 @@ function _korbArchivCrawlOeffnen() {
           + '<label class="flex items-start gap-2 text-[11px] text-ink-700 cursor-pointer">'
             + '<input type="checkbox" id="korbCrawlNachholen" class="mt-0.5">'
             + '<span><b>Nachzügler holen</b> — statt neuer Absender die, bei denen zuletzt nur die Nummer fehlte.</span></label>'
+          + '<label class="flex items-start gap-2 text-[11px] text-ink-700 cursor-pointer">'
+            + '<input type="checkbox" id="korbCrawlAlles" class="mt-0.5">'
+            + '<span><b>Alles neu lesen</b> — auch schon ausgewertete Absender. Dafür ist nichts zu löschen: '
+            + 'Der Korb bleibt, was schon drin ist wird <b>ergänzt</b> statt doppelt angelegt, und eine Firma aus '
+            + 'einem fehlerhaften Lauf wird überschrieben. Von Hand Korrigiertes bleibt unangetastet. '
+            + 'Innerhalb von zwölf Stunden arbeitet sich der Lauf durch, danach beginnt die Runde von vorn.</span></label>'
           + '<div class="flex gap-2 flex-wrap">'
             + '<button onclick="_korbCrawlZaehlen(this)" class="px-3 py-1.5 rounded-lg text-[12px] font-bold bg-white border border-ink-300 text-ink-700 hover:bg-ink-50">Wie viele offen?</button>'
             + '<button onclick="_korbCrawlStarten(this)" class="px-3 py-1.5 bg-violet-600 hover:bg-violet-700 text-white rounded-lg text-[12px] font-bold">Crawlen starten</button>'
@@ -45967,6 +45973,7 @@ function _korbCrawlParameter(zaehlen) {
     zaehlen: !!zaehlen,
     nur_mit_nummer: !!document.getElementById('korbCrawlNurNummer')?.checked,
     nachholen: !!document.getElementById('korbCrawlNachholen')?.checked,
+    alles: !!document.getElementById('korbCrawlAlles')?.checked,
   };
 }
 
@@ -46022,6 +46029,35 @@ async function _korbCrawlZaehlen(btn) {
   }
 }
 
+/* Was darf ein erneuter Lauf an einem vorhandenen Korb-Eintrag ändern?
+   Leere Felder füllen: immer — das ist der Sinn des Ergänzens.
+   Belegte Felder überschreiben: nur, wenn der alte Wert nachweislich Müll ist.
+   Alles andere bleibt stehen, denn dahinter kann eine Korrektur von Hand
+   stecken, und die wäre nach einem Lauf spurlos weg. */
+function _korbWertUnbrauchbar(wert) {
+  const w = String(wert || '').trim();
+  if (!w) return true;
+  if (w.startsWith('[')) return true;                  // „[Bild: … GmbH]" aus dem fehlerhaften Lauf
+  // Die eigene Firma des Mandanten — beim Absender ist sie immer falsch.
+  const eigene = (APP_STATE.accounts || []).map(a => String(a.name || '').toLowerCase().replace(/\s+/g, ' ').trim());
+  const norm = w.toLowerCase().replace(/\s+/g, ' ').trim();
+  return eigene.some(e => e && (norm === e || norm === e + ' gmbh'));
+}
+
+function _korbErgaenzung(alt, neu) {
+  const aend = {};
+  for (const f of ['firma', 'telefon', 'position', 'strasse', 'plz', 'ort', 'name']) {
+    const wNeu = String(neu[f] || '').trim();
+    if (!wNeu) continue;
+    const wAlt = String(alt[f] || '').trim();
+    if (wAlt === wNeu) continue;
+    // Firma wird auch ersetzt, wenn der Altwert erkennbar aus dem kaputten
+    // Lauf stammt; bei den übrigen Feldern reicht Ergänzen.
+    if (!wAlt || (f === 'firma' && _korbWertUnbrauchbar(wAlt))) aend[f] = wNeu;
+  }
+  return aend;
+}
+
 async function _korbCrawlStarten(btn) {
   const meld = document.getElementById('korbCrawlMeldung');
   const acc = (APP_STATE.accounts || []).find(a => _archivSlugFuer(a.id) === (document.getElementById('korbCrawlMandant')?.value || ''));
@@ -46038,40 +46074,56 @@ async function _korbCrawlStarten(btn) {
         + (d.fertig ? 'Es sind keine offenen Absender mehr da.' : 'Nächster Lauf macht weiter.') + '</span>';
       return;
     }
-    // Dubletten gegen den vorhandenen Korb — über Adresse UND Nummer.
-    const vorhandene = new Set();
-    (CRAWL_STATE.records || []).forEach(r => {
-      const k = _ccKennungen({ email: r.email, telefon: r.telefon });
-      if (k.mail) vorhandene.add(k.mail);
-      if (k.tel) vorhandene.add(k.tel);
+    /* Bestand gegen Adresse. Bis v2.82.4 wurde hier CRAWL_STATE.records
+       abgefragt — die Eigenschaft gibt es nicht, die Liste heißt .list. Das Set
+       war also immer leer, und jeder Lauf legte dieselben Leute noch einmal an.
+       Deshalb wuchs der Korb, ohne dass neue Firmen dazukamen. */
+    if (!CRAWL_STATE.list || !CRAWL_STATE.list.length) await showCrawledContacts(null);
+    const proMail = new Map();
+    (CRAWL_STATE.list || []).forEach(r => {
+      const e = String(r.email || '').trim().toLowerCase();
+      if (e && String(r.account_id) === String(acc.id) && !proMail.has(e)) proMail.set(e, r);
     });
     const sperre = await _ccSperrlisteLaden(true);
     const jetzt2 = nowIso();
-    let neu = 0, doppelt = 0, gesperrt = 0;
+    let neu = 0, ergaenzt = 0, unveraendert = 0, gesperrt = 0;
     setBusy(btn, true, '0/' + roh.length);
     for (const k of roh) {
       const lead = { email: k.email, telefon: k.telefon || '' };
-      if (_ccSchonBekannt(vorhandene, lead)) { doppelt++; continue; }
-      if (_ccSchonBekannt(sperre, lead)) { gesperrt++; continue; }
-      _ccKennungenMerken(vorhandene, lead);
+      if (_ccSchonBekannt(sperre, lead)) { gesperrt++; setBusy(btn, true, (neu + ergaenzt + unveraendert + gesperrt) + '/' + roh.length); continue; }
+      const alt = proMail.get(String(k.email).trim().toLowerCase());
       try {
-        await airtableWriteWithAutoField(CRAWLED_TABLE, {
-          account_id: acc.id, email: k.email, name: k.name || '',
-          firma: k.firma || '', telefon: k.telefon || '', position: k.position || '',
-          strasse: k.strasse || '', plz: k.plz || '', ort: k.ort || '', land: '',
-          quelle: 'archiv', quelle_ticket: k.anzahl + ' Vorgänge, zuletzt ' + String(k.zuletzt || '').slice(0, 7),
-          fd_status: 'unbekannt', fs_status: 'unbekannt', mc_status: 'unbekannt',
-          zdb_status: '', crawled_at: jetzt2, updated_at: jetzt2,
-        }, CRAWLED_TYPES_MAP);
-        neu++;
+        if (alt) {
+          const aend = _korbErgaenzung(alt, k);
+          if (Object.keys(aend).length) {
+            aend.updated_at = jetzt2;
+            await airtableUpdateWithAutoField(CRAWLED_TABLE, alt.recordId, aend, CRAWLED_TYPES_MAP);
+            Object.assign(alt, aend);
+            ergaenzt++;
+          } else unveraendert++;
+        } else {
+          const res = await airtableWriteWithAutoField(CRAWLED_TABLE, {
+            account_id: acc.id, email: k.email, name: k.name || '',
+            firma: k.firma || '', telefon: k.telefon || '', position: k.position || '',
+            strasse: k.strasse || '', plz: k.plz || '', ort: k.ort || '', land: '',
+            quelle: 'archiv', quelle_ticket: k.anzahl + ' Vorgänge, zuletzt ' + String(k.zuletzt || '').slice(0, 7),
+            fd_status: 'unbekannt', fs_status: 'unbekannt', mc_status: 'unbekannt',
+            zdb_status: '', crawled_at: jetzt2, updated_at: jetzt2,
+          }, CRAWLED_TYPES_MAP);
+          // Sofort merken, sonst legt derselbe Lauf dieselbe Adresse zweimal an.
+          proMail.set(String(k.email).trim().toLowerCase(),
+            Object.assign({ recordId: res && res.id, account_id: acc.id }, k));
+          neu++;
+        }
       } catch (e) { console.warn('[Korb-Crawl]', k.email, e.message); }
-      setBusy(btn, true, (neu + doppelt + gesperrt) + '/' + roh.length);
+      setBusy(btn, true, (neu + ergaenzt + unveraendert + gesperrt) + '/' + roh.length);
     }
     setBusy(btn, false);
     if (meld) meld.innerHTML = '<span class="text-emerald-700"><b>' + neu + '</b> neu im Korb</span>'
+      + (ergaenzt ? ' <span class="text-blue-700"><b>' + ergaenzt + '</b> ergänzt</span>' : '')
       + ' <span class="text-ink-600">· ' + d.geprueft + ' Absender geprüft · ' + (d.ohne_firma || 0) + ' ohne erkennbare Firma ausgelassen'
       + ((d.ohne_nummer || 0) ? ' · ' + d.ohne_nummer + ' ohne Telefonnummer zurückgestellt' : '')
-      + (doppelt ? ' · ' + doppelt + ' Dubletten' : '') + (gesperrt ? ' · ' + gesperrt + ' gesperrt' : '')
+      + (unveraendert ? ' · ' + unveraendert + ' schon vollständig' : '') + (gesperrt ? ' · ' + gesperrt + ' gesperrt' : '')
       + ((d.verworfene_nummern || []).length ? ' · ' + d.verworfene_nummern.length + ' Sammelnummern verworfen' : '')
       + '</span><br><span class="text-ink-500">Erneut starten, um die nächsten 200 zu bearbeiten.</span>';
     showCrawledContacts(null);
