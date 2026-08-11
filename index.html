@@ -824,7 +824,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.80.3';
+const APP_VERSION = 'v2.81.0';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -45326,6 +45326,7 @@ async function _ccImportAusArchiv(btn) {
     const d = await res.json();
     if (!res.ok) throw new Error(d.fehler || ('HTTP ' + res.status));
     const roh = d.kontakte || [];
+    const verworfen = Array.isArray(d.verworfen) ? d.verworfen : [];
     // Klarname statt Kürzel — „Archiv · Aufzugshandwerk GmbH" liest sich in der
     // Zeile besser als „Archiv · aufzugshandwerk".
     const quellSlug = document.getElementById('ccArchivMandant')?.value || '';
@@ -45342,12 +45343,17 @@ async function _ccImportAusArchiv(btn) {
     for (const k of roh) {
       const lead = {
         firma: k.firma || '', ansprechpartner: k.name || '', email: k.email || '',
-        telefon: '', typ: '', ort: '',
+        // Die Nummer kommt jetzt aus demselben Aufruf — geprüft auf Fax,
+        // Belegnummern und Sammelnummern, und einheitlich geschrieben.
+        telefon: _ccNummerNormalisieren(k.telefon || ''), typ: '', ort: '',
       };
       const gemerkt = _ccTypBekannt(typen, lead);
       if (gemerkt) lead.typ = gemerkt;
       const kenn = _ccKennungen(lead);
       if (!kenn.mail) { doppelt++; continue; }
+      // Auch die Nummer gegen den Bestand prüfen, nicht nur die Adresse:
+      // Derselbe Mensch steht sonst zweimal drin, einmal je Kennung.
+      if (kenn.tel && _ccSchonBekannt(vorhanden, { telefon: lead.telefon })) { lead.telefon = ''; }
       if (_ccSchonBekannt(vorhanden, lead)) { doppelt++; continue; }
       if (_ccSchonBekannt(sperre, lead)) { gesperrt++; continue; }
       _ccKennungenMerken(vorhanden, lead);
@@ -45359,22 +45365,35 @@ async function _ccImportAusArchiv(btn) {
         // Anrufer sofort, wie warm der Kontakt ist.
         quelle: 'Archiv · ' + (quellName || k.mandant || ''),
         notiz: k.anzahl + ' Vorgänge, zuletzt ' + String(k.zuletzt || '').slice(0, 7),
-        dedupe_key: kenn.mail, dedupe_tel: '',
+        dedupe_key: kenn.mail, dedupe_tel: _ccKennungen(lead).tel || '',
         bestand: istBestand ? 'ja' : '',
         status: 'offen', versuche: '0', created_at: jetzt, updated_at: jetzt,
       }));
     }
     if (!saetze.length) { setBusy(btn, false); return toast('Nichts Neues — alles bereits vorhanden oder gesperrt.', 'warn', 8000); }
+    const mitNr = saetze.filter(x => _ccNummerNormal(x.telefon).length >= 6).length;
     if (!confirm(saetze.length + ' Kontakte aus dem Archiv übernehmen?\n\n'
-      + doppelt + ' bereits vorhanden · ' + gesperrt + ' gesperrt · ' + bekannt + ' davon bereits Kunde.\n\n'
-      + 'Telefonnummern fehlen zunächst — danach „Nummern suchen" laufen lassen.')) { setBusy(btn, false); return; }
+      + mitNr + ' davon mit Telefonnummer, ' + (saetze.length - mitNr) + ' ohne.\n'
+      + doppelt + ' bereits vorhanden · ' + gesperrt + ' gesperrt · ' + bekannt + ' davon bereits Kunde.'
+      + (verworfen.length ? '\n' + verworfen.length + ' Sammelnummern verworfen (standen bei mehreren Kontakten).' : '')
+      + (CC_STATE.nurMitNummer && saetze.length > mitNr ? '\n\nHinweis: Der Filter „nur mit Nummer" ist aktiv und wird abgeschaltet, sonst wären ' + (saetze.length - mitNr) + ' Kontakte sofort unsichtbar.' : ''))) { setBusy(btn, false); return; }
 
     setBusy(btn, true, '0/' + saetze.length);
     const n = await _ccStapelSchreiben(saetze);
     setBusy(btn, false);
     _ccImportSchliessen();
-    toast(n + ' Kontakte aus dem Archiv übernommen · ' + doppelt + ' übersprungen'
-      + (gesperrt ? ' · ' + gesperrt + ' gesperrt' : '') + (bekannt ? ' · ' + bekannt + ' bereits Kunde' : ''), 'success', 10000);
+    /* Archivkontakte kommen ohne Nummer herein. Bleibt „nur mit Nummer"
+       aktiv, meldet der Import Erfolg und die Liste zeigt nichts Neues — man
+       sucht dann den Fehler beim Import statt beim Filter. Also Filter
+       abschalten und ausdrücklich sagen, dass das geschehen ist. */
+    // Filter nur abschalten, wenn tatsächlich Kontakte ohne Nummer dabei sind.
+    const filterStoert = !!CC_STATE.nurMitNummer && saetze.length > mitNr;
+    if (filterStoert) { CC_STATE.nurMitNummer = false; _ccZustandMerken(); }
+    toast(n + ' Kontakte übernommen · ' + mitNr + ' mit Nummer · ' + doppelt + ' übersprungen'
+      + (gesperrt ? ' · ' + gesperrt + ' gesperrt' : '') + (bekannt ? ' · ' + bekannt + ' bereits Kunde' : '')
+      + (verworfen.length ? ' · ' + verworfen.length + ' Sammelnummern verworfen' : '')
+      + (filterStoert ? ' — Filter „nur mit Nummer" abgeschaltet, sonst wären die ohne Nummer unsichtbar.' : ''),
+      'success', 13000);
     renderCallcenterPage();
   } catch (e) {
     setBusy(btn, false);
