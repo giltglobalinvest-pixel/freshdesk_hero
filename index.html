@@ -824,7 +824,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.81.0';
+const APP_VERSION = 'v2.81.1';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -43426,6 +43426,7 @@ function _ccQuellenFilter(alle) {
    Die Breiten sind ziehbar, weil sich niemand auf eine Vorgabe einigen kann:
    Wer nach Firma sucht, braucht dort Platz, wer nach Nummern arbeitet, dort. */
 const CC_SPALTEN = [
+  { key: 'nr',       titel: '#',               breite: 42,  fest: true },
   { key: 'led',      titel: '',                breite: 26,  fest: true },
   { key: 'firma',    titel: 'Firma',           breite: 230 },
   { key: 'person',   titel: 'Ansprechpartner', breite: 210 },
@@ -43489,6 +43490,7 @@ function _ccTabelle(rows) {
 
     return '<tr class="' + zebra + (belegt ? ' opacity-60' : ' hover:bg-brand-50/60 cursor-pointer')
         + '" ' + (belegt ? '' : 'onclick="_ccAktiv(\'' + r.recordId + '\')"') + '>'
+      + '<td class="' + td + ' text-[11px] text-ink-400 tabular-nums">' + (i + 1) + '</td>'
       + '<td class="' + td + '">' + _ccLed(r) + '</td>'
       + '<td class="' + td + '" title="' + escapeAttr(firmaText) + '">'
         + '<span class="font-bold text-ink-900 text-[14px]">' + escapeHtml(r.firma || '—') + '</span>'
@@ -43535,7 +43537,43 @@ function _ccTabelle(rows) {
     + '<div class="overflow-x-auto"><table class="w-full border-collapse" style="table-layout:fixed">'
     + '<colgroup>' + cols + '</colgroup>'
     + '<thead class="sticky top-0 z-10"><tr>' + kopf + '</tr></thead>'
-    + '<tbody>' + trs + '</tbody></table></div></div>';
+    + '<tbody>' + trs + '</tbody></table></div>'
+    + _ccFusszeile(rows.length) + '</div>';
+}
+
+/* v2.81.1: Wie viele von wie vielen — und warum die übrigen fehlen.
+   „177" oben und dreißig Zeilen darunter ist ein Widerspruch, den man nicht
+   auflösen kann, ohne jeden Filter einzeln zu prüfen. Also steht es hier. */
+function _ccFusszeile(gezeigt) {
+  const inKampagne = _ccKampagnenLeads();
+  const gesamt = inKampagne.length;
+  const versteckt = inKampagne.filter(r => String(r.versteckt || '') === 'ja').length;
+  const gruende = [];
+  if (CC_STATE.filter === 'offen') gruende.push('nur „Zu tun"');
+  else if (CC_STATE.filter === 'interessiert') gruende.push('nur „Interessiert"');
+  if (CC_STATE.quelle) gruende.push('Quelle „' + CC_STATE.quelle + '"');
+  if (CC_STATE.typ) gruende.push('Typ „' + CC_STATE.typ + '"');
+  if (CC_STATE.ohneBestand) gruende.push('nur Neukunden');
+  if (CC_STATE.nurMitNummer) gruende.push('nur mit Nummer');
+  if (!CC_STATE.zeigeVersteckte && versteckt) gruende.push(versteckt + ' ausgeblendet');
+  if (String(CC_STATE.suche || '').trim()) gruende.push('Suche „' + CC_STATE.suche.trim() + '"');
+  return '<div class="px-3 py-2 border-t border-ink-200 bg-ink-50 text-[11px] text-ink-600 flex items-center gap-2 flex-wrap">'
+    + '<span><b class="text-ink-900">' + gezeigt + '</b> von ' + gesamt + ' Kontakten dieser Kampagne</span>'
+    + (gruende.length
+        ? '<span class="text-ink-400">·</span><span>ausgeblendet durch: ' + escapeHtml(gruende.join(', ')) + '</span>'
+          + '<button onclick="_ccFilterZuruecksetzen()" class="ml-auto px-2 py-0.5 rounded border border-ink-300 bg-white hover:bg-ink-100 text-[11px] font-semibold">Alle Filter aus</button>'
+        : '<span class="text-ink-400">· kein Filter aktiv</span>')
+    + '</div>';
+}
+
+function _ccFilterZuruecksetzen() {
+  CC_STATE.filter = 'alle';
+  CC_STATE.quelle = ''; CC_STATE.typ = '';
+  CC_STATE.ohneBestand = false; CC_STATE.nurMitNummer = false;
+  CC_STATE.zeigeVersteckte = true; CC_STATE.suche = '';
+  CC_STATE.aktiv = null;
+  _ccZustandMerken();
+  _ccZeichnen();
 }
 
 /* Wer arbeitet gerade an dieser Zeile? Leer, wenn niemand oder ich selbst.
