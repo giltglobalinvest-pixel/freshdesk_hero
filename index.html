@@ -824,7 +824,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.80.2';
+const APP_VERSION = 'v2.80.3';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -16846,14 +16846,24 @@ function _sanitizeForFreshdeskQuery(s) {
     .trim();
 }
 
-/* Sucht Tickets per Freshdesk Search-API für ein Keyword. Robuster Fallback auf []. */
+/* v2.80.3: Freshdesks Filter-API kann KEINE Volltextsuche.
+   Erlaubt sind dort nur Status, Gruppe, Priorität, Typ, Tags und Datumsfelder —
+   `subject`, `description` und `fr_email` weist sie mit „Unexpected/invalid
+   field" ab. Diese Abfrage lief also seit jeher in einen 400er, wurde
+   stillschweigend zu einer leeren Liste und füllte nebenbei die Konsole.
+
+   Was Freshdesk kann, ist die Suche nach dem ANFRAGENDEN — dafür gibt es einen
+   eigenen, unterstützten Weg. Für alles Übrige ist das Archiv zuständig; es
+   durchsucht ohnehin auch Antworten und interne Notizen, was Freshdesk selbst
+   über die API nicht anbietet. */
 async function searchTicketsByKeyword(accountId, keyword) {
   const safeKw = _sanitizeForFreshdeskQuery(keyword);
   if (safeKw.length < 2) return [];
-  const query = `subject:'${safeKw}' OR description:'${safeKw}' OR fr_email:'${safeKw}'`;
+  // Nur bei einer E-Mail-Adresse gibt es einen unterstützten Weg.
+  if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(safeKw)) return [];
   try {
     const path = '/freshdesk/' + encodeURIComponent(accountId) +
-      '/api/v2/search/tickets?query=' + encodeURIComponent('"' + query + '"');
+      '/api/v2/tickets?email=' + encodeURIComponent(safeKw) + '&per_page=30';
     const data = await proxyJson(path);
     const list = Array.isArray(data) ? data : (data.results || []);
     const acc = APP_STATE.accounts.find(a => a.id === accountId);
