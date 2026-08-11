@@ -824,7 +824,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.81.1';
+const APP_VERSION = 'v2.82.0';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -45842,6 +45842,148 @@ function _crawlBadge(label, status) {
   return '<span class="text-[9px] font-bold px-1.5 py-0.5 rounded border ' + (map[status] || map.unbekannt) + '">' + label + ': ' + escapeHtml(status) + '</span>';
 }
 
+/* === ARCHIV-CRAWL IN DEN KORB (v2.82.0) ==================================
+   Der gründliche Lauf: Signaturen auswerten, Firma, Anschrift, Position und
+   Nummer herausziehen. Er läuft EINMAL je Absender — der Worker merkt sich,
+   wen er hatte. Was danach im Korb liegt, wird geprüft und freigegeben; die
+   Kampagnen holen sich ihre Kontakte aus der zentralen DB, nicht mehr aus dem
+   Archiv. So wird die teure Arbeit einmal gemacht statt bei jeder Aktion. */
+function _korbArchivCrawlOeffnen() {
+  let host = document.getElementById('korbCrawlHost');
+  if (!host) { host = document.createElement('div'); host.id = 'korbCrawlHost'; document.body.appendChild(host); }
+  const accId = CONTACTS_STATE.searchAccountId;
+  host.innerHTML =
+    '<div class="fixed inset-0 z-[84] bg-black/40 flex items-start justify-center overflow-y-auto p-4" onclick="if(event.target===this)_korbCrawlSchliessen()">'
+      + '<div class="bg-white rounded-2xl shadow-xl w-full max-w-lg my-8">'
+        + '<div class="flex items-center justify-between p-4 border-b border-ink-200">'
+          + '<div><h3 class="font-bold text-ink-900">Archiv crawlen</h3>'
+          + '<p class="text-[11px] text-ink-500">Signaturen auswerten und Kontakte in den Korb legen</p></div>'
+          + '<button onclick="_korbCrawlSchliessen()" class="text-ink-400 hover:text-ink-700"><i data-lucide="x" class="w-5 h-5"></i></button></div>'
+        + '<div class="p-4 space-y-3">'
+          + '<p class="text-[11px] text-ink-600">Gelesen wird der Signaturblock der eingehenden Nachrichten — Firma, Anschrift, Position und Telefonnummer. '
+          + '<b>Absender ohne erkennbare Firma werden nicht übernommen</b>, ebenso Automaten und Großanbieter wie PayPal oder DHL. '
+          + 'Jeder Absender wird nur einmal ausgewertet; ein zweiter Lauf macht dort weiter, wo der erste aufgehört hat.</p>'
+          + '<div class="grid grid-cols-3 gap-2">'
+            + '<label class="block"><span class="text-[10px] font-semibold text-ink-600">Mandant</span>'
+              + '<select id="korbCrawlMandant" class="w-full mt-0.5 px-1.5 py-1 border border-ink-300 rounded text-[12px] bg-white">'
+              + (APP_STATE.accounts || []).map(a => {
+                  const sl = _archivSlugFuer(a.id);
+                  return sl ? '<option value="' + escapeAttr(sl) + '"' + (String(a.id) === String(accId) ? ' selected' : '') + '>' + escapeHtml(a.name || sl) + '</option>' : '';
+                }).join('')
+              + '</select></label>'
+            + '<label class="block"><span class="text-[10px] font-semibold text-ink-600">ab Vorgängen</span>'
+              + '<input id="korbCrawlMin" type="number" min="1" max="99" value="2" class="w-full mt-0.5 px-1.5 py-1 border border-ink-300 rounded text-[12px]"></label>'
+            + '<label class="block"><span class="text-[10px] font-semibold text-ink-600">seit Jahr</span>'
+              + '<input id="korbCrawlSeit" type="number" min="2012" max="2030" value="' + (new Date().getFullYear() - 4) + '" class="w-full mt-0.5 px-1.5 py-1 border border-ink-300 rounded text-[12px]"></label>'
+          + '</div>'
+          + '<div class="flex gap-2 flex-wrap">'
+            + '<button onclick="_korbCrawlZaehlen(this)" class="px-3 py-1.5 rounded-lg text-[12px] font-bold bg-white border border-ink-300 text-ink-700 hover:bg-ink-50">Wie viele offen?</button>'
+            + '<button onclick="_korbCrawlStarten(this)" class="px-3 py-1.5 bg-violet-600 hover:bg-violet-700 text-white rounded-lg text-[12px] font-bold">Crawlen starten</button>'
+          + '</div>'
+          + '<div id="korbCrawlMeldung" class="text-[11px]"></div>'
+        + '</div>'
+      + '</div>'
+    + '</div>';
+  if (window.lucide) lucide.createIcons();
+}
+function _korbCrawlSchliessen() { const h = document.getElementById('korbCrawlHost'); if (h) h.innerHTML = ''; }
+
+function _korbCrawlParameter(zaehlen) {
+  const mandant = document.getElementById('korbCrawlMandant')?.value || '';
+  if (!mandant) throw new Error('Bitte einen Mandanten wählen.');
+  return {
+    mandant,
+    min: Math.max(1, parseInt(document.getElementById('korbCrawlMin')?.value || '2', 10) || 2),
+    seit: (document.getElementById('korbCrawlSeit')?.value || '2020') + '-01-01',
+    limit: 200,
+    zaehlen: !!zaehlen,
+  };
+}
+
+async function _korbCrawlAufruf(koerper) {
+  const key = APP_KEYS.user?.api_key;
+  if (!key) throw new Error('Nicht angemeldet.');
+  const res = await fetch(ARCHIV_URL + '/crawl', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', 'X-Hero-Key': key },
+    body: JSON.stringify(koerper),
+  });
+  const d = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(d.fehler || ('Archiv HTTP ' + res.status));
+  return d;
+}
+
+async function _korbCrawlZaehlen(btn) {
+  const meld = document.getElementById('korbCrawlMeldung');
+  setBusy(btn, true, 'Zähle…');
+  try {
+    const d = await _korbCrawlAufruf(_korbCrawlParameter(true));
+    setBusy(btn, false);
+    if (meld) meld.innerHTML = '<span class="text-ink-700"><b>' + d.offen + '</b> Absender wurden noch nicht ausgewertet'
+      + (d.aussortiert ? ' · ' + d.aussortiert + ' Automaten und Großanbieter fallen weg' : '')
+      + '. Je Lauf werden bis zu 200 bearbeitet.</span>';
+  } catch (e) {
+    setBusy(btn, false);
+    if (meld) meld.innerHTML = '<span class="text-red-700">' + escapeHtml(e.message || String(e)) + '</span>';
+  }
+}
+
+async function _korbCrawlStarten(btn) {
+  const meld = document.getElementById('korbCrawlMeldung');
+  const acc = (APP_STATE.accounts || []).find(a => _archivSlugFuer(a.id) === (document.getElementById('korbCrawlMandant')?.value || ''));
+  if (!acc) return toast('Mandant nicht gefunden.', 'warn', 5000);
+  setBusy(btn, true, 'Werte Signaturen aus…');
+  try {
+    const d = await _korbCrawlAufruf(_korbCrawlParameter(false));
+    const roh = d.kontakte || [];
+    if (!roh.length) {
+      setBusy(btn, false);
+      if (meld) meld.innerHTML = '<span class="text-ink-700">' + d.geprueft + ' Absender geprüft, keiner mit erkennbarer Firma. '
+        + (d.fertig ? 'Es sind keine offenen Absender mehr da.' : 'Nächster Lauf macht weiter.') + '</span>';
+      return;
+    }
+    // Dubletten gegen den vorhandenen Korb — über Adresse UND Nummer.
+    const vorhandene = new Set();
+    (CRAWL_STATE.records || []).forEach(r => {
+      const k = _ccKennungen({ email: r.email, telefon: r.telefon });
+      if (k.mail) vorhandene.add(k.mail);
+      if (k.tel) vorhandene.add(k.tel);
+    });
+    const sperre = await _ccSperrlisteLaden(true);
+    const jetzt2 = nowIso();
+    let neu = 0, doppelt = 0, gesperrt = 0;
+    setBusy(btn, true, '0/' + roh.length);
+    for (const k of roh) {
+      const lead = { email: k.email, telefon: k.telefon || '' };
+      if (_ccSchonBekannt(vorhandene, lead)) { doppelt++; continue; }
+      if (_ccSchonBekannt(sperre, lead)) { gesperrt++; continue; }
+      _ccKennungenMerken(vorhandene, lead);
+      try {
+        await airtableWriteWithAutoField(CRAWLED_TABLE, {
+          account_id: acc.id, email: k.email, name: k.name || '',
+          firma: k.firma || '', telefon: k.telefon || '', position: k.position || '',
+          strasse: k.strasse || '', plz: k.plz || '', ort: k.ort || '', land: '',
+          quelle: 'archiv', quelle_ticket: k.anzahl + ' Vorgänge, zuletzt ' + String(k.zuletzt || '').slice(0, 7),
+          fd_status: 'unbekannt', fs_status: 'unbekannt', mc_status: 'unbekannt',
+          zdb_status: '', crawled_at: jetzt2, updated_at: jetzt2,
+        }, CRAWLED_TYPES_MAP);
+        neu++;
+      } catch (e) { console.warn('[Korb-Crawl]', k.email, e.message); }
+      setBusy(btn, true, (neu + doppelt + gesperrt) + '/' + roh.length);
+    }
+    setBusy(btn, false);
+    if (meld) meld.innerHTML = '<span class="text-emerald-700"><b>' + neu + '</b> neu im Korb</span>'
+      + ' <span class="text-ink-600">· ' + d.geprueft + ' Absender geprüft · ' + (d.ohne_firma || 0) + ' ohne erkennbare Firma ausgelassen'
+      + (doppelt ? ' · ' + doppelt + ' Dubletten' : '') + (gesperrt ? ' · ' + gesperrt + ' gesperrt' : '')
+      + ((d.verworfene_nummern || []).length ? ' · ' + d.verworfene_nummern.length + ' Sammelnummern verworfen' : '')
+      + '</span><br><span class="text-ink-500">Erneut starten, um die nächsten 200 zu bearbeiten.</span>';
+    showCrawledContacts(null);
+  } catch (e) {
+    setBusy(btn, false);
+    if (meld) meld.innerHTML = '<span class="text-red-700">' + escapeHtml(e.message || String(e)) + '</span>';
+  }
+}
+
 function _renderCrawledContacts() {
   const host = $('contactsResults');
   if (!host) return;
@@ -45869,6 +46011,7 @@ function _renderCrawledContacts() {
           '<option value="">Alle Typen</option>' +
           types.map(t => '<option value="' + escapeAttr(t.name) + '"' + (CRAWL_STATE.filterTyp === t.name ? ' selected' : '') + '>' + escapeHtml(t.name) + '</option>').join('') +
         '</select>' +
+        (APP_KEYS.user?.is_admin ? '<button onclick="_korbArchivCrawlOeffnen()" class="px-2 py-1 bg-violet-600 hover:bg-violet-700 text-white rounded-lg text-[11px] font-bold inline-flex items-center gap-1" title="Signaturen im Archiv auswerten und Kontakte in den Korb legen"><i data-lucide="database-zap" class="w-3 h-3"></i> Archiv crawlen</button>' : '') +
         '<button onclick="showCrawledContacts(this)" class="px-2 py-1 bg-white border border-violet-300 text-violet-700 rounded-lg text-[11px] font-bold" title="Neu laden">↻</button>' +
       '</div>' +
       ((hiddenCount || softHiddenCount) ?
