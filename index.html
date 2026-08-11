@@ -824,7 +824,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.82.5';
+const APP_VERSION = 'v2.82.6';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -46070,8 +46070,9 @@ async function _korbCrawlStarten(btn) {
       setBusy(btn, false);
       if (meld) meld.innerHTML = '<span class="text-ink-700">' + d.geprueft + ' Absender geprüft, keiner übernommen'
         + ((d.ohne_firma || 0) ? ' · ' + d.ohne_firma + ' ohne erkennbare Firma' : '')
-        + ((d.ohne_nummer || 0) ? ' · ' + d.ohne_nummer + ' ohne Telefonnummer' : '') + '. '
-        + (d.fertig ? 'Es sind keine offenen Absender mehr da.' : 'Nächster Lauf macht weiter.') + '</span>';
+        + ((d.ohne_nummer || 0) ? ' · ' + d.ohne_nummer + ' ohne Telefonnummer' : '')
+        + ((d.aussortiert || 0) ? ' · ' + d.aussortiert + ' Automaten und Großanbieter aussortiert und vermerkt' : '') + '. '
+        + (d.fertig ? 'Es sind keine offenen Absender mehr da.' : 'Nächster Lauf macht weiter — noch einmal starten.') + '</span>';
       return;
     }
     /* Bestand gegen Adresse. Bis v2.82.4 wurde hier CRAWL_STATE.records
