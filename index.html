@@ -824,7 +824,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.82.0';
+const APP_VERSION = 'v2.82.1';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -43342,6 +43342,37 @@ async function _ccStapelAendern(aenderungen) {
   return n;
 }
 
+/* Stapelweise löschen — dieselbe Zehnergrenze wie beim Anlegen und Ändern.
+   Einzeln zu löschen hält nur bis etwa hundert Sätze: Airtable lässt rund fünf
+   Anfragen je Sekunde zu und beantwortet alles darüber mit 429. Bis v2.82.0
+   wurde dieser Fehler bloß gezählt — „Leeren" löschte deshalb die ersten paar
+   Dutzend, ließ den großen Rest stehen und lud ihn gleich wieder ein. */
+async function _ccStapelLoeschen(ids, fortschritt) {
+  if (!APP_KEYS.airtableWriteKey) throw new Error('Schreibzugriff fehlt');
+  const url = 'https://api.airtable.com/v0/' + APP_CONFIG.APP_BASE_ID + '/' + encodeURIComponent(CC_TABLE);
+  const schlaf = ms => new Promise(r => setTimeout(r, ms));
+  const geloescht = [], gescheitert = [];
+  let letzterFehler = '';
+  for (let i = 0; i < ids.length; i += 10) {
+    const teil = ids.slice(i, i + 10);
+    let ok = false;
+    for (let versuch = 0; versuch < 5 && !ok; versuch++) {
+      let res;
+      try {
+        res = await fetch(url + '?' + teil.map(id => 'records[]=' + encodeURIComponent(id)).join('&'),
+          { method: 'DELETE', headers: { Authorization: 'Bearer ' + APP_KEYS.airtableWriteKey } });
+      } catch (e) { letzterFehler = e.message || String(e); await schlaf(800 * (versuch + 1)); continue; }
+      if (res.status === 429) { await schlaf(1200 * (versuch + 1)); continue; }
+      if (!res.ok) { letzterFehler = 'HTTP ' + res.status + ' ' + (await res.text().catch(() => '')).slice(0, 160); break; }
+      ok = true;
+    }
+    if (ok) geloescht.push(...teil); else gescheitert.push(...teil);
+    if (fortschritt) fortschritt(geloescht.length + gescheitert.length, ids.length);
+    await schlaf(220);   // bewusst unter dem erlaubten Takt bleiben
+  }
+  return { geloescht, gescheitert, fehler: letzterFehler };
+}
+
 /* Kampagne umbenennen. Der Name steht an jedem Lead — es ist also keine
    Beschriftung, sondern die Zuordnung selbst. Trägt man einen bestehenden Namen
    ein, werden beide Kampagnen zusammengeführt; das wird ausdrücklich gefragt,
@@ -44973,14 +45004,25 @@ async function _ccKampagneLeeren(btn) {
   if (bearbeitet && !confirm('Sicher? ' + bearbeitet + ' bearbeitete Kontakte werden mit gelöscht.')) return;
 
   setBusy(btn, true, '0/' + leads.length);
-  let n = 0, fehler = 0;
-  for (const r of leads) {
-    try { await airtableDelete(CC_TABLE, r.recordId); n++; }
-    catch (e) { fehler++; console.warn('[CC] Löschen:', e.message); }
-    setBusy(btn, true, (n + fehler) + '/' + leads.length);
+  let erg;
+  try {
+    erg = await _ccStapelLoeschen(leads.map(r => r.recordId),
+      (fertig, gesamt) => setBusy(btn, true, fertig + '/' + gesamt));
+  } catch (e) {
+    setBusy(btn, false);
+    return toast('Leeren nicht möglich: ' + (e.message || e), 'error', 9000);
   }
   setBusy(btn, false);
-  toast(n + ' Kontakte gelöscht' + (fehler ? ' · ' + fehler + ' fehlgeschlagen' : ''), fehler ? 'warn' : 'success', 7000);
+  // Erfolgreich Gelöschte sofort aus dem Zustand nehmen: Airtable braucht
+  // manchmal einen Moment, bis die Liste sie nicht mehr zurückgibt.
+  const weg = new Set(erg.geloescht);
+  CC_STATE.leads = CC_STATE.leads.filter(r => !weg.has(r.recordId));
+  if (erg.gescheitert.length) {
+    toast(erg.geloescht.length + ' gelöscht · ' + erg.gescheitert.length + ' blieben stehen'
+      + (erg.fehler ? ' (' + erg.fehler + ')' : '') + ' — „Leeren" noch einmal drücken.', 'error', 12000);
+  } else {
+    toast(erg.geloescht.length + ' Kontakte gelöscht — „' + kampagne + '" ist jetzt leer.', 'success', 6000);
+  }
   renderCallcenterPage();
 }
 
@@ -45262,14 +45304,22 @@ let _CC_PRUEF = null;
 async function _ccZeilenEntfernen(saetze, btn, was) {
   if (!saetze || !saetze.length) return;
   setBusy(btn, true, '0/' + saetze.length);
-  let n = 0;
-  for (const l of saetze) {
-    try { await airtableDelete(CC_TABLE, l.recordId); n++; setBusy(btn, true, n + '/' + saetze.length); }
-    catch (e) { console.warn('[CC] Löschen:', e.message); }
+  let erg;
+  try {
+    erg = await _ccStapelLoeschen(saetze.map(l => l.recordId),
+      (fertig, gesamt) => setBusy(btn, true, fertig + '/' + gesamt));
+  } catch (e) {
+    setBusy(btn, false);
+    return toast('Entfernen nicht möglich: ' + (e.message || e), 'error', 9000);
   }
   setBusy(btn, false);
+  const weg = new Set(erg.geloescht);
+  CC_STATE.leads = CC_STATE.leads.filter(r => !weg.has(r.recordId));
   _ccImportSchliessen();
-  toast(n + ' ' + was + ' entfernt', 'success', 5000);
+  toast(erg.geloescht.length + ' ' + was + ' entfernt'
+    + (erg.gescheitert.length ? ' · ' + erg.gescheitert.length + ' blieben stehen'
+        + (erg.fehler ? ' (' + erg.fehler + ')' : '') : ''),
+    erg.gescheitert.length ? 'error' : 'success', erg.gescheitert.length ? 11000 : 5000);
   renderCallcenterPage();
 }
 function _ccGesperrteEntfernen(btn) { _ccZeilenEntfernen(_CC_PRUEF && _CC_PRUEF.gesperrt, btn, 'gesperrte Kontakte'); }
