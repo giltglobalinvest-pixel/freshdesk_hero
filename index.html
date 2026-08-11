@@ -824,7 +824,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.82.6';
+const APP_VERSION = 'v2.83.0';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -29812,6 +29812,10 @@ async function openAngebotsChatModal(accountId, ticketId, forcedRestore) {
       window._ANG_CHAT.collected = Object.assign({}, window._ANG_CHAT.collected, restored.collected);
       window._ANG_CHAT.history   = Array.isArray(restored.history) ? restored.history : [];
       window._ANG_CHAT.iteration = restored.iteration || 0;
+      // v2.83.0: Identität des geladenen Angebots übernehmen. Ohne das trug das
+      // PDF eine andere Nummer als der Datensatz, aus dem es stammt.
+      if (restored.angebotNummer != null) window._ANG_CHAT.angebotNummer = restored.angebotNummer;
+      if (restored.bkRecordId) window._ANG_CHAT.bkRecordId = restored.bkRecordId;
     }
     _renderAngChatShell();
     const subj = ticket.subject || '';
@@ -30159,7 +30163,7 @@ async function _angRestoreFromBK(accountId, ticketId) {
     const d = await r.json();
     const f = d.records?.[0]?.fields;
     if (!f) return null;
-    return _angMapBkFieldsToRestore(f);
+    return _angMapBkFieldsToRestore(f, d.records?.[0]?.id);
   } catch (e) {
     console.warn('[Angebot-Restore-BK]', e.message);
     return null;
@@ -30169,7 +30173,7 @@ async function _angRestoreFromBK(accountId, ticketId) {
 /* v2.46.230: App_Angebote-Record-Felder → Chat-Restore-Objekt. Von
    _angRestoreFromBK (letztes Angebot pro Ticket) UND dem Angebote-Picker
    (gezielt gewähltes Angebot) genutzt. */
-function _angMapBkFieldsToRestore(f) {
+function _angMapBkFieldsToRestore(f, recordId) {
   let positionen = [];
   try {
     positionen = JSON.parse(f.positionen_json || '[]').map(p => ({
@@ -30224,6 +30228,12 @@ function _angMapBkFieldsToRestore(f) {
     iteration: 1,
     savedAt:   f.erstellt_am || '',
     fromBK:    'ANG-' + (f.app_angebot_num || '?'),
+    /* v2.83.0: Die Nummer gehört zum wiederhergestellten Angebot. Bis hierher
+       ging sie verloren — das PDF fiel deshalb auf „ANG-FDH-<Ticket>" zurück,
+       während im Chat „ANG-2709 geladen" stand und beim Speichern eine dritte
+       Nummer gezogen wurde. Drei Nummern für ein Angebot. */
+    angebotNummer: (f.app_angebot_num != null ? f.app_angebot_num : null),
+    bkRecordId:    recordId || null,
   };
 }
 
@@ -30359,7 +30369,7 @@ async function _angOpenFromPicker(recordId) {
   if (!accountId || !ticketId) {
     return toast('Zu diesem Angebot fehlt der Ticket-/Mandanten-Bezug — es kann nicht im Chat geöffnet werden.', 'warn', 7000);
   }
-  const restore = _angMapBkFieldsToRestore(f);
+  const restore = _angMapBkFieldsToRestore(f, recordId);
   toast('Öffne Angebot ' + (restore.fromBK || '') + ' …', 'info', 2500);
   openAngebotsChatModal(accountId, ticketId, restore);
 }
@@ -33237,10 +33247,21 @@ async function _angChatCallApi(s) {
 /* v2.46.181: KOMPLETT NEU — kein HTML-Dump mehr in den Reply-Body.
    Stattdessen: Send-Vorschau-Modal mit editierbarem Email-Text, dem
    generierten BK-PDF als echtem Anhang und Signatur-Option. */
+/* v2.83.0: Nummer festmachen, BEVOR etwas Kundensichtbares entsteht.
+   Bis hierher konnte ein Angebot als „ANG-FDH-3112" beim Kunden landen und
+   später als „ANG-2709" im Berichtskonverter stehen — zwei Nummern für
+   dasselbe Papier, und die auf dem PDF gab es in keinem System. */
+async function _angNummerSichern(s) {
+  if (!s || s.angebotNummer != null) return;
+  if (!APP_KEYS.bkAirtableBaseId) return;
+  try { s.angebotNummer = await _bkNextAppAngebotNum(APP_KEYS.bkAirtableBaseId); } catch (_) {}
+}
+
 async function angChatExecuteFinal(btn) {
   const s = window._ANG_CHAT;
   if (!s) return;
   setBusy(btn, true, 'Baue PDF…');
+  await _angNummerSichern(s);
   let pdfBlob;
   try {
     pdfBlob = await _fdhBuildBkAngebotPdfBlob(s);
@@ -33592,7 +33613,9 @@ async function angChatSaveToBerichtskonverter(btn) {
   const s = window._ANG_CHAT;
   if (!s) return;
   if (!APP_KEYS.bkAirtableBaseId) return toast('Berichtskonverter-Base-ID nicht konfiguriert — Admin → Einstellungen', 'warn', 8000);
-  if (!confirm('Angebot ins Berichtskonverter-System speichern?\n\nKein Push ins ERP · Kein Kundenversand · nur Ablage.')) return;
+  if (!confirm('Angebot ins Berichtskonverter-System speichern?\n\nKein Kundenversand. Das Angebot landet in der Servicebox-Liste; '
+    + 'der ERP-Bezug (Anlage, Kunde, Kontakt) wird — soweit die Fabriknummer ihn hergibt — mitgeschrieben, '
+    + 'damit der ERP-Push dort möglich ist. Gepusht wird nicht von hier aus.')) return;
   setBusy(btn, true, 'Speichere…');
   try {
     const bk = await _bkSaveAngebotToBK(s);
@@ -33608,6 +33631,7 @@ async function angChatSaveToBerichtskonverter(btn) {
 }
 
 async function angChatShowPdfOnly(btn) {
+  await _angNummerSichern(window._ANG_CHAT);
   const s = window._ANG_CHAT;
   if (!s) return;
   const ctx = _angChatToCtx(s);
@@ -35607,6 +35631,69 @@ async function _bkNextAppAngebotNum(bkBaseId) {
   } catch (_) { return 1; }
 }
 
+/* v2.83.0: ERP-Bezug an den Berichtskonverter-Datensatz schreiben.
+
+   Warum das nötig ist: Die Servicebox schiebt ein Angebot nur dann ins ERP,
+   wenn `anlage_id` UND `kunde_nummer` am Datensatz stehen — `_angPushToErp`
+   bricht sonst mit „Keine Anlage verknüpft" ab. Aus Freshdesk erstellte
+   Angebote hatten diese Felder nie, deshalb kam dort nie eines an.
+
+   Beides steht nicht in Freshdesk, sondern im ERP: Die Anlage wird über die
+   Fabriknummer gefunden, der Kunde hängt an der Anlage. Fehlt die
+   Fabriknummer, ist die Anlage nicht bestimmbar — dann bleibt der Bezug leer
+   und die Servicebox sagt weiterhin, was fehlt. Das ist richtig so: Ein
+   Angebot der falschen Anlage zuzuordnen wäre schlimmer als keines.
+
+   Läuft bewusst nebenher: Ein ERP, das gerade nicht erreichbar ist, darf das
+   Speichern des Angebots nicht verhindern. */
+async function _bkErpBezugSetzen(recordId, s) {
+  if (!recordId || !APP_KEYS.erpProxyUrl) return;
+  const slug = _erpFirmaSlugForAccount(s.account || {});
+  if (!slug) return;
+  const fab = String((s.collected && s.collected.fabriknummer) || '').trim();
+  if (!fab || /^(unbekannt|unknown|\?|-)$/i.test(fab)) {
+    s._erpBezug = { fehlt: 'Fabriknummer' };
+    toast('Im Berichtskonverter gespeichert — aber ohne ERP-Bezug: Die Fabriknummer fehlt'
+      + (fab ? ' (steht als „' + fab + '")' : '') + '. Ohne sie lässt sich die Anlage nicht bestimmen, '
+      + 'und die Servicebox kann das Angebot nicht ins ERP pushen.', 'warn', 11000);
+    return;
+  }
+  let anlage = null;
+  try { anlage = await erpFindAnlageByFabriknummer(slug, fab); }
+  catch (e) { console.warn('[BK-Save] Anlagensuche:', e.message); return; }
+  if (!anlage) {
+    s._erpBezug = { fehlt: 'Anlage zu Fabriknummer ' + fab };
+    toast('Im Berichtskonverter gespeichert — aber im ERP gibt es keine Anlage mit der Fabriknummer '
+      + fab + '. Ohne Anlage kein ERP-Push aus der Servicebox.', 'warn', 11000);
+    return;
+  }
+  const kdNr = anlage.kunde?.kundennummer || anlage.kundennummer || '';
+  const felder = { anlage_id: String(anlage.id || ''), erp_firma_slug: slug };
+  if (kdNr) felder.kunde_nummer = String(kdNr);
+  // Kontakt: der Standardansprechpartner der Anlage, sonst der erste des Kunden.
+  let kontaktId = anlage.standardansprechpartnerId || anlage.standardAnsprechpartnerId
+    || anlage.standardAnsprechpartner?.id || anlage.ansprechpartner?.id || null;
+  if (!kontaktId && kdNr) {
+    const kontakte = await erpLoadKundenKontakte(slug, kdNr);
+    kontaktId = (kontakte || [])[0]?.id || null;
+  }
+  if (kontaktId) felder.kontakt_id = String(kontaktId);
+  try {
+    const r = await fetch('https://api.airtable.com/v0/' + APP_KEYS.bkAirtableBaseId + '/App_Angebote/' + recordId, {
+      method: 'PATCH',
+      headers: { 'Authorization': 'Bearer ' + APP_KEYS.airtableWriteKey, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ fields: felder, typecast: true }),
+    });
+    if (!r.ok) { console.warn('[BK-Save] ERP-Bezug schreiben:', r.status, (await r.text()).slice(0, 200)); return; }
+    s._erpBezug = { anlage: anlage.id, kunde: kdNr, kontakt: kontaktId };
+    console.log('[BK-Save] ERP-Bezug gesetzt:', felder);
+    toast('ERP-Bezug gesetzt: Anlage ' + anlage.id + (kdNr ? ' · Kunde ' + kdNr : '')
+      + (kontaktId ? ' · Kontakt ' + kontaktId : '')
+      + '. In der Servicebox ist „Ins ERP pushen" jetzt möglich.'
+      + (kdNr ? '' : ' — ohne Kundennummer lehnt der Push aber weiterhin ab.'), kdNr ? 'success' : 'warn', 9000);
+  } catch (e) { console.warn('[BK-Save] ERP-Bezug:', e.message); }
+}
+
 /* v2.46.178: KOMPLETT umgestellt auf den _fdhChatToBkRec-Mapper — derselbe der
    die Live-Vorschau speist. Damit ist garantiert: was in der Vorschau steht,
    landet 1:1 im Berichtskonverter (Positionen im titel/leistungsbeschreibung-Format,
@@ -35623,6 +35710,7 @@ async function _bkSaveAngebotToBK(chatState) {
   // v2.46.302: bereits reservierte Nummer verwenden (matcht die PDF-Nummer); sonst frisch ziehen
   const angNum = (s.angebotNummer != null) ? s.angebotNummer : await _bkNextAppAngebotNum(APP_KEYS.bkAirtableBaseId);
   s.angebotNummer = angNum;
+  const istAenderung = !!s.bkRecordId;
   const fdUrl = account.domain ? ('https://' + account.domain + '.freshdesk.com/a/tickets/' + s.ticketId) : '';
   const fields = Object.assign({}, rec, {
     app_angebot_num:      angNum,
@@ -35680,9 +35768,15 @@ async function _bkSaveAngebotToBK(chatState) {
   };
   // Direct-POST — nicht via airtableWriteWithAutoField, weil das die App-Base fest hat.
   // Wir schreiben in eine ANDERE Base (bkAirtableBaseId).
+  /* v2.83.0: Ein geladenes Angebot wird GEÄNDERT, nicht neu angelegt. Vorher
+     entstand bei jedem Speichern ein weiterer Datensatz mit der nächsten
+     Nummer — aus ANG-2709 wurde beim Nachbessern ANG-2710, und in der Liste
+     standen zwei Angebote für denselben Vorgang. */
   const post = async () => {
-    const r = await fetch('https://api.airtable.com/v0/' + APP_KEYS.bkAirtableBaseId + '/App_Angebote', {
-      method: 'POST',
+    const url = 'https://api.airtable.com/v0/' + APP_KEYS.bkAirtableBaseId + '/App_Angebote'
+      + (istAenderung ? '/' + s.bkRecordId : '');
+    const r = await fetch(url, {
+      method: istAenderung ? 'PATCH' : 'POST',
       headers: { 'Authorization': 'Bearer ' + APP_KEYS.airtableWriteKey, 'Content-Type': 'application/json' },
       body: JSON.stringify({ fields }),
     });
@@ -35708,7 +35802,10 @@ async function _bkSaveAngebotToBK(chatState) {
   }
   if (!res.ok) throw new Error('Berichtskonverter-Save: ' + res.status + ' — ' + res.body.slice(0, 300));
   const created = JSON.parse(res.body);
-  console.log('[BK-Save] Angebot ANG', angNum, 'erstellt:', created.id);
+  s.bkRecordId = created.id;      // ab jetzt wird geändert statt neu angelegt
+  console.log('[BK-Save] Angebot ANG', angNum, istAenderung ? 'aktualisiert:' : 'erstellt:', created.id);
+  // ERP-Verknüpfung nachziehen — ohne sie lehnt die Servicebox den Push ab.
+  _bkErpBezugSetzen(created.id, s).catch(e => console.warn('[BK-Save] ERP-Bezug:', e.message));
   // v2.46.178: PDF (BK-Design) als app_pdf-Attachment hochladen — damit im
   // Berichtskonverter-Listing das fertige PDF direkt sichtbar/downloadbar ist.
   try {
