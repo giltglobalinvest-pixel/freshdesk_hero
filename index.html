@@ -824,7 +824,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.98.1';
+const APP_VERSION = 'v2.99.0';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -48076,6 +48076,7 @@ function _renderCrawledContacts() {
           + (markiert
               ? '<button onclick="_korbSammelUebernehmen(this)" class="px-2.5 py-1 rounded-lg text-[11px] font-bold bg-emerald-600 hover:bg-emerald-700 text-white inline-flex items-center gap-1" title="Die markierten Kontakte in die zentrale DB übernehmen">'
                 + '<i data-lucide="check-check" class="w-3.5 h-3.5"></i> ' + markiert + ' markierte übernehmen</button>'
+                + '<button onclick="_korbSammelAusblenden(this)" class="px-2.5 py-1 rounded-lg text-[11px] font-bold bg-ink-600 hover:bg-ink-700 text-white inline-flex items-center gap-1" title="Die markierten Kontakte ausblenden — gilt für alle Benutzer, gelöscht wird nichts"><i data-lucide="eye-off" class="w-3.5 h-3.5"></i> ' + markiert + ' ausblenden</button>'
                 + '<button onclick="_korbAuswahlLeeren()" class="px-2 py-1 rounded-lg text-[11px] font-bold bg-white border border-ink-300 text-ink-600 hover:bg-ink-50">Markierung aufheben</button>'
               : '<span class="text-[11px] text-ink-500 italic">Kontakte markieren, um sie gemeinsam zu übernehmen.</span>')
         + '</div>';
@@ -48681,6 +48682,48 @@ async function _korbFirmenRichtigstellen(btn) {
   _renderCrawledContacts();
   toast(korrigiert + ' Firmen richtiggestellt · ' + geleert + ' geleert (im Archiv nichts gefunden)'
     + (fehler ? ' · ' + fehler + ' Fehler' : ''), fehler ? 'warn' : 'success', 9000);
+}
+
+/* Markierte gemeinsam ausblenden.
+
+   WICHTIG und in der Rückfrage ausdrücklich gesagt: `hidden` ist ein Feld am
+   gemeinsamen Datensatz, keine persönliche Ansicht. Was hier ausgeblendet wird,
+   ist für JEDEN ausgeblendet, der den Korb öffnet. Das ist auch richtig so —
+   der Korb ist eine gemeinsame Arbeitsliste, und wer einen Eintrag geprüft und
+   verworfen hat, soll ihn den Kolleginnen nicht erneut vorlegen. Nur muss man
+   es wissen, bevor man 97 Einträge auf einmal wegräumt. */
+async function _korbSammelAusblenden(btn) {
+  const sichtbar = _crawlVisible();
+  const ziel = sichtbar.filter(r => KORB_AUSWAHL.has(r.recordId) && r.hidden !== 'hidden');
+  if (!ziel.length) return toast('Nichts markiert (oder bereits ausgeblendet).', 'warn', 4000);
+  if (!confirm(ziel.length + ' Kontakte ausblenden?\n\n'
+    + 'Das gilt für ALLE Benutzer, nicht nur für dich — der Korb ist eine gemeinsame Arbeitsliste.\n\n'
+    + 'Rückgängig über „Ausgeblendete anzeigen" oben und den Knopf an der jeweiligen Karte. '
+    + 'Gelöscht wird nichts.')) return;
+
+  setBusy(btn, true, '0/' + ziel.length);
+  let ok = 0, fehler = 0;
+  for (let i = 0; i < ziel.length; i += 10) {
+    const stapel = ziel.slice(i, i + 10).map(r => ({ id: r.recordId, fields: { hidden: 'hidden', updated_at: nowIso() } }));
+    try {
+      const res = await fetch('https://api.airtable.com/v0/' + APP_CONFIG.APP_BASE_ID + '/' + encodeURIComponent(CRAWLED_TABLE), {
+        method: 'PATCH',
+        headers: { Authorization: 'Bearer ' + APP_KEYS.airtableWriteKey, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ records: stapel, typecast: true }),
+      });
+      if (!res.ok) { fehler += stapel.length; console.warn('[Korb] Ausblenden:', (await res.text()).slice(0, 200)); }
+      else {
+        ok += stapel.length;
+        ziel.slice(i, i + 10).forEach(r => { r.hidden = 'hidden'; KORB_AUSWAHL.delete(r.recordId); });
+      }
+    } catch (e) { fehler += stapel.length; console.warn('[Korb] Ausblenden:', e.message); }
+    setBusy(btn, true, Math.min(i + 10, ziel.length) + '/' + ziel.length);
+    await new Promise(r2 => setTimeout(r2, 200));
+  }
+  setBusy(btn, false);
+  _renderCrawledContacts();
+  toast(ok + ' ausgeblendet — für alle Benutzer' + (fehler ? ' · ' + fehler + ' fehlgeschlagen' : ''),
+    fehler ? 'warn' : 'success', 7000);
 }
 
 /* ===== Mehrere Kontakte auf einmal nachfassen (v2.98.0) ==================
