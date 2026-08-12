@@ -824,7 +824,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.83.3';
+const APP_VERSION = 'v2.84.0';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -6985,6 +6985,49 @@ function _syncAllInputsToCtx() { _syncContactMaster(); }
 function _syncFreshdeskInputsToCtx()  { _syncContactMaster(); }
 function _syncFreshsalesInputsToCtx() { _syncContactMaster(); }
 
+/* Signaturdaten aus dem Archiv zu dieser Adresse.
+
+   Warum das nötig ist: Der KI-Zauber sah bisher nur den AKTUELLEN Vorgang. Wer
+   zum dritten Mal schreibt und diesmal nur „Können Sie bitte kommen?" tippt,
+   hat dort keine Signatur — in den Mails davor aber sehr wohl. Dann meldete der
+   Knopf „Alle Felder sehen gut aus", obwohl Telefon, Anschrift und Position
+   leer blieben, weil im Archiv niemand nachgesehen hat.
+
+   Nur der Mandant des Tickets wird durchsucht — die Vorgeschichte eines Kunden
+   gehört zu der Firma, mit der er geschrieben hat. */
+async function _ciArchivSignatur(ctx) {
+  const key = APP_KEYS.user?.api_key;
+  const accId = ctx.accountId || ctx.fd?.accountId;
+  const slug = accId ? _archivSlugFuer(accId) : null;
+  const email = String(ctx.master?.contact?.email || ctx.ticket?.requester?.email || '').trim().toLowerCase();
+  if (!key || !slug || !email.includes('@')) return null;
+  try {
+    const res = await fetch(ARCHIV_URL + '/signatur?mandant=' + encodeURIComponent(slug)
+      + '&email=' + encodeURIComponent(email), { headers: { 'X-Hero-Key': key } });
+    if (!res.ok) return null;
+    const d = await res.json();
+    return d && d.gefunden ? d : null;
+  } catch (e) { console.warn('[KI-Zauber] Archiv:', e.message); return null; }
+}
+
+/* Archiv-Signatur → dieselben Feldnamen, die der Zauberbutton anzeigt.
+   Bewusst ohne Firmennamen-Rateei: Was der Leser nicht sicher hergibt, bleibt
+   der KI überlassen. */
+function _ciArchivZuVorschlaegen(d) {
+  const sig = (d && d.signatur) || {};
+  const quelle = 'Archiv · Signatur aus ' + d.nachrichten + ' Nachricht' + (d.nachrichten === 1 ? '' : 'en');
+  const raus = {};
+  const setze = (feld, wert) => { if (String(wert || '').trim()) raus[feld] = { value: String(wert).trim(), source: quelle, accepted: false }; };
+  setze('company_name',    sig.firma);
+  setze('company_street',  sig.strasse);
+  setze('company_zipcode', sig.plz);
+  setze('company_city',    sig.ort);
+  setze('job_title',       sig.position);
+  setze('phone',           sig.telefon);
+  setze('mobile',          sig.mobil);
+  return raus;
+}
+
 async function loadContactSuggestions() {
   const ctx = CONTACT_EDIT_CTX;
   if (!ctx?.fd) return;
@@ -6993,7 +7036,12 @@ async function loadContactSuggestions() {
   ctx.suggestionsError = null;
   renderContactEditBody();
   try {
-    const raw = await aiSuggestAllContactFields(ctx);
+    // Archiv zuerst — belegte Daten schlagen geratene. Läuft parallel zur KI,
+    // damit der Knopf nicht doppelt so lange braucht.
+    const [archiv, raw] = await Promise.all([
+      _ciArchivSignatur(ctx).catch(() => null),
+      aiSuggestAllContactFields(ctx),
+    ]);
     // Master-flach: alle Felder unter ctx.suggestions.master.{field}
     const validFields = Object.keys(SUGG_INPUT_MAP.master);
     const norm = { master: {} };
@@ -7008,7 +7056,16 @@ async function loadContactSuggestions() {
         };
       }
     });
+    /* Archivwerte gewinnen: Sie stehen so in einer Signatur, die diese Person
+       selbst geschrieben hat. Ein aus der Domain abgeleiteter Firmenname ist
+       dagegen eine Vermutung. Vorgeschlagen wird weiterhin nur für Felder, die
+       im Formular leer sind — das prüft die Anzeige. */
+    const ausArchiv = archiv ? _ciArchivZuVorschlaegen(archiv) : {};
+    Object.keys(ausArchiv).forEach(feld => {
+      if (validFields.includes(feld)) norm.master[feld] = ausArchiv[feld];
+    });
     ctx.suggestions = norm;
+    ctx._archivTreffer = archiv ? archiv.nachrichten : 0;
   } catch (e) {
     ctx.suggestionsError = e.message;
   } finally {
@@ -12174,7 +12231,7 @@ async function openMarketingFromContactModal(accountId, recipientEmail, recipien
 function _renderMarketingFromContactModal(accountId, recipientEmail, recipientName, contactId, sourceTicketId, responses, configs, history) {
   const host = document.getElementById('subModalHost');
   if (!host) return;
-  const primaryCfg = configs.find(c => c.primary_role || c.default) || configs[0];
+  const primaryCfg = _fdStandardAbsender(accountId, configs);
   const tplOpts = '<option value="">— Vorlage wählen —</option>' +
     responses.map(r => {
       const folderSuffix = r._folderName ? ' · ' + r._folderName : '';
@@ -26164,6 +26221,55 @@ async function ensureCannedResponsesLoaded(accountId) {
   return FD_CANNED_RESPONSES_CACHE[accountId];
 }
 
+/* Welcher Absender ist für DIESEN Mandanten der richtige?
+
+   Bisher stand überall `configs.find(c => c.primary_role || c.default) || configs[0]`.
+   Hat in Freshdesk keine Adresse eine Vorrangmarkierung — und das ist der
+   Normalfall, wenn mehrere Schwesterfirmen in einer Instanz hängen —, gewinnt
+   schlicht die ERSTE aus der API-Antwort. Bei FLP war das `service@liftaro.de`.
+   Eine Mail unter fremdem Firmennamen fällt erst auf, wenn der Empfänger
+   antwortet.
+
+   Reihenfolge: gemerkte Wahl → Adresse, die zum Mandantennamen passt →
+   Vorrangmarkierung → erste. */
+const _FD_ABSENDER_KEY = (accountId) => 'fdh_absender_' + accountId;
+
+function _fdAccountWortmarken(accountId) {
+  const acc = (APP_STATE.accounts || []).find(a => String(a.id) === String(accountId));
+  if (!acc) return [];
+  const stop = new Set(['gmbh', 'ag', 'kg', 'mbh', 'ug', 'und', 'the', 'service', 'group', 'holding', 'co']);
+  const ausName = String(acc.name || '').toLowerCase().split(/[^a-z0-9]+/).filter(w => w.length >= 3 && !stop.has(w));
+  const ausDomain = String(acc.domain || '').toLowerCase().split(/[^a-z0-9]+/).filter(w => w.length >= 3 && !stop.has(w));
+  return [...new Set(ausName.concat(ausDomain))];
+}
+
+function _fdStandardAbsender(accountId, configs) {
+  const liste = configs || [];
+  if (!liste.length) return null;
+  const adresse = (c) => String(c.reply_email || c.support_email || c.email || '').toLowerCase();
+
+  let gemerkt = '';
+  try { gemerkt = localStorage.getItem(_FD_ABSENDER_KEY(accountId)) || ''; } catch (_) {}
+  if (gemerkt) {
+    const treffer = liste.find(c => String(c.id) === String(gemerkt));
+    if (treffer) return treffer;
+  }
+  const marken = _fdAccountWortmarken(accountId);
+  if (marken.length) {
+    const passend = liste.find(c => {
+      const dom = (adresse(c).split('@')[1] || '');
+      return marken.some(w => dom.includes(w));
+    });
+    if (passend) return passend;
+  }
+  return liste.find(c => c.primary_role || c.default) || liste[0];
+}
+
+/** Getroffene Absenderwahl merken — je Mandant. */
+function _fdAbsenderMerken(accountId, cfgId) {
+  if (accountId && cfgId) lsSetzen(_FD_ABSENDER_KEY(accountId), String(cfgId));
+}
+
 async function ensureEmailConfigsLoaded(accountId) {
   if (FD_EMAIL_CONFIGS_CACHE[accountId]) return FD_EMAIL_CONFIGS_CACHE[accountId];
   try {
@@ -26255,7 +26361,7 @@ function _renderDealEmailModal(accountId, dealId, deal, contact, responses, conf
   const acc = (APP_STATE.accounts || []).find(function (a) { return a.id === accountId; });
   const contactName = contact ? (contact.display_name || ((contact.first_name || '') + ' ' + (contact.last_name || '')).trim()) : '';
   // Default From: erste primary email_config (oder erste überhaupt)
-  const primaryCfg = configs.find(function (c) { return c.primary_role || c.default; }) || configs[0];
+  const primaryCfg = _fdStandardAbsender(accountId, configs);
   // Vorlagen-Dropdown (flach, mit Folder als Suffix für Orientierung)
   const tplOpts = '<option value="">— Vorlage wählen —</option>' +
     responses.map(function (r) {
@@ -26530,7 +26636,7 @@ function _renderTicketEmailModal(accountId, ticketId, ticket, responses, configs
   const host = document.getElementById('subModalHost');
   if (!host) return;
   const ctx = _buildTicketEmailCtx(ticket);
-  const primaryCfg = configs.find(function (c) { return c.primary_role || c.default; }) || configs[0];
+  const primaryCfg = _fdStandardAbsender(accountId, configs);
   const tplOpts = '<option value="">— Vorlage wählen —</option>' +
     responses.map(function (r) {
       const folderSuffix = r._folderName ? ' · ' + r._folderName : '';
@@ -27295,7 +27401,7 @@ async function _renderNewEmailPreview() {
     body.innerHTML = '<div class="bg-red-50 border border-red-200 rounded-xl p-3 text-sm text-red-800">Keine Email-Configs gefunden — bitte in Freshdesk eine Support-Email-Adresse aktivieren.</div>';
     return;
   }
-  const primaryCfg = configs.find(function (c) { return c.primary_role || c.default; }) || configs[0];
+  const primaryCfg = _fdStandardAbsender(ref && ref.accountId, configs);
   const tplOpts = '<option value="">— Keine Vorlage (KI-Entwurf nutzen) —</option>' +
     responses.map(function (r) {
       const folderSuffix = r._folderName ? ' · ' + r._folderName : '';
@@ -27446,6 +27552,8 @@ async function processSendNewEmail(btn) {
   if (!body)      return setErr('Email-Text fehlt');
   if (!fromIdStr) return setErr('Absender (Von) fehlt');
   const fromId = parseInt(fromIdStr, 10);
+  // Wahl merken — beim nächsten Mal steht sie für diesen Mandanten wieder da.
+  _fdAbsenderMerken(NEW_EMAIL_PLAN && NEW_EMAIL_PLAN.accountId, fromId);
   const files = NEW_EMAIL_FILES.slice();
   setBusy(btn, true, files.length ? 'Sende + hänge Anhänge an…' : 'Sende…');
   // v2.67.8: Signatur anhängen — Freshdesk tut das bei outbound_email nicht selbst.
@@ -33270,6 +33378,32 @@ async function _angChatCallApi(s) {
    Nummer nachträglich zu ändern, nachdem das PDF beim Kunden liegt, wäre
    schlimmer als eine Nummer aus dem falschen Kreis. */
 
+/* Der Mandanten-Slug für die Nummernkreise. Für Aszendio und Aufzugshandwerk
+   ist das der ERP-Slug — die Servicebox zählt unter genau diesem Wert weiter.
+   Alle anderen bekommen einen aus dem Namen abgeleiteten Slug.
+
+   Der frühere Rückfall auf 'aszendio' war falsch: Ein Liftaro-Angebot wäre in
+   Aszendios Nummernkreis gelandet und stünde in deren Liste. */
+function _angFirmaSlug(account) {
+  const erp = _erpFirmaSlugForAccount(account || {});
+  if (erp) return erp;
+  const name = String((account || {}).name || '').toLowerCase();
+  if (/flp/.test(name))     return 'flp';
+  if (/liftaro/.test(name)) return 'liftaro';
+  return name.replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'unbekannt';
+}
+
+/* Führt dieser Mandant überhaupt Anlagen?
+
+   Nur Aszendio und Aufzugshandwerk hängen an Maxise, wo ein Angebot ohne
+   Anlage nicht existieren kann. FLP verkauft Ersatzteile, Liftaro prüft
+   Angebote — dort gibt es schlicht keine Fabriknummern. Für sie ist sie
+   deshalb auch kein Kriterium: Sie laufen immer im eigenen Kreis, nicht weil
+   etwas fehlt, sondern weil es diesen Weg bei ihnen nicht gibt. */
+function _angMandantFuehrtAnlagen(account) {
+  return !!_erpFirmaSlugForAccount(account || {});
+}
+
 /** Taugt die Fabriknummer, um im ERP eine Anlage zu bestimmen oder anzulegen? */
 function _angHatFabriknummer(s) {
   const f = String((s && s.collected && s.collected.fabriknummer) || '').trim();
@@ -33336,14 +33470,17 @@ function _angNrText(s) {
 async function _angNummerSichern(s) {
   if (!s || s.angebotNummer != null) return;
   if (!APP_KEYS.bkAirtableBaseId) return;
-  const erpFaehig = _angHatFabriknummer(s);
-  const firmaSlug = _erpFirmaSlugForAccount(s.account || {}) || '';
+  const fuehrtAnlagen = _angMandantFuehrtAnlagen(s.account || {});
+  const erpFaehig = fuehrtAnlagen && _angHatFabriknummer(s);
+  const firmaSlug = _angFirmaSlug(s.account || {});
   s.angebotKreis = erpFaehig ? 'ang' : 'fdh';
   s.angebotNummer = erpFaehig
     ? await _angNaechsteNummer('app_angebot_num', firmaSlug, false)
     : await _angNaechsteNummer('fdh_angebot_num', firmaSlug, true);
   s.angebotNr = (erpFaehig ? 'ANG-' : 'FDH-') + s.angebotNummer;
-  if (!erpFaehig) {
+  // Nur erklären, wenn es etwas zu erklären gibt: Bei Mandanten ohne Anlagen
+  // ist der eigene Kreis der Normalfall und keine Einschränkung.
+  if (!erpFaehig && fuehrtAnlagen) {
     toast('Ohne Fabriknummer: Angebot ' + s.angebotNr + ' läuft im Hero-Nummernkreis. '
       + 'Im ERP kann es nicht angelegt werden — dort braucht jedes Angebot eine Anlage, '
       + 'und eine Anlage braucht eine Fabriknummer.', 'info', 10000);
@@ -35770,7 +35907,7 @@ async function _bkNextAppAngebotNum(bkBaseId) {
 async function _bkErpBezugSetzen(recordId, s) {
   if (!recordId || !APP_KEYS.erpProxyUrl) return;
   const slug = _erpFirmaSlugForAccount(s.account || {});
-  if (!slug) return;
+  if (!slug) return;              // Mandant ohne Anlagen-ERP — nichts zu verknüpfen
   const fab = String((s.collected && s.collected.fabriknummer) || '').trim();
   if (!fab || /^(unbekannt|unknown|\?|-)$/i.test(fab)) {
     s._erpBezug = { fehlt: 'Fabriknummer' };
@@ -36638,7 +36775,7 @@ function _fdhChatToBkRec(chatState) {
   const s = chatState || window._ANG_CHAT;
   if (!s) return null;
   const account = s.account || {};
-  const firmaSlug = _erpFirmaSlugForAccount(account) || 'aszendio';
+  const firmaSlug = _angFirmaSlug(account);
   const sd = s.collected?.stammdaten || {};
   const req = s.ticket?.requester || {};
   const totals = s.collected?._totals || (typeof _angebotCalcTotals === 'function' ? _angebotCalcTotals(s.collected) : { netto: 0, brutto: 0, mwst: 0 });
@@ -39700,7 +39837,7 @@ async function _pcSendMail(btn) {
   setBusy(btn, true, 'Sende…');
   try {
     const configs = await ensureEmailConfigsLoaded(c._accountId);
-    const primaryCfg = configs.find(cf => cf.primary_role || cf.default) || configs[0];
+    const primaryCfg = _fdStandardAbsender(accountId, configs);
     if (!primaryCfg) throw new Error('Keine Absender-Konfiguration im Mandanten');
     const me = await fetchAgentMe(c._accountId).catch(() => null);
     const sig = me?.signature || '';
@@ -47692,7 +47829,7 @@ function _renderBulkMarketingModal() {
   const host = document.getElementById('subModalHost');
   if (!host) return;
   const acc = (APP_STATE.accounts || []).find(a => a.id === ctx.accountId);
-  const primaryCfg = ctx.configs.find(c => c.primary_role || c.default) || ctx.configs[0];
+  const primaryCfg = _fdStandardAbsender(ctx.accountId, ctx.configs);
   const tplOpts = '<option value="">— Vorlage wählen —</option>' +
     ctx.responses.map(r => {
       const folderSuffix = r._folderName ? ' · ' + r._folderName : '';
