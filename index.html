@@ -824,7 +824,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.88.4';
+const APP_VERSION = 'v2.88.5';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -30708,9 +30708,28 @@ async function openAngebotsChatModal(accountId, ticketId, forcedRestore) {
        zu diesem Ticket reserviert, dann gehört sie hierher. Läuft nebenher und
        zeichnet die Vorschau nach, sobald die Antwort da ist. */
     if (window._ANG_CHAT && window._ANG_CHAT.angebotNummer == null) {
-      _angNummerAusBkHolen(accountId, ticketId).then(gefunden => {
+      _angNummerAusBkHolen(accountId, ticketId).then(async gefunden => {
         const st = window._ANG_CHAT;
         if (!gefunden || !st || String(st.ticketId) !== String(ticketId) || st.angebotNummer != null) return;
+        if (gefunden.reparieren) {
+          // Datensatz da, Nummer fehlt: jetzt eine ziehen und ihn damit füllen.
+          st.bkRecordId = gefunden.recordId;
+          await _angNummerSichern(st);
+          if (st.angebotNummer == null) return;
+          const feld = st.angebotKreis === 'fdh' ? 'fdh_angebot_num' : 'app_angebot_num';
+          const patch = { angebot_nr: st.angebotNr }; patch[feld] = st.angebotNummer;
+          try {
+            await fetch('https://api.airtable.com/v0/' + APP_KEYS.bkAirtableBaseId + '/App_Angebote/' + gefunden.recordId, {
+              method: 'PATCH',
+              headers: { 'Authorization': 'Bearer ' + APP_KEYS.airtableWriteKey, 'Content-Type': 'application/json' },
+              body: JSON.stringify({ fields: patch, typecast: true }),
+            });
+          } catch (e) { console.warn('[Angebot] Reparatur-PATCH:', e.message); }
+          _angPersistState();
+          try { _angChatRenderPreview(); } catch (_) {}
+          toast('Der Datensatz in der Servicebox hatte keine Nummer — nachgetragen als ' + st.angebotNr + '.', 'success', 8000);
+          return;
+        }
         st.angebotNummer = gefunden.nummer;
         st.angebotKreis  = gefunden.kreis;
         st.angebotNr     = gefunden.nr;
@@ -31323,12 +31342,19 @@ async function _angNummerAusBkHolen(accountId, ticketId) {
     const d = await r.json();
     const recs = d.records || [];
     console.log('[Angebot] BK-Suche zu Ticket ' + ticketId + ': ' + recs.length + ' Datensatz/Datensätze');
-    let best = null;
+    let best = null, ohneNummer = null;
     for (const rec of recs) {
       const f = rec.fields || {};
       const istFdh = f.app_angebot_num == null && f.fdh_angebot_num != null;
       const nummer = istFdh ? f.fdh_angebot_num : f.app_angebot_num;
-      if (nummer == null) continue;
+      if (nummer == null) {
+        /* Datensatz ohne jede Nummer — entstanden, als der Satz vor der Vergabe
+           gebaut wurde. Er wird nicht übergangen, sondern repariert: Er gehört
+           zu diesem Ticket, also bekommt er jetzt eine Nummer statt dass ein
+           zweiter Datensatz danebengelegt wird. */
+        if (!ohneNummer) ohneNummer = { recordId: rec.id, reparieren: true };
+        continue;
+      }
       // Ein „ENTWURF-…" im Feld ist keine Nummer, sondern ein Altlast-Text aus
       // der Zeit, als der Datensatz vor der Vergabe gebaut wurde.
       const text = String(f.angebot_nr || '');
@@ -31338,7 +31364,10 @@ async function _angNummerAusBkHolen(accountId, ticketId) {
                      textFalsch: !brauchbar };
       if (!best || kand.nummer > best.nummer) best = kand;
     }
-    if (!best) console.warn('[Angebot] BK-Datensatz gefunden, aber ohne Nummer in app_angebot_num/fdh_angebot_num');
+    if (!best && ohneNummer) {
+      console.warn('[Angebot] BK-Datensatz ohne Nummer — wird repariert:', ohneNummer.recordId);
+      return ohneNummer;
+    }
     return best;
   } catch (e) { console.warn('[Angebot] Nummer aus BK:', e.message); return null; }
 }
@@ -34390,7 +34419,10 @@ async function _angNummerSichern(s) {
      nicht. Wer prüfen will, was der Kunde bekommt, sah die falsche Nummer. */
   try { if (typeof _angChatRenderPreview === 'function') _angChatRenderPreview(); } catch (_) {}
 
-  const belegt = await _angNummerBelegen(s, feld, firmaSlug);
+  /* Gibt es zu diesem Angebot schon einen Datensatz, wird KEIN zweiter
+     angelegt — die Nummer gehört auf den vorhandenen. Der Aufrufer schreibt
+     sie dort hinein. */
+  const belegt = s.bkRecordId ? true : await _angNummerBelegen(s, feld, firmaSlug);
   if (!belegt) {
     toast('Achtung: Nummer ' + s.angebotNr + ' konnte nicht reserviert werden. '
       + 'Sie steht auf dem PDF, ist aber noch nicht belegt — wer parallel arbeitet, '
@@ -36964,7 +36996,13 @@ async function _bkSaveAngebotToBK(chatState) {
   const istAenderung = !!s.bkRecordId;
   const fdUrl = account.domain ? ('https://' + account.domain + '.freshdesk.com/a/tickets/' + s.ticketId) : '';
   const fields = Object.assign({}, rec, {
-    angebot_nr:           _angNrText(s),   // Sicherheitsnetz gegen zu frühes Mappen
+    /* Nummernfelder hier NOCH EINMAL aus dem Zustand setzen. Verlässt man sich
+       allein auf den Mapper, hängt alles daran, dass er nach der Vergabe lief —
+       und genau das war der Fehler, durch den ein Datensatz ohne jede Nummer
+       im Berichtskonverter landete. */
+    app_angebot_num:      (s.angebotKreis === 'fdh' ? null : s.angebotNummer),
+    fdh_angebot_num:      (s.angebotKreis === 'fdh' ? s.angebotNummer : null),
+    angebot_nr:           _angNrText(s),
     status:               'fertig',
     source_app:           'freshdesk_hero',
     freshdesk_ticket_id:  String(s.ticketId || ''),
