@@ -824,7 +824,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.99.3';
+const APP_VERSION = 'v2.99.4';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -8555,6 +8555,17 @@ function getAgentName(accountId, agentId) {
   const c = APP_STATE.agentsCache?.[accountId];
   return c?.byId?.[agentId]?.name || ('#' + agentId);
 }
+/* v2.99.4: Auch bei internen Notizen den Verfasser nennen.
+
+   Über jeder Notiz stand pauschal „Interne Notiz" — die Richtung, nicht die
+   Person. Bei einem Vorgang, durch den mehrere Hände gehen, ist genau das die
+   Frage: Wer hat das notiert und wen frage ich, wenn etwas unklar ist?
+   Freshdesk liefert die `user_id` je Nachricht mit; sie war nur nie aufgelöst. */
+function _fdhNotizBeschriftung(accountId, c) {
+  const wer = _fdhNachrichtAbsender(accountId, c);
+  return wer && wer !== 'Agent' ? 'Interne Notiz · ' + wer : 'Interne Notiz';
+}
+
 /* v2.68.8: Absender einer ausgehenden Nachricht als NAME statt als Rolle.
    Vorher stand über jeder ausgehenden Nachricht pauschal „Agent" — das ist nur
    die Richtung. Freshdesk liefert je Nachricht die `user_id` mit; ohne sie
@@ -13113,7 +13124,7 @@ async function openTicketContentModal(accountId, ticketId) {
     conversations.forEach(c => {
       const isIncoming = c.incoming === true;
       const isPrivate  = c.private === true;
-      const who = isPrivate ? 'Interne Notiz' : (isIncoming ? (c.from_email || 'Kunde') : _fdhNachrichtAbsender(accountId, c));
+      const who = isPrivate ? _fdhNotizBeschriftung(accountId, c) : (isIncoming ? (c.from_email || 'Kunde') : _fdhNachrichtAbsender(accountId, c));
       const align = isIncoming ? 'border-brand-300 bg-brand-50/40' : (isPrivate ? 'border-amber-300 bg-amber-50/40' : 'border-ink-200 bg-ink-50/40');
       const arrow = isPrivate ? '⊙' : (isIncoming ? '←' : '→');
       const rawHtml = c.body || '';
@@ -15840,7 +15851,7 @@ function renderTicketDetailBody(ticket) {
           ${conversations.map((c, idx) => {
             const isIncoming = c.incoming === true;
             const isPrivate  = c.private === true;
-            const who = isPrivate ? 'Interne Notiz' : (isIncoming ? (c.from_email || 'Kunde') : _fdhNachrichtAbsender(ticket._accountId, c));
+            const who = isPrivate ? _fdhNotizBeschriftung(ticket._accountId, c) : (isIncoming ? (c.from_email || 'Kunde') : _fdhNachrichtAbsender(ticket._accountId, c));
             const align = isIncoming ? 'border-brand-300 bg-brand-50/50' : (isPrivate ? 'border-amber-300 bg-amber-50/50' : 'border-ink-200 bg-ink-50/50');
             const arrow = isPrivate ? '⊙' : (isIncoming ? '←' : '→');
             const rawHtml = c.body || '';
@@ -19766,7 +19777,7 @@ function renderAssistantInput() {
           ${conversations.map(c => {
             const isIncoming = c.incoming === true;
             const isPrivate  = c.private === true;
-            const who = isPrivate ? 'Interne Notiz' : (isIncoming ? (c.from_email || 'Kunde') : _fdhNachrichtAbsender((t && t._accountId) || ctx.accountId, c));
+            const who = isPrivate ? _fdhNotizBeschriftung((t && t._accountId) || ctx.accountId, c) : (isIncoming ? (c.from_email || 'Kunde') : _fdhNachrichtAbsender((t && t._accountId) || ctx.accountId, c));
             const align = isIncoming ? 'border-brand-300 bg-brand-50/40' : (isPrivate ? 'border-amber-300 bg-amber-50/40' : 'border-ink-200 bg-ink-50/40');
             const arrow = isPrivate ? '⊙' : (isIncoming ? '←' : '→');
             const body = htmlToText(c.body_text || c.body || '');
