@@ -824,7 +824,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.91.0';
+const APP_VERSION = 'v2.92.0';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -17952,6 +17952,7 @@ function renderSearchResults() {
   // Tickets zuerst — sie sind in aller Regel das Gesuchte.
   $('searchResults').innerHTML = headerSummary + ticketBlock + hiddenTicketsHint + contactBlock + hiddenContactsHint;
   if (window.lucide) lucide.createIcons();
+  _korbAuswahlLeisteZeichnen();
   // Stammdaten-Marken nachtragen — nicht abwarten, die Treffer stehen schon.
   if (contacts.length && !hideContacts) _zdbMarkenNachtragen(contacts).catch(() => {});
 }
@@ -48037,6 +48038,17 @@ function _renderCrawledContacts() {
         (APP_KEYS.user?.is_admin ? '<button onclick="_korbArchivCrawlOeffnen()" class="px-2 py-1 bg-violet-600 hover:bg-violet-700 text-white rounded-lg text-[11px] font-bold inline-flex items-center gap-1" title="Signaturen im Archiv auswerten und Kontakte in den Korb legen"><i data-lucide="database-zap" class="w-3 h-3"></i> Archiv crawlen</button>' : '') +
         '<button onclick="showCrawledContacts(this)" class="px-2 py-1 bg-white border border-violet-300 text-violet-700 rounded-lg text-[11px] font-bold" title="Neu laden">↻</button>' +
       '</div>' +
+      /* Sammelfreigabe. „Alle im Filter" bezieht sich ausdrücklich auf das,
+         was gerade sichtbar ist — nicht auf den ganzen Korb. Sonst übernimmt
+         jemand mit einem Klick siebenhundert ungeprüfte Einträge. */
+      (list.length ? '<div class="mt-2 flex items-center gap-2 flex-wrap">'
+        + '<label class="inline-flex items-center gap-1.5 text-[11px] text-violet-900 cursor-pointer bg-white border border-violet-200 rounded-lg px-2 py-1">'
+          + '<input type="checkbox"' + (list.length && list.every(r => KORB_AUSWAHL.has(r.recordId)) ? ' checked' : '')
+          + ' onchange="_korbAlleAuswaehlen(this.checked)"> alle ' + list.length + ' markieren</label>'
+        + '<button onclick="_korbSammelUebernehmen(true, this)" class="px-2.5 py-1 rounded-lg text-[11px] font-bold bg-emerald-600 hover:bg-emerald-700 text-white inline-flex items-center gap-1" title="Alle gerade sichtbaren Kontakte in die zentrale DB übernehmen">'
+          + '<i data-lucide="check-check" class="w-3.5 h-3.5"></i> Alle im Filter übernehmen (' + list.length + ')</button>'
+        + '<span id="korbAuswahlLeiste"></span>'
+      + '</div>' : '') +
       ((hiddenCount || softHiddenCount) ?
         '<div class="mt-1.5 flex items-center gap-3 flex-wrap">' +
           (softHiddenCount ?
@@ -48055,6 +48067,8 @@ function _renderCrawledContacts() {
     (list.length ? sichtbar.map((r, i) =>
       '<div class="' + (r.hidden === 'spam' ? 'bg-rose-50 border-rose-200' : r.hidden === 'hidden' ? 'bg-ink-50 border-ink-200 opacity-60' : 'bg-white border-ink-200') + ' rounded-xl border p-3 mb-2 transition">' +
         '<div class="flex items-start gap-2 flex-wrap">' +
+        '<input type="checkbox" class="mt-1 w-4 h-4 shrink-0"' + (KORB_AUSWAHL.has(r.recordId) ? ' checked' : '')
+          + ' onchange="_korbAuswahlUm(\'' + escapeAttr(r.recordId) + '\', this.checked)" title="Für die Sammelübernahme markieren">' +
           '<div class="flex-1 min-w-[220px] cursor-pointer" onclick="_crawlDetail(' + i + ')" title="Vollständige Kontaktdetails anzeigen">' +
             '<div class="flex items-center gap-1.5 mb-1 flex-wrap">' + _korbStatusBadge(r) + _korbMandantBadge(r) + _korbQuelleBadge(r) + '</div>' +
             '<p class="font-bold text-ink-900 text-sm hover:text-violet-700">' + escapeHtml(r.name || r.email) + (r.position ? ' <span class="font-normal text-ink-500">· ' + escapeHtml(r.position) + '</span>' : '') +
@@ -48142,6 +48156,96 @@ function _korbKontaktDaten(r) {
 
 function _korbAccount(r) {
   return (APP_STATE.accounts || []).find(a => String(a.id) === String(r && r.account_id)) || null;
+}
+
+/* ===== Sammelübernahme im Korb (v2.92.0) =================================
+   Ein Korb mit siebenhundert Einträgen lässt sich nicht einzeln freigeben. Was
+   fehlte, war die Möglichkeit, eine geprüfte Auswahl in einem Zug zu übernehmen
+   — oder gleich alles, was der eingestellte Filter zeigt.
+
+   Zwei Sicherungen sind dabei bewusst drin:
+   · Die Freigabe schreibt in die Stammdaten. Bei mehr als fünfzig Einträgen
+     wird deshalb die Zahl ausdrücklich bestätigt.
+   · Bereits übernommene und als Spam markierte Einträge werden übersprungen
+     statt doppelt geschrieben — das Ergebnis nennt sie getrennt. */
+const KORB_AUSWAHL = new Set();
+
+function _korbAuswahlUm(recordId, an) {
+  if (an) KORB_AUSWAHL.add(recordId); else KORB_AUSWAHL.delete(recordId);
+  _korbAuswahlLeisteZeichnen();
+}
+
+function _korbAlleAuswaehlen(an) {
+  const liste = _crawlVisible();
+  liste.forEach(r => { if (an) KORB_AUSWAHL.add(r.recordId); else KORB_AUSWAHL.delete(r.recordId); });
+  _renderCrawledContacts();
+}
+
+function _korbAuswahlLeeren() { KORB_AUSWAHL.clear(); _renderCrawledContacts(); }
+
+function _korbAuswahlLeisteZeichnen() {
+  const el = document.getElementById('korbAuswahlLeiste');
+  if (!el) return;
+  const n = KORB_AUSWAHL.size;
+  el.innerHTML = n
+    ? '<div class="flex items-center gap-2 flex-wrap bg-emerald-600 text-white rounded-lg px-3 py-2 text-[12px] font-bold">'
+      + '<span>' + n + ' ausgewählt</span>'
+      + '<button onclick="_korbSammelUebernehmen(false, this)" class="px-2.5 py-1 bg-white text-emerald-700 rounded font-bold hover:bg-emerald-50">Auswahl übernehmen</button>'
+      + '<button onclick="_korbAuswahlLeeren()" class="px-2 py-1 bg-white/20 rounded hover:bg-white/30">Auswahl aufheben</button>'
+      + '</div>'
+    : '';
+}
+
+async function _korbSammelUebernehmen(alleImFilter, btn) {
+  const sichtbar = _crawlVisible();
+  const ziel = alleImFilter ? sichtbar : sichtbar.filter(r => KORB_AUSWAHL.has(r.recordId));
+  if (!ziel.length) return toast('Nichts ausgewählt.', 'warn', 4000);
+
+  const schonDrin = ziel.filter(r => /^uebernommen/i.test(String(r.zdb_status || ''))).length;
+  const spam = ziel.filter(r => r.hidden === 'spam').length;
+  const offen = ziel.filter(r => !/^uebernommen/i.test(String(r.zdb_status || '')) && r.hidden !== 'spam');
+  if (!offen.length) {
+    return toast('Alle ' + ziel.length + ' sind bereits übernommen oder als Spam markiert — nichts zu tun.', 'warn', 7000);
+  }
+  if (!confirm(offen.length + ' Kontakte in die zentrale DB übernehmen?\n\n'
+    + (schonDrin ? schonDrin + ' bereits übernommen — werden übersprungen.\n' : '')
+    + (spam ? spam + ' als Spam markiert — werden übersprungen.\n' : '')
+    + '\nFirmen werden angelegt bzw. ergänzt. Bestehende Angaben werden nicht überschrieben.')) return;
+
+  if (btn) setBusy(btn, true, '0/' + offen.length);
+  let ok = 0; const fehler = [];
+  for (const r of offen) {
+    try {
+      const account = _korbAccount(r);
+      if (!account) throw new Error('Mandant nicht gefunden');
+      const res = await zdbSaveFirmaKontakt(
+        account,
+        r.firma ? { name: r.firma, strasse: r.strasse, plz: r.plz, ort: r.ort, land: r.land, quelle: _korbQuelle(r) } : null,
+        _korbKontaktDaten(r),
+        { erzwingen: true });
+      if (!res || !res.kontaktId) throw new Error('Kontakt wurde nicht angelegt');
+      const stempel = 'uebernommen ' + nowIso() + ' · ' + ((APP_KEYS.user && APP_KEYS.user.name) || 'Hero');
+      await airtableUpdateWithAutoField(CRAWLED_TABLE, r.recordId,
+        { zdb_status: stempel, hidden: '', updated_at: nowIso() }, CRAWLED_TYPES_MAP);
+      r.zdb_status = stempel; r.hidden = '';
+      KORB_AUSWAHL.delete(r.recordId);
+      ok++;
+    } catch (e) {
+      fehler.push((r.name || r.email || r.recordId) + ': ' + (e.message || e));
+    }
+    if (btn) setBusy(btn, true, (ok + fehler.length) + '/' + offen.length);
+    // Airtable-Takt: die Freigabe schreibt je Kontakt mehrfach.
+    await new Promise(res2 => setTimeout(res2, 180));
+  }
+  if (btn) setBusy(btn, false);
+  _renderCrawledContacts();
+  if (fehler.length) {
+    console.warn('[Korb] Sammelübernahme:', fehler);
+    toast(ok + ' übernommen · ' + fehler.length + ' fehlgeschlagen — erster Fehler: ' + fehler[0], 'error', 12000);
+  } else {
+    toast(ok + ' Kontakte in die zentrale DB übernommen'
+      + (schonDrin || spam ? ' · ' + (schonDrin + spam) + ' übersprungen' : ''), 'success', 7000);
+  }
 }
 
 /* ✓ Übernehmen — der EINZIGE Weg in die zentrale DB.
