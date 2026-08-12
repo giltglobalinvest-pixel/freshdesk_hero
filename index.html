@@ -824,7 +824,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.99.1';
+const APP_VERSION = 'v2.99.2';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -48350,6 +48350,13 @@ function _korbNachfassZeichnen(platzhalter) {
 
   const a = st.archiv;
   const sig = (a && a.signatur) || {};
+  /* Auch LEERE Felder zeigen. „Firma" fehlte im Kasten schlicht, wenn der
+     Leser nichts fand — und dann fragt man sich, warum sie nicht angeboten
+     wird, statt zu sehen, dass es nichts zu bieten gibt. */
+  const leerzeile = (label) => '<div class="flex items-center gap-2 text-[12px] border border-dashed border-ink-200 rounded-lg px-2 py-1.5">'
+    + '<span class="text-[10px] uppercase font-semibold text-ink-400 w-24 shrink-0">' + escapeHtml(label) + '</span>'
+    + '<span class="flex-1 text-ink-400 italic">im Archiv nicht gefunden</span>'
+    + '<span class="text-[10px] text-ink-400 shrink-0">unten von Hand</span></div>';
   const zeile = (label, wert, feld, quelle) => {
     if (!String(wert || '').trim()) return '';
     const schon = String(r[feld] || '').trim().toLowerCase() === String(wert).trim().toLowerCase();
@@ -48367,13 +48374,13 @@ function _korbNachfassZeichnen(platzhalter) {
     ? (a.gefunden
         ? '<div><p class="text-[10px] uppercase font-semibold text-ink-600 mb-1">Aus dem Archiv · ' + (a.nachrichten || 0) + ' Nachrichten gelesen</p>'
           + '<div class="space-y-1">'
-            + zeile('Ansprechpartner', sig.name, 'name')
-            + zeile('Firma', sig.firma, 'firma')
-            + zeile('Telefon', sig.telefon || sig.mobil, 'telefon')
-            + zeile('Position', sig.position, 'position')
-            + zeile('Straße', sig.strasse, 'strasse')
-            + zeile('PLZ', sig.plz, 'plz')
-            + zeile('Ort', sig.ort, 'ort')
+            + (zeile('Ansprechpartner', sig.name, 'name') || leerzeile('Ansprechpartner'))
+            + (zeile('Firma', sig.firma, 'firma') || leerzeile('Firma'))
+            + (zeile('Telefon', sig.telefon || sig.mobil, 'telefon') || leerzeile('Telefon'))
+            + (zeile('Position', sig.position, 'position') || leerzeile('Position'))
+            + (zeile('Straße', sig.strasse, 'strasse') || leerzeile('Straße'))
+            + (zeile('PLZ', sig.plz, 'plz') || leerzeile('PLZ'))
+            + (zeile('Ort', sig.ort, 'ort') || leerzeile('Ort'))
           + '</div>'
           + ((!sig.firma && !sig.telefon && !sig.mobil && !sig.position && !sig.name)
               ? '<p class="text-[11px] text-ink-500 italic mt-1">Signatur gefunden, aber keine verwertbaren Felder.</p>'
