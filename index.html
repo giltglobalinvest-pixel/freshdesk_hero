@@ -824,7 +824,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.96.0';
+const APP_VERSION = 'v2.97.0';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -48057,6 +48057,12 @@ function _renderCrawledContacts() {
           + '<label class="inline-flex items-center gap-1.5 text-[11px] text-violet-900 cursor-pointer bg-white border border-violet-200 rounded-lg px-2 py-1">'
             + '<input type="checkbox"' + (markiert === list.length ? ' checked' : '')
             + ' onchange="_korbAlleAuswaehlen(this.checked)"> alle ' + list.length + ' markieren</label>'
+          + ((() => {
+              const ohneTyp = list.filter(r => !String(r.kontakt_typ || '').trim()).length;
+              if (!ohneTyp || !APP_KEYS.user?.is_admin) return '';
+              return '<button onclick="_korbTypKi(this)" class="px-2.5 py-1 rounded-lg text-[11px] font-bold bg-violet-600 hover:bg-violet-700 text-white inline-flex items-center gap-1" title="Kontakttyp aus Firmenname, Position und Domain ableiten — nur aus der gepflegten Liste, im Zweifel leer">'
+                + '<i data-lucide="sparkles" class="w-3.5 h-3.5"></i> Typ per KI (' + ohneTyp + ' offen)</button>';
+            })())
           + (markiert
               ? '<button onclick="_korbSammelUebernehmen(this)" class="px-2.5 py-1 rounded-lg text-[11px] font-bold bg-emerald-600 hover:bg-emerald-700 text-white inline-flex items-center gap-1" title="Die markierten Kontakte in die zentrale DB übernehmen">'
                 + '<i data-lucide="check-check" class="w-3.5 h-3.5"></i> ' + markiert + ' markierte übernehmen</button>'
@@ -48665,6 +48671,103 @@ async function _korbFirmenRichtigstellen(btn) {
   _renderCrawledContacts();
   toast(korrigiert + ' Firmen richtiggestellt · ' + geleert + ' geleert (im Archiv nichts gefunden)'
     + (fehler ? ' · ' + fehler + ' Fehler' : ''), fehler ? 'warn' : 'success', 9000);
+}
+
+/* ===== Kontakttyp per KI zuordnen (v2.97.0) ==============================
+   Sechshundert Kontakte einzeln einzuordnen macht niemand. Dabei steht die
+   Antwort meist im Firmennamen: „… Hausverwaltung GmbH" ist eine
+   Hausverwaltung, „Stadt Ludwigsburg" eine Stadtverwaltung, „Hotel Adler" ein
+   Hotel.
+
+   Die KI wählt AUSSCHLIESSLICH aus der gepflegten Typenliste und lässt das Feld
+   leer, wenn sie unsicher ist. Ein falsch gesetzter Typ ist schlimmer als ein
+   leerer: Nach ihm wird gefiltert, wenn eine Kampagne zusammengestellt wird —
+   ein als „Hausverwaltung" geführter Mitbewerber bekäme Werbung. */
+async function _korbTypKi(btn) {
+  const sichtbar = _crawlVisible();
+  const markiert = sichtbar.filter(r => KORB_AUSWAHL.has(r.recordId));
+  const grundmenge = markiert.length ? markiert : sichtbar;
+  const offen = grundmenge.filter(r => !String(r.kontakt_typ || '').trim());
+  if (!offen.length) {
+    return toast(markiert.length
+      ? 'Alle markierten Kontakte haben bereits einen Typ.'
+      : 'Alle sichtbaren Kontakte haben bereits einen Typ.', 'info', 5000);
+  }
+  const typen = _ccTypenListe();
+  if (!typen.length) return toast('Es ist keine Typenliste gepflegt.', 'warn', 6000);
+
+  if (!confirm('Für ' + offen.length + ' Kontakte ohne Typ einen Vorschlag ermitteln?\n\n'
+    + (markiert.length ? 'Grundlage: die markierten Kontakte.\n' : 'Grundlage: alle gerade sichtbaren Kontakte.\n')
+    + 'Gewählt wird nur aus der gepflegten Liste:\n' + typen.join(' · ')
+    + '\n\nBereits gesetzte Typen bleiben unangetastet. Wo die KI unsicher ist, bleibt das Feld leer.')) return;
+
+  setBusy(btn, true, '0/' + offen.length);
+  const sys =
+    'Du ordnest Geschäftskontakte eines Aufzug-Serviceunternehmens einer Kategorie zu.\n\n'
+    + 'ERLAUBTE KATEGORIEN — nichts anderes ist zulässig:\n' + typen.map(t => '· ' + t).join('\n') + '\n\n'
+    + 'ENTSCHEIDUNGSGRUNDLAGE, in dieser Reihenfolge:\n'
+    + '1. Firmenname — er sagt es meist selbst („… Hausverwaltung", „Stadt …", „Hotel …", „… Immobilien", „Bauverein …").\n'
+    + '2. Position der Person („Objektbetreuung" → Hausverwaltung, „Einkauf" bei einem Aufzugsbauer → Mitbewerber).\n'
+    + '3. E-Mail-Domain.\n\n'
+    + 'REGELN:\n'
+    + '· Aufzugsfirmen und Aufzugsbauer sind Mitbewerber, keine Lieferanten — es sei denn, die Liste kennt „Aufzugsunternehmen".\n'
+    + '· Freemail-Adressen ohne Firma sind „Privat", sofern die Liste das kennt.\n'
+    + '· Bist du unsicher, gib "" zurück. Ein falscher Typ steuert später Werbeaussendungen; ein leerer stört niemanden.\n\n'
+    + 'ANTWORTE NUR MIT JSON: {"zuordnung":[{"i":0,"typ":"Hausverwaltung"},{"i":1,"typ":""}]}';
+
+  let gesetzt = 0, unsicher = 0, fehler = 0;
+  for (let i = 0; i < offen.length; i += 40) {
+    const teil = offen.slice(i, i + 40);
+    try {
+      const liste = teil.map((r, j) => ({
+        i: j,
+        firma: String(r.firma || '').slice(0, 80),
+        person: String(r.name || '').slice(0, 60),
+        position: String(r.position || '').slice(0, 60),
+        domain: (String(r.email || '').split('@')[1] || ''),
+      }));
+      const data = await _callAnthropicWithRetry({
+        model: 'claude-sonnet-4-5-20250929',
+        max_tokens: 4000,
+        system: sys,
+        messages: [{ role: 'user', content: 'KONTAKTE:\n' + JSON.stringify(liste, null, 1) }],
+      });
+      const parsed = parseAIJson((data.content && data.content[0] && data.content[0].text) || '') || {};
+      const zuo = Array.isArray(parsed.zuordnung) ? parsed.zuordnung : [];
+      const aenderungen = [];
+      for (const z of zuo) {
+        const r = teil[+z.i];
+        const typ = String(z.typ || '').trim();
+        if (!r) continue;
+        if (!typ || !typen.includes(typ)) { unsicher++; continue; }
+        aenderungen.push({ id: r.recordId, fields: { kontakt_typ: typ, updated_at: nowIso() } });
+        r.kontakt_typ = typ;
+      }
+      unsicher += teil.length - zuo.length;
+      // Stapelweise schreiben — Airtable nimmt zehn Sätze je Anfrage.
+      for (let k = 0; k < aenderungen.length; k += 10) {
+        const stapel = aenderungen.slice(k, k + 10);
+        const res = await fetch('https://api.airtable.com/v0/' + APP_CONFIG.APP_BASE_ID + '/' + encodeURIComponent(CRAWLED_TABLE), {
+          method: 'PATCH',
+          headers: { Authorization: 'Bearer ' + APP_KEYS.airtableWriteKey, 'Content-Type': 'application/json' },
+          body: JSON.stringify({ records: stapel, typecast: true }),
+        });
+        if (!res.ok) { fehler += stapel.length; console.warn('[Typ-KI]', (await res.text()).slice(0, 200)); }
+        else gesetzt += stapel.length;
+        await new Promise(r2 => setTimeout(r2, 220));
+      }
+    } catch (e) {
+      fehler += teil.length;
+      console.warn('[Typ-KI] Stapel:', e.message);
+    }
+    setBusy(btn, true, Math.min(i + 40, offen.length) + '/' + offen.length);
+  }
+  setBusy(btn, false);
+  _renderCrawledContacts();
+  toast(gesetzt + ' Typen gesetzt'
+    + (unsicher ? ' · ' + unsicher + ' offen gelassen (KI unsicher)' : '')
+    + (fehler ? ' · ' + fehler + ' fehlgeschlagen' : ''),
+    fehler ? 'warn' : 'success', 9000);
 }
 
 /* ===== Sammelübernahme im Korb (v2.92.0) =================================
