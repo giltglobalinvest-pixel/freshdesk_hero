@@ -824,7 +824,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.88.3';
+const APP_VERSION = 'v2.88.4';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -30715,6 +30715,15 @@ async function openAngebotsChatModal(accountId, ticketId, forcedRestore) {
         st.angebotKreis  = gefunden.kreis;
         st.angebotNr     = gefunden.nr;
         st.bkRecordId    = gefunden.recordId;
+        // Stand im Berichtskonverter gleich mitkorrigieren, damit dort nicht
+        // weiter „ENTWURF-…" als Angebotsnummer steht.
+        if (gefunden.textFalsch) {
+          fetch('https://api.airtable.com/v0/' + APP_KEYS.bkAirtableBaseId + '/App_Angebote/' + gefunden.recordId, {
+            method: 'PATCH',
+            headers: { 'Authorization': 'Bearer ' + APP_KEYS.airtableWriteKey, 'Content-Type': 'application/json' },
+            body: JSON.stringify({ fields: { angebot_nr: gefunden.nr }, typecast: true }),
+          }).catch(() => {});
+        }
         _angPersistState();
         try { _angChatRenderPreview(); } catch (_) {}
         toast('Reservierte Nummer ' + gefunden.nr + ' übernommen — sie stand schon im Berichtskonverter.', 'info', 6000);
@@ -30811,6 +30820,7 @@ function _renderAngChatShell() {
               '<div class="flex items-center gap-2 flex-wrap">' +
                 // v2.46.194: Toggle entfernt — die KI erkennt Pauschal/Aufwand aus dem Chat
                 // („nach Aufwand" → Aufwand-Modus mit ERP-Sätzen). Modus steht im Iter-Label.
+                '<span id="angSbBadge"></span>' +
                 '<span id="angErpBadge"></span>' +
                 '<button onclick="openAngStammdatenEditor()" class="inline-flex items-center gap-1 px-2 py-1 bg-indigo-50 hover:bg-indigo-100 border border-indigo-200 text-indigo-700 rounded-md text-[10px] font-bold" title="Stammdaten (Kunde, Anschrift, Kontakt) bearbeiten"><i data-lucide="edit-3" class="w-3 h-3"></i> Stammdaten</button>' +
                 '<button onclick="openAngPositionenEditor()" class="inline-flex items-center gap-1 px-2 py-1 bg-indigo-50 hover:bg-indigo-100 border border-indigo-200 text-indigo-700 rounded-md text-[10px] font-bold" title="Angebots-Positionen direkt bearbeiten (Titel, Beschreibung, Menge, Preis)"><i data-lucide="list" class="w-3 h-3"></i> Positionen</button>' +
@@ -31319,8 +31329,13 @@ async function _angNummerAusBkHolen(accountId, ticketId) {
       const istFdh = f.app_angebot_num == null && f.fdh_angebot_num != null;
       const nummer = istFdh ? f.fdh_angebot_num : f.app_angebot_num;
       if (nummer == null) continue;
+      // Ein „ENTWURF-…" im Feld ist keine Nummer, sondern ein Altlast-Text aus
+      // der Zeit, als der Datensatz vor der Vergabe gebaut wurde.
+      const text = String(f.angebot_nr || '');
+      const brauchbar = text && !/^entwurf|^fdh-entwurf/i.test(text);
       const kand = { recordId: rec.id, nummer: +nummer, kreis: istFdh ? 'fdh' : 'ang',
-                     nr: f.angebot_nr || ((istFdh ? 'FDH-' : 'ANG-') + nummer) };
+                     nr: brauchbar ? text : ((istFdh ? 'FDH-' : 'ANG-') + nummer),
+                     textFalsch: !brauchbar };
       if (!best || kand.nummer > best.nummer) best = kand;
     }
     if (!best) console.warn('[Angebot] BK-Datensatz gefunden, aber ohne Nummer in app_angebot_num/fdh_angebot_num');
@@ -33926,6 +33941,29 @@ async function _angChatRenderPreview() {
   const modus = s.collected.abrechnung_modus || 'pauschal';
   if (lbl) lbl.textContent = (s.iteration ? 'Iteration ' + s.iteration + ' · ' : '') +
     (modus === 'aufwand' ? 'Nach Aufwand' : 'Brutto: ' + _formatEur(totals.brutto));
+  /* v2.88.4: Servicebox-LED. Ohne sie sieht man dem Angebot nicht an, ob es
+     drüben schon einen Datensatz hat — und genau daran hing zuletzt alles:
+     Nummer vergeben, Datensatz vorhanden, aber in Hero nicht mehr verknüpft.
+     Grün heißt: dieser Chat schreibt beim Speichern in genau diesen Datensatz.
+     Grau heißt: beim nächsten Speichern entsteht ein neuer. */
+  const sbBadge = document.getElementById('angSbBadge');
+  if (sbBadge) {
+    const nr = _angNrText(s);
+    const verknuepft = !!s.bkRecordId;
+    const nummerDa = s.angebotNummer != null;
+    sbBadge.innerHTML = verknuepft
+      ? '<span class="inline-flex items-center gap-1 px-2 py-1 bg-emerald-100 border border-emerald-300 text-emerald-800 rounded-md text-[10px] font-bold" '
+        + 'title="Mit der Servicebox verknüpft — Speichern aktualisiert genau diesen Datensatz. Nummer ist reserviert.">'
+        + '<span class="inline-block w-2 h-2 rounded-full bg-emerald-500"></span> Servicebox ' + escapeHtml(nr) + '</span>'
+      : (nummerDa
+          ? '<span class="inline-flex items-center gap-1 px-2 py-1 bg-amber-100 border border-amber-300 text-amber-800 rounded-md text-[10px] font-bold" '
+            + 'title="Nummer vergeben, aber kein Datensatz in der Servicebox verknüpft — beim Speichern entsteht ein neuer.">'
+            + '<span class="inline-block w-2 h-2 rounded-full bg-amber-500"></span> ' + escapeHtml(nr) + ' · nicht verknüpft</span>'
+          : '<span class="inline-flex items-center gap-1 px-2 py-1 bg-ink-100 border border-ink-300 text-ink-600 rounded-md text-[10px] font-bold" '
+            + 'title="Noch keine Nummer vergeben. Sie entsteht beim PDF, beim Versand oder beim Speichern in die Servicebox.">'
+            + '<span class="inline-block w-2 h-2 rounded-full bg-ink-400"></span> Entwurf · ohne Nummer</span>');
+  }
+
   // v2.46.210: ERP-Herkunfts-Badge in der Vorschau-Leiste
   const erpBadge = document.getElementById('angErpBadge');
   if (erpBadge) {
@@ -36913,16 +36951,20 @@ async function _bkSaveAngebotToBK(chatState) {
   if (!APP_KEYS.airtableWriteKey) throw new Error('Airtable-Write-Key fehlt');
   const s = chatState || window._ANG_CHAT;
   if (!s) throw new Error('Kein Angebot-State');
-  const rec = _fdhChatToBkRec(s);
-  if (!rec) throw new Error('Mapper lieferte nichts');
   const account = s.account || {};
-  // Nummer kommt aus _angNummerSichern — dieselbe, die auf dem PDF steht, und
-  // aus dem Kreis, der zur ERP-Fähigkeit des Angebots passt.
+  /* Erst die Nummer, DANN den Datensatz bauen. Andersherum stand im
+     Berichtskonverter „ENTWURF-40430" als Angebotsnummer: Der Mapper setzt
+     `angebot_nr` aus dem aktuellen Stand, und der kannte zu diesem Zeitpunkt
+     noch keine Nummer. Die Zahl in `app_angebot_num` stimmte, der Text nicht —
+     was schlimmer ist als beides falsch, weil es richtig aussieht. */
   await _angNummerSichern(s);
   const angNum = s.angebotNummer;
+  const rec = _fdhChatToBkRec(s);
+  if (!rec) throw new Error('Mapper lieferte nichts');
   const istAenderung = !!s.bkRecordId;
   const fdUrl = account.domain ? ('https://' + account.domain + '.freshdesk.com/a/tickets/' + s.ticketId) : '';
   const fields = Object.assign({}, rec, {
+    angebot_nr:           _angNrText(s),   // Sicherheitsnetz gegen zu frühes Mappen
     status:               'fertig',
     source_app:           'freshdesk_hero',
     freshdesk_ticket_id:  String(s.ticketId || ''),
