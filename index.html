@@ -824,7 +824,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.98.0';
+const APP_VERSION = 'v2.98.1';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -47439,8 +47439,17 @@ function _korbStatus(r) {
   if (z.startsWith('uebernommen')) return 'uebernommen';
   return 'wartend';
 }
+/* „wartend" ist der Normalfall und wird NICHT beschriftet.
+
+   Bei eingeschaltetem „nur offene" trägt jede einzelne Zeile dieses Etikett —
+   es unterscheidet dann nichts, kostet aber auf jeder Karte Platz und Blick.
+   Beschriftet wird, was vom Normalfall abweicht: übernommen, verworfen, Spam.
+   Wer die Wartenden ausdrücklich sehen will, schaltet „nur offene" aus; dann
+   sind die anderen an ihrem Etikett zu erkennen. */
 function _korbStatusBadge(r) {
-  const st = KORB_STATUS[_korbStatus(r)];
+  const key = _korbStatus(r);
+  if (key === 'wartend') return '';
+  const st = KORB_STATUS[key];
   return '<span class="text-[10px] px-1.5 py-0.5 rounded border font-bold ' + st.cls + '">' + st.label + '</span>';
 }
 /* v2.68.18: Zu welchem Freshdesk-Mandanten gehört der Eintrag?
