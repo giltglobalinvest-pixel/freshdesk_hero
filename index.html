@@ -824,7 +824,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.84.0';
+const APP_VERSION = 'v2.84.1';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -6580,6 +6580,73 @@ async function _masterCreateFdCompany(btnEl) {
   }
 }
 
+/* === Kontakt in die zentrale DB übernehmen ================================
+   Aus der Suche heraus stößt man ständig auf Leute, die in Freshdesk stehen,
+   aber noch nicht in den Stammdaten. Bis hierher gab es dafür nur den Umweg
+   über den Korb — ein Kontakt, den man gerade offen hat, musste erst gecrawlt
+   werden, um übernommen werden zu können.
+
+   Das Upsert selbst ist non-destruktiv (`zdbSaveFirmaKontakt`): Leere Felder
+   werden gefüllt, bestehende nie überschrieben, Abweichungen landen als
+   sync_konflikt zur Prüfung. Deshalb ist ein zweiter Klick harmlos. */
+async function _ciZdbStatusPruefen() {
+  const ctx = CONTACT_EDIT_CTX;
+  if (!ctx) return;
+  const acc = (APP_STATE.accounts || []).find(a => String(a.id) === String(ctx.accountId));
+  const mail = String(ctx.master?.contact?.email || ctx.fd?.email || '').trim().toLowerCase();
+  if (!acc || !mail) { ctx._zdbStatus = { geprueft: true, drin: false }; return; }
+  try {
+    const names = await _zdbEnsureTables(acc);
+    const hit = (await _zdbSelect(names.kontakt.name,
+      { filter: "LOWER({email})='" + _zdbEsc(mail) + "'", maxRecords: 1 }))[0] || null;
+    ctx._zdbStatus = { geprueft: true, drin: !!hit, recordId: hit ? hit.id : null };
+  } catch (e) {
+    console.warn('[ZDB] Statusprüfung:', e.message);
+    ctx._zdbStatus = { geprueft: true, fehler: e.message };
+  }
+  renderContactEditBody();
+}
+
+async function _ciZdbPushen(btnEl) {
+  const ctx = CONTACT_EDIT_CTX;
+  if (!ctx?.master) return;
+  _syncContactMaster();
+  const acc = (APP_STATE.accounts || []).find(a => String(a.id) === String(ctx.accountId));
+  if (!acc) return toast('Mandant nicht gefunden', 'warn', 5000);
+  const cn = ctx.master.contact || {};
+  const co = ctx.master.company || {};
+  if (!cn.email && !cn.last_name && !cn.first_name) {
+    return toast('Ohne Email oder Namen lässt sich kein Stammdatensatz anlegen.', 'warn', 6000);
+  }
+  setBusy(btnEl, true, 'Übernehme…');
+  try {
+    const firmaData = _zdbClean({
+      name: co.name, strasse: co.street, plz: co.zipcode, ort: co.city, land: co.country,
+      email: co.email, telefon: _ccNummerNormalisieren(co.phone) || co.phone,
+      freshdesk_company_id: ctx.company?.id, quelle: 'suche',
+    });
+    const kontaktData = _zdbClean({
+      vorname: cn.first_name, nachname: cn.last_name, email: cn.email,
+      telefon: _ccNummerNormalisieren(cn.phone) || cn.phone,
+      mobil: _ccNummerNormalisieren(cn.mobile) || cn.mobile,
+      position: cn.job_title, quelle: 'suche',
+      freshdesk_contact_id: ctx.contactId,
+    });
+    // erzwingen: Der Autosave-Schalter regelt das automatische Mitschreiben —
+    // ein ausdrücklicher Klick ist etwas anderes und soll immer greifen.
+    const res = await zdbSaveFirmaKontakt(acc, firmaData.name ? firmaData : null, kontaktData, { erzwingen: true });
+    setBusy(btnEl, false);
+    if (!res || !res.kontaktId) throw new Error('Die zentrale DB hat nichts zurückgegeben');
+    ctx._zdbStatus = { geprueft: true, drin: true, recordId: res.kontaktId };
+    renderContactEditBody();
+    toast('In der zentralen DB' + (firmaData.name ? ' (Firma „' + firmaData.name + '" und Kontakt)' : '')
+      + '. Bestehende Angaben wurden nicht überschrieben.', 'success', 7000);
+  } catch (e) {
+    setBusy(btnEl, false);
+    toast('Übernahme fehlgeschlagen: ' + (e.message || e), 'error', 9000);
+  }
+}
+
 async function _masterCreateFsContact(btnEl) {
   const ctx = CONTACT_EDIT_CTX;
   if (!ctx?.master) return;
@@ -7360,6 +7427,13 @@ function renderContactEditBody() {
     </div>`;
 
   // === System-Status-Box: zeigt Verknüpfungen + Anlegen-Aktionen ===
+  const zdbStatus = ctx._zdbStatus || {};
+  const zdbDrin = !!zdbStatus.drin;
+  // Einmal je geöffnetem Kontakt nachsehen, ob er in den Stammdaten steht.
+  if (!zdbStatus.geprueft && !ctx._zdbPruefeLaeuft) {
+    ctx._zdbPruefeLaeuft = true;
+    _ciZdbStatusPruefen().finally(() => { ctx._zdbPruefeLaeuft = false; });
+  }
   const hasFsContact = !!ctx.fs?.id;
   const hasFsAccount = !!ctx.fsAccount?.id;
   const hasFdCompany = !!ctx.company?.id;
@@ -7400,6 +7474,21 @@ function renderContactEditBody() {
             <span class="text-[10px] text-ink-500 italic">nicht für diesen Account konfiguriert</span>
           </div>
         `}
+        <!-- Zentrale DB -->
+        <div class="flex items-center gap-2 flex-wrap">
+          <i data-lucide="${zdbDrin ? 'check-circle-2' : 'circle'}" class="w-3.5 h-3.5 ${zdbDrin ? 'text-emerald-600' : 'text-ink-300'}"></i>
+          <span class="text-ink-700 font-medium">Zentrale DB</span>
+          ${zdbDrin
+            ? '<span class="text-[10px] text-emerald-700 bg-emerald-100 px-1.5 py-0.5 rounded font-mono">vorhanden</span>'
+            : (zdbStatus.fehler
+                ? `<span class="text-[10px] text-red-600">Prüfung fehlgeschlagen</span>`
+                : (zdbStatus.geprueft
+                    ? '<span class="text-[10px] text-ink-500 italic">noch nicht erfasst</span>'
+                    : '<span class="text-[10px] text-ink-400 italic">prüfe…</span>'))}
+          ${!zdbDrin ? `<button type="button" onclick="_ciZdbPushen(this)" class="ml-auto text-[10px] bg-emerald-600 hover:bg-emerald-700 text-white px-2 py-1 rounded font-semibold inline-flex items-center gap-1">
+            <i data-lucide="database" class="w-3 h-3"></i> In zentrale DB
+          </button>` : `<button type="button" onclick="_ciZdbPushen(this)" class="ml-auto text-[10px] bg-white border border-emerald-300 text-emerald-700 hover:bg-emerald-50 px-2 py-1 rounded font-semibold" title="Erneut abgleichen — leere Felder werden gefüllt, bestehende nie überschrieben">Abgleichen</button>`}
+        </div>
       </div>
     </div>`;
 
