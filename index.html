@@ -824,7 +824,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.92.1';
+const APP_VERSION = 'v2.93.0';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -48035,6 +48035,13 @@ function _renderCrawledContacts() {
           typListe.map(t => '<option value="' + escapeAttr(t) + '"' + (CRAWL_STATE.filterTyp === t ? ' selected' : '') + '>' + escapeHtml(t) + '</option>').join('') +
         '</select>' +
         (APP_KEYS.user?.is_admin ? '<button onclick="_korbArchivCrawlOeffnen()" class="px-2 py-1 bg-violet-600 hover:bg-violet-700 text-white rounded-lg text-[11px] font-bold inline-flex items-center gap-1" title="Signaturen im Archiv auswerten und Kontakte in den Korb legen"><i data-lucide="database-zap" class="w-3 h-3"></i> Archiv crawlen</button>' : '') +
+        (() => {
+          if (!APP_KEYS.user?.is_admin) return '';
+          const n = scoped.filter(_korbFirmaVerdaechtig).length;
+          if (!n) return '';
+          return '<button onclick="_korbFirmenRichtigstellen(this)" class="px-2 py-1 bg-rose-600 hover:bg-rose-700 text-white rounded-lg text-[11px] font-bold inline-flex items-center gap-1" title="Einträge mit der eigenen Firma oder einem Bild-Platzhalter noch einmal auswerten">'
+            + '<i data-lucide="alert-triangle" class="w-3 h-3"></i> ' + n + ' falsche Firmen prüfen</button>';
+        })() +
         '<button onclick="showCrawledContacts(this)" class="px-2 py-1 bg-white border border-violet-300 text-violet-700 rounded-lg text-[11px] font-bold" title="Neu laden">↻</button>' +
       '</div>' +
       /* Sammelfreigabe. „Alle im Filter" bezieht sich ausdrücklich auf das,
@@ -48081,7 +48088,10 @@ function _renderCrawledContacts() {
             '<p class="font-bold text-ink-900 text-sm hover:text-violet-700">' + escapeHtml(r.name || r.email) + (r.position ? ' <span class="font-normal text-ink-500">· ' + escapeHtml(r.position) + '</span>' : '') +
               (r.hidden === 'spam' ? ' <span class="text-[9px] font-bold px-1.5 py-0.5 rounded border bg-rose-100 text-rose-700 border-rose-300 align-middle">SPAM</span>' : r.hidden === 'hidden' ? ' <span class="text-[9px] font-bold px-1.5 py-0.5 rounded border bg-ink-100 text-ink-600 border-ink-300 align-middle">AUSGEBLENDET</span>' : '') +
               ' <i data-lucide="info" class="w-3 h-3 inline-block text-ink-400 align-middle"></i></p>' +
-            '<p class="text-[11px] text-ink-600">' + escapeHtml(r.firma || '') + '</p>' +
+            (_korbFirmaVerdaechtig(r)
+              ? '<p class="text-[11px] text-rose-700 bg-rose-50 border border-rose-200 rounded px-1.5 py-0.5 inline-block" title="Das ist die eigene Firma bzw. ein Bild-Platzhalter — beim alten Crawl aus der zitierten Vormail gelesen. Über „falsche Firmen prüfen" oben richtigstellen.">'
+                + escapeHtml(r.firma || '') + ' · falsch erkannt</p>'
+              : '<p class="text-[11px] text-ink-600">' + escapeHtml(r.firma || '') + '</p>') +
             '<p class="text-[11px] text-ink-500 font-mono">' + escapeHtml(r.email) + (r.telefon ? ' · ' + escapeHtml(r.telefon) : '') + (r.mobil ? ' · ' + escapeHtml(r.mobil) : '') + '</p>' +
             '<div class="flex gap-1 mt-1.5 flex-wrap">' +
               _crawlBadge('FD', r.fd_status || 'unbekannt') + _crawlBadge('FS', r.fs_status || 'unbekannt') + _crawlBadge('MC', r.mc_status || 'unbekannt') +
@@ -48165,6 +48175,74 @@ function _korbAccount(r) {
   return (APP_STATE.accounts || []).find(a => String(a.id) === String(r && r.account_id)) || null;
 }
 
+/* ===== Falsche Firmen im Korb erkennen und richtigstellen (v2.93.0) ======
+   Bis v2.82.1 las der Archiv-Crawl das ENDE einer Nachricht. Bei einer Antwort
+   steht dort die zitierte Vormail — also unsere eigene Signatur. Ergebnis:
+   Kontakte fremder Firmen tragen „[Bild: Aszendio Aufzugservice GmbH]" als
+   Firma, den Alternativtext unseres Logos.
+
+   Solche Einträge sind gefährlicher als leere: Sie sehen vollständig aus. Wer
+   sie übernimmt, legt in den Stammdaten einen Ansprechpartner der eigenen
+   Firma an, der in Wahrheit bei einem Kunden arbeitet. */
+function _korbFirmaVerdaechtig(r) {
+  const f = String((r && r.firma) || '').trim();
+  if (!f) return false;
+  if (f.startsWith('[')) return true;                       // Bild-Platzhalter
+  const norm = f.toLowerCase().replace(/\s+/g, ' ').trim();
+  return (APP_STATE.accounts || []).some(a => {
+    const n = String(a.name || '').toLowerCase().replace(/\s+/g, ' ').trim();
+    return n && (norm === n || norm === n + ' gmbh');
+  });
+}
+
+/* Richtigstellen heißt: noch einmal lesen, diesmal richtig. Der Worker wertet
+   dieselbe Adresse mit dem korrigierten Signaturleser aus. Findet er nichts,
+   wird die falsche Firma GELEERT statt stehen gelassen — ohne Firma ist ein
+   Kontakt unvollständig, mit falscher ist er verkehrt. */
+async function _korbFirmenRichtigstellen(btn) {
+  const betroffen = _crawlMandantScoped().filter(_korbFirmaVerdaechtig);
+  if (!betroffen.length) return toast('Keine verdächtigen Firmen gefunden.', 'info', 4000);
+  const key = APP_KEYS.user?.api_key;
+  if (!key) return toast('Nicht angemeldet.', 'warn', 5000);
+  if (!confirm(betroffen.length + ' Einträge tragen die eigene Firma oder einen Bild-Platzhalter als Firmennamen.\n\n'
+    + 'Sie stammen aus dem fehlerhaften Crawl vor v2.82.1. Jetzt noch einmal auswerten?\n\n'
+    + 'Wird nichts gefunden, wird die falsche Firma geleert — sie ist schlimmer als keine.')) return;
+
+  if (btn) setBusy(btn, true, '0/' + betroffen.length);
+  let korrigiert = 0, geleert = 0, fehler = 0;
+  for (const r of betroffen) {
+    try {
+      const slug = _archivSlugFuer(r.account_id);
+      const mail = String(r.email || '').trim().toLowerCase();
+      let sig = null;
+      if (slug && mail.includes('@')) {
+        const res = await fetch(ARCHIV_URL + '/signatur?mandant=' + encodeURIComponent(slug)
+          + '&email=' + encodeURIComponent(mail), { headers: { 'X-Hero-Key': key } });
+        if (res.ok) { const d = await res.json(); if (d && d.gefunden) sig = d.signatur || {}; }
+      }
+      const neu = { updated_at: nowIso() };
+      if (sig && sig.firma && !_korbFirmaVerdaechtig({ firma: sig.firma })) {
+        neu.firma = sig.firma;
+        if (sig.strasse && !r.strasse) neu.strasse = sig.strasse;
+        if (sig.plz && !r.plz) neu.plz = sig.plz;
+        if (sig.ort && !r.ort) neu.ort = sig.ort;
+        if (sig.position && !r.position) neu.position = sig.position;
+        korrigiert++;
+      } else {
+        neu.firma = '';
+        geleert++;
+      }
+      await airtableUpdateWithAutoField(CRAWLED_TABLE, r.recordId, neu, CRAWLED_TYPES_MAP);
+      Object.assign(r, neu);
+    } catch (e) { fehler++; console.warn('[Korb] Firma richtigstellen:', r.email, e.message); }
+    if (btn) setBusy(btn, true, (korrigiert + geleert + fehler) + '/' + betroffen.length);
+  }
+  if (btn) setBusy(btn, false);
+  _renderCrawledContacts();
+  toast(korrigiert + ' Firmen richtiggestellt · ' + geleert + ' geleert (im Archiv nichts gefunden)'
+    + (fehler ? ' · ' + fehler + ' Fehler' : ''), fehler ? 'warn' : 'success', 9000);
+}
+
 /* ===== Sammelübernahme im Korb (v2.92.0) =================================
    Ein Korb mit siebenhundert Einträgen lässt sich nicht einzeln freigeben. Was
    fehlte, war die Möglichkeit, eine geprüfte Auswahl in einem Zug zu übernehmen
@@ -48200,13 +48278,19 @@ async function _korbSammelUebernehmen(btn) {
 
   const schonDrin = ziel.filter(r => /^uebernommen/i.test(String(r.zdb_status || ''))).length;
   const spam = ziel.filter(r => r.hidden === 'spam').length;
-  const offen = ziel.filter(r => !/^uebernommen/i.test(String(r.zdb_status || '')) && r.hidden !== 'spam');
+  const falscheFirma = ziel.filter(_korbFirmaVerdaechtig).length;
+  /* Einträge mit falsch erkannter Firma bleiben draußen. Sie in die Stammdaten
+     zu schreiben hieße, einen Kunden als eigenen Mitarbeiter zu führen — und
+     das fällt später niemandem mehr auf. */
+  const offen = ziel.filter(r => !/^uebernommen/i.test(String(r.zdb_status || ''))
+    && r.hidden !== 'spam' && !_korbFirmaVerdaechtig(r));
   if (!offen.length) {
     return toast('Alle ' + ziel.length + ' sind bereits übernommen oder als Spam markiert — nichts zu tun.', 'warn', 7000);
   }
   if (!confirm(offen.length + ' Kontakte in die zentrale DB übernehmen?\n\n'
     + (schonDrin ? schonDrin + ' bereits übernommen — werden übersprungen.\n' : '')
     + (spam ? spam + ' als Spam markiert — werden übersprungen.\n' : '')
+    + (falscheFirma ? falscheFirma + ' mit falsch erkannter Firma — erst über „falsche Firmen prüfen" richtigstellen.\n' : '')
     + '\nFirmen werden angelegt bzw. ergänzt. Bestehende Angaben werden nicht überschrieben.')) return;
 
   if (btn) setBusy(btn, true, '0/' + offen.length);
