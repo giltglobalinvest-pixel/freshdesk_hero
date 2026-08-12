@@ -824,7 +824,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.89.1';
+const APP_VERSION = 'v2.90.0';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -14992,6 +14992,11 @@ function _detailReplyComposer(ticket) {
           </div>
         </div>
       </div>
+      <!-- v2.90.0: Anhänge direkt hier. Zwei Sorten, und der Unterschied zählt:
+           Die Dateien AM TICKET kann die KI lesen und beim Formulieren
+           berücksichtigen („Antworte ihm mit dem Anhang entsprechend"), eigene
+           Dateien werden der Antwort beigelegt. -->
+      <div id="detailAssistAnhaenge" class="mt-2">${_detailAssistAnhangUi(accId, ticket)}</div>
       <div class="flex gap-2 mt-2">
         ${speechAvailable ? `
           <button id="detailAssistMicBtn" type="button" onclick="toggleDetailAssistVoice()" class="px-3 py-2.5 bg-gradient-to-br from-purple-500 to-brand-600 text-white rounded-lg text-sm font-semibold inline-flex items-center gap-1.5 active:opacity-80 shrink-0">
@@ -15139,7 +15144,15 @@ function runDetailAssistant(btnEl, accountId, ticketId) {
   if (DETAIL_ASSIST_REC) { try { DETAIL_ASSIST_REC.stop(); } catch (_) {} DETAIL_ASSIST_REC = null; }
   // Eingabe schon mal leeren — die KI bekommt den Befehl mit ins Modal
   if ($('detailAssistInput')) $('detailAssistInput').value = '';
+  // Auswahl aus der Ticketansicht mitnehmen: eigene Dateien als Anhang,
+  // angehakte Ticket-Dateien als Lesestoff für die KI.
+  const mitLesen = (DETAIL_ASSIST_ATT && DETAIL_ASSIST_ATT.ticketId === ticketId) ? DETAIL_ASSIST_ATT.lesen.slice() : [];
+  const mitEigene = (DETAIL_ASSIST_ATT && DETAIL_ASSIST_ATT.ticketId === ticketId) ? DETAIL_ASSIST_ATT.eigene.slice() : [];
   openAssistantModal(accountId, ticketId).then(() => {
+    if (ASSISTANT_CTX) {
+      ASSISTANT_CTX.leseAnhaenge = mitLesen;
+      if (mitEigene.length) ASSISTANT_CTX.preAttachments = mitEigene;
+    }
     const tryFill = (attempt = 0) => {
       const ta = $('assistantCommand');
       const btn = document.querySelector('button[onclick="processAssistantCommand(this)"]');
@@ -19959,7 +19972,7 @@ async function processAssistantCommand(btn) {
   ctx.command = cmd;
   setBusy(btn, true, 'Claude analysiert…');
   try {
-    const plan = await aiInterpretCommand(ctx.ticket, cmd, ctx.accountId);
+    const plan = await aiInterpretCommand(ctx.ticket, cmd, ctx.accountId, ctx.leseAnhaenge);
     // v2.46.94: Pre-Anhänge aus der Eingabe-Phase an die erste passende Action übergeben
     if (ctx.preAttachments?.length) {
       const target = plan.actions.find(a => ['reply', 'note', 'forward', 'marketing_email'].includes(a.type));
@@ -19980,7 +19993,7 @@ async function processAssistantCommand(btn) {
   }
 }
 
-async function aiInterpretCommand(ticket, command, accountId) {
+async function aiInterpretCommand(ticket, command, accountId, leseAnhaenge) {
   const cache       = APP_STATE.agentsCache?.[accountId] || { agents: [] };
   const groupsCache = APP_STATE.groupsCache?.[accountId] || { groups: [] };
   const conv = (ticket.conversations || [])
@@ -20089,11 +20102,38 @@ async function aiInterpretCommand(ticket, command, accountId) {
 
   // v2.46.135: Retry-Wrapper auch hier — transient 5xx vom val.town-Proxy
   // sind dadurch unsichtbar fuer den User statt das ganze Verarbeiten-Button-Klick zu killen.
+  /* Angehakte Ticket-Dateien mitgeben — als Dokument-Blöcke, nicht als
+     Dateinamen. „Antworte ihm mit dem Anhang entsprechend" lässt sich sonst
+     nicht beantworten: Was drinsteht, weiß nur, wer hineinsieht. */
+  let inhalt = [{ type: 'text', text: userPrompt }];
+  if (Array.isArray(leseAnhaenge) && leseAnhaenge.length) {
+    try {
+      const alle = await _qaCollectAttachments(accountId, ticket.id, ticket,
+        { maxCount: 6, maxBytes: 20 * 1024 * 1024, maxPerFile: 12 * 1024 * 1024 });
+      const gewaehlt = (alle || []).filter(a => leseAnhaenge.includes(a.name));
+      if (gewaehlt.length) {
+        inhalt[0].text += '\n\nDIE FOLGENDEN ' + gewaehlt.length + ' DATEI(EN) SIND ANGEHÄNGT UND SOLLEN AUSGEWERTET WERDEN. '
+          + 'Lies sie vollständig und beziehe dich beim Formulieren konkret auf ihren Inhalt '
+          + '(Beträge, Nummern, Positionen, Fristen) — nicht auf den Dateinamen:\n'
+          + gewaehlt.map(a => '- ' + a.name).join('\n');
+        gewaehlt.forEach(a => {
+          if (a.mediaType === 'application/pdf') {
+            inhalt.push({ type: 'text', text: 'Anhang: ' + a.name });
+            inhalt.push({ type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: a.base64 } });
+          } else if (String(a.mediaType || '').startsWith('image/')) {
+            inhalt.push({ type: 'text', text: 'Anhang: ' + a.name });
+            inhalt.push({ type: 'image', source: { type: 'base64', media_type: a.mediaType, data: a.base64 } });
+          }
+        });
+        console.log('[Assistent] ' + gewaehlt.length + ' Anhang/Anhänge zur Auswertung mitgegeben');
+      }
+    } catch (e) { console.warn('[Assistent] Anhänge laden:', e.message); }
+  }
   const data = await _callAnthropicWithRetry({
     model: 'claude-sonnet-4-5-20250929',
     max_tokens: 4000,
     system: sysPrompt,
-    messages: [{ role: 'user', content: userPrompt }]
+    messages: [{ role: 'user', content: inhalt }]
   });
   const text = (data.content && data.content[0] && data.content[0].text) || '';
   const parsed = parseAIJson(text);
@@ -21193,6 +21233,96 @@ async function _marketingTemplateChange(idx) {
 /* v2.46.93: Anhang-Handling im KI-Assistent.
    Files werden direkt im Action-State gehalten (a._attachments = [{name, type, size, blob}]).
    Beim Senden werden sie via FormData/multipart an FD geschickt. */
+/* ===== Anhänge im KI-Assistenten der Ticketansicht (v2.90.0) ==============
+   Bis hierher ließ sich dort gar nichts anhängen, und die KI sah die Dateien
+   des Tickets nicht — auf „Antworte ihm mit dem Anhang entsprechend" konnte
+   sie deshalb nur raten. */
+let DETAIL_ASSIST_ATT = { ticketId: null, lesen: [], eigene: [] };
+
+function _detailAssistAnhangUi(accId, ticket) {
+  if (!DETAIL_ASSIST_ATT || DETAIL_ASSIST_ATT.ticketId !== ticket.id) {
+    DETAIL_ASSIST_ATT = { ticketId: ticket.id, lesen: [], eigene: [] };
+  }
+  const st = DETAIL_ASSIST_ATT;
+  const tAtts = [];
+  const gesehen = new Set();
+  const nimm = (a) => {
+    if (!a || !a.attachment_url) return;
+    const k = String(a.id != null ? a.id : a.name);
+    if (gesehen.has(k)) return;
+    gesehen.add(k);
+    tAtts.push({ id: a.id, name: a.name || 'anhang', url: a.attachment_url, size: +a.size || 0, type: a.content_type || '' });
+  };
+  (ticket.attachments || []).forEach(nimm);
+  (ticket.conversations || []).forEach(c => (c.attachments || []).forEach(nimm));
+  st._ticketAtts = tAtts;
+
+  const zeile = (a, i) => '<label class="flex items-center gap-2 text-[11px] cursor-pointer hover:bg-white rounded px-1.5 py-1">'
+    + '<input type="checkbox"' + (st.lesen.includes(a.name) ? ' checked' : '')
+    + ' onchange="_detailAssistLesen(' + i + ', this.checked)" class="w-3.5 h-3.5">'
+    + '<i data-lucide="' + (/pdf/i.test(a.type) ? 'file-text' : (/image/i.test(a.type) ? 'image' : 'file')) + '" class="w-3 h-3 text-ink-500 shrink-0"></i>'
+    + '<span class="truncate flex-1 text-ink-800">' + escapeHtml(a.name) + '</span>'
+    + '<span class="text-[10px] text-ink-400 shrink-0">' + (a.size ? Math.round(a.size / 1024) + ' KB' : '') + '</span></label>';
+
+  const eigene = st.eigene.length
+    ? '<ul class="mt-1 space-y-0.5">' + st.eigene.map((f, i) =>
+        '<li class="flex items-center justify-between gap-2 bg-white border border-brand-200 rounded px-2 py-1 text-[11px]">'
+        + '<span class="truncate text-ink-800"><i data-lucide="paperclip" class="w-3 h-3 inline -mt-0.5 mr-1 text-ink-500"></i>'
+        + escapeHtml(f.name) + ' <span class="text-ink-400">(' + Math.round((f.size || 0) / 1024) + ' KB)</span></span>'
+        + '<button type="button" onclick="_detailAssistEigeneWeg(' + i + ')" class="text-red-600 hover:text-red-700 shrink-0" title="Entfernen"><i data-lucide="x" class="w-3 h-3"></i></button></li>').join('')
+      + '</ul>'
+    : '';
+
+  return '<div class="bg-brand-50/40 border border-brand-200 rounded-lg px-2 py-1.5">'
+    + '<div class="flex items-center justify-between gap-2 mb-1">'
+      + '<span class="text-[10px] uppercase tracking-wider text-brand-800 font-bold inline-flex items-center gap-1">'
+        + '<i data-lucide="paperclip" class="w-3 h-3"></i> Anhänge</span>'
+      + '<label class="text-[11px] text-brand-700 font-semibold cursor-pointer inline-flex items-center gap-1 hover:opacity-80">'
+        + '<i data-lucide="plus" class="w-3 h-3"></i> Eigene Datei'
+        + '<input type="file" multiple class="hidden" onchange="_detailAssistEigeneDazu(this)"></label>'
+    + '</div>'
+    + (tAtts.length
+        ? '<p class="text-[10px] text-ink-600 mb-0.5">Aus dem Ticket — angehakte liest die KI mit:</p>'
+          + '<div class="max-h-28 overflow-y-auto">' + tAtts.map(zeile).join('') + '</div>'
+        : '<p class="text-[10px] text-ink-500 italic">Keine Dateien am Ticket.</p>')
+    + eigene
+    + '<p class="text-[9px] text-ink-500 mt-1">Angehakte Ticket-Dateien werden von der KI gelesen. Eigene Dateien werden an die erzeugte Antwort gehängt (max 20 MB).</p>'
+    + '</div>';
+}
+
+function _detailAssistLesen(i, an) {
+  const st = DETAIL_ASSIST_ATT;
+  const a = (st._ticketAtts || [])[i];
+  if (!a) return;
+  const pos = st.lesen.indexOf(a.name);
+  if (an && pos < 0) st.lesen.push(a.name);
+  if (!an && pos >= 0) st.lesen.splice(pos, 1);
+}
+
+function _detailAssistEigeneDazu(inputEl) {
+  const st = DETAIL_ASSIST_ATT;
+  const MAX = 20 * 1024 * 1024;
+  for (const f of Array.from(inputEl?.files || [])) {
+    if (f.size > MAX) { toast('„' + f.name + '" ist zu groß — max 20 MB', 'warn', 6000); continue; }
+    st.eigene.push({ name: f.name, type: f.type || 'application/octet-stream', size: f.size, blob: f });
+  }
+  if (inputEl) inputEl.value = '';
+  _detailAssistAnhaengeZeichnen();
+}
+
+function _detailAssistEigeneWeg(i) {
+  DETAIL_ASSIST_ATT.eigene.splice(i, 1);
+  _detailAssistAnhaengeZeichnen();
+}
+
+function _detailAssistAnhaengeZeichnen() {
+  const host = document.getElementById('detailAssistAnhaenge');
+  const t = CURRENT_TICKET;
+  if (!host || !t) return;
+  host.innerHTML = _detailAssistAnhangUi(t._accountId || '', t);
+  if (window.lucide) lucide.createIcons();
+}
+
 /* v2.46.94: Pre-Phase-Anhänge (vor KI-Verarbeitung in der Eingabe ausgewählt).
    Werden nach processAssistantCommand automatisch an die erste passende Action gehängt. */
 function _assistantAddPreFiles(inputEl) {
@@ -22427,6 +22557,16 @@ async function _sigEditorRefreshViews(accId) {
   // v2.67.8: offene Versand-Dialoge zeigen die Signatur — nach dem Speichern nachziehen
   try { if (document.getElementById('angSendSigVorschau')) await _angSendSigVorschauFuellen(accId); } catch (_) {}
   try { if (document.getElementById('neSigVorschau')) await _neSigVorschauFuellen(accId); } catch (_) {}
+  /* v2.90.0: Die Vorschau in der TICKETANSICHT fehlte hier — genau die, unter
+     der „bearbeiten" steht. Wer dort korrigierte, sah danach weiter die alte
+     Signatur und musste annehmen, das Speichern habe nicht funktioniert.
+     Versendet wurde die neue; nur das Bild log. */
+  try {
+    if (document.getElementById('detailSigVorschau')) await _fdhSigVorschauFuellen(accId);
+  } catch (_) {}
+  // Der Agenten-Cache hält die Freshdesk-Daten zehn Minuten. Nach einer
+  // Signaturänderung ist er für diesen Mandanten zu verwerfen.
+  try { if (typeof AGENT_ME_CACHE === 'object' && AGENT_ME_CACHE) delete AGENT_ME_CACHE[accId]; } catch (_) {}
 }
 async function _sigEditorSave(accId, btn) {
   const wys = document.getElementById('sigEdWys_' + accId);
