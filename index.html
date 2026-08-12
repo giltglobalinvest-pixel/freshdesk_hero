@@ -824,7 +824,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.87.2';
+const APP_VERSION = 'v2.87.3';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -34235,8 +34235,11 @@ function _angNrText(s) {
   if (!s) return '';
   if (s.angebotNr) return s.angebotNr;
   if (s.angebotNummer != null) return (s.angebotKreis === 'fdh' ? 'FDH-' : 'ANG-') + s.angebotNummer;
-  // Noch nicht vergeben — als Platzhalter der Ticketbezug, nie als echte Nummer.
-  return 'FDH-Entwurf-' + (s.ticketId || '?');
+  /* Noch nicht vergeben. Bewusst OHNE Kreiskürzel: Welcher Kreis es wird,
+     entscheidet sich erst an der Fabriknummer, und „FDH-Entwurf" an einem
+     Angebot, das später ANG-2711 heißt, liest sich wie eine Aussage über den
+     Nummernkreis. Vergeben wird beim PDF, beim Versand oder beim Speichern. */
+  return 'ENTWURF-' + (s.ticketId || '?');
 }
 
 /** Nummer festmachen, BEVOR etwas Kundensichtbares entsteht. */
