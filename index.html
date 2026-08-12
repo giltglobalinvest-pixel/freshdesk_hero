@@ -824,7 +824,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.95.1';
+const APP_VERSION = 'v2.95.2';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -48387,7 +48387,29 @@ function _korbNachfassZeichnen(platzhalter) {
     : '<button onclick="_korbNachfassNetz(this)" class="w-full px-3 py-2 rounded-lg text-[12px] font-bold bg-white border border-violet-300 text-violet-700 hover:bg-violet-50 inline-flex items-center justify-center gap-1.5">'
       + '<i data-lucide="globe" class="w-4 h-4"></i> Im Internet nach Nummer und Ansprechpartner suchen</button>';
 
-  host.innerHTML = rahmen(kopf + archivBlock + '<div class="border-t border-ink-200 pt-3">' + netzBlock + '</div>'
+  /* Von Hand korrigieren. Nötig, weil weder Archiv noch Netz jeden Fall lösen:
+     Steht in der Mail schlicht kein Firmenname mit Rechtsform, bleibt das Feld
+     leer — und wer die Firma kennt, soll sie eintragen können, statt mit einer
+     roten Markierung zu leben. Leeres Feld speichern löscht den Wert; genau so
+     wird man einen falsch erkannten Namen wieder los. */
+  const handBlock = '<div class="border-t border-ink-200 pt-3">'
+    + '<p class="text-[10px] uppercase font-semibold text-ink-600 mb-1">Von Hand</p>'
+    + '<div class="grid grid-cols-2 gap-2">'
+      + '<label class="block"><span class="text-[10px] text-ink-500">Ansprechpartner</span>'
+        + '<input id="nfName" value="' + escapeAttr(r.name || '') + '" class="w-full mt-0.5 px-2 py-1.5 border border-ink-300 rounded text-sm"></label>'
+      + '<label class="block"><span class="text-[10px] text-ink-500">Firma</span>'
+        + '<input id="nfFirma" value="' + escapeAttr(r.firma || '') + '" class="w-full mt-0.5 px-2 py-1.5 border border-ink-300 rounded text-sm"></label>'
+    + '</div>'
+    + '<div class="flex items-center gap-2 mt-1.5">'
+      + '<button onclick="_korbNachfassHand(this)" class="px-3 py-1.5 rounded-lg text-[12px] font-bold bg-ink-800 hover:bg-ink-900 text-white">Speichern</button>'
+      + (_korbFirmaVerdaechtig(r)
+          ? '<button onclick="document.getElementById(\'nfFirma\').value=\'\';_korbNachfassHand(this)" class="px-3 py-1.5 rounded-lg text-[12px] font-bold bg-white border border-rose-300 text-rose-700 hover:bg-rose-50">Falsche Firma löschen</button>'
+          : '')
+    + '</div>'
+    + '<p class="text-[10px] text-ink-500 mt-1">Leeres Feld speichern löscht den Wert — so verschwindet auch die Markierung „falsch erkannt".</p>'
+    + '</div>';
+
+  host.innerHTML = rahmen(kopf + archivBlock + '<div class="border-t border-ink-200 pt-3">' + netzBlock + '</div>' + handBlock
     + '<div class="flex justify-end pt-1"><button onclick="_korbNachfassSchliessen()" class="px-3 py-2 rounded-lg text-[12px] font-bold bg-ink-800 hover:bg-ink-900 text-white">Fertig</button></div>');
   if (window.lucide) lucide.createIcons();
 }
@@ -48452,6 +48474,29 @@ async function _korbNachfassAlles(quelle, btn) {
   } catch (e) {
     if (btn) setBusy(btn, false);
     toast('Übernehmen fehlgeschlagen: ' + (e.message || e), 'error', 9000);
+  }
+}
+
+/* Handkorrektur speichern. Bewusst auch mit LEEREN Werten: Einen falsch
+   erkannten Firmennamen zu löschen ist der häufigste Fall. */
+async function _korbNachfassHand(btn) {
+  const st = window._KORB_NACHFASS;
+  if (!st) return;
+  const r = st.rec;
+  const name = (document.getElementById('nfName')?.value || '').trim();
+  const firma = (document.getElementById('nfFirma')?.value || '').trim();
+  if (btn) setBusy(btn, true, 'Speichere…');
+  try {
+    const patch = { name, firma, updated_at: nowIso() };
+    await airtableUpdateWithAutoField(CRAWLED_TABLE, r.recordId, patch, CRAWLED_TYPES_MAP);
+    Object.assign(r, patch);
+    if (btn) setBusy(btn, false);
+    _korbNachfassZeichnen();
+    _renderCrawledContacts();
+    toast(firma ? 'Gespeichert.' : 'Firma gelöscht — die Markierung „falsch erkannt" ist damit weg.', 'success', 5000);
+  } catch (e) {
+    if (btn) setBusy(btn, false);
+    toast('Speichern fehlgeschlagen: ' + (e.message || e), 'error', 9000);
   }
 }
 
