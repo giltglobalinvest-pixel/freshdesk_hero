@@ -824,7 +824,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.88.1';
+const APP_VERSION = 'v2.88.2';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -30699,6 +30699,26 @@ async function openAngebotsChatModal(accountId, ticketId, forcedRestore) {
       if (restored.angebotKreis) window._ANG_CHAT.angebotKreis = restored.angebotKreis;
       if (restored.angebotNr)    window._ANG_CHAT.angebotNr    = restored.angebotNr;
       if (restored.bkRecordId)   window._ANG_CHAT.bkRecordId   = restored.bkRecordId;
+      // Gilt für BEIDE Herkünfte — localStorage wie Berichtskonverter.
+      if (restored.angebotNummer != null && !restored.angebotKreis) {
+        window._ANG_CHAT.angebotKreis = String(restored.angebotNr || '').startsWith('FDH-') ? 'fdh' : 'ang';
+      }
+    }
+    /* Trägt der Stand keine Nummer, aber der Berichtskonverter hat schon eine
+       zu diesem Ticket reserviert, dann gehört sie hierher. Läuft nebenher und
+       zeichnet die Vorschau nach, sobald die Antwort da ist. */
+    if (window._ANG_CHAT && window._ANG_CHAT.angebotNummer == null) {
+      _angNummerAusBkHolen(accountId, ticketId).then(gefunden => {
+        const st = window._ANG_CHAT;
+        if (!gefunden || !st || st.ticketId !== ticketId || st.angebotNummer != null) return;
+        st.angebotNummer = gefunden.nummer;
+        st.angebotKreis  = gefunden.kreis;
+        st.angebotNr     = gefunden.nr;
+        st.bkRecordId    = gefunden.recordId;
+        _angPersistState();
+        try { _angChatRenderPreview(); } catch (_) {}
+        toast('Reservierte Nummer ' + gefunden.nr + ' übernommen — sie stand schon im Berichtskonverter.', 'info', 6000);
+      }).catch(() => {});
     }
     _renderAngChatShell();
     const subj = ticket.subject || '';
@@ -31263,6 +31283,40 @@ async function _angOpenFromPicker(recordId) {
   openAngebotsChatModal(accountId, ticketId, restore);
 }
 
+/* Bereits reservierte Nummer zu diesem Ticket wiederfinden.
+
+   Nötig für Angebote, deren Arbeitsstand noch ohne Nummer gespeichert wurde,
+   und als Sicherheitsnetz überhaupt: Existiert im Berichtskonverter schon ein
+   Datensatz zu diesem Ticket, gehört dessen Nummer diesem Angebot. Sie NICHT
+   zu übernehmen wäre der teure Fehler — der nächste Speichervorgang zöge eine
+   zweite Nummer und legte einen zweiten Datensatz an.
+
+   Anders als beim Wiederherstellen des Inhalts zählen hier auch Platzhalter
+   (status=entwurf): Genau die sind ja die Reservierung. */
+async function _angNummerAusBkHolen(accountId, ticketId) {
+  if (!APP_KEYS.bkAirtableBaseId || !APP_KEYS.airtableWriteKey) return null;
+  try {
+    const url = 'https://api.airtable.com/v0/' + APP_KEYS.bkAirtableBaseId + '/App_Angebote'
+      + '?filterByFormula=' + encodeURIComponent("{freshdesk_ticket_id}='" + escapeFormula(String(ticketId)) + "'")
+      + '&sort[0][field]=erstellt_am&sort[0][direction]=desc&maxRecords=1';
+    const r = await fetch(url, { headers: { 'Authorization': 'Bearer ' + APP_KEYS.airtableWriteKey } });
+    if (!r.ok) return null;
+    const d = await r.json();
+    const rec = (d.records || [])[0];
+    if (!rec) return null;
+    const f = rec.fields || {};
+    const istFdh = f.app_angebot_num == null && f.fdh_angebot_num != null;
+    const nummer = istFdh ? f.fdh_angebot_num : f.app_angebot_num;
+    if (nummer == null) return null;
+    return {
+      recordId: rec.id,
+      nummer,
+      kreis: istFdh ? 'fdh' : 'ang',
+      nr: f.angebot_nr || ((istFdh ? 'FDH-' : 'ANG-') + nummer),
+    };
+  } catch (e) { console.warn('[Angebot] Nummer aus BK:', e.message); return null; }
+}
+
 /* v2.46.191: Kompletten Angebot-Stand pro Ticket in localStorage sichern.
    Beim nächsten Öffnen wird immer das ZULETZT erstellte Angebot geladen.
    Bewusst NICHT persistiert: _genAtts (base64-Anhänge), _sendPdfBlob,
@@ -31276,6 +31330,15 @@ function _angPersistState() {
       history:   (s.history || []).slice(-30),
       iteration: s.iteration || 0,
       savedAt:   new Date().toISOString(),
+      /* v2.88.2: Die Identität des Angebots gehört zum gespeicherten Stand.
+         Ohne sie stand nach dem Wiederöffnen wieder „ENTWURF-40430" im PDF,
+         obwohl die Nummer längst vergeben und belegt war — und der nächste
+         Speichervorgang hätte eine ZWEITE Nummer gezogen und einen zweiten
+         Datensatz angelegt. */
+      angebotNummer: (s.angebotNummer != null ? s.angebotNummer : null),
+      angebotKreis:  s.angebotKreis || null,
+      angebotNr:     s.angebotNr || null,
+      bkRecordId:    s.bkRecordId || null,
     }));
   } catch (e) { console.warn('[Angebot-Persist]', e.message); }
 }
