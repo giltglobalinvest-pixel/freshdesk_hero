@@ -824,7 +824,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.87.0';
+const APP_VERSION = 'v2.87.1';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -27125,13 +27125,14 @@ async function openTicketSplitModal(accountId, ticketId) {
   TICKET_SPLIT = { accountId, ticketId, ticket: null, teile: [], anhaenge: [], laden: true };
   host.innerHTML = _splitRahmen('<div class="text-center py-10 text-sm text-ink-500">'
     + '<span class="spinner inline-block w-5 h-5 border-[2px] text-sky-500"></span>'
-    + '<p class="mt-2">Lade Vorgang und prüfe, worum es geht…</p></div>');
+    + '<p class="mt-2">Lade Vorgang und Anhänge — die KI liest die PDFs, nicht nur die Dateinamen.</p>'
+    + '<p class="text-[11px] text-ink-400 mt-1">Das dauert bei mehreren Anhängen einen Moment.</p></div>');
   if (window.lucide) lucide.createIcons();
   try {
     const t = await fetchTicketDetail(accountId, ticketId);
     TICKET_SPLIT.ticket = t;
     TICKET_SPLIT.anhaenge = _splitAnhaengeSammeln(t);
-    TICKET_SPLIT.teile = await _splitVorschlag(t, TICKET_SPLIT.anhaenge);
+    TICKET_SPLIT.teile = await _splitVorschlag(t, TICKET_SPLIT.anhaenge, '');
     TICKET_SPLIT.laden = false;
     _splitZeichnen();
   } catch (e) {
@@ -27176,45 +27177,81 @@ function _splitAnhaengeSammeln(t) {
   return raus;
 }
 
-/* Die KI schlägt die Aufteilung vor. Sie entscheidet nichts — sie liest nur
-   heraus, wie viele Anliegen in der Mail stecken und welcher Anhang wozu
-   gehört. Bestätigt wird von Hand. */
-async function _splitVorschlag(t, anhaenge) {
+/* Die KI schlägt die Aufteilung vor.
+
+   Entscheidend: Sie bekommt die ANHÄNGE SELBST, nicht nur deren Dateinamen.
+   Bei „MBC — Aktuelle Angebote von Kone" steht im Betreff und im Mailtext
+   nichts von zwei Aufzügen; die beiden Anlagen stehen ausschließlich in den
+   beiden PDFs. Wer nur Betreff und Dateinamen liest, kommt zwangsläufig zu
+   „ein einziges Anliegen" — genau das ist beim ersten Anlauf passiert.
+
+   Die Beschreibung je Teil ist deshalb auch kein Verweis, sondern der aus dem
+   jeweiligen Anhang herausgezogene Inhalt: Anlage, Leistung, Preise. Damit hat
+   das Angebotstool im neuen Ticket sofort etwas in der Hand. */
+async function _splitVorschlag(t, anhaenge, anweisung) {
+  const s = TICKET_SPLIT;
   const beschreibung = htmlToText(t.description_text || t.description || '').slice(0, 6000);
   const verlauf = (t.conversations || [])
     .filter(c => !c.private)
     .slice(0, 4)
     .map(c => (c.incoming ? 'Kunde' : 'Wir') + ': ' + htmlToText(c.body_text || c.body || '').slice(0, 800))
     .join('\n\n');
+
+  // Anhänge im Volltext — derselbe Sammler wie bei der Schnellanalyse.
+  let dateien = [];
+  try {
+    dateien = await _qaCollectAttachments(s.accountId, s.ticketId, t,
+      { maxCount: 8, maxBytes: 24 * 1024 * 1024, maxPerFile: 12 * 1024 * 1024 });
+  } catch (e) { console.warn('[Split] Anhänge laden:', e.message); }
+  if (s) s.dateienGelesen = dateien.length;
+
   const sys =
-    'Du prüfst einen Helpdesk-Vorgang eines Aufzugs-Serviceunternehmens daraufhin, ob darin MEHRERE getrennte Anliegen stecken '
-    + '— typischerweise mehrere Aufzugsanlagen (verschiedene Fabriknummern, Standorte oder Auftragsnummern) in einer einzigen E-Mail.\n\n'
+    'Du prüfst einen Helpdesk-Vorgang eines Aufzugs-Serviceunternehmens daraufhin, ob darin MEHRERE getrennt zu bearbeitende Vorgänge stecken '
+    + '— in aller Regel mehrere Aufzugsanlagen mit verschiedenen Fabriknummern, Standorten oder Auftragsnummern.\n\n'
+    + 'DIE ANHÄNGE SIND DIE HAUPTQUELLE. Betreff und Mailtext nennen die Anlagen oft gar nicht; die Angebote, Berichte und Aufstellungen im Anhang schon. '
+    + 'Lies jeden Anhang VOLLSTÄNDIG. Zwei Angebots-PDFs desselben Lieferanten mit verschiedenen Fabriknummern sind ZWEI Vorgänge — auch wenn die Mail nur einen Satz enthält.\n\n'
+    + 'FABRIKNUMMER: meist eine 4- bis 8-stellige Zahl direkt neben „Fabriknummer", „Fabrik-Nr.", „Anlagennummer" oder „Equipment". NICHT mit Auftrags-, Angebots- oder Rechnungsnummer verwechseln.\n\n'
+    + 'JE TEIL LIEFERST DU:\n'
+    + '· betreff — aussagekräftig und im Stil des Originals, mit Standort und/oder Fabriknummer, damit man die Vorgänge in der Liste auseinanderhält. Du legst den Titel fest, nicht der Mensch.\n'
+    + '· fabriknummer, standort — soweit im Anhang oder Text auffindbar, sonst leer\n'
+    + '· beschreibung — der INHALT aus dem zugehörigen Anhang, der für die Bearbeitung zählt: Anlage, angebotene Leistung, Positionen mit Preisen, Liefer-/Ausführungshinweise. Kein Verweis auf den Anhang, sondern die Angaben selbst, knapp und vollständig. Nichts erfinden.\n'
+    + '· anhaenge — die Dateinamen, die zu DIESEM Teil gehören. Eine Übersicht oder Sammelaufstellung, die alle betrifft, gehört zu jedem Teil.\n\n'
     + 'REGELN:\n'
-    + '1. Nur teilen, wenn es sachlich zwei oder mehr getrennt zu bearbeitende Vorgänge sind. Mehrere Fragen zu DERSELBEN Anlage sind EIN Vorgang.\n'
-    + '2. Jeder Teil bekommt einen Betreff im Stil des Originals, plus — soweit erkennbar — Fabriknummer und Standort.\n'
-    + '3. Die Beschreibung je Teil ist ein knapper Auszug dessen, was zu DIESEM Teil gehört. Nichts erfinden.\n'
-    + '4. Anhänge zuordnen: Dateinamen enthalten oft die Auftrags- oder Fabriknummer. Passt ein Anhang zu keinem Teil eindeutig, gehört er zu Teil 1.\n'
-    + '5. Bist du unsicher, gib "mehrere": false zurück. Ein zu Unrecht geteilter Vorgang macht mehr Arbeit als ein ungeteilter.\n\n'
+    + '1. Mehrere Fragen zu DERSELBEN Anlage sind EIN Vorgang.\n'
+    + '2. Bist du unsicher, ob es mehrere sind, gib "mehrere": false — ein zu Unrecht geteilter Vorgang macht mehr Arbeit als ein ungeteilter.\n\n'
     + 'ANTWORTE NUR MIT JSON:\n'
-    + '{"mehrere": true, "begruendung": "kurz, ein Satz", "teile": [\n'
-    + '  {"betreff":"…","fabriknummer":"…","standort":"…","beschreibung":"…","anhaenge":["Dateiname.pdf"]}\n'
+    + '{"mehrere": true, "begruendung": "ein Satz, woran du es festmachst", "teile": [\n'
+    + '  {"betreff":"…","fabriknummer":"…","standort":"…","beschreibung":"…","anhaenge":["Datei.pdf"]}\n'
     + ']}';
-  const user = 'BETREFF: ' + (t.subject || '') + '\n\n'
+
+  const inhalt = [{ type: 'text', text:
+    'BETREFF: ' + (t.subject || '') + '\n\n'
     + 'ERSTE ANFRAGE:\n' + beschreibung + '\n\n'
     + (verlauf ? 'VERLAUF:\n' + verlauf + '\n\n' : '')
-    + 'ANHÄNGE:\n' + (anhaenge.length ? anhaenge.map(a => '- ' + a.name).join('\n') : '(keine)');
+    + 'ANHÄNGE (' + dateien.length + ' als eigene Blöcke im Anschluss):\n'
+    + (anhaenge.length ? anhaenge.map(a => '- ' + a.name).join('\n') : '(keine)')
+    + (anweisung ? '\n\nANWEISUNG DES BEARBEITERS — sie hat Vorrang vor deiner eigenen Einschätzung:\n' + anweisung : '')
+  }];
+  dateien.forEach(att => {
+    if (att.mediaType === 'application/pdf') {
+      inhalt.push({ type: 'text', text: 'Anhang: ' + att.name });
+      inhalt.push({ type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: att.base64 } });
+    } else if (String(att.mediaType || '').startsWith('image/')) {
+      inhalt.push({ type: 'text', text: 'Anhang: ' + att.name });
+      inhalt.push({ type: 'image', source: { type: 'base64', media_type: att.mediaType, data: att.base64 } });
+    }
+  });
+
   const data = await _callAnthropicWithRetry({
     model: 'claude-sonnet-4-5-20250929',
-    max_tokens: 3000,
+    max_tokens: 6000,
     system: sys,
-    messages: [{ role: 'user', content: user }],
+    messages: [{ role: 'user', content: inhalt }],
   });
   const parsed = parseAIJson((data.content && data.content[0] && data.content[0].text) || '') || {};
-  TICKET_SPLIT.begruendung = String(parsed.begruendung || '');
-  TICKET_SPLIT.kiSagtMehrere = !!parsed.mehrere;
+  if (s) { s.begruendung = String(parsed.begruendung || ''); s.kiSagtMehrere = !!parsed.mehrere; }
   const teile = Array.isArray(parsed.teile) ? parsed.teile : [];
   if (!parsed.mehrere || teile.length < 2) {
-    // Trotzdem eine Zeile anbieten — der Mensch sieht mehr als das Muster.
     return [{ betreff: t.subject || '', fabriknummer: '', standort: '', beschreibung: '',
               anhaenge: anhaenge.map(a => a.name) }];
   }
@@ -27270,6 +27307,18 @@ function _splitZeichnen() {
     + '</div>';
   }).join('');
 
+  /* Anweisungsfeld: Der Bearbeiter weiß Dinge, die in keinem Anhang stehen —
+     „das sind zwei Aufzüge", „Teil 2 gehört zu Haus B". Statt die Aufteilung
+     danach von Hand zurechtzuziehen, sagt er es der KI und lässt neu lesen. */
+  const anweisung = '<div class="border border-ink-200 rounded-xl p-3 bg-ink-50 space-y-2">'
+    + '<label class="block"><span class="text-[10px] font-semibold text-ink-600 uppercase">Anweisung an die KI (optional)</span>'
+      + '<textarea id="splitAnweisung" rows="2" placeholder="z.B. zwei verschiedene Aufzuege - je Angebots-PDF ein eigener Vorgang" '
+      + 'class="w-full mt-0.5 px-2 py-1.5 border border-ink-300 rounded text-sm">' + escapeHtml(s.anweisung || '') + '</textarea></label>'
+    + '<button onclick="_splitNeuAnalysieren(this)" class="px-3 py-1.5 rounded-lg text-[12px] font-bold bg-white border border-sky-300 text-sky-700 hover:bg-sky-50 inline-flex items-center gap-1">'
+      + '<i data-lucide="refresh-cw" class="w-3.5 h-3.5"></i> Neu analysieren</button>'
+    + '<p class="text-[10px] text-ink-500">Gelesen wurden ' + (s.dateienGelesen || 0) + ' Anhang/Anhänge im Volltext.</p>'
+    + '</div>';
+
   const fuss = '<div class="flex items-center gap-2 flex-wrap pt-1">'
     + '<button onclick="_splitTeilHinzufuegen()" class="px-3 py-2 rounded-lg text-[12px] font-bold bg-white border border-ink-300 text-ink-700 hover:bg-ink-50">+ Weiterer Teil</button>'
     + '<button onclick="closeTicketSplitModal()" class="ml-auto px-3 py-2 rounded-lg text-[12px] font-bold bg-white border border-ink-300 text-ink-700 hover:bg-ink-50">Abbrechen</button>'
@@ -27279,10 +27328,24 @@ function _splitZeichnen() {
 
   host.innerHTML = _splitRahmen(
     '<p class="text-[11px] text-ink-500">Vorgang #' + s.ticketId + ' · ' + escapeHtml(t.subject || '') + '</p>'
-    + kopf + teile + fuss
+    + kopf + teile + anweisung + fuss
     + '<p class="text-[10px] text-ink-500">Die ursprüngliche Kundenmail bleibt unverändert — sie ist der Beleg. '
     + 'Teil 1 bekommt nur eine Notiz, alle Vorgänge werden gegenseitig verlinkt.</p>');
   if (window.lucide) lucide.createIcons();
+}
+
+async function _splitNeuAnalysieren(btn) {
+  const s = TICKET_SPLIT;
+  if (!s || !s.ticket) return;
+  s.anweisung = (document.getElementById('splitAnweisung')?.value || '').trim();
+  setBusy(btn, true, 'Lese erneut…');
+  try {
+    s.teile = await _splitVorschlag(s.ticket, s.anhaenge, s.anweisung);
+    _splitZeichnen();
+  } catch (e) {
+    setBusy(btn, false);
+    toast('Analyse fehlgeschlagen: ' + (e.message || e), 'error', 9000);
+  }
 }
 
 function _splitFeld(i, feld, wert) { if (TICKET_SPLIT?.teile?.[i]) TICKET_SPLIT.teile[i][feld] = wert; }
