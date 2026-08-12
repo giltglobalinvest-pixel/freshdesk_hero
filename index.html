@@ -824,7 +824,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.95.0';
+const APP_VERSION = 'v2.95.1';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -48554,6 +48554,10 @@ function _korbFirmaVerdaechtig(r) {
   const f = String((r && r.firma) || '').trim();
   if (!f) return false;
   if (f.startsWith('[')) return true;                       // Bild-Platzhalter
+  /* Fußzeile eines Helpdesk-Systems statt eines Firmennamens: „Dako Aufzüge
+     GmbH powered by Freshdesk" steht unter jeder Mail, die dieses System
+     verschickt — auch unter der eines fremden Kunden. */
+  if (/(powered by|freshdesk|freshservice|zendesk|helpdesk|ticketsystem|support ?portal)/i.test(f)) return true;
   const norm = f.toLowerCase().replace(/\s+/g, ' ').trim();
   return (APP_STATE.accounts || []).some(a => {
     const n = String(a.name || '').toLowerCase().replace(/\s+/g, ' ').trim();
