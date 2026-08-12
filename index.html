@@ -824,7 +824,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.85.0';
+const APP_VERSION = 'v2.85.1';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -6600,6 +6600,10 @@ async function _ciZdbStatusPruefen() {
     const hit = (await _zdbSelect(names.kontakt.name,
       { filter: "LOWER({email})='" + _zdbEsc(mail) + "'", maxRecords: 1 }))[0] || null;
     ctx._zdbStatus = { geprueft: true, drin: !!hit, recordId: hit ? hit.id : null };
+    // Vorhandenen Typ übernehmen, damit die Auswahl den Bestand zeigt und ein
+    // Speichern ihn nicht versehentlich leert.
+    const typDb = hit && (hit.fields || {}).typ;
+    if (typDb && ctx.master?.contact && !ctx.master.contact.kontakt_typ) ctx.master.contact.kontakt_typ = typDb;
   } catch (e) {
     console.warn('[ZDB] Statusprüfung:', e.message);
     ctx._zdbStatus = { geprueft: true, fehler: e.message };
@@ -6629,7 +6633,7 @@ async function _ciZdbPushen(btnEl) {
       vorname: cn.first_name, nachname: cn.last_name, email: cn.email,
       telefon: _ccNummerNormalisieren(cn.phone) || cn.phone,
       mobil: _ccNummerNormalisieren(cn.mobile) || cn.mobile,
-      position: cn.job_title, quelle: 'suche',
+      position: cn.job_title, typ: cn.kontakt_typ, quelle: 'suche',
       freshdesk_contact_id: ctx.contactId,
     });
     // erzwingen: Der Autosave-Schalter regelt das automatische Mitschreiben —
@@ -6840,6 +6844,10 @@ function _consolidateContactMaster(ctx) {
   // Pattern: Note hat häufig präzisere Daten als die FD-Contact-Address (Anschrift Firma)
   const noteParsed  = _parseCompanyNoteForMaster(fdco?.note || '');
   const descParsed  = _parseCompanyNoteForMaster(fdco?.description || '');
+  // Der Kontakttyp kommt aus der zentralen DB, nicht aus Freshdesk/Freshsales.
+  // Er muss das Neuaufbauen des Masters überleben, sonst wäre die Auswahl nach
+  // jedem Speichern wieder leer.
+  const typBisher = ctx.master?.contact?.kontakt_typ || '';
 
   ctx.master = {
     company: {
@@ -6865,6 +6873,7 @@ function _consolidateContactMaster(ctx) {
       work_phone: pick(fs?.work_number, fd?.phone),
       mobile:     pick(fs?.mobile_number, fd?.mobile),
       job_title:  pick(fs?.job_title, fd?.job_title),
+      kontakt_typ: typBisher,
     },
   };
 }
@@ -6895,6 +6904,7 @@ function _syncContactMaster() {
   if ($('cmP_workph'))  cn.work_phone = get('cmP_workph');
   if ($('cmP_mobile'))  cn.mobile     = get('cmP_mobile');
   if ($('cmP_job'))     cn.job_title  = get('cmP_job');
+  if ($('cmP_typ'))     cn.kontakt_typ = get('cmP_typ');
 }
 
 /* Stitcht Firmen-Adresse aus den Master-Feldern als Multi-Liner zusammen für FD-Contact.address.
@@ -7417,10 +7427,23 @@ function renderContactEditBody() {
               ${sBan('master', 'mobile', cn.mobile)}
             </div>
           </div>
-          <div>
-            <label class="text-[10px] uppercase font-semibold text-brand-800 block">Position</label>
-            <input id="cmP_job" type="text" value="${escapeAttr(cn.job_title || '')}" class="w-full mt-1 px-2 py-1.5 border border-brand-200 bg-white rounded text-sm">
-            ${sBan('master', 'job_title', cn.job_title)}
+          <div class="grid grid-cols-2 gap-2">
+            <div>
+              <label class="text-[10px] uppercase font-semibold text-brand-800 block">Position</label>
+              <input id="cmP_job" type="text" value="${escapeAttr(cn.job_title || '')}" class="w-full mt-1 px-2 py-1.5 border border-brand-200 bg-white rounded text-sm">
+              ${sBan('master', 'job_title', cn.job_title)}
+            </div>
+            <div>
+              <!-- Kontakttyp gleich hier, nicht später: Wer den Kontakt gerade
+                   offen hat, weiß, was für einer es ist. Nachträglich in der
+                   zentralen DB nachzupflegen macht es niemand. -->
+              <label class="text-[10px] uppercase font-semibold text-brand-800 block">Kontakttyp <span class="text-ink-400 normal-case font-normal">(für die zentrale DB)</span></label>
+              <select id="cmP_typ" class="w-full mt-1 px-2 py-1.5 border border-brand-200 bg-white rounded text-sm">
+                <option value="">— kein Typ —</option>
+                ${[...new Set(_ccTypenListe().concat(cn.kontakt_typ ? [cn.kontakt_typ] : []))].filter(Boolean)
+                  .map(t => `<option value="${escapeAttr(t)}"${cn.kontakt_typ === t ? ' selected' : ''}>${escapeHtml(t)}</option>`).join('')}
+              </select>
+            </div>
           </div>
         </div>
       </div>
@@ -7496,7 +7519,7 @@ function renderContactEditBody() {
   const saveAllButton = `
     <button id="cmSaveAllBtn" type="button" onclick="saveAllContactData(this)" class="w-full bg-gradient-to-r from-brand-600 to-emerald-600 hover:from-brand-700 hover:to-emerald-700 text-white px-3 py-3 rounded-xl text-sm font-bold inline-flex items-center justify-center gap-2 shadow">
       <i data-lucide="zap" class="w-5 h-5"></i>
-      ⚡ Alles speichern + in ${ctx.hasFreshsales ? '2 Systeme' : 'Freshdesk'} verteilen
+      ⚡ Alles speichern + in ${ctx.hasFreshsales ? '3 Systeme' : '2 Systeme'} verteilen
     </button>`;
 
   $('contactEditBody').innerHTML = `
@@ -8315,6 +8338,40 @@ async function saveAllContactData(btnEl) {
         errs.push('FS-Kontakt: ' + e.message);
         log.push('FS-Kontakt ✗');
       }
+    }
+  }
+
+  // ---------- Phase 3: zentrale DB ----------
+  // Der Knopf heißt „verteilen" — dann gehören die Stammdaten dazu. Vorher war
+  // die zentrale DB der einzige Ort, den man von Hand nachziehen musste.
+  const zdbAcc = (APP_STATE.accounts || []).find(a => String(a.id) === String(ctx.accountId));
+  if (zdbAcc && (cn.email || cn.last_name || cn.first_name)) {
+    setBusy(btnEl, true, 'Zentrale DB…');
+    try {
+      const zFirma = _zdbClean({
+        name: co.name, strasse: co.street, plz: co.zipcode, ort: co.city, land: co.country,
+        email: co.email, telefon: _ccNummerNormalisieren(co.phone) || co.phone,
+        freshdesk_company_id: resolvedCompanyId || ctx.company?.id, quelle: 'kontakt-editor',
+      });
+      const zKontakt = _zdbClean({
+        vorname: cn.first_name, nachname: cn.last_name, email: cn.email,
+        telefon: _ccNummerNormalisieren(cn.phone) || cn.phone,
+        mobil: _ccNummerNormalisieren(cn.mobile) || cn.mobile,
+        position: cn.job_title, typ: cn.kontakt_typ, quelle: 'kontakt-editor',
+        freshdesk_contact_id: ctx.contactId,
+      });
+      const zRes = await zdbSaveFirmaKontakt(zdbAcc, zFirma.name ? zFirma : null, zKontakt, { erzwingen: true });
+      if (zRes && zRes.kontaktId) {
+        ctx._zdbStatus = { geprueft: true, drin: true, recordId: zRes.kontaktId };
+        if (cn.email) _ZDB_MITGLIED_CACHE.set(ctx.accountId + '|' + String(cn.email).toLowerCase(), true);
+        log.push('zentrale DB');
+      } else {
+        errs.push('Zentrale DB: keine Antwort');
+        log.push('zentrale DB ✗');
+      }
+    } catch (e) {
+      errs.push('Zentrale DB: ' + e.message);
+      log.push('zentrale DB ✗');
     }
   }
 
