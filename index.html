@@ -824,7 +824,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.87.3';
+const APP_VERSION = 'v2.88.0';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -31039,7 +31039,10 @@ async function _angRestoreFromBK(accountId, ticketId) {
   if (!APP_KEYS.bkAirtableBaseId || !APP_KEYS.airtableWriteKey) return null;
   try {
     const url = 'https://api.airtable.com/v0/' + APP_KEYS.bkAirtableBaseId + '/App_Angebote'
-      + '?filterByFormula=' + encodeURIComponent("{freshdesk_ticket_id}='" + String(ticketId).replace(/'/g, "\\'") + "'")
+      /* Reservierte, aber nie ausgefüllte Nummern (status=entwurf) sind keine
+         Angebote. Sie hier zurückzuholen würde einen leeren Stand über einen
+         echten legen. */
+      + '?filterByFormula=' + encodeURIComponent("AND({freshdesk_ticket_id}='" + String(ticketId).replace(/'/g, "\\'") + "',{status}!='entwurf')")
       + '&sort[0][field]=app_angebot_num&sort[0][direction]=desc&maxRecords=1';
     const r = await fetch(url, { headers: { 'Authorization': 'Bearer ' + APP_KEYS.airtableWriteKey } });
     if (!r.ok) return null;
@@ -31133,7 +31136,7 @@ async function _angLoadAllBkAngebote() {
   let offset = '';
   for (let guard = 0; guard < 40; guard++) {
     const url = 'https://api.airtable.com/v0/' + APP_KEYS.bkAirtableBaseId + '/App_Angebote'
-      + '?filterByFormula=' + encodeURIComponent("{source_app}='freshdesk_hero'")
+      + '?filterByFormula=' + encodeURIComponent("AND({source_app}='freshdesk_hero',{status}!='entwurf')")
       + '&sort[0][field]=app_angebot_num&sort[0][direction]=desc&pageSize=100'
       + (offset ? '&offset=' + encodeURIComponent(offset) : '');
     const r = await fetch(url, { headers: { 'Authorization': 'Bearer ' + APP_KEYS.airtableWriteKey } });
@@ -34242,25 +34245,107 @@ function _angNrText(s) {
   return 'ENTWURF-' + (s.ticketId || '?');
 }
 
-/** Nummer festmachen, BEVOR etwas Kundensichtbares entsteht. */
+/* Nummer festmachen und SOFORT belegen, BEVOR etwas Kundensichtbares entsteht.
+
+   Warum das Belegen dazugehört: Die Nummer entsteht als „höchste vorhandene + 1".
+   Solange kein Datensatz existiert, liest der nächste Aufruf dieselbe höchste
+   Nummer — zwei Mitarbeitende, die gleichzeitig ein PDF bauen, bekommen beide
+   2711 und schicken zwei verschiedene Angebote unter derselben Nummer raus.
+   Das fällt erst auf, wenn ein Kunde sich darauf beruft.
+
+   Deshalb wird hier ein Platzhalter-Datensatz mit Status „entwurf" angelegt.
+   Damit ist die Nummer belegt. Der spätere Speichervorgang füllt denselben
+   Datensatz (PATCH über bkRecordId), es entsteht kein zweiter.
+
+   Nicht schon beim Öffnen des Angebots-Chats: Jeder verworfene Versuch würde
+   sonst eine Nummer verbrennen und Lücken hinterlassen, zu denen es kein
+   Angebot gibt. Belegt wird beim PDF, beim Versand oder beim Speichern — also
+   dann, wenn das Angebot die App verlässt. */
 async function _angNummerSichern(s) {
   if (!s || s.angebotNummer != null) return;
   if (!APP_KEYS.bkAirtableBaseId) return;
   const fuehrtAnlagen = _angMandantFuehrtAnlagen(s.account || {});
   const erpFaehig = fuehrtAnlagen && _angHatFabriknummer(s);
   const firmaSlug = _angFirmaSlug(s.account || {});
+  const feld = erpFaehig ? 'app_angebot_num' : 'fdh_angebot_num';
   s.angebotKreis = erpFaehig ? 'ang' : 'fdh';
-  s.angebotNummer = erpFaehig
-    ? await _angNaechsteNummer('app_angebot_num', firmaSlug, false)
-    : await _angNaechsteNummer('fdh_angebot_num', firmaSlug, true);
+  s.angebotNummer = await _angNaechsteNummer(feld, firmaSlug, !erpFaehig);
   s.angebotNr = (erpFaehig ? 'ANG-' : 'FDH-') + s.angebotNummer;
-  // Nur erklären, wenn es etwas zu erklären gibt: Bei Mandanten ohne Anlagen
-  // ist der eigene Kreis der Normalfall und keine Einschränkung.
+
+  const belegt = await _angNummerBelegen(s, feld, firmaSlug);
+  if (!belegt) {
+    toast('Achtung: Nummer ' + s.angebotNr + ' konnte nicht reserviert werden. '
+      + 'Sie steht auf dem PDF, ist aber noch nicht belegt — wer parallel arbeitet, '
+      + 'könnte dieselbe bekommen. Bitte zügig speichern oder senden.', 'warn', 11000);
+  }
   if (!erpFaehig && fuehrtAnlagen) {
     toast('Ohne Fabriknummer: Angebot ' + s.angebotNr + ' läuft im Hero-Nummernkreis. '
       + 'Im ERP kann es nicht angelegt werden — dort braucht jedes Angebot eine Anlage, '
       + 'und eine Anlage braucht eine Fabriknummer.', 'info', 10000);
   }
+}
+
+/* Legt den Platzhalter an und prüft danach, ob die Nummer wirklich uns gehört.
+   Die Prüfung ist nötig, weil Airtable keinen Zähler kennt: Zwei fast
+   gleichzeitige Anlagen können beide durchgehen. Wer dann als Zweiter dasteht,
+   rückt auf die nächste freie Nummer. */
+async function _angNummerBelegen(s, feld, firmaSlug) {
+  const basis = 'https://api.airtable.com/v0/' + APP_KEYS.bkAirtableBaseId + '/App_Angebote';
+  const kopf = { 'Authorization': 'Bearer ' + APP_KEYS.airtableWriteKey, 'Content-Type': 'application/json' };
+  const felderBauen = () => {
+    const f = {
+      angebot_nr: s.angebotNr,
+      firma: firmaSlug,
+      source_app: 'freshdesk_hero',
+      status: 'entwurf',
+      freshdesk_ticket_id: String(s.ticketId || ''),
+      freshdesk_account_id: s.accountId || '',
+      erstellt_am: nowIso(),
+      erstellt_von: APP_KEYS.user?.name || '',
+    };
+    f[feld] = s.angebotNummer;
+    return f;
+  };
+  const anlegen = async () => {
+    const r = await fetch(basis, { method: 'POST', headers: kopf, body: JSON.stringify({ fields: felderBauen(), typecast: true }) });
+    return { ok: r.ok, body: await r.text() };
+  };
+  try {
+    let res = await anlegen();
+    if (!res.ok && /UNKNOWN_FIELD_NAME|Unknown field/i.test(res.body)) {
+      for (const [n, t] of [['angebot_nr', 'singleLineText'], ['fdh_angebot_num', 'number'],
+                            ['app_angebot_num', 'number'], ['status', 'singleLineText'],
+                            ['source_app', 'singleLineText'], ['freshdesk_ticket_id', 'singleLineText'],
+                            ['freshdesk_account_id', 'singleLineText'], ['erstellt_am', 'singleLineText'],
+                            ['erstellt_von', 'singleLineText'], ['firma', 'singleLineText']]) {
+        try { await _bkEnsureField('App_Angebote', n, t); } catch (_) {}
+      }
+      res = await anlegen();
+    }
+    if (!res.ok) { console.warn('[Nummer] Reservieren:', res.body.slice(0, 200)); return false; }
+    s.bkRecordId = JSON.parse(res.body).id;
+
+    /* Gegenprobe: Hat sonst noch jemand dieselbe Nummer? Dann gewinnt der
+       ältere Datensatz, und wir rücken auf. */
+    for (let runde = 0; runde < 3; runde++) {
+      const url = basis + '?filterByFormula=' + encodeURIComponent(
+        "AND({firma}='" + escapeFormula(firmaSlug) + "',{" + feld + "}=" + s.angebotNummer + ")")
+        + '&fields[]=' + encodeURIComponent(feld) + '&pageSize=10';
+      const p = await fetch(url, { headers: { 'Authorization': 'Bearer ' + APP_KEYS.airtableWriteKey } });
+      if (!p.ok) break;
+      const d = await p.json();
+      const rec = d.records || [];
+      if (rec.length <= 1) break;
+      const aelteste = rec.slice().sort((a, b) => String(a.createdTime || '').localeCompare(String(b.createdTime || '')))[0];
+      if (aelteste && aelteste.id === s.bkRecordId) break;     // uns gehört sie
+      s.angebotNummer = await _angNaechsteNummer(feld, firmaSlug, feld === 'fdh_angebot_num');
+      s.angebotNr = (s.angebotKreis === 'fdh' ? 'FDH-' : 'ANG-') + s.angebotNummer;
+      const patch = { angebot_nr: s.angebotNr }; patch[feld] = s.angebotNummer;
+      await fetch(basis + '/' + s.bkRecordId, { method: 'PATCH', headers: kopf, body: JSON.stringify({ fields: patch, typecast: true }) });
+      console.log('[Nummer] Kollision — aufgerückt auf', s.angebotNr);
+    }
+    return true;
+  } catch (e) { console.warn('[Nummer] Reservieren:', e.message); return false; }
 }
 
 async function angChatExecuteFinal(btn) {
