@@ -824,7 +824,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.89.0';
+const APP_VERSION = 'v2.89.1';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -30697,7 +30697,10 @@ async function openAngebotsChatModal(accountId, ticketId, forcedRestore) {
       // PDF eine andere Nummer als der Datensatz, aus dem es stammt.
       if (restored.angebotNummer != null) window._ANG_CHAT.angebotNummer = restored.angebotNummer;
       if (restored.angebotKreis) window._ANG_CHAT.angebotKreis = restored.angebotKreis;
-      if (restored.angebotNr)    window._ANG_CHAT.angebotNr    = restored.angebotNr;
+      // Platzhalter aus alten Datensätzen nicht übernehmen.
+      if (restored.angebotNr && !/^entwurf|^fdh-entwurf/i.test(String(restored.angebotNr))) {
+        window._ANG_CHAT.angebotNr = restored.angebotNr;
+      }
       if (restored.bkRecordId)   window._ANG_CHAT.bkRecordId   = restored.bkRecordId;
       if (restored.erpLoaded && !window._ANG_CHAT._erpLoaded) window._ANG_CHAT._erpLoaded = restored.erpLoaded;
       // Gilt für BEIDE Herkünfte — localStorage wie Berichtskonverter.
@@ -30708,6 +30711,23 @@ async function openAngebotsChatModal(accountId, ticketId, forcedRestore) {
     /* Trägt der Stand keine Nummer, aber der Berichtskonverter hat schon eine
        zu diesem Ticket reserviert, dann gehört sie hierher. Läuft nebenher und
        zeichnet die Vorschau nach, sobald die Antwort da ist. */
+    /* ERP-Anzeige nach dem Wiederherstellen neu füllen. Der Ladevorgang läuft
+       beim Wiederaufnehmen eines Angebots nicht noch einmal — deshalb war die
+       Marke „ERP 3/3 ✓" weg, obwohl Anlage, Kunde und Kontakt unverändert
+       verknüpft waren. Aus dem gespeicherten Stand lässt sie sich herleiten. */
+    if (window._ANG_CHAT && !window._ANG_CHAT._erpLoaded) {
+      const c = window._ANG_CHAT.collected || {};
+      const sd = c.stammdaten || {};
+      if (c.fabriknummer || sd.vertragspartner) {
+        window._ANG_CHAT._erpLoaded = {
+          anlage:  { ok: !!(c.fabriknummer || c.standort), val: c.fabriknummer ? ('Fabr.-Nr. ' + c.fabriknummer) : (c.standort || '') },
+          kunde:   { ok: !!sd.vertragspartner, val: sd.vertragspartner || '' },
+          kontakt: { ok: !!sd.ansprechpartner_vor_ort, val: sd.ansprechpartner_vor_ort || '' },
+          ausStand: true,
+        };
+      }
+    }
+
     /* Verknüpft, aber ohne Nummer: sofort nachtragen. Genau dieser Fall lag bei
        Ticket 40430 vor — die Suche im Berichtskonverter half nicht, weil der
        Datensatz dort selbst keine Nummer trug. */
@@ -34432,8 +34452,15 @@ async function _angNaechsteNummer(feld, firmaSlug, nurHero) {
 /** Die Nummer, wie sie auf Papier und in der Liste steht. */
 function _angNrText(s) {
   if (!s) return '';
-  if (s.angebotNr) return s.angebotNr;
+  /* Die ZAHL ist maßgeblich, nicht der Text. Vorher gewann `angebotNr` — und
+     wenn dort ein alter „ENTWURF-40430"-Text aus dem Berichtskonverter stand,
+     zeigte Hero ihn selbst dann noch an, als die Nummer längst vergeben war.
+     Genau daran hingen die letzten Runden: grüne LED, Nummer im Zustand, und
+     im PDF trotzdem „ENTWURF". */
   if (s.angebotNummer != null) return (s.angebotKreis === 'fdh' ? 'FDH-' : 'ANG-') + s.angebotNummer;
+  // Nur wenn es gar keine Zahl gibt, zählt ein gespeicherter Text — und auch
+  // der nur, wenn er selbst kein Platzhalter ist.
+  if (s.angebotNr && !/^entwurf|^fdh-entwurf/i.test(String(s.angebotNr))) return s.angebotNr;
   /* Noch nicht vergeben. Bewusst OHNE Kreiskürzel: Welcher Kreis es wird,
      entscheidet sich erst an der Fabriknummer, und „FDH-Entwurf" an einem
      Angebot, das später ANG-2711 heißt, liest sich wie eine Aussage über den
