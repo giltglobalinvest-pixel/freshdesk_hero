@@ -824,7 +824,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.88.2';
+const APP_VERSION = 'v2.88.3';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -30710,7 +30710,7 @@ async function openAngebotsChatModal(accountId, ticketId, forcedRestore) {
     if (window._ANG_CHAT && window._ANG_CHAT.angebotNummer == null) {
       _angNummerAusBkHolen(accountId, ticketId).then(gefunden => {
         const st = window._ANG_CHAT;
-        if (!gefunden || !st || st.ticketId !== ticketId || st.angebotNummer != null) return;
+        if (!gefunden || !st || String(st.ticketId) !== String(ticketId) || st.angebotNummer != null) return;
         st.angebotNummer = gefunden.nummer;
         st.angebotKreis  = gefunden.kreis;
         st.angebotNr     = gefunden.nr;
@@ -31294,26 +31294,37 @@ async function _angOpenFromPicker(recordId) {
    Anders als beim Wiederherstellen des Inhalts zählen hier auch Platzhalter
    (status=entwurf): Genau die sind ja die Reservierung. */
 async function _angNummerAusBkHolen(accountId, ticketId) {
-  if (!APP_KEYS.bkAirtableBaseId || !APP_KEYS.airtableWriteKey) return null;
+  if (!APP_KEYS.bkAirtableBaseId || !APP_KEYS.airtableWriteKey) {
+    console.warn('[Angebot] Nummer aus BK: Base-ID oder Schlüssel fehlt');
+    return null;
+  }
   try {
+    /* Bewusst OHNE sort-Parameter: Fehlt das Sortierfeld in der Tabelle,
+       antwortet Airtable mit 422 und die ganze Suche liefe ins Leere. Lieber
+       ein paar Datensätze holen und hier die höchste Nummer wählen. */
     const url = 'https://api.airtable.com/v0/' + APP_KEYS.bkAirtableBaseId + '/App_Angebote'
       + '?filterByFormula=' + encodeURIComponent("{freshdesk_ticket_id}='" + escapeFormula(String(ticketId)) + "'")
-      + '&sort[0][field]=erstellt_am&sort[0][direction]=desc&maxRecords=1';
+      + '&maxRecords=10';
     const r = await fetch(url, { headers: { 'Authorization': 'Bearer ' + APP_KEYS.airtableWriteKey } });
-    if (!r.ok) return null;
+    if (!r.ok) {
+      console.warn('[Angebot] Nummer aus BK: HTTP ' + r.status, (await r.text()).slice(0, 200));
+      return null;
+    }
     const d = await r.json();
-    const rec = (d.records || [])[0];
-    if (!rec) return null;
-    const f = rec.fields || {};
-    const istFdh = f.app_angebot_num == null && f.fdh_angebot_num != null;
-    const nummer = istFdh ? f.fdh_angebot_num : f.app_angebot_num;
-    if (nummer == null) return null;
-    return {
-      recordId: rec.id,
-      nummer,
-      kreis: istFdh ? 'fdh' : 'ang',
-      nr: f.angebot_nr || ((istFdh ? 'FDH-' : 'ANG-') + nummer),
-    };
+    const recs = d.records || [];
+    console.log('[Angebot] BK-Suche zu Ticket ' + ticketId + ': ' + recs.length + ' Datensatz/Datensätze');
+    let best = null;
+    for (const rec of recs) {
+      const f = rec.fields || {};
+      const istFdh = f.app_angebot_num == null && f.fdh_angebot_num != null;
+      const nummer = istFdh ? f.fdh_angebot_num : f.app_angebot_num;
+      if (nummer == null) continue;
+      const kand = { recordId: rec.id, nummer: +nummer, kreis: istFdh ? 'fdh' : 'ang',
+                     nr: f.angebot_nr || ((istFdh ? 'FDH-' : 'ANG-') + nummer) };
+      if (!best || kand.nummer > best.nummer) best = kand;
+    }
+    if (!best) console.warn('[Angebot] BK-Datensatz gefunden, aber ohne Nummer in app_angebot_num/fdh_angebot_num');
+    return best;
   } catch (e) { console.warn('[Angebot] Nummer aus BK:', e.message); return null; }
 }
 
