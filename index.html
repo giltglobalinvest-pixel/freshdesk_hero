@@ -824,7 +824,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.90.2';
+const APP_VERSION = 'v2.91.0';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -15876,6 +15876,7 @@ function renderTicketDetailBody(ticket) {
                   <span class="text-ink-400 shrink-0">${escapeHtml(fmtDate(c.created_at))}</span>
                   ${_renderTranslateButton(bodyPlain, convId)}
                   ${isPrivate ? `<button onclick="deleteInternalNote('${escapeAttr(ticket._accountId)}', ${ticket.id}, ${c.id}, this)" class="shrink-0 text-rose-500 hover:text-rose-700 hover:bg-rose-50 -m-1 p-1 rounded inline-flex items-center" title="Interne Notiz löschen"><i data-lucide="trash-2" class="w-3.5 h-3.5"></i></button>` : ''}
+                  ${(!isPrivate && isIncoming && c.from_email) ? `<button onclick="openAntwortSplit('${escapeAttr(ticket._accountId)}', ${ticket.id}, ${c.id}, this)" class="shrink-0 -m-1 p-1 rounded inline-flex items-center gap-1 ${_antwortFremderAbsender(ticket, c) ? 'text-sky-700 bg-sky-100 hover:bg-sky-200 font-semibold px-1.5' : 'text-ink-400 hover:text-sky-700 hover:bg-sky-50'}" title="${_antwortFremderAbsender(ticket, c) ? 'Diese Antwort kommt von einer anderen Adresse als der Anfragende. Eigenen Vorgang daraus machen, um direkt antworten zu können.' : 'Aus dieser Antwort einen eigenen Vorgang machen'}"><i data-lucide="split" class="w-3.5 h-3.5"></i>${_antwortFremderAbsender(ticket, c) ? 'anderer Absender' : ''}</button>` : ''}
                 </div>
                 ${rulePill}
                 <div data-translatable-area="${convId}">
@@ -27285,6 +27286,179 @@ function closeTicketEmailModal() {
    Per Account konfigurierbar — siehe TITLE_FORMAT_PRESETS oben.
    Claude extrahiert die im Preset definierten Felder aus dem Ticket-Inhalt,
    User kann editieren, dann PUT subject zu FD. */
+/* ===== ANTWORT ABTRENNEN (v2.91.0) =======================================
+   Schreibt jemand auf ein Ticket, der nicht der Anfragende ist — die Kollegin
+   aus der Buchhaltung, ein hinzugezogener Techniker —, dann geht jede Antwort
+   von Freshdesk trotzdem an den ursprünglichen Anfragenden. Der eigentliche
+   Schreiber bekommt sie nie. Freshdesk löst das mit „Split"; hier ist dasselbe.
+
+   Aus der markierten Antwort entsteht ein eigener Vorgang mit dem RICHTIGEN
+   Absender als Anfragendem. Danach ist Antworten wieder das, was es sein soll:
+   eine Antwort an den, der geschrieben hat.
+
+   Das Original bleibt unangetastet — bis auf eine Notiz, die sagt, wohin die
+   Antwort gegangen ist. Nichts wird gelöscht: Der Verlauf eines Vorgangs ist
+   ein Beleg, kein Arbeitsvorrat. */
+
+function _antwortFremderAbsender(ticket, c) {
+  const von = String(c && c.from_email || '').trim().toLowerCase();
+  if (!von) return false;
+  const anfragender = String(ticket && ticket.requester && ticket.requester.email || '').trim().toLowerCase();
+  return !!anfragender && von !== anfragender;
+}
+
+async function openAntwortSplit(accountId, ticketId, conversationId, btnEl) {
+  const t = CURRENT_TICKET && CURRENT_TICKET.id === ticketId ? CURRENT_TICKET : await fetchTicketDetail(accountId, ticketId);
+  const c = ((t && t.conversations) || []).find(x => String(x.id) === String(conversationId));
+  if (!c) return toast('Antwort nicht gefunden — Ticket neu laden.', 'warn', 6000);
+  const von = String(c.from_email || '').trim();
+  if (!von) return toast('Zu dieser Antwort ist keine Absenderadresse hinterlegt.', 'warn', 6000);
+
+  const fremd = _antwortFremderAbsender(t, c);
+  const text = htmlToText(c.body_text || c.body || '').trim();
+  const atts = (c.attachments || []).filter(a => a && a.attachment_url);
+
+  let host = document.getElementById('subModalHost');
+  if (!host) { host = document.createElement('div'); host.id = 'subModalHost'; document.body.appendChild(host); }
+  window._ANTWORT_SPLIT = { accountId, ticketId, conversationId, ticket: t, conv: c, atts };
+
+  const vorschlag = 'ANFRAGE neu | ' + (String(t.subject || '').replace(/^(ANFRAGE\s+\d+\s*\|\s*)/i, '').slice(0, 120));
+  host.innerHTML =
+    '<div class="fixed inset-0 z-[70] bg-black/40 flex items-start justify-center overflow-y-auto p-4" onclick="if(event.target===this)closeAntwortSplit()">'
+      + '<div class="bg-white rounded-2xl shadow-xl w-full max-w-lg my-8">'
+        + '<div class="flex items-center justify-between p-4 border-b border-ink-200">'
+          + '<div><h3 class="font-bold text-ink-900 inline-flex items-center gap-2"><i data-lucide="split" class="w-5 h-5 text-sky-600"></i> Antwort abtrennen</h3>'
+          + '<p class="text-[11px] text-ink-500">Eigener Vorgang mit dem richtigen Absender</p></div>'
+          + '<button onclick="closeAntwortSplit()" class="text-ink-400 hover:text-ink-700"><i data-lucide="x" class="w-5 h-5"></i></button></div>'
+        + '<div class="p-4 space-y-3">'
+          + (fremd
+              ? '<div class="bg-sky-50 border border-sky-200 rounded-xl p-2.5 text-[12px] text-sky-900">Diese Antwort kommt von <b>' + escapeHtml(von) + '</b>, der Vorgang gehört <b>' + escapeHtml(t.requester?.email || '?') + '</b>. Eine Antwort hier ginge an den Anfragenden — nicht an den Schreiber.</div>'
+              : '<div class="bg-amber-50 border border-amber-200 rounded-xl p-2.5 text-[12px] text-amber-900">Absender und Anfragender sind dieselbe Adresse. Ein eigener Vorgang lohnt nur, wenn es inhaltlich ein anderes Anliegen ist.</div>')
+          + '<label class="block"><span class="text-[10px] font-semibold text-ink-600 uppercase">Neuer Anfragender</span>'
+            + '<input id="asplitVon" value="' + escapeAttr(von) + '" class="w-full mt-0.5 px-2 py-1.5 border border-ink-300 rounded text-sm"></label>'
+          + '<label class="block"><span class="text-[10px] font-semibold text-ink-600 uppercase">Betreff</span>'
+            + '<input id="asplitBetreff" value="' + escapeAttr(vorschlag) + '" class="w-full mt-0.5 px-2 py-1.5 border border-ink-300 rounded text-sm"></label>'
+          + '<label class="block"><span class="text-[10px] font-semibold text-ink-600 uppercase">Inhalt des neuen Vorgangs</span>'
+            + '<textarea id="asplitText" rows="7" class="w-full mt-0.5 px-2 py-1.5 border border-ink-300 rounded text-sm">' + escapeHtml(text.slice(0, 6000)) + '</textarea></label>'
+          + (atts.length
+              ? '<div><span class="text-[10px] font-semibold text-ink-600 uppercase">Anhänge dieser Antwort</span>'
+                + '<div class="mt-1 space-y-1">' + atts.map((a, i) =>
+                    '<label class="flex items-center gap-2 text-[12px] cursor-pointer"><input type="checkbox" checked data-asplit-att="' + i + '" class="w-3.5 h-3.5">'
+                    + '<span class="truncate flex-1">' + escapeHtml(a.name || 'anhang') + '</span>'
+                    + '<span class="text-[10px] text-ink-400">' + Math.round((+a.size || 0) / 1024) + ' KB</span></label>').join('')
+                + '</div></div>'
+              : '')
+          + '<label class="flex items-start gap-2 text-[11px] text-ink-700 cursor-pointer">'
+            + '<input type="checkbox" id="asplitAntworten" checked class="mt-0.5">'
+            + '<span>Nach dem Anlegen den neuen Vorgang öffnen, um direkt zu antworten.</span></label>'
+          + '<div class="flex gap-2 justify-end pt-1">'
+            + '<button onclick="closeAntwortSplit()" class="px-3 py-2 rounded-lg text-[12px] font-bold bg-white border border-ink-300 text-ink-700 hover:bg-ink-50">Abbrechen</button>'
+            + '<button onclick="_antwortSplitAusfuehren(this)" class="px-4 py-2 rounded-lg text-[12px] font-bold bg-sky-600 hover:bg-sky-700 text-white">Vorgang anlegen</button>'
+          + '</div>'
+          + '<p class="text-[10px] text-ink-500">Der ursprüngliche Vorgang bleibt unverändert und bekommt nur eine Notiz mit der neuen Nummer.</p>'
+        + '</div>'
+      + '</div>'
+    + '</div>';
+  if (window.lucide) lucide.createIcons();
+}
+
+function closeAntwortSplit() {
+  window._ANTWORT_SPLIT = null;
+  const h = document.getElementById('subModalHost');
+  if (h) h.innerHTML = '';
+}
+
+async function _antwortSplitAusfuehren(btn) {
+  const st = window._ANTWORT_SPLIT;
+  if (!st) return;
+  const t = st.ticket;
+  const von = (document.getElementById('asplitVon')?.value || '').trim();
+  const betreff = (document.getElementById('asplitBetreff')?.value || '').trim();
+  const text = (document.getElementById('asplitText')?.value || '').trim();
+  const oeffnen = !!document.getElementById('asplitAntworten')?.checked;
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(von)) return toast('Absenderadresse sieht nicht gültig aus.', 'warn', 6000);
+  if (!betreff) return toast('Betreff fehlt.', 'warn', 5000);
+  if (!text) return toast('Inhalt fehlt.', 'warn', 5000);
+
+  const gewaehlt = Array.from(document.querySelectorAll('[data-asplit-att]:checked'))
+    .map(el => st.atts[+el.getAttribute('data-asplit-att')]).filter(Boolean);
+
+  setBusy(btn, true, 'Lege an…');
+  try {
+    // Anhänge übernehmen — dieselbe Doppelstrategie wie sonst auch.
+    const dateien = [];
+    for (const a of gewaehlt) {
+      try {
+        let blob = null;
+        if (!/s3[.\-]|amazonaws\.com|freshdesk\.com/i.test(a.attachment_url)) {
+          try { const r = await fetch(a.attachment_url, { mode: 'cors' }); if (r.ok) blob = await r.blob(); } catch (_) {}
+        }
+        if (!blob) {
+          const r = await proxyFetch('/attachment-fetch?url=' + encodeURIComponent(a.attachment_url));
+          if (r.ok) blob = await r.blob();
+        }
+        if (blob) dateien.push({ blob, name: a.name || 'anhang' });
+      } catch (e) { console.warn('[Split] Anhang', a.name, e.message); }
+    }
+
+    const koerper = text
+      + '\n\n---\nAbgetrennt aus Vorgang #' + st.ticketId + ' (' + (t.subject || '') + ').'
+      + '\nDort ging diese Nachricht als Antwort ein, obwohl sie von einer anderen Adresse stammt.';
+    const felder = {
+      subject: betreff,
+      description: textToHtmlForFreshdesk(koerper),
+      email: von,                       // legt den Kontakt bei Bedarf an
+      status: 2,
+      priority: t.priority || 1,
+      source: t.source || 1,
+    };
+    if (t.group_id) felder.group_id = t.group_id;
+    if (t.type) felder.type = t.type;
+    if (t.responder_id) felder.responder_id = t.responder_id;
+
+    let created;
+    if (dateien.length) {
+      created = await _fdPostMultipart(st.accountId, 'tickets', felder, dateien);
+    } else {
+      const payload = Object.assign({}, felder);
+      if (Array.isArray(t.tags) && t.tags.length) payload.tags = t.tags;
+      created = await proxyJson('/freshdesk/' + encodeURIComponent(st.accountId) + '/api/v2/tickets',
+        { method: 'POST', body: JSON.stringify(payload) });
+    }
+    if (!created?.id) throw new Error('Freshdesk gab keine Vorgangsnummer zurück');
+
+    // Betreff mit echter Nummer nachziehen, falls das Muster genutzt wurde.
+    if (/^ANFRAGE\s+neu\b/i.test(betreff)) {
+      const echt = betreff.replace(/^ANFRAGE\s+neu\b/i, 'ANFRAGE ' + created.id);
+      try {
+        await proxyJson('/freshdesk/' + encodeURIComponent(st.accountId) + '/api/v2/tickets/' + created.id,
+          { method: 'PUT', body: JSON.stringify({ subject: echt }) });
+      } catch (_) {}
+    }
+
+    // Notiz im Original — wohin die Antwort gegangen ist.
+    try {
+      await proxyJson('/freshdesk/' + encodeURIComponent(st.accountId) + '/api/v2/tickets/' + st.ticketId + '/notes',
+        { method: 'POST', body: JSON.stringify({ private: true,
+          body: textToHtmlForFreshdesk('Antwort von ' + von + ' abgetrennt → eigener Vorgang #' + created.id
+            + '.\nDort kann direkt an ' + von + ' geantwortet werden; hier ginge jede Antwort an '
+            + (t.requester?.email || 'den Anfragenden') + '.') }) });
+    } catch (e) { console.warn('[Split] Notiz im Original:', e.message); }
+
+    setBusy(btn, false);
+    closeAntwortSplit();
+    toast('Vorgang #' + created.id + ' angelegt — Anfragender ist jetzt ' + von + '.', 'success', 8000);
+    if (oeffnen) {
+      setTimeout(() => { try { openTicketDetail(st.accountId, created.id); } catch (_) {} }, 250);
+    } else {
+      try { await _reloadTicketDetail(st.accountId, st.ticketId, null); } catch (_) {}
+    }
+  } catch (e) {
+    setBusy(btn, false);
+    toast('Abtrennen fehlgeschlagen: ' + (e.message || e), 'error', 10000);
+  }
+}
+
 /* ===================== TICKET AUFTEILEN (v2.87.0) ========================
    Kunden schreiben eine Mail und meinen zwei Aufzüge. Ab da hängt alles
    schief: ein Ticket, zwei Fabriknummern, zwei Angebote, zwei Aufträge — und
