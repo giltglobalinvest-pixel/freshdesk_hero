@@ -824,7 +824,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.88.0';
+const APP_VERSION = 'v2.88.1';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -34272,12 +34272,20 @@ async function _angNummerSichern(s) {
   s.angebotNummer = await _angNaechsteNummer(feld, firmaSlug, !erpFaehig);
   s.angebotNr = (erpFaehig ? 'ANG-' : 'FDH-') + s.angebotNummer;
 
+  /* Vorschau sofort nachziehen. Bis v2.88.0 stand dort weiter „ENTWURF-40430",
+     auch nachdem die Nummer längst vergeben und belegt war — die Vorschau wird
+     nur beim Ändern des Inhalts gezeichnet, und die Vergabe ändert den Inhalt
+     nicht. Wer prüfen will, was der Kunde bekommt, sah die falsche Nummer. */
+  try { if (typeof _angChatRenderPreview === 'function') _angChatRenderPreview(); } catch (_) {}
+
   const belegt = await _angNummerBelegen(s, feld, firmaSlug);
   if (!belegt) {
     toast('Achtung: Nummer ' + s.angebotNr + ' konnte nicht reserviert werden. '
       + 'Sie steht auf dem PDF, ist aber noch nicht belegt — wer parallel arbeitet, '
       + 'könnte dieselbe bekommen. Bitte zügig speichern oder senden.', 'warn', 11000);
   }
+  // Nach der Gegenprobe kann die Nummer aufgerückt sein — noch einmal zeichnen.
+  try { if (typeof _angChatRenderPreview === 'function') _angChatRenderPreview(); } catch (_) {}
   if (!erpFaehig && fuehrtAnlagen) {
     toast('Ohne Fabriknummer: Angebot ' + s.angebotNr + ' läuft im Hero-Nummernkreis. '
       + 'Im ERP kann es nicht angelegt werden — dort braucht jedes Angebot eine Anlage, '
@@ -34696,13 +34704,13 @@ async function angChatConfirmSend(btn) {
     if (APP_KEYS.bkAirtableBaseId) {
       try {
         const bk = await _bkSaveAngebotToBK(s);
-        bkNote = ' · Berichtskonverter ANG-' + bk.angNum;
+        bkNote = ' · Berichtskonverter ' + _angNrText(s);
       } catch (e1) {
         console.warn('BK-Save Versuch 1 fehlgeschlagen — Retry:', e1.message);
         await new Promise(r => setTimeout(r, 2000));
         try {
           const bk = await _bkSaveAngebotToBK(s);
-          bkNote = ' · Berichtskonverter ANG-' + bk.angNum;
+          bkNote = ' · Berichtskonverter ' + _angNrText(s);
         } catch (e2) {
           bkError = e2;
           console.error('BK-Save endgültig fehlgeschlagen:', e2);
@@ -34739,7 +34747,8 @@ async function angChatSaveToBerichtskonverter(btn) {
     _angRecordLerntext(s).catch(() => {});  // v2.46.180: Stil fürs nächste Mal lernen
     _angPersistState();  // v2.46.196: explizit gespeichert = neue Referenz-Version
     setBusy(btn, false);
-    toast('Im Berichtskonverter gespeichert als ANG-' + bk.angNum + ' ✓', 'success', 6000);
+    try { _angChatRenderPreview(); } catch (_) {}
+    toast('Im Berichtskonverter gespeichert als ' + _angNrText(s) + ' ✓', 'success', 6000);
   } catch (e) {
     setBusy(btn, false);
     toast('BK-Save fehlgeschlagen: ' + (e.message || e), 'error', 10000);
