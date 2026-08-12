@@ -824,7 +824,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.90.0';
+const APP_VERSION = 'v2.90.1';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -16850,8 +16850,14 @@ function _archivSlugFuer(accountId) {
   return _ARCHIV_SLUGS.find(sl => new RegExp(sl, 'i').test(acc.name || '')) || null;
 }
 
-function openSearchModal() {
-  SEARCH_CTX = { query: '', results: null, summary: null, busy: false };
+function openSearchModal(neuBeginnen) {
+  /* Eine Suche, die älter als eine Viertelstunde ist, taugt nicht mehr als
+     Arbeitsstand — Tickets ändern sich. Dann wird frisch begonnen. */
+  const frisch = LETZTE_SUCHE && (Date.now() - LETZTE_SUCHE.zeit) < 15 * 60 * 1000;
+  const wieder = !neuBeginnen && frisch ? LETZTE_SUCHE : null;
+  SEARCH_CTX = wieder
+    ? { query: wieder.query, results: wieder.results, summary: wieder.summary, busy: false, _archivHtml: wieder.archiv }
+    : { query: '', results: null, summary: null, busy: false };
   let host = document.getElementById('subModalHost');
   if (!host) { host = document.createElement('div'); host.id = 'subModalHost'; document.body.appendChild(host); }
   const speechAvailable = !!(window.SpeechRecognition || window.webkitSpeechRecognition);
@@ -16899,15 +16905,55 @@ function openSearchModal() {
       </div>
     </div>`;
   if (window.lucide) lucide.createIcons();
-  setTimeout(() => $('searchInput')?.focus(), 100);
+  if (wieder) {
+    const inp = $('searchInput');
+    if (inp) inp.value = wieder.query || '';
+    try { renderSearchResults(); } catch (_) {}
+    // Archivtreffer waren nachgeladen — sie hier wieder anzuhängen spart den
+    // zweiten Lauf gegen den Worker.
+    if (wieder.archiv) {
+      const ziel = document.getElementById('searchResults');
+      if (ziel) {
+        const box = document.createElement('div');
+        box.id = 'archivBlock';
+        box.className = 'mb-4 border border-emerald-200 bg-emerald-50/40 rounded-xl p-3';
+        box.innerHTML = wieder.archiv;
+        ziel.insertBefore(box, ziel.firstChild);
+        if (window.lucide) lucide.createIcons();
+      }
+    }
+    toast('Letzte Suche wiederhergestellt — „Suchen" für einen frischen Lauf.', 'info', 4000);
+  } else {
+    setTimeout(() => $('searchInput')?.focus(), 100);
+  }
   // Enter im Input triggert KI-Suche
   $('searchInput')?.addEventListener('keydown', e => {
     if (e.key === 'Enter') { e.preventDefault(); runSearch(true); }
   });
 }
 
+/* Die zuletzt gelaufene Suche überlebt das Schließen.
+
+   Grund: Aus einem Treffer heraus öffnet man ein Ticket — und dafür MUSS die
+   Suche zu, sie liegt im selben Overlay. Kommt man zurück, war bisher alles
+   weg und dieselbe Frage musste noch einmal gestellt werden, samt KI-Aufruf
+   und Archiv-Abfrage. Bei einer Trefferliste, die man Punkt für Punkt
+   abarbeitet, ist das die halbe Arbeit.
+
+   Aufgehoben wird nur der Suchstand, nicht die Ticketdaten selbst — die sind
+   nach dem Öffnen ohnehin frisch geladen. */
+let LETZTE_SUCHE = null;
+
 function closeSearchModal() {
   if (SEARCH_REC) { try { SEARCH_REC.stop(); } catch (_) {} SEARCH_REC = null; }
+  // Vor dem Verwerfen sichern, damit „zurück zur Suche" wieder dorthin führt.
+  if (SEARCH_CTX && SEARCH_CTX.results) {
+    const ab = document.getElementById('archivBlock');
+    LETZTE_SUCHE = { query: SEARCH_CTX.query || '', results: SEARCH_CTX.results,
+                     summary: SEARCH_CTX.summary || null,
+                     archiv: (ab && !/spinner/.test(ab.innerHTML)) ? ab.innerHTML : '',
+                     zeit: Date.now() };
+  }
   const host = document.getElementById('subModalHost');
   if (host) host.innerHTML = '';
   SEARCH_CTX = null;
