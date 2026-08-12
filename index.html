@@ -824,7 +824,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.95.2';
+const APP_VERSION = 'v2.96.0';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -48372,6 +48372,7 @@ function _korbNachfassZeichnen(platzhalter) {
         ? '<div class="bg-red-50 border border-red-200 rounded-xl p-2.5 text-[12px] text-red-800">' + escapeHtml(st.netz.fehler) + '</div>'
         : '<div><p class="text-[10px] uppercase font-semibold text-ink-600 mb-1">Aus dem Internet · ungeprüfte Fundstücke</p>'
           + '<div class="space-y-1">'
+            + zeile('Firma', st.netz.firma, 'firma', st.netz.firma_quelle)
             + zeile('Telefon', st.netz.telefon, 'telefon', st.netz.telefon_quelle)
             + zeile('Ansprechpartner', st.netz.ansprechpartner, 'name', st.netz.ansprechpartner_quelle)
             + zeile('Position', st.netz.position, 'position', st.netz.ansprechpartner_quelle)
@@ -48442,7 +48443,7 @@ async function _korbNachfassAlles(quelle, btn) {
   const r = st.rec;
   const q = quelle === 'netz' ? (st.netz || {}) : (((st.archiv || {}).signatur) || {});
   const paare = quelle === 'netz'
-    ? [['name', q.ansprechpartner], ['telefon', q.telefon], ['position', q.position],
+    ? [['name', q.ansprechpartner], ['firma', q.firma], ['telefon', q.telefon], ['position', q.position],
        ['strasse', q.strasse], ['plz', q.plz], ['ort', q.ort]]
     : [['name', q.name], ['firma', q.firma], ['telefon', q.telefon || q.mobil],
        ['position', q.position], ['strasse', q.strasse], ['plz', q.plz], ['ort', q.ort]];
@@ -48544,8 +48545,11 @@ async function _korbNachfassNetz(btn) {
       + (ort ? 'Ort: ' + ort + '\n' : '')
       + (r.strasse ? 'Straße: ' + r.strasse + '\n' : '')
       + (r.email ? 'Bekannte E-Mail: ' + r.email + '\n' : '')
-      + '\nFinde: die allgemeine Telefonnummer des Unternehmens und — falls auffindbar — '
-      + 'eine namentliche Kontaktperson (Geschäftsführung, Vertrieb oder Ansprechpartner) mit Position.';
+      + (r.name ? 'Bekannte Person: ' + r.name + '\n' : '')
+      + '\nFinde: den offiziellen FIRMENNAMEN mit Rechtsform, die allgemeine Telefonnummer '
+      + 'und — falls auffindbar — eine namentliche Kontaktperson mit Position.\n'
+      + 'Achtung bei Portalen: Adressen wie @mycasavi.com, @casavi.de oder @immobilien-portal gehören der '
+      + 'Software-Plattform, nicht dem Unternehmen. Gesucht ist das Unternehmen, für das die Person arbeitet.';
     const sys =
       'Du recherchierst Firmenkontaktdaten im Web und antwortest AUSSCHLIESSLICH mit JSON.\n\n'
       + 'HARTE REGELN:\n'
@@ -48555,7 +48559,8 @@ async function _korbNachfassNetz(btn) {
       + '4. Im Zweifel Feld weglassen. Eine fehlende Angabe ist harmlos, eine falsche kostet einen Anruf beim falschen Unternehmen.\n'
       + '5. Telefonnummern im Format +49 … oder 0… , ohne Zusätze.\n\n'
       + 'JSON-FORMAT (alle Felder optional):\n'
-      + '{"telefon":"…","telefon_quelle":"https://…",'
+      + '{"firma":"Offizieller Name mit Rechtsform","firma_quelle":"https://…",'
+      + '"telefon":"…","telefon_quelle":"https://…",'
       + '"ansprechpartner":"Vorname Nachname","position":"…","ansprechpartner_quelle":"https://…",'
       + '"strasse":"…","plz":"…","ort":"…","adresse_quelle":"https://…",'
       + '"hinweis":"ein Satz, falls etwas unklar blieb"}';
@@ -48573,7 +48578,7 @@ async function _korbNachfassNetz(btn) {
     if (!gesucht) {
       st.netz = { fehler: 'Die Websuche stand nicht zur Verfügung — der Proxy hat das Werkzeug nicht durchgereicht. '
         + 'Ohne echte Recherche wird hier bewusst nichts angezeigt.' };
-    } else if (!daten.telefon && !daten.ansprechpartner && !daten.strasse) {
+    } else if (!daten.telefon && !daten.ansprechpartner && !daten.strasse && !daten.firma) {
       st.netz = { fehler: 'Im Netz nichts belegbar gefunden'
         + (daten.hinweis ? ' — ' + daten.hinweis : '.') };
     } else {
@@ -48603,6 +48608,10 @@ function _korbFirmaVerdaechtig(r) {
      GmbH powered by Freshdesk" steht unter jeder Mail, die dieses System
      verschickt — auch unter der eines fremden Kunden. */
   if (/(powered by|freshdesk|freshservice|zendesk|helpdesk|ticketsystem|support ?portal)/i.test(f)) return true;
+  /* Ganze Sätze statt Namen: „Diese E-Mail ist ein Service von … GmbH." Sie
+     tragen eine Rechtsform und rutschten deshalb als Firma durch. */
+  if (/(diese e-?mail|diese nachricht|ist ein service|wird gesendet|automatisch (erzeugt|generiert|versendet)|im auftrag von)/i.test(f)) return true;
+  if (f.split(/\s+/).filter(Boolean).length >= 5 && /\b(ist|sind|wird|wurde|werden|hat|haben)\b/i.test(f)) return true;
   const norm = f.toLowerCase().replace(/\s+/g, ' ').trim();
   return (APP_STATE.accounts || []).some(a => {
     const n = String(a.name || '').toLowerCase().replace(/\s+/g, ' ').trim();
