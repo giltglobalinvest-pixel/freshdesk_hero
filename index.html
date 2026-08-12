@@ -824,7 +824,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.88.5';
+const APP_VERSION = 'v2.89.0';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -30699,6 +30699,7 @@ async function openAngebotsChatModal(accountId, ticketId, forcedRestore) {
       if (restored.angebotKreis) window._ANG_CHAT.angebotKreis = restored.angebotKreis;
       if (restored.angebotNr)    window._ANG_CHAT.angebotNr    = restored.angebotNr;
       if (restored.bkRecordId)   window._ANG_CHAT.bkRecordId   = restored.bkRecordId;
+      if (restored.erpLoaded && !window._ANG_CHAT._erpLoaded) window._ANG_CHAT._erpLoaded = restored.erpLoaded;
       // Gilt für BEIDE Herkünfte — localStorage wie Berichtskonverter.
       if (restored.angebotNummer != null && !restored.angebotKreis) {
         window._ANG_CHAT.angebotKreis = String(restored.angebotNr || '').startsWith('FDH-') ? 'fdh' : 'ang';
@@ -30707,7 +30708,12 @@ async function openAngebotsChatModal(accountId, ticketId, forcedRestore) {
     /* Trägt der Stand keine Nummer, aber der Berichtskonverter hat schon eine
        zu diesem Ticket reserviert, dann gehört sie hierher. Läuft nebenher und
        zeichnet die Vorschau nach, sobald die Antwort da ist. */
-    if (window._ANG_CHAT && window._ANG_CHAT.angebotNummer == null) {
+    /* Verknüpft, aber ohne Nummer: sofort nachtragen. Genau dieser Fall lag bei
+       Ticket 40430 vor — die Suche im Berichtskonverter half nicht, weil der
+       Datensatz dort selbst keine Nummer trug. */
+    if (window._ANG_CHAT && window._ANG_CHAT.angebotNummer == null && window._ANG_CHAT.bkRecordId) {
+      _angNummerNachtragen(null).catch(() => {});
+    } else if (window._ANG_CHAT && window._ANG_CHAT.angebotNummer == null) {
       _angNummerAusBkHolen(accountId, ticketId).then(async gefunden => {
         const st = window._ANG_CHAT;
         if (!gefunden || !st || String(st.ticketId) !== String(ticketId) || st.angebotNummer != null) return;
@@ -31322,6 +31328,39 @@ async function _angOpenFromPicker(recordId) {
 
    Anders als beim Wiederherstellen des Inhalts zählen hier auch Platzhalter
    (status=entwurf): Genau die sind ja die Reservierung. */
+/* Nummer in einen verknüpften, aber nummernlosen Datensatz nachtragen.
+
+   Der Fall entsteht durch Datensätze aus der Zeit, als der Satz vor der
+   Nummernvergabe gebaut wurde: Verknüpfung vorhanden, Zahlenfelder leer. Der
+   Nutzer soll das nicht durch erneutes Speichern reparieren müssen — dabei
+   entstünde leicht ein zweiter Vorgang. Ein Klick genügt. */
+async function _angNummerNachtragen(btnEl) {
+  const s = window._ANG_CHAT;
+  if (!s) return;
+  if (!s.bkRecordId) return toast('Kein verknüpfter Datensatz — bitte einmal speichern.', 'warn', 6000);
+  if (s.angebotNummer != null) { try { _angChatRenderPreview(); } catch (_) {} return; }
+  if (btnEl) setBusy(btnEl, true, 'Trage nach…');
+  try {
+    await _angNummerSichern(s);                 // belegt nichts Neues, weil bkRecordId gesetzt ist
+    if (s.angebotNummer == null) throw new Error('Es konnte keine Nummer ermittelt werden');
+    const feld = s.angebotKreis === 'fdh' ? 'fdh_angebot_num' : 'app_angebot_num';
+    const patch = { angebot_nr: s.angebotNr }; patch[feld] = s.angebotNummer;
+    const r = await fetch('https://api.airtable.com/v0/' + APP_KEYS.bkAirtableBaseId + '/App_Angebote/' + s.bkRecordId, {
+      method: 'PATCH',
+      headers: { 'Authorization': 'Bearer ' + APP_KEYS.airtableWriteKey, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ fields: patch, typecast: true }),
+    });
+    if (!r.ok) throw new Error('Servicebox HTTP ' + r.status + ': ' + (await r.text()).slice(0, 160));
+    _angPersistState();
+    if (btnEl) setBusy(btnEl, false);
+    try { _angChatRenderPreview(); } catch (_) {}
+    toast('Nummer ' + s.angebotNr + ' nachgetragen — in Hero und in der Servicebox.', 'success', 7000);
+  } catch (e) {
+    if (btnEl) setBusy(btnEl, false);
+    toast('Nachtragen fehlgeschlagen: ' + (e.message || e), 'error', 10000);
+  }
+}
+
 async function _angNummerAusBkHolen(accountId, ticketId) {
   if (!APP_KEYS.bkAirtableBaseId || !APP_KEYS.airtableWriteKey) {
     console.warn('[Angebot] Nummer aus BK: Base-ID oder Schlüssel fehlt');
@@ -31390,6 +31429,15 @@ function _angPersistState() {
          obwohl die Nummer längst vergeben und belegt war — und der nächste
          Speichervorgang hätte eine ZWEITE Nummer gezogen und einen zweiten
          Datensatz angelegt. */
+      /* Auch der ERP-Stand gehört dazu. Er ging beim Schließen verloren, und
+         die Anzeige „ERP 3/3 ✓" war danach weg, obwohl Anlage, Kunde und
+         Kontakt weiterhin verknüpft waren. Gespeichert wird nur die Kurzform —
+         die vollständigen ERP-Objekte sind zu groß für localStorage. */
+      erpLoaded: s._erpLoaded ? {
+        anlage:  { ok: !!(s._erpLoaded.anlage && s._erpLoaded.anlage.ok),  id: s._erpLoaded.anlage?.id || '' },
+        kunde:   { ok: !!(s._erpLoaded.kunde && s._erpLoaded.kunde.ok),    id: s._erpLoaded.kunde?.id || '' },
+        kontakt: { ok: !!(s._erpLoaded.kontakt && s._erpLoaded.kontakt.ok), id: s._erpLoaded.kontakt?.id || '' },
+      } : null,
       angebotNummer: (s.angebotNummer != null ? s.angebotNummer : null),
       angebotKreis:  s.angebotKreis || null,
       angebotNr:     s.angebotNr || null,
@@ -33980,17 +34028,24 @@ async function _angChatRenderPreview() {
     const nr = _angNrText(s);
     const verknuepft = !!s.bkRecordId;
     const nummerDa = s.angebotNummer != null;
-    sbBadge.innerHTML = verknuepft
+    /* Grün NUR, wenn Verknüpfung UND Nummer da sind. Vorher leuchtete es grün,
+       während im Titel „ENTWURF" stand — eine Anzeige, die das Gegenteil dessen
+       behauptet, was daneben steht, ist schlimmer als keine. */
+    sbBadge.innerHTML = (verknuepft && nummerDa)
       ? '<span class="inline-flex items-center gap-1 px-2 py-1 bg-emerald-100 border border-emerald-300 text-emerald-800 rounded-md text-[10px] font-bold" '
         + 'title="Mit der Servicebox verknüpft — Speichern aktualisiert genau diesen Datensatz. Nummer ist reserviert.">'
         + '<span class="inline-block w-2 h-2 rounded-full bg-emerald-500"></span> Servicebox ' + escapeHtml(nr) + '</span>'
-      : (nummerDa
-          ? '<span class="inline-flex items-center gap-1 px-2 py-1 bg-amber-100 border border-amber-300 text-amber-800 rounded-md text-[10px] font-bold" '
-            + 'title="Nummer vergeben, aber kein Datensatz in der Servicebox verknüpft — beim Speichern entsteht ein neuer.">'
-            + '<span class="inline-block w-2 h-2 rounded-full bg-amber-500"></span> ' + escapeHtml(nr) + ' · nicht verknüpft</span>'
-          : '<span class="inline-flex items-center gap-1 px-2 py-1 bg-ink-100 border border-ink-300 text-ink-600 rounded-md text-[10px] font-bold" '
-            + 'title="Noch keine Nummer vergeben. Sie entsteht beim PDF, beim Versand oder beim Speichern in die Servicebox.">'
-            + '<span class="inline-block w-2 h-2 rounded-full bg-ink-400"></span> Entwurf · ohne Nummer</span>');
+      : (verknuepft
+          ? '<button onclick="_angNummerNachtragen(this)" class="inline-flex items-center gap-1 px-2 py-1 bg-rose-100 border border-rose-300 text-rose-800 hover:bg-rose-200 rounded-md text-[10px] font-bold" '
+            + 'title="Der verknüpfte Datensatz in der Servicebox trägt keine Nummer. Klicken, um sie jetzt zu vergeben und dort einzutragen.">'
+            + '<span class="inline-block w-2 h-2 rounded-full bg-rose-500"></span> verknüpft, Nummer fehlt — nachtragen</button>'
+          : nummerDa
+            ? '<span class="inline-flex items-center gap-1 px-2 py-1 bg-amber-100 border border-amber-300 text-amber-800 rounded-md text-[10px] font-bold" '
+              + 'title="Nummer vergeben, aber kein Datensatz in der Servicebox verknüpft — beim Speichern entsteht ein neuer.">'
+              + '<span class="inline-block w-2 h-2 rounded-full bg-amber-500"></span> ' + escapeHtml(nr) + ' · nicht verknüpft</span>'
+            : '<span class="inline-flex items-center gap-1 px-2 py-1 bg-ink-100 border border-ink-300 text-ink-600 rounded-md text-[10px] font-bold" '
+              + 'title="Noch keine Nummer vergeben. Sie entsteht beim PDF, beim Versand oder beim Speichern in die Servicebox.">'
+              + '<span class="inline-block w-2 h-2 rounded-full bg-ink-400"></span> Entwurf · ohne Nummer</span>');
   }
 
   // v2.46.210: ERP-Herkunfts-Badge in der Vorschau-Leiste
