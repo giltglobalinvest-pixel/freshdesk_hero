@@ -824,7 +824,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.83.2';
+const APP_VERSION = 'v2.83.3';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -33394,10 +33394,12 @@ async function angChatExecuteFinal(btn) {
     ? '<div><label class="text-[11px] font-bold text-ink-700 uppercase tracking-wider">Anhänge aus dem Ticket mitsenden (optional)</label>' +
         '<div class="mt-1 space-y-1 max-h-40 overflow-y-auto border border-ink-200 rounded-lg p-2 bg-ink-50">' +
         ticketAtts.map((a, i) =>
-          '<label class="flex items-center gap-2 text-sm cursor-pointer hover:bg-white rounded px-1.5 py-1">' +
+          '<label class="flex items-center gap-2 text-sm cursor-pointer hover:bg-white rounded px-1.5 py-1'
+            + (_angSiehtNachAngebotAus(a.name) ? ' bg-amber-50' : '') + '">' +
             '<input type="checkbox" data-send-att-idx="' + i + '" class="w-4 h-4 accent-indigo-600 shrink-0">' +
             '<i data-lucide="' + (/pdf/i.test(a.type) ? 'file-text' : (/image/i.test(a.type) ? 'image' : 'file')) + '" class="w-3.5 h-3.5 text-ink-500 shrink-0"></i>' +
-            '<span class="truncate flex-1">' + escapeHtml(a.name) + '</span>' +
+            '<span class="truncate flex-1">' + escapeHtml(a.name)
+              + (_angSiehtNachAngebotAus(a.name) ? ' <span class="text-[10px] font-bold text-amber-700">· älteres Angebot</span>' : '') + '</span>' +
             '<span class="text-[10px] text-ink-400 shrink-0">' + (a.size ? Math.round(a.size / 1024) + ' KB' : '') + '</span>' +
           '</label>'
         ).join('') +
@@ -33575,6 +33577,15 @@ async function _angSendPickLibrary() {
   });
 }
 
+/* Sieht dieser Dateiname nach einem Angebot aus? Gebraucht wird das an genau
+   einer Stelle: In der Anhangsliste des Versanddialogs stehen ALLE Dateien des
+   Tickets — auch ältere Angebots-PDFs aus früheren Notizen. Wer dort das
+   Zertifikat anhakt, hat die Zeile darüber schnell mit erwischt, und beim
+   Kunden liegen zwei Angebote mit verschiedenen Nummern und Preisen. */
+function _angSiehtNachAngebotAus(name) {
+  return /angebot|offerte|quote/i.test(String(name || ''));
+}
+
 /* v2.46.181: Tatsächlicher Versand — PDF als multipart-Anhang, Text als Body,
    optional Signatur. Danach BK-Save + Lerntext wie gehabt. */
 async function angChatConfirmSend(btn) {
@@ -33658,11 +33669,26 @@ async function angChatConfirmSend(btn) {
     if (totalAll > 19 * 1024 * 1024) {
       throw new Error('Anhänge zu groß: ' + Math.round(totalAll / 1024 / 1024) + ' MB — Freshdesk erlaubt max. 20 MB. Bitte Auswahl reduzieren.');
     }
+    /* Letzte Bremse vor dem Kunden: Geht neben dem erzeugten Angebot ein
+       ZWEITES Angebots-PDF mit, ist das fast immer ein Versehen — und es fällt
+       erst auf, wenn der Kunde nachfragt, welches denn nun gilt. */
+    const weitereAngebote = sendAtts.slice(1).filter(a => _angSiehtNachAngebotAus(a.name));
+    if (weitereAngebote.length) {
+      setBusy(btn, false);
+      const weiter = confirm('Achtung: Neben „' + pdfName + '" ' + (weitereAngebote.length === 1 ? 'geht ein weiteres Angebot' : 'gehen ' + weitereAngebote.length + ' weitere Angebote') + ' mit:\n\n'
+        + weitereAngebote.map(a => '· ' + a.name).join('\n')
+        + '\n\nDer Kunde bekommt dann mehrere Angebote in einer Mail und weiß nicht, welches gilt.\n\nTrotzdem senden?');
+      if (!weiter) return;
+      setBusy(btn, true, 'Sende…');
+    }
     setBusy(btn, true, 'Sende…');
     await _fdPostMultipart(s.accountId, 'tickets/' + s.ticketId + '/reply',
       { body: bodyHtml },
       sendAtts
     );
+    // Auswahl verbrauchen: Ein zweiter Versand aus demselben Chat hätte sonst
+    // stillschweigend dieselben Zusatzdateien wieder angehängt.
+    s._sendLocalFiles = [];
     // Lokales Save (Status Versendet) — Legacy-ctx nur für die alte Tabelle
     try { await _angebotSaveAirtable(_angChatToCtx(s), 'Versendet'); } catch (e) { console.warn('Airtable-Save:', e.message); }
     // v2.46.183: Berichtskonverter-Save GARANTIERT — mit einem Auto-Retry,
