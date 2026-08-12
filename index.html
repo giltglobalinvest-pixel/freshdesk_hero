@@ -824,7 +824,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.97.0';
+const APP_VERSION = 'v2.98.0';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -48057,6 +48057,7 @@ function _renderCrawledContacts() {
           + '<label class="inline-flex items-center gap-1.5 text-[11px] text-violet-900 cursor-pointer bg-white border border-violet-200 rounded-lg px-2 py-1">'
             + '<input type="checkbox"' + (markiert === list.length ? ' checked' : '')
             + ' onchange="_korbAlleAuswaehlen(this.checked)"> alle ' + list.length + ' markieren</label>'
+          + '<button onclick="_korbSammelNachfassen(this)" class="px-2.5 py-1 rounded-lg text-[11px] font-bold bg-white border border-violet-300 text-violet-700 hover:bg-violet-50 inline-flex items-center gap-1" title="Archiv für die markierten bzw. alle sichtbaren Kontakte genauer nachlesen — füllt nur leere Felder"><i data-lucide="search-check" class="w-3.5 h-3.5"></i> Nachfassen</button>'
           + ((() => {
               const ohneTyp = list.filter(r => !String(r.kontakt_typ || '').trim()).length;
               if (!ohneTyp || !APP_KEYS.user?.is_admin) return '';
@@ -48671,6 +48672,85 @@ async function _korbFirmenRichtigstellen(btn) {
   _renderCrawledContacts();
   toast(korrigiert + ' Firmen richtiggestellt · ' + geleert + ' geleert (im Archiv nichts gefunden)'
     + (fehler ? ' · ' + fehler + ' Fehler' : ''), fehler ? 'warn' : 'success', 9000);
+}
+
+/* ===== Mehrere Kontakte auf einmal nachfassen (v2.98.0) ==================
+   Die Lupe an der einzelnen Karte klärt einen Fall. Bei sechshundert Einträgen
+   ist das der falsche Zuschnitt: Was fehlt, ist derselbe genauere Blick über
+   eine ganze Auswahl.
+
+   Gelesen wird ausschließlich das ARCHIV — dort steht, was die Leute selbst
+   geschrieben haben. Die Internetsuche bleibt der Einzelprüfung vorbehalten:
+   Sie liefert Vermutungen, und Vermutungen ungesehen über hunderte Datensätze
+   zu schreiben wäre genau der Fehler, den wir heute mehrfach ausgebaut haben.
+
+   Gefüllt werden nur LEERE Felder. Einzige Ausnahme ist eine Firma, die als
+   falsch erkannt markiert ist — die darf ersetzt werden, denn sie ist bereits
+   als unbrauchbar erwiesen. */
+async function _korbSammelNachfassen(btn) {
+  const sichtbar = _crawlVisible();
+  const markiert = sichtbar.filter(r => KORB_AUSWAHL.has(r.recordId));
+  const ziel = markiert.length ? markiert : sichtbar;
+  if (!ziel.length) return toast('Nichts sichtbar.', 'warn', 4000);
+  const key = APP_KEYS.user?.api_key;
+  if (!key) return toast('Nicht angemeldet.', 'warn', 5000);
+
+  const minuten = Math.max(1, Math.round(ziel.length * 0.9 / 60));
+  if (!confirm(ziel.length + ' Kontakte im Archiv genauer nachlesen?\n\n'
+    + (markiert.length ? 'Grundlage: die markierten Kontakte.\n' : 'Grundlage: alle gerade sichtbaren Kontakte.\n')
+    + 'Gefüllt werden nur leere Felder — Name, Firma, Position, Telefon, Anschrift.\n'
+    + 'Eine als falsch markierte Firma wird ersetzt. Bestehende Angaben bleiben.\n\n'
+    + 'Dauer: etwa ' + minuten + ' Minute' + (minuten === 1 ? '' : 'n') + '. Die Internetsuche läuft NICHT mit — die bleibt der Einzelprüfung vorbehalten.')) return;
+
+  setBusy(btn, true, '0/' + ziel.length);
+  let ergaenzt = 0, ohneFund = 0, fehler = 0, felderGesamt = 0;
+  for (let i = 0; i < ziel.length; i++) {
+    const r = ziel[i];
+    try {
+      const slug = _archivSlugFuer(r.account_id);
+      const mail = String(r.email || '').trim().toLowerCase();
+      if (!slug || !mail.includes('@')) { ohneFund++; continue; }
+      const res = await fetch(ARCHIV_URL + '/signatur?mandant=' + encodeURIComponent(slug)
+        + '&email=' + encodeURIComponent(mail), { headers: { 'X-Hero-Key': key } });
+      if (!res.ok) { fehler++; continue; }
+      const d = await res.json();
+      const sig = (d && d.gefunden && d.signatur) || null;
+      if (!sig) { ohneFund++; continue; }
+
+      const patch = {};
+      const setzeWennLeer = (feld, wert) => {
+        const w = String(wert || '').trim();
+        if (!w) return;
+        if (String(r[feld] || '').trim()) return;
+        patch[feld] = feld === 'telefon' ? (_ccNummerNormalisieren(w) || w) : w;
+      };
+      setzeWennLeer('name', sig.name);
+      setzeWennLeer('position', sig.position);
+      setzeWennLeer('telefon', sig.telefon || sig.mobil);
+      setzeWennLeer('strasse', sig.strasse);
+      setzeWennLeer('plz', sig.plz);
+      setzeWennLeer('ort', sig.ort);
+      // Firma: leer füllen ODER eine nachweislich falsche ersetzen.
+      if (sig.firma && (!String(r.firma || '').trim() || _korbFirmaVerdaechtig(r))
+          && !_korbFirmaVerdaechtig({ firma: sig.firma })) {
+        patch.firma = sig.firma;
+      }
+      if (!Object.keys(patch).length) { ohneFund++; continue; }
+      patch.updated_at = nowIso();
+      await airtableUpdateWithAutoField(CRAWLED_TABLE, r.recordId, patch, CRAWLED_TYPES_MAP);
+      Object.assign(r, patch);
+      ergaenzt++;
+      felderGesamt += Object.keys(patch).length - 1;
+    } catch (e) { fehler++; console.warn('[Sammel-Nachfassen]', r.email, e.message); }
+    setBusy(btn, true, (i + 1) + '/' + ziel.length);
+    await new Promise(res2 => setTimeout(res2, 120));
+  }
+  setBusy(btn, false);
+  _renderCrawledContacts();
+  toast(ergaenzt + ' Kontakte ergänzt (' + felderGesamt + ' Felder)'
+    + (ohneFund ? ' · ' + ohneFund + ' ohne neuen Fund' : '')
+    + (fehler ? ' · ' + fehler + ' Fehler' : ''),
+    fehler ? 'warn' : 'success', 10000);
 }
 
 /* ===== Kontakttyp per KI zuordnen (v2.97.0) ==============================
