@@ -824,7 +824,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.86.0';
+const APP_VERSION = 'v2.87.0';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -14610,6 +14610,8 @@ function _ticketActionBarIcons(accountId, ticketId) {
     btn('clock',          'indigo',  'Auf Wiedervorlage / aus meiner Sicht ausblenden',        `openWiedervorlagePicker('${accIdAttr}', ${ticketId})`),
     btn('calendar-clock', 'indigo',  'Sofort 2 Wochen ausblenden (ohne Nachfrage)',            `wvSofort('${accIdAttr}', ${ticketId}, 14, this)`),
     btn('text-cursor-input', 'sky',  'Titel als „ANFRAGE Nr | Standort | Fabriknr" strukturieren', `openRestructureTitleModal('${accIdAttr}', ${ticketId})`),
+    // v2.87.0: Eine Mail, zwei Anlagen — daraus zwei Vorgänge machen.
+    btn('split',          'sky',     'Ticket aufteilen (mehrere Anlagen in einer Anfrage)',    `openTicketSplitModal('${accIdAttr}', ${ticketId})`),
     // v2.46.70: Angebots-Button nur für Aufzug-Service-Accounts (Aufzugshandwerk/Aszendio)
     (accountHasAngebotsModul(acc) ? btn('file-text', 'indigo', 'Angebot erstellen (KI-gestützt)', `openAngebotsModal('${accIdAttr}', ${ticketId})`) : ''),
     // v2.46.152: Schnellanalyse-Icon — KI analysiert Ticket + Anhänge nach Mandanten-Prompt
@@ -27097,6 +27099,346 @@ function closeTicketEmailModal() {
    Per Account konfigurierbar — siehe TITLE_FORMAT_PRESETS oben.
    Claude extrahiert die im Preset definierten Felder aus dem Ticket-Inhalt,
    User kann editieren, dann PUT subject zu FD. */
+/* ===================== TICKET AUFTEILEN (v2.87.0) ========================
+   Kunden schreiben eine Mail und meinen zwei Aufzüge. Ab da hängt alles
+   schief: ein Ticket, zwei Fabriknummern, zwei Angebote, zwei Aufträge — und
+   am Ende weiß niemand, welcher Vorgang wozu gehört.
+
+   Deshalb wird hier geteilt statt zusammengehalten. Der ursprüngliche Vorgang
+   bleibt bestehen und übernimmt den ersten Teil; für jeden weiteren entsteht
+   ein neues Ticket beim selben Anfragenden, mit Gruppe, Typ, Priorität, Tags
+   und Zusatzfeldern des Originals.
+
+   Zwei Festlegungen, die bewusst so sind:
+
+   · Die Beschreibung des Originals wird NICHT umgeschrieben. Sie ist das, was
+     der Kunde geschickt hat — ein Beleg. Was zum ersten Teil gehört, steht als
+     Notiz daneben.
+   · Angelegt wird erst nach Bestätigung, und die Aufteilung ist vorher
+     vollständig editierbar. Ein falsch geteiltes Ticket wieder einzufangen
+     kostet mehr Zeit als das Prüfen. */
+let TICKET_SPLIT = null;
+
+async function openTicketSplitModal(accountId, ticketId) {
+  let host = document.getElementById('subModalHost');
+  if (!host) { host = document.createElement('div'); host.id = 'subModalHost'; document.body.appendChild(host); }
+  TICKET_SPLIT = { accountId, ticketId, ticket: null, teile: [], anhaenge: [], laden: true };
+  host.innerHTML = _splitRahmen('<div class="text-center py-10 text-sm text-ink-500">'
+    + '<span class="spinner inline-block w-5 h-5 border-[2px] text-sky-500"></span>'
+    + '<p class="mt-2">Lade Vorgang und prüfe, worum es geht…</p></div>');
+  if (window.lucide) lucide.createIcons();
+  try {
+    const t = await fetchTicketDetail(accountId, ticketId);
+    TICKET_SPLIT.ticket = t;
+    TICKET_SPLIT.anhaenge = _splitAnhaengeSammeln(t);
+    TICKET_SPLIT.teile = await _splitVorschlag(t, TICKET_SPLIT.anhaenge);
+    TICKET_SPLIT.laden = false;
+    _splitZeichnen();
+  } catch (e) {
+    host.innerHTML = _splitRahmen('<div class="bg-red-50 border border-red-200 rounded-xl p-3 text-sm text-red-800">'
+      + escapeHtml(e.message || String(e)) + '</div>');
+    if (window.lucide) lucide.createIcons();
+  }
+}
+
+function _splitRahmen(inhalt) {
+  return '<div class="fixed inset-0 z-[70] bg-black/40 flex items-start justify-center overflow-y-auto p-4" onclick="if(event.target===this)closeTicketSplitModal()">'
+    + '<div class="bg-white rounded-2xl shadow-xl w-full max-w-2xl my-8">'
+      + '<div class="flex items-center justify-between p-4 border-b border-ink-200">'
+        + '<div><h3 class="font-bold text-ink-900 inline-flex items-center gap-2"><i data-lucide="split" class="w-5 h-5 text-sky-600"></i> Ticket aufteilen</h3>'
+        + '<p class="text-[11px] text-ink-500">Mehrere Anfragen in einer Mail — je Anlage ein eigener Vorgang</p></div>'
+        + '<button onclick="closeTicketSplitModal()" class="text-ink-400 hover:text-ink-700"><i data-lucide="x" class="w-5 h-5"></i></button>'
+      + '</div>'
+      + '<div class="p-4 space-y-3">' + inhalt + '</div>'
+    + '</div>'
+  + '</div>';
+}
+
+function closeTicketSplitModal() {
+  TICKET_SPLIT = null;
+  const h = document.getElementById('subModalHost');
+  if (h) h.innerHTML = '';
+}
+
+/* Anhänge des Vorgangs — aus der ersten Anfrage UND aus dem Verlauf. */
+function _splitAnhaengeSammeln(t) {
+  const raus = [];
+  const gesehen = new Set();
+  const nimm = (a, wo) => {
+    if (!a || !a.attachment_url) return;
+    const k = String(a.id != null ? a.id : a.name);
+    if (gesehen.has(k)) return;
+    gesehen.add(k);
+    raus.push({ id: a.id, name: a.name || 'anhang', url: a.attachment_url, size: +a.size || 0, type: a.content_type || '', wo });
+  };
+  (t.attachments || []).forEach(a => nimm(a, 'Erste Anfrage'));
+  (t.conversations || []).forEach(c => (c.attachments || []).forEach(a => nimm(a, 'Verlauf')));
+  return raus;
+}
+
+/* Die KI schlägt die Aufteilung vor. Sie entscheidet nichts — sie liest nur
+   heraus, wie viele Anliegen in der Mail stecken und welcher Anhang wozu
+   gehört. Bestätigt wird von Hand. */
+async function _splitVorschlag(t, anhaenge) {
+  const beschreibung = htmlToText(t.description_text || t.description || '').slice(0, 6000);
+  const verlauf = (t.conversations || [])
+    .filter(c => !c.private)
+    .slice(0, 4)
+    .map(c => (c.incoming ? 'Kunde' : 'Wir') + ': ' + htmlToText(c.body_text || c.body || '').slice(0, 800))
+    .join('\n\n');
+  const sys =
+    'Du prüfst einen Helpdesk-Vorgang eines Aufzugs-Serviceunternehmens daraufhin, ob darin MEHRERE getrennte Anliegen stecken '
+    + '— typischerweise mehrere Aufzugsanlagen (verschiedene Fabriknummern, Standorte oder Auftragsnummern) in einer einzigen E-Mail.\n\n'
+    + 'REGELN:\n'
+    + '1. Nur teilen, wenn es sachlich zwei oder mehr getrennt zu bearbeitende Vorgänge sind. Mehrere Fragen zu DERSELBEN Anlage sind EIN Vorgang.\n'
+    + '2. Jeder Teil bekommt einen Betreff im Stil des Originals, plus — soweit erkennbar — Fabriknummer und Standort.\n'
+    + '3. Die Beschreibung je Teil ist ein knapper Auszug dessen, was zu DIESEM Teil gehört. Nichts erfinden.\n'
+    + '4. Anhänge zuordnen: Dateinamen enthalten oft die Auftrags- oder Fabriknummer. Passt ein Anhang zu keinem Teil eindeutig, gehört er zu Teil 1.\n'
+    + '5. Bist du unsicher, gib "mehrere": false zurück. Ein zu Unrecht geteilter Vorgang macht mehr Arbeit als ein ungeteilter.\n\n'
+    + 'ANTWORTE NUR MIT JSON:\n'
+    + '{"mehrere": true, "begruendung": "kurz, ein Satz", "teile": [\n'
+    + '  {"betreff":"…","fabriknummer":"…","standort":"…","beschreibung":"…","anhaenge":["Dateiname.pdf"]}\n'
+    + ']}';
+  const user = 'BETREFF: ' + (t.subject || '') + '\n\n'
+    + 'ERSTE ANFRAGE:\n' + beschreibung + '\n\n'
+    + (verlauf ? 'VERLAUF:\n' + verlauf + '\n\n' : '')
+    + 'ANHÄNGE:\n' + (anhaenge.length ? anhaenge.map(a => '- ' + a.name).join('\n') : '(keine)');
+  const data = await _callAnthropicWithRetry({
+    model: 'claude-sonnet-4-5-20250929',
+    max_tokens: 3000,
+    system: sys,
+    messages: [{ role: 'user', content: user }],
+  });
+  const parsed = parseAIJson((data.content && data.content[0] && data.content[0].text) || '') || {};
+  TICKET_SPLIT.begruendung = String(parsed.begruendung || '');
+  TICKET_SPLIT.kiSagtMehrere = !!parsed.mehrere;
+  const teile = Array.isArray(parsed.teile) ? parsed.teile : [];
+  if (!parsed.mehrere || teile.length < 2) {
+    // Trotzdem eine Zeile anbieten — der Mensch sieht mehr als das Muster.
+    return [{ betreff: t.subject || '', fabriknummer: '', standort: '', beschreibung: '',
+              anhaenge: anhaenge.map(a => a.name) }];
+  }
+  return teile.map((x, i) => ({
+    betreff: String(x.betreff || t.subject || '').slice(0, 240),
+    fabriknummer: String(x.fabriknummer || ''),
+    standort: String(x.standort || ''),
+    beschreibung: String(x.beschreibung || ''),
+    anhaenge: Array.isArray(x.anhaenge) ? x.anhaenge : (i === 0 ? anhaenge.map(a => a.name) : []),
+  }));
+}
+
+function _splitZeichnen() {
+  const s = TICKET_SPLIT;
+  if (!s) return;
+  const host = document.getElementById('subModalHost');
+  const t = s.ticket || {};
+  const mehrere = s.teile.length > 1;
+  const kopf = s.kiSagtMehrere
+    ? '<div class="bg-sky-50 border border-sky-200 rounded-xl p-2.5 text-[12px] text-sky-900"><b>' + s.teile.length + ' getrennte Anliegen erkannt.</b>'
+        + (s.begruendung ? ' ' + escapeHtml(s.begruendung) : '') + '</div>'
+    : '<div class="bg-amber-50 border border-amber-200 rounded-xl p-2.5 text-[12px] text-amber-900">'
+        + '<b>Es sieht nach einem einzigen Anliegen aus.</b> Wenn du es trotzdem trennen willst, füge unten einen Teil hinzu.</div>';
+
+  const teile = s.teile.map((teil, i) => {
+    const istOriginal = i === 0;
+    return '<div class="border ' + (istOriginal ? 'border-ink-300 bg-ink-50' : 'border-sky-300 bg-white') + ' rounded-xl p-3 space-y-2">'
+      + '<div class="flex items-center justify-between gap-2">'
+        + '<p class="text-[11px] font-bold uppercase tracking-wider ' + (istOriginal ? 'text-ink-600' : 'text-sky-700') + '">'
+          + (istOriginal ? 'Teil 1 · bleibt Ticket #' + s.ticketId : 'Teil ' + (i + 1) + ' · neues Ticket') + '</p>'
+        + (istOriginal ? '' : '<button onclick="_splitTeilEntfernen(' + i + ')" class="text-[11px] text-rose-600 hover:text-rose-800 font-semibold">Entfernen</button>')
+      + '</div>'
+      + '<label class="block"><span class="text-[10px] font-semibold text-ink-600 uppercase">Betreff</span>'
+        + '<input id="splitBetreff' + i + '" value="' + escapeAttr(teil.betreff || '') + '" oninput="_splitFeld(' + i + ',\'betreff\',this.value)" class="w-full mt-0.5 px-2 py-1.5 border border-ink-300 rounded text-sm"></label>'
+      + '<div class="grid grid-cols-2 gap-2">'
+        + '<label class="block"><span class="text-[10px] font-semibold text-ink-600 uppercase">Fabriknummer</span>'
+          + '<input value="' + escapeAttr(teil.fabriknummer || '') + '" oninput="_splitFeld(' + i + ',\'fabriknummer\',this.value)" class="w-full mt-0.5 px-2 py-1.5 border border-ink-300 rounded text-sm font-mono"></label>'
+        + '<label class="block"><span class="text-[10px] font-semibold text-ink-600 uppercase">Standort</span>'
+          + '<input value="' + escapeAttr(teil.standort || '') + '" oninput="_splitFeld(' + i + ',\'standort\',this.value)" class="w-full mt-0.5 px-2 py-1.5 border border-ink-300 rounded text-sm"></label>'
+      + '</div>'
+      + '<label class="block"><span class="text-[10px] font-semibold text-ink-600 uppercase">' + (istOriginal ? 'Notiz am bestehenden Vorgang' : 'Beschreibung des neuen Vorgangs') + '</span>'
+        + '<textarea rows="3" oninput="_splitFeld(' + i + ',\'beschreibung\',this.value)" class="w-full mt-0.5 px-2 py-1.5 border border-ink-300 rounded text-sm">' + escapeHtml(teil.beschreibung || '') + '</textarea></label>'
+      + (s.anhaenge.length
+          ? '<div><span class="text-[10px] font-semibold text-ink-600 uppercase">Anhänge</span>'
+            + '<div class="mt-1 space-y-1">' + s.anhaenge.map((a, j) =>
+                '<label class="flex items-center gap-2 text-[12px] cursor-pointer">'
+                + '<input type="checkbox"' + ((teil.anhaenge || []).includes(a.name) ? ' checked' : '')
+                + ' onchange="_splitAnhang(' + i + ',' + j + ',this.checked)" class="w-3.5 h-3.5">'
+                + '<span class="truncate flex-1">' + escapeHtml(a.name) + '</span>'
+                + '<span class="text-[10px] text-ink-400 shrink-0">' + Math.round(a.size / 1024) + ' KB</span></label>').join('')
+            + '</div></div>'
+          : '')
+    + '</div>';
+  }).join('');
+
+  const fuss = '<div class="flex items-center gap-2 flex-wrap pt-1">'
+    + '<button onclick="_splitTeilHinzufuegen()" class="px-3 py-2 rounded-lg text-[12px] font-bold bg-white border border-ink-300 text-ink-700 hover:bg-ink-50">+ Weiterer Teil</button>'
+    + '<button onclick="closeTicketSplitModal()" class="ml-auto px-3 py-2 rounded-lg text-[12px] font-bold bg-white border border-ink-300 text-ink-700 hover:bg-ink-50">Abbrechen</button>'
+    + '<button onclick="_splitAusfuehren(this)" class="px-4 py-2 rounded-lg text-[12px] font-bold text-white ' + (mehrere ? 'bg-sky-600 hover:bg-sky-700' : 'bg-ink-300 cursor-not-allowed') + '"' + (mehrere ? '' : ' disabled')
+      + '>' + (mehrere ? (s.teile.length - 1) + ' neue' + (s.teile.length === 2 ? 's Ticket' : ' Tickets') + ' anlegen' : 'Nichts zu teilen') + '</button>'
+    + '</div>';
+
+  host.innerHTML = _splitRahmen(
+    '<p class="text-[11px] text-ink-500">Vorgang #' + s.ticketId + ' · ' + escapeHtml(t.subject || '') + '</p>'
+    + kopf + teile + fuss
+    + '<p class="text-[10px] text-ink-500">Die ursprüngliche Kundenmail bleibt unverändert — sie ist der Beleg. '
+    + 'Teil 1 bekommt nur eine Notiz, alle Vorgänge werden gegenseitig verlinkt.</p>');
+  if (window.lucide) lucide.createIcons();
+}
+
+function _splitFeld(i, feld, wert) { if (TICKET_SPLIT?.teile?.[i]) TICKET_SPLIT.teile[i][feld] = wert; }
+
+function _splitAnhang(i, j, an) {
+  const s = TICKET_SPLIT;
+  if (!s?.teile?.[i]) return;
+  const name = s.anhaenge[j]?.name;
+  if (!name) return;
+  const liste = s.teile[i].anhaenge || (s.teile[i].anhaenge = []);
+  const pos = liste.indexOf(name);
+  if (an && pos < 0) liste.push(name);
+  if (!an && pos >= 0) liste.splice(pos, 1);
+}
+
+function _splitTeilHinzufuegen() {
+  const s = TICKET_SPLIT;
+  if (!s) return;
+  s.teile.push({ betreff: (s.ticket?.subject || '') + ' — Teil ' + (s.teile.length + 1),
+                 fabriknummer: '', standort: '', beschreibung: '', anhaenge: [] });
+  _splitZeichnen();
+}
+
+function _splitTeilEntfernen(i) {
+  const s = TICKET_SPLIT;
+  if (!s || i === 0) return;
+  s.teile.splice(i, 1);
+  _splitZeichnen();
+}
+
+/* Anhang laden — dieselbe Doppelstrategie wie beim Angebotsversand: Freshdesks
+   Anhang-Links sind vorsignierte S3-Adressen, die der Browser meist nicht direkt
+   holen darf. Deshalb erst direkt, dann über den Proxy. */
+async function _splitAnhangLaden(att) {
+  const cors = /s3[.\-]|amazonaws\.com|freshdesk\.com/i;
+  if (!cors.test(att.url)) {
+    try { const r = await fetch(att.url, { mode: 'cors' }); if (r.ok) return await r.blob(); } catch (_) {}
+  }
+  const r = await proxyFetch('/attachment-fetch?url=' + encodeURIComponent(att.url));
+  if (!r.ok) throw new Error('Anhang „' + att.name + '" nicht ladbar (HTTP ' + r.status + ')');
+  return await r.blob();
+}
+
+async function _splitAusfuehren(btn) {
+  const s = TICKET_SPLIT;
+  if (!s || s.teile.length < 2) return;
+  const t = s.ticket || {};
+  const neue = s.teile.slice(1);
+  if (!confirm('Aus Vorgang #' + s.ticketId + ' werden ' + neue.length + ' weitere Vorgänge angelegt.\n\n'
+    + neue.map((x, i) => (i + 1) + '. ' + (x.betreff || '(ohne Betreff)')).join('\n')
+    + '\n\nDas Original bleibt bestehen. Fortfahren?')) return;
+
+  setBusy(btn, true, '0/' + neue.length);
+  const angelegt = [];
+  const fehler = [];
+  for (let i = 0; i < neue.length; i++) {
+    const teil = neue[i];
+    try {
+      // Anhänge dieses Teils laden
+      const atts = [];
+      for (const name of (teil.anhaenge || [])) {
+        const a = s.anhaenge.find(x => x.name === name);
+        if (!a) continue;
+        try { atts.push({ blob: await _splitAnhangLaden(a), name: a.name }); }
+        catch (e) { console.warn('[Split] Anhang', name, e.message); }
+      }
+      const kopfzeilen = [
+        teil.fabriknummer ? 'Fabriknummer: ' + teil.fabriknummer : '',
+        teil.standort ? 'Standort: ' + teil.standort : '',
+        'Abgetrennt von Vorgang #' + s.ticketId + ' — dort kam diese Anfrage gemeinsam mit weiteren an.',
+      ].filter(Boolean).join('\n');
+      const text = [teil.beschreibung || '', '', kopfzeilen].join('\n').trim();
+      const felder = {
+        subject: teil.betreff || (t.subject || 'Vorgang'),
+        description: textToHtmlForFreshdesk(text),
+        requester_id: t.requester_id,
+        status: 2,
+        priority: t.priority || 1,
+        source: t.source || 2,
+      };
+      if (t.group_id) felder.group_id = t.group_id;
+      if (t.type) felder.type = t.type;
+      if (t.responder_id) felder.responder_id = t.responder_id;
+
+      let created;
+      if (atts.length) {
+        // Multipart: Tags und Zusatzfelder gehen hier nicht mit — sie werden
+        // gleich danach per PUT nachgezogen.
+        created = await _fdPostMultipart(s.accountId, 'tickets', felder, atts);
+      } else {
+        const payload = Object.assign({}, felder);
+        if (Array.isArray(t.tags) && t.tags.length) payload.tags = t.tags;
+        if (t.custom_fields && Object.keys(t.custom_fields).length) payload.custom_fields = t.custom_fields;
+        created = await proxyJson('/freshdesk/' + encodeURIComponent(s.accountId) + '/api/v2/tickets',
+          { method: 'POST', body: JSON.stringify(payload) });
+      }
+      if (!created?.id) throw new Error('Freshdesk gab keine Ticketnummer zurück');
+
+      // Tags und Zusatzfelder nachziehen (nur nötig beim Multipart-Weg).
+      if (atts.length && ((t.tags || []).length || (t.custom_fields && Object.keys(t.custom_fields).length))) {
+        const nach = {};
+        if ((t.tags || []).length) nach.tags = t.tags;
+        if (t.custom_fields && Object.keys(t.custom_fields).length) nach.custom_fields = t.custom_fields;
+        try {
+          await proxyJson('/freshdesk/' + encodeURIComponent(s.accountId) + '/api/v2/tickets/' + created.id,
+            { method: 'PUT', body: JSON.stringify(nach) });
+        } catch (e) { console.warn('[Split] Tags/Zusatzfelder:', e.message); }
+      }
+
+      // Rückverweis im neuen Vorgang
+      try {
+        await proxyJson('/freshdesk/' + encodeURIComponent(s.accountId) + '/api/v2/tickets/' + created.id + '/notes',
+          { method: 'POST', body: JSON.stringify({ private: true,
+            body: textToHtmlForFreshdesk('Abgetrennt von Vorgang #' + s.ticketId + ' (' + (t.subject || '') + ').') }) });
+      } catch (_) {}
+
+      angelegt.push({ id: created.id, betreff: felder.subject, anhaenge: atts.length });
+    } catch (e) {
+      fehler.push((teil.betreff || 'Teil ' + (i + 2)) + ': ' + (e.message || e));
+    }
+    setBusy(btn, true, (angelegt.length + fehler.length) + '/' + neue.length);
+  }
+
+  // Notiz am Original — was hier bleibt und wohin der Rest gegangen ist.
+  if (angelegt.length) {
+    const teil1 = s.teile[0] || {};
+    const notiz = ['Vorgang aufgeteilt — diese Mail enthielt mehrere Anliegen.', '',
+      'Hier bleibt: ' + (teil1.beschreibung || teil1.betreff || '(unverändert)')
+        + (teil1.fabriknummer ? ' · Fabriknummer ' + teil1.fabriknummer : '')
+        + (teil1.standort ? ' · ' + teil1.standort : ''),
+      '', 'Abgetrennt:',
+      ...angelegt.map(a => '· #' + a.id + ' — ' + a.betreff + (a.anhaenge ? ' (' + a.anhaenge + ' Anhang/Anhänge)' : '')),
+    ].join('\n');
+    try {
+      await proxyJson('/freshdesk/' + encodeURIComponent(s.accountId) + '/api/v2/tickets/' + s.ticketId + '/notes',
+        { method: 'POST', body: JSON.stringify({ private: true, body: textToHtmlForFreshdesk(notiz) }) });
+    } catch (e) { console.warn('[Split] Notiz am Original:', e.message); }
+    // Betreff des Originals auf Teil 1 setzen, wenn er geändert wurde.
+    if (teil1.betreff && teil1.betreff !== t.subject) {
+      try {
+        await proxyJson('/freshdesk/' + encodeURIComponent(s.accountId) + '/api/v2/tickets/' + s.ticketId,
+          { method: 'PUT', body: JSON.stringify({ subject: teil1.betreff }) });
+      } catch (e) { console.warn('[Split] Betreff Original:', e.message); }
+    }
+  }
+
+  setBusy(btn, false);
+  closeTicketSplitModal();
+  if (fehler.length) {
+    toast(angelegt.length + ' Vorgänge angelegt · ' + fehler.length + ' fehlgeschlagen: ' + fehler[0], 'error', 12000);
+  } else {
+    toast('Aufgeteilt: ' + angelegt.map(a => '#' + a.id).join(', ') + ' angelegt. Notiz am Original hinterlegt.', 'success', 9000);
+  }
+  try { await _reloadTicketDetail(s.accountId, s.ticketId, null); } catch (_) {}
+}
+
 async function openRestructureTitleModal(accountId, ticketId) {
   let host = document.getElementById('subModalHost');
   if (!host) { host = document.createElement('div'); host.id = 'subModalHost'; document.body.appendChild(host); }
