@@ -824,7 +824,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.87.1';
+const APP_VERSION = 'v2.87.2';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -27212,8 +27212,9 @@ async function _splitVorschlag(t, anhaenge, anweisung) {
     + 'Lies jeden Anhang VOLLSTÄNDIG. Zwei Angebots-PDFs desselben Lieferanten mit verschiedenen Fabriknummern sind ZWEI Vorgänge — auch wenn die Mail nur einen Satz enthält.\n\n'
     + 'FABRIKNUMMER: meist eine 4- bis 8-stellige Zahl direkt neben „Fabriknummer", „Fabrik-Nr.", „Anlagennummer" oder „Equipment". NICHT mit Auftrags-, Angebots- oder Rechnungsnummer verwechseln.\n\n'
     + 'JE TEIL LIEFERST DU:\n'
-    + '· betreff — aussagekräftig und im Stil des Originals, mit Standort und/oder Fabriknummer, damit man die Vorgänge in der Liste auseinanderhält. Du legst den Titel fest, nicht der Mensch.\n'
-    + '· fabriknummer, standort — soweit im Anhang oder Text auffindbar, sonst leer\n'
+    + '· standort — die Adresse, an der DIESER Aufzug steht: Straße + Hausnummer + Ort, sonst der Objektname. KEINE Firmennamen, keine Personennamen.\n'
+    + '· fabriknummer — die Aufzugs-Seriennummer dieser Anlage. Marker: „Fabriknummer", „Fabrik-Nr.", „F.-Nr.", „Anlagennummer", „Equipment". Meist 4-8 Stellen. NICHT die Angebots-, Auftrags- oder Rechnungsnummer nehmen — „T-0009836400" ist eine Angebotsnummer, keine Fabriknummer.\n'
+    + '· betreff — NICHT setzen. Den Titel baut die App aus Standort und Fabriknummer nach festem Muster. Liefere stattdessen sauber die beiden Felder.\n'
     + '· beschreibung — der INHALT aus dem zugehörigen Anhang, der für die Bearbeitung zählt: Anlage, angebotene Leistung, Positionen mit Preisen, Liefer-/Ausführungshinweise. Kein Verweis auf den Anhang, sondern die Angaben selbst, knapp und vollständig. Nichts erfinden.\n'
     + '· anhaenge — die Dateinamen, die zu DIESEM Teil gehören. Eine Übersicht oder Sammelaufstellung, die alle betrifft, gehört zu jedem Teil.\n\n'
     + 'REGELN:\n'
@@ -27255,13 +27256,31 @@ async function _splitVorschlag(t, anhaenge, anweisung) {
     return [{ betreff: t.subject || '', fabriknummer: '', standort: '', beschreibung: '',
               anhaenge: anhaenge.map(a => a.name) }];
   }
+  /* Titel nach demselben Muster wie der Betreff-Optimierer — je Mandant
+     „ANFRAGE {id} | {standort} | {fabriknummer}". Zwei Vorgänge zum selben
+     Objekt unterscheiden sich sonst nur an der Angebotsnummer im Titel, und
+     genau die sagt niemandem, um welchen Aufzug es geht. */
+  const preset = getTitleFormatPreset(s.accountId);
   return teile.map((x, i) => ({
-    betreff: String(x.betreff || t.subject || '').slice(0, 240),
+    betreff: '',                       // wird in _splitBetreffBauen gesetzt
     fabriknummer: String(x.fabriknummer || ''),
     standort: String(x.standort || ''),
     beschreibung: String(x.beschreibung || ''),
     anhaenge: Array.isArray(x.anhaenge) ? x.anhaenge : (i === 0 ? anhaenge.map(a => a.name) : []),
+    _preset: preset,
+  })).map((teil, i) => Object.assign(teil, {
+    betreff: _splitBetreffBauen(preset, i === 0 ? s.ticketId : null, teil),
   }));
+}
+
+/* Der Titel eines neuen Vorgangs kann seine Nummer erst tragen, wenn Freshdesk
+   sie vergeben hat. Bis dahin steht dort „ANFRAGE neu"; nach dem Anlegen wird
+   der Betreff mit der echten Nummer nachgezogen. */
+function _splitBetreffBauen(preset, ticketId, teil) {
+  return buildTitleFromPreset(preset || getTitleFormatPreset(TICKET_SPLIT?.accountId),
+    ticketId == null ? 'neu' : ticketId,
+    { standort: teil.standort || '', fabriknummer: teil.fabriknummer || '',
+      kundenreferenz: teil.fabriknummer || '', artikel: '' });
 }
 
 function _splitZeichnen() {
@@ -27270,6 +27289,11 @@ function _splitZeichnen() {
   const host = document.getElementById('subModalHost');
   const t = s.ticket || {};
   const mehrere = s.teile.length > 1;
+  const anhangWarnung = (s.anhaenge.length && !s.dateienGelesen)
+    ? '<div class="bg-red-50 border border-red-200 rounded-xl p-2.5 text-[12px] text-red-800">'
+      + '<b>Kein Anhang konnte gelesen werden.</b> Die Einschätzung beruht damit nur auf Betreff und Mailtext — '
+      + 'bei Angeboten steht die Anlage aber ausschließlich im PDF. Ticket neu laden und noch einmal versuchen.</div>'
+    : '';
   const kopf = s.kiSagtMehrere
     ? '<div class="bg-sky-50 border border-sky-200 rounded-xl p-2.5 text-[12px] text-sky-900"><b>' + s.teile.length + ' getrennte Anliegen erkannt.</b>'
         + (s.begruendung ? ' ' + escapeHtml(s.begruendung) : '') + '</div>'
@@ -27316,7 +27340,9 @@ function _splitZeichnen() {
       + 'class="w-full mt-0.5 px-2 py-1.5 border border-ink-300 rounded text-sm">' + escapeHtml(s.anweisung || '') + '</textarea></label>'
     + '<button onclick="_splitNeuAnalysieren(this)" class="px-3 py-1.5 rounded-lg text-[12px] font-bold bg-white border border-sky-300 text-sky-700 hover:bg-sky-50 inline-flex items-center gap-1">'
       + '<i data-lucide="refresh-cw" class="w-3.5 h-3.5"></i> Neu analysieren</button>'
-    + '<p class="text-[10px] text-ink-500">Gelesen wurden ' + (s.dateienGelesen || 0) + ' Anhang/Anhänge im Volltext.</p>'
+    + '<p class="text-[10px] text-ink-500">Gelesen wurden ' + (s.dateienGelesen || 0) + ' Anhang/Anhänge im Volltext. '
+    + 'Betreff nach Muster „' + escapeHtml(getTitleFormatPreset(s.accountId).template) + '" — Standort und Fabriknummer ändern ihn mit, '
+    + 'ein von Hand geschriebener Betreff bleibt stehen.</p>'
     + '</div>';
 
   const fuss = '<div class="flex items-center gap-2 flex-wrap pt-1">'
@@ -27328,7 +27354,7 @@ function _splitZeichnen() {
 
   host.innerHTML = _splitRahmen(
     '<p class="text-[11px] text-ink-500">Vorgang #' + s.ticketId + ' · ' + escapeHtml(t.subject || '') + '</p>'
-    + kopf + teile + anweisung + fuss
+    + anhangWarnung + kopf + teile + anweisung + fuss
     + '<p class="text-[10px] text-ink-500">Die ursprüngliche Kundenmail bleibt unverändert — sie ist der Beleg. '
     + 'Teil 1 bekommt nur eine Notiz, alle Vorgänge werden gegenseitig verlinkt.</p>');
   if (window.lucide) lucide.createIcons();
@@ -27348,7 +27374,19 @@ async function _splitNeuAnalysieren(btn) {
   }
 }
 
-function _splitFeld(i, feld, wert) { if (TICKET_SPLIT?.teile?.[i]) TICKET_SPLIT.teile[i][feld] = wert; }
+function _splitFeld(i, feld, wert) {
+  const s = TICKET_SPLIT;
+  if (!s?.teile?.[i]) return;
+  s.teile[i][feld] = wert;
+  // Wer Standort oder Fabriknummer korrigiert, will den Titel nicht zweimal
+  // tippen — außer er hat ihn vorher selbst überschrieben.
+  if ((feld === 'standort' || feld === 'fabriknummer') && !s.teile[i]._betreffVonHand) {
+    s.teile[i].betreff = _splitBetreffBauen(s.teile[i]._preset, i === 0 ? s.ticketId : null, s.teile[i]);
+    const el = document.getElementById('splitBetreff' + i);
+    if (el) el.value = s.teile[i].betreff;
+  }
+  if (feld === 'betreff') s.teile[i]._betreffVonHand = true;
+}
 
 function _splitAnhang(i, j, an) {
   const s = TICKET_SPLIT;
@@ -27443,6 +27481,19 @@ async function _splitAusfuehren(btn) {
           { method: 'POST', body: JSON.stringify(payload) });
       }
       if (!created?.id) throw new Error('Freshdesk gab keine Ticketnummer zurück');
+
+      /* Betreff mit der echten Vorgangsnummer nachziehen — vorher stand dort
+         „ANFRAGE neu", weil Freshdesk die Nummer erst beim Anlegen vergibt. */
+      if (!teil._betreffVonHand) {
+        const echt = _splitBetreffBauen(teil._preset, created.id, teil);
+        if (echt && echt !== felder.subject) {
+          try {
+            await proxyJson('/freshdesk/' + encodeURIComponent(s.accountId) + '/api/v2/tickets/' + created.id,
+              { method: 'PUT', body: JSON.stringify({ subject: echt }) });
+            felder.subject = echt;
+          } catch (e) { console.warn('[Split] Betreff nachziehen:', e.message); }
+        }
+      }
 
       // Tags und Zusatzfelder nachziehen (nur nötig beim Multipart-Weg).
       if (atts.length && ((t.tags || []).length || (t.custom_fields && Object.keys(t.custom_fields).length))) {
