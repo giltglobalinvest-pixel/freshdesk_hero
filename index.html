@@ -824,7 +824,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.85.1';
+const APP_VERSION = 'v2.86.0';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -19838,6 +19838,63 @@ function updateAssistantMicUI(active) {
   if (window.lucide) lucide.createIcons();
 }
 
+/* Empfänger suchen — Freshdesk, zentrale DB und Archiv zusammen.
+
+   Warum drei Quellen: Freshdesk kennt nur Leute, die im Kontaktstamm GENAU
+   dieses Mandanten angelegt sind. „Malte Baumgarten" war das nicht — im Archiv
+   steht er mit vier Vorgängen, weil er ja geschrieben hat. Wer nur Freshdesk
+   fragt, bekommt „nicht gefunden" und tippt die Adresse von Hand ab, obwohl das
+   Haus sie längst kennt. */
+async function _kontaktSuchenAlleQuellen(accountId, term) {
+  const q = String(term || '').trim();
+  const treffer = [];
+  const gesehen = new Set();
+  const aufnehmen = (email, name, quelle, zusatz) => {
+    const e = String(email || '').trim().toLowerCase();
+    if (!e.includes('@') || gesehen.has(e)) return;
+    gesehen.add(e);
+    treffer.push({ email: e, name: name || '', quelle, zusatz: zusatz || '' });
+  };
+
+  // 1 · Freshdesk des Mandanten
+  try {
+    const fd = await _searchFdContactsByPlan(accountId, { recipient_name: q });
+    (fd || []).forEach(c => aufnehmen(c.email, c.name, 'Freshdesk'));
+  } catch (e) { console.warn('[Empfängersuche] Freshdesk:', e.message); }
+
+  // 2 · Zentrale DB — dort stehen die gepflegten Stammdaten
+  try {
+    const acc = (APP_STATE.accounts || []).find(a => String(a.id) === String(accountId));
+    if (acc && q.length >= 3) {
+      const names = await _zdbEnsureTables(acc);
+      const qq = _zdbEsc(q.toLowerCase());
+      const rows = await _zdbSelect(names.kontakt.name, {
+        filter: "OR(FIND('" + qq + "',LOWER({nachname}&'')),FIND('" + qq + "',LOWER({vorname}&'')),FIND('" + qq + "',LOWER({email}&'')))",
+        maxRecords: 10,
+      });
+      (rows || []).forEach(r => {
+        const f = r.fields || {};
+        aufnehmen(f.email, [f.vorname, f.nachname].filter(Boolean).join(' '), 'zentrale DB', f.position || '');
+      });
+    }
+  } catch (e) { console.warn('[Empfängersuche] zentrale DB:', e.message); }
+
+  // 3 · Archiv — die breiteste Quelle, aber die ungepflegteste. Deshalb zuletzt.
+  try {
+    const key = APP_KEYS.user?.api_key;
+    if (key && q.length >= 3) {
+      const res = await fetch(ARCHIV_URL + '/adressen?q=' + encodeURIComponent(q), { headers: { 'X-Hero-Key': key } });
+      if (res.ok) {
+        const d = await res.json();
+        (d.adressen || []).forEach(a => aufnehmen(a.email, a.name,
+          'Archiv', a.vorgaenge + ' Vorgang' + (a.vorgaenge === 1 ? '' : 'e') + ' · ' + a.mandant));
+      }
+    }
+  } catch (e) { console.warn('[Empfängersuche] Archiv:', e.message); }
+
+  return treffer.slice(0, 12);
+}
+
 /* v2.46.283: Forward-Empfänger auflösen — Name → Freshdesk-Kontakt(e). auto=true bei
    automatischem Trigger nach dem Render (liest den Namen aus a.forward_to), sonst
    manuell per Button (liest den aktuellen Input-Text). 1 Treffer → E-Mail übernehmen,
@@ -19860,23 +19917,24 @@ async function _asstSearchForwardContact(i, auto) {
   if (!term || isEmail(term)) { if (!auto) hits.innerHTML = '<p class="text-[11px] text-ink-500">Bitte einen Namen eingeben (oder es steht bereits eine E-Mail im Feld).</p>'; return; }
   hits.innerHTML = '<p class="text-[11px] text-ink-500"><span class="spinner inline-block w-3 h-3 mr-1"></span>Suche Kontakt „' + escapeHtml(term) + '" in Freshdesk…</p>';
   let list = [];
-  try { list = await _searchFdContactsByPlan(ctx.accountId, { recipient_name: term }); } catch (_) {}
-  list = (list || []).filter(c => c && c.email);
+  try { list = await _kontaktSuchenAlleQuellen(ctx.accountId, term); } catch (_) {}
   if (!list.length) {
-    hits.innerHTML = '<p class="text-[11px] text-amber-700">Kein Freshdesk-Kontakt zu „' + escapeHtml(term) + '" gefunden — bitte E-Mail oben manuell eintragen.</p>';
+    hits.innerHTML = '<p class="text-[11px] text-amber-700">Zu „' + escapeHtml(term) + '" ist weder in Freshdesk noch in der zentralen DB noch im Archiv eine Adresse zu finden — bitte oben manuell eintragen.</p>';
     return;
   }
   if (list.length === 1) {
-    _asstPickForwardContact(i, list[0].email, list[0].name);
+    _asstPickForwardContact(i, list[0].email, list[0].name, list[0].quelle);
     return;
   }
-  hits.innerHTML = '<p class="text-[11px] text-ink-600 mb-1">' + list.length + ' Kontakte zu „' + escapeHtml(term) + '" — bitte wählen:</p>' +
+  hits.innerHTML = '<p class="text-[11px] text-ink-600 mb-1">' + list.length + ' Adressen zu „' + escapeHtml(term) + '" — bitte wählen:</p>' +
     '<select onchange="_asstPickForwardContact(' + i + ', this.value)" class="w-full text-[12px] px-2 py-1.5 border border-ink-300 rounded-lg bg-white">' +
       '<option value="">— Kontakt wählen —</option>' +
-      list.map(c => '<option value="' + escapeAttr(c.email) + '">' + escapeHtml((c.name || '(ohne Name)') + ' · ' + c.email) + (c.phone || c.mobile ? ' · ' + escapeHtml(c.phone || c.mobile) : '') + '</option>').join('') +
+      list.map(c => '<option value="' + escapeAttr(c.email) + '">'
+        + escapeHtml((c.name || '(ohne Name)') + ' · ' + c.email + ' · ' + c.quelle + (c.zusatz ? ' (' + c.zusatz + ')' : ''))
+        + '</option>').join('') +
     '</select>';
 }
-function _asstPickForwardContact(i, email, name) {
+function _asstPickForwardContact(i, email, name, quelle) {
   if (!email) return;
   const ctx = ASSISTANT_CTX;
   const a = ctx?.plan?.actions?.[i];
@@ -19884,7 +19942,9 @@ function _asstPickForwardContact(i, email, name) {
   if (inp) inp.value = email;
   if (a) a.forward_to = [email];
   const hits = document.getElementById('asstFwdHits_' + i);
-  if (hits) hits.innerHTML = '<p class="text-[11px] text-emerald-700 inline-flex items-center gap-1"><i data-lucide="check" class="w-3 h-3"></i> Übernommen: ' + (name ? '<b>' + escapeHtml(name) + '</b> · ' : '') + escapeHtml(email) + '</p>';
+  if (hits) hits.innerHTML = '<p class="text-[11px] text-emerald-700 inline-flex items-center gap-1"><i data-lucide="check" class="w-3 h-3"></i> Übernommen: '
+    + (name ? '<b>' + escapeHtml(name) + '</b> · ' : '') + escapeHtml(email)
+    + (quelle ? ' <span class="text-ink-400">(aus ' + escapeHtml(quelle) + ')</span>' : '') + '</p>';
   if (window.lucide) lucide.createIcons();
 }
 
@@ -27487,7 +27547,17 @@ async function processNewEmailAi(btn) {
     }
     // Sonst FD-Contacts durchsuchen
     setBusy(btn, true, 'Suche Kontakt…');
-    const contacts = await _searchFdContactsByPlan(accountId, plan);
+    /* Auch hier alle drei Quellen: Freshdesk allein kennt nur, wer im
+       Kontaktstamm dieses Mandanten steht — nicht jeden, mit dem geschrieben
+       wurde. */
+    let contacts = [];
+    try {
+      const roh = await _kontaktSuchenAlleQuellen(accountId,
+        [plan.recipient_name, plan.company_name].filter(Boolean)[0] || '');
+      contacts = roh.map(c => ({ id: c.email, name: c.name, email: c.email, _quelle: c.quelle, _zusatz: c.zusatz }));
+    } catch (_) {
+      contacts = await _searchFdContactsByPlan(accountId, plan);
+    }
     NEW_EMAIL_PLAN.contacts = contacts;
     _renderNewEmailContactPicker();
   } catch (e) {
@@ -27571,6 +27641,7 @@ function _renderNewEmailContactPicker() {
                 '<p class="font-semibold text-ink-900 text-sm truncate">' + escapeHtml(c.name || '–') + '</p>' +
                 '<p class="text-[12px] text-ink-600 truncate">' + escapeHtml(c.email || '') + '</p>' +
                 (c.phone || c.mobile ? '<p class="text-[10px] text-ink-400">' + escapeHtml(c.phone || c.mobile || '') + '</p>' : '') +
+                (c._quelle ? '<p class="text-[10px] text-ink-400">aus ' + escapeHtml(c._quelle) + (c._zusatz ? ' · ' + escapeHtml(c._zusatz) : '') + '</p>' : '') +
               '</div>' +
               '<i data-lucide="arrow-right" class="w-4 h-4 text-orange-500 shrink-0"></i>' +
             '</div>' +
