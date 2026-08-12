@@ -824,7 +824,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.94.1';
+const APP_VERSION = 'v2.94.2';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -48275,8 +48275,10 @@ function _korbNachfassZeichnen(platzhalter) {
             + zeile('PLZ', sig.plz, 'plz')
             + zeile('Ort', sig.ort, 'ort')
           + '</div>'
-          + ((!sig.firma && !sig.telefon && !sig.mobil && !sig.position)
-              ? '<p class="text-[11px] text-ink-500 italic mt-1">Signatur gefunden, aber keine verwertbaren Felder.</p>' : '')
+          + ((!sig.firma && !sig.telefon && !sig.mobil && !sig.position && !sig.name)
+              ? '<p class="text-[11px] text-ink-500 italic mt-1">Signatur gefunden, aber keine verwertbaren Felder.</p>'
+              : '<button onclick="_korbNachfassAlles(\'archiv\', this)" class="mt-1.5 w-full px-3 py-1.5 rounded-lg text-[12px] font-bold bg-violet-600 hover:bg-violet-700 text-white inline-flex items-center justify-center gap-1.5">'
+                + '<i data-lucide="check-check" class="w-3.5 h-3.5"></i> Alles übernehmen</button>')
           + '</div>'
         : '<p class="text-[12px] text-ink-600">Im Archiv dieses Mandanten steht zu <b>' + escapeHtml(r.email || '') + '</b> keine auswertbare Signatur'
           + (a.nachrichten ? ' (' + a.nachrichten + ' Nachrichten gelesen)' : '') + '.</p>')
@@ -48294,6 +48296,8 @@ function _korbNachfassZeichnen(platzhalter) {
             + zeile('PLZ', st.netz.plz, 'plz', st.netz.adresse_quelle)
             + zeile('Ort', st.netz.ort, 'ort', st.netz.adresse_quelle)
           + '</div>'
+          + '<button onclick="_korbNachfassAlles(\'netz\', this)" class="mt-1.5 w-full px-3 py-1.5 rounded-lg text-[12px] font-bold bg-white border border-violet-300 text-violet-700 hover:bg-violet-50 inline-flex items-center justify-center gap-1.5">'
+            + '<i data-lucide="check-check" class="w-3.5 h-3.5"></i> Alles übernehmen (ungeprüft)</button>'
           + '<p class="text-[10px] text-ink-500 mt-1">Ungeprüft. Vor dem Übernehmen die Quelle ansehen — eine falsche Nummer führt später zum falschen Unternehmen.</p>'
           + (st.netz.hinweis ? '<p class="text-[11px] text-ink-600 mt-1">' + escapeHtml(st.netz.hinweis) + '</p>' : '')
           + '</div>')
@@ -48319,6 +48323,53 @@ function _korbNachfassSchliessen() {
   window._KORB_NACHFASS = null;
   const h = document.getElementById('subModalHost');
   if (h) h.innerHTML = '';
+}
+
+/* Alles auf einmal übernehmen — je Quelle getrennt.
+
+   Getrennt, weil die beiden Quellen verschieden viel wert sind: Archivwerte
+   stammen aus einer Signatur, die diese Person selbst geschrieben hat.
+   Internetfunde sind Vermutungen; deshalb werden sie vor dem Schreiben noch
+   einmal aufgezählt, mitsamt dem, was überschrieben würde. */
+async function _korbNachfassAlles(quelle, btn) {
+  const st = window._KORB_NACHFASS;
+  if (!st) return;
+  const r = st.rec;
+  const q = quelle === 'netz' ? (st.netz || {}) : (((st.archiv || {}).signatur) || {});
+  const paare = quelle === 'netz'
+    ? [['name', q.ansprechpartner], ['telefon', q.telefon], ['position', q.position],
+       ['strasse', q.strasse], ['plz', q.plz], ['ort', q.ort]]
+    : [['name', q.name], ['firma', q.firma], ['telefon', q.telefon || q.mobil],
+       ['position', q.position], ['strasse', q.strasse], ['plz', q.plz], ['ort', q.ort]];
+
+  const patch = {};
+  const zeigen = [];
+  for (const [feld, wert] of paare) {
+    const w = String(wert || '').trim();
+    if (!w) continue;
+    const alt = String(r[feld] || '').trim();
+    if (alt.toLowerCase() === w.toLowerCase()) continue;
+    patch[feld] = feld === 'telefon' ? (_ccNummerNormalisieren(w) || w) : w;
+    zeigen.push(feld + ': ' + (alt ? alt + '  →  ' : '') + w);
+  }
+  if (!Object.keys(patch).length) return toast('Es gibt nichts zu übernehmen — alles steht schon so.', 'info', 4000);
+
+  if (quelle === 'netz' && !confirm('Diese ungeprüften Internetfunde übernehmen?\n\n'
+    + zeigen.join('\n') + '\n\nBitte vorher die Quellen ansehen. Eine falsche Nummer führt später zum falschen Unternehmen.')) return;
+
+  if (btn) setBusy(btn, true, 'Übernehme…');
+  try {
+    patch.updated_at = nowIso();
+    await airtableUpdateWithAutoField(CRAWLED_TABLE, r.recordId, patch, CRAWLED_TYPES_MAP);
+    Object.assign(r, patch);
+    if (btn) setBusy(btn, false);
+    _korbNachfassZeichnen();
+    _renderCrawledContacts();
+    toast(Object.keys(patch).length - 1 + ' Felder übernommen', 'success', 4000);
+  } catch (e) {
+    if (btn) setBusy(btn, false);
+    toast('Übernehmen fehlgeschlagen: ' + (e.message || e), 'error', 9000);
+  }
 }
 
 async function _korbNachfassUebernehmen(feld, wert, btn) {
