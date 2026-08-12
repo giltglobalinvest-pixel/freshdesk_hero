@@ -824,7 +824,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.94.2';
+const APP_VERSION = 'v2.95.0';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -43473,6 +43473,7 @@ function _zdbPaintView() {
         (canEdit && tab === 'kontakte'
           ? '<button onclick="_ccTypenVerwalten()" class="px-2 py-1 rounded-lg text-[12px] bg-white border border-ink-200 text-ink-500 hover:bg-ink-50" title="Kontakttypen verwalten"><i data-lucide="settings-2" class="w-3.5 h-3.5"></i></button>'
             + '<button onclick="_zdbSammelnummern(this)" class="px-2.5 py-1 rounded-lg text-[12px] font-bold bg-white border border-amber-300 text-amber-800 hover:bg-amber-50 inline-flex items-center gap-1" title="Nummern finden, die bei mehreren Kontakten stehen"><i data-lucide="alert-triangle" class="w-3.5 h-3.5"></i> Prüfen</button>'
+            + '<button onclick="_zdbDubletten(this)" class="px-2.5 py-1 rounded-lg text-[12px] font-bold bg-white border border-rose-300 text-rose-700 hover:bg-rose-50 inline-flex items-center gap-1" title="Doppelte Kontakte und Firmen finden"><i data-lucide="copy" class="w-3.5 h-3.5"></i> Dubletten</button>'
             + '<button onclick="_zdbNummernBereinigen(this)" class="px-2.5 py-1 rounded-lg text-[12px] font-bold bg-white border border-ink-300 text-ink-600 hover:bg-ink-50 inline-flex items-center gap-1" title="Telefon und Mobil auf eine Schreibweise bringen"><i data-lucide="wand-2" class="w-3.5 h-3.5"></i> Nummern</button>' : '') +
         (canEdit ? '<button onclick="_zdbNewRecord(\'' + tab + '\')" class="px-2.5 py-1 rounded-lg text-[12px] font-bold bg-emerald-600 hover:bg-emerald-700 text-white inline-flex items-center gap-1"><i data-lucide="plus" class="w-3.5 h-3.5"></i> Neu</button>' : '') +
       '</div>' + searchBox +
@@ -48147,6 +48148,88 @@ function _renderCrawledContacts() {
 
 /* Der gefilterte Index i bezieht sich auf die AKTUELL gerenderte Liste. */
 /* Airtable-Record löschen (für „Aus DB entfernen"). */
+/* ===== Dublettenprüfung der zentralen DB (v2.95.0) =======================
+   Die Frage „habe ich den schon übernommen?" lässt sich sonst nur durch Suchen
+   beantworten. Sie kommt zwangsläufig auf, weil Kontakte aus mehreren Quellen
+   kommen — Korb, CSV, ERP, Freshsales.
+
+   Zur Beruhigung vorweg: Ein zweites „Übernehmen" desselben Kontakts erzeugt
+   KEINE Dublette. `_zdbUpsertKontakt` sucht erst über die E-Mail, dann über
+   Vor- und Nachnamen, und ändert den vorhandenen Satz statt einen neuen
+   anzulegen. Dubletten entstehen anders: dieselbe Person mit zwei Adressen,
+   oder dieselbe Firma einmal mit und einmal ohne Ort — denn die Firmensuche
+   vergleicht Name UND Ort. */
+async function _zdbDubletten(btn) {
+  const acc = _zdbCurrentAccount();
+  if (!acc) return toast('Kein Mandant gewählt', 'warn', 4000);
+  if (btn) setBusy(btn, true, 'Prüfe…');
+  try {
+    const names = await _zdbEnsureTables(acc);
+    const kontakte = await _zdbSelect(names.kontakt.name, { maxRecords: 5000 });
+    const firmen = await _zdbSelect(names.firma.name, { maxRecords: 5000 });
+
+    const schluessel = (x) => String(x || '').trim().toLowerCase().replace(/\s+/g, ' ');
+    const gruppen = (liste, keyFn) => {
+      const m = new Map();
+      liste.forEach(r => {
+        const k = keyFn(r.fields || {});
+        if (!k) return;
+        if (!m.has(k)) m.set(k, []);
+        m.get(k).push(r);
+      });
+      return [...m.entries()].filter(([, v]) => v.length > 1);
+    };
+
+    const kMail = gruppen(kontakte, f => schluessel(f.email));
+    const kName = gruppen(kontakte, f => {
+      const n = schluessel([f.vorname, f.nachname].filter(Boolean).join(' '));
+      return n.length > 3 ? n : '';
+    }).filter(([k]) => !kMail.some(([, v]) => v.some(r => schluessel([r.fields.vorname, r.fields.nachname].filter(Boolean).join(' ')) === k)));
+    // Firmen: Name ohne Rechtsform, damit „Müller GmbH" und „Müller" zusammenfinden.
+    const fName = gruppen(firmen, f => schluessel(String(f.name || '')
+      .replace(/\b(gmbh|ag|kg|mbh|ohg|gbr|ug|se|kgaa|ltd|inc|e\.?\s?v\.?|e\.?\s?k\.?|eg|& co\.?|co\.)\b/gi, ' ')));
+
+    const zeile = (r, felder) => '<li class="text-[11px] text-ink-700 border border-ink-200 rounded px-2 py-1 flex items-center gap-2">'
+      + '<span class="flex-1 truncate">' + escapeHtml(felder.map(f => (r.fields || {})[f]).filter(Boolean).join(' · ') || '(leer)') + '</span>'
+      + '<span class="text-[10px] text-ink-400 shrink-0">' + escapeHtml(String((r.fields || {}).quelle || '')) + '</span></li>';
+
+    const block = (titel, paare, felder, erklaerung) => !paare.length ? '' :
+      '<div><p class="text-[11px] font-bold text-ink-800 mb-1">' + titel + ' (' + paare.length + ')</p>'
+      + '<p class="text-[10px] text-ink-500 mb-1">' + erklaerung + '</p>'
+      + paare.slice(0, 40).map(([k, v]) =>
+          '<div class="mb-2"><p class="text-[10px] uppercase tracking-wider text-ink-500">' + escapeHtml(k) + '</p>'
+          + '<ul class="space-y-0.5">' + v.map(r => zeile(r, felder)).join('') + '</ul></div>').join('')
+      + (paare.length > 40 ? '<p class="text-[10px] text-ink-500">… und ' + (paare.length - 40) + ' weitere</p>' : '')
+      + '</div>';
+
+    const inhalt = (kMail.length || kName.length || fName.length)
+      ? block('Kontakte mit gleicher E-Mail', kMail, ['vorname', 'nachname', 'email', 'telefon'],
+              'Echte Dubletten — dieselbe Adresse zweimal angelegt.')
+        + block('Kontakte mit gleichem Namen, anderer Adresse', kName, ['vorname', 'nachname', 'email', 'telefon'],
+                'Kann derselbe Mensch mit zwei Adressen sein — oder zwei Namensvettern. Bitte ansehen.')
+        + block('Firmen mit gleichem Namen', fName, ['name', 'ort', 'strasse'],
+                'Entsteht, wenn dieselbe Firma einmal mit und einmal ohne Ort angelegt wurde — die Firmensuche vergleicht Name UND Ort.')
+      : '<p class="text-[12px] text-emerald-700">Keine Dubletten gefunden — weder bei Kontakten noch bei Firmen.</p>';
+
+    let host = document.getElementById('subModalHost');
+    if (!host) { host = document.createElement('div'); host.id = 'subModalHost'; document.body.appendChild(host); }
+    host.innerHTML = '<div class="fixed inset-0 z-[70] bg-black/40 flex items-start justify-center overflow-y-auto p-4" onclick="if(event.target===this)document.getElementById(\'subModalHost\').innerHTML=\'\'">'
+      + '<div class="bg-white rounded-2xl shadow-xl w-full max-w-2xl my-8">'
+        + '<div class="flex items-center justify-between p-4 border-b border-ink-200">'
+          + '<div><h3 class="font-bold text-ink-900">Dubletten in der zentralen DB</h3>'
+          + '<p class="text-[11px] text-ink-500">' + escapeHtml(acc.name || '') + ' · ' + kontakte.length + ' Kontakte, ' + firmen.length + ' Firmen geprüft</p></div>'
+          + '<button onclick="document.getElementById(\'subModalHost\').innerHTML=\'\'" class="text-ink-400 hover:text-ink-700"><i data-lucide="x" class="w-5 h-5"></i></button></div>'
+        + '<div class="p-4 space-y-4 max-h-[70vh] overflow-y-auto">' + inhalt
+        + '<p class="text-[10px] text-ink-500 border-t border-ink-200 pt-2">Ein zweites „Übernehmen" desselben Kontakts erzeugt keine Dublette — '
+        + 'die Übernahme sucht erst über die E-Mail, dann über Vor- und Nachnamen, und ändert den vorhandenen Satz.</p>'
+        + '</div></div></div>';
+    if (window.lucide) lucide.createIcons();
+  } catch (e) {
+    toast('Dublettenprüfung fehlgeschlagen: ' + (e.message || e), 'error', 9000);
+  }
+  if (btn) setBusy(btn, false);
+}
+
 async function _zdbDeleteRecord(tableName, recordId) {
   const url = 'https://api.airtable.com/v0/' + ZDB_BASE_ID + '/' + _zdbTab(tableName) + '/' + recordId;
   const res = await fetch(url, { method: 'DELETE', headers: { Authorization: 'Bearer ' + APP_KEYS.airtableWriteKey } });
