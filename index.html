@@ -824,7 +824,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.93.0';
+const APP_VERSION = 'v2.94.0';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -48108,7 +48108,11 @@ function _renderCrawledContacts() {
                   return '<button onclick="_korbAusDbEntfernen(' + i + ', this)" class="px-2 py-1 bg-white border border-rose-300 text-rose-700 hover:bg-rose-50 rounded text-[10px] font-bold" title="Kontakt aus der zentralen DB loeschen (Firma bleibt)">\u2715 Aus DB entfernen</button>';
                 }
                 const label = st === 'wartend' ? '\u2713 \u00dcbernehmen' : '\u2713 Doch \u00fcbernehmen';
-                return '<button onclick="_korbUebernehmen(' + i + ', this)" class="px-2 py-1 bg-emerald-600 hover:bg-emerald-700 text-white rounded text-[10px] font-bold" title="In die zentrale DB uebernehmen">' + label + '</button>';
+                return '<button onclick="_korbUebernehmen(' + i + ', this)" class="px-2 py-1 bg-emerald-600 hover:bg-emerald-700 text-white rounded text-[10px] font-bold" title="In die zentrale DB uebernehmen">' + label + '</button>'
+                  /* Nachfassen sitzt direkt daneben: Wer beim Übernehmen merkt,
+                     dass Nummer oder Ansprechpartner fehlen, soll nicht suchen
+                     müssen, wo er das nachholt. */
+                  + '<button onclick="_korbNachfassen(' + i + ', this)" class="px-2 py-1 bg-white border border-violet-300 text-violet-700 hover:bg-violet-50 rounded text-[10px] font-bold inline-flex items-center gap-1" title="Genauer nachsehen: Archiv erneut auswerten, wahlweise im Internet nach Nummer und Ansprechpartner suchen"><i data-lucide="search-check" class="w-3 h-3"></i></button>';
               })() +
               '<button onclick="_crawlSendMarketing(' + i + ')" class="px-2 py-1 bg-orange-500 hover:bg-orange-600 text-white rounded text-[10px] font-bold inline-flex items-center gap-1" title="Werbe-Email senden (bestehendes Marketing-Feature)"><i data-lucide="megaphone" class="w-3 h-3"></i> Werbung</button>' +
               '<button onclick="_crawlPushFd(' + i + ', this)" class="px-2 py-1 bg-blue-600 hover:bg-blue-700 text-white rounded text-[10px] font-bold" title="In Freshdesk anlegen/aktualisieren">→ FD</button>' +
@@ -48173,6 +48177,233 @@ function _korbKontaktDaten(r) {
 
 function _korbAccount(r) {
   return (APP_STATE.accounts || []).find(a => String(a.id) === String(r && r.account_id)) || null;
+}
+
+/* ===== Einzelnen Korb-Kontakt nachfassen (v2.94.0) =======================
+   Der Massen-Crawl arbeitet flach: acht Nachrichten je Adresse, ein Durchgang.
+   Für die meisten reicht das. Bleibt eine Telefonnummer oder der Name der
+   Kontaktperson offen, lohnt sich der genauere Blick — aber nur für den einen
+   Kontakt, den man gerade vor sich hat.
+
+   Zwei Quellen, streng getrennt gehalten:
+
+   · ARCHIV — Belege. Was in einer Signatur steht, hat diese Person selbst
+     geschrieben. Wird als gesichert behandelt.
+   · INTERNET — Vermutungen. Eine im Netz gefundene Nummer kann die Zentrale
+     eines Konzerns, eine veraltete Angabe oder schlicht falsch sein.
+
+   Deshalb wird NICHTS automatisch geschrieben. Jeder Wert braucht einen Klick,
+   und Internetfunde tragen ihre Quelle sichtbar bei sich. Eine falsche Nummer
+   in den Stammdaten kostet später einen Anruf beim falschen Unternehmen. */
+
+async function _korbNachfassen(i, btn) {
+  const r = _crawlRecAt(i);
+  if (!r) return;
+  if (btn) setBusy(btn, true);
+  let host = document.getElementById('subModalHost');
+  if (!host) { host = document.createElement('div'); host.id = 'subModalHost'; document.body.appendChild(host); }
+  window._KORB_NACHFASS = { rec: r, archiv: null, netz: null };
+  _korbNachfassZeichnen('<div class="text-center py-8 text-sm text-ink-500">'
+    + '<span class="spinner inline-block w-5 h-5 border-[2px] text-violet-500"></span>'
+    + '<p class="mt-2">Archiv wird gelesen …</p></div>');
+
+  // 1 · Archiv — dieselbe Auswertung wie beim Crawl, aber gezielt.
+  try {
+    const key = APP_KEYS.user?.api_key;
+    const slug = _archivSlugFuer(r.account_id);
+    const mail = String(r.email || '').trim().toLowerCase();
+    if (key && slug && mail.includes('@')) {
+      const res = await fetch(ARCHIV_URL + '/signatur?mandant=' + encodeURIComponent(slug)
+        + '&email=' + encodeURIComponent(mail), { headers: { 'X-Hero-Key': key } });
+      if (res.ok) {
+        const d = await res.json();
+        window._KORB_NACHFASS.archiv = d && d.gefunden ? d : { gefunden: false, nachrichten: d?.nachrichten || 0 };
+      }
+    }
+  } catch (e) { console.warn('[Nachfassen] Archiv:', e.message); }
+  if (btn) setBusy(btn, false);
+  _korbNachfassZeichnen();
+}
+
+function _korbNachfassZeichnen(platzhalter) {
+  const st = window._KORB_NACHFASS;
+  const host = document.getElementById('subModalHost');
+  if (!st || !host) return;
+  const r = st.rec;
+  const rahmen = (inhalt) =>
+    '<div class="fixed inset-0 z-[70] bg-black/40 flex items-start justify-center overflow-y-auto p-4" onclick="if(event.target===this)_korbNachfassSchliessen()">'
+    + '<div class="bg-white rounded-2xl shadow-xl w-full max-w-lg my-8">'
+      + '<div class="flex items-center justify-between p-4 border-b border-ink-200">'
+        + '<div><h3 class="font-bold text-ink-900 inline-flex items-center gap-2"><i data-lucide="search-check" class="w-5 h-5 text-violet-600"></i> Kontakt nachfassen</h3>'
+        + '<p class="text-[11px] text-ink-500">' + escapeHtml(r.name || r.email || '') + (r.firma ? ' · ' + escapeHtml(r.firma) : '') + '</p></div>'
+        + '<button onclick="_korbNachfassSchliessen()" class="text-ink-400 hover:text-ink-700"><i data-lucide="x" class="w-5 h-5"></i></button></div>'
+      + '<div class="p-4 space-y-3">' + inhalt + '</div>'
+    + '</div></div>';
+  if (platzhalter) { host.innerHTML = rahmen(platzhalter); if (window.lucide) lucide.createIcons(); return; }
+
+  const fehlt = [];
+  if (!String(r.telefon || '').trim()) fehlt.push('Telefonnummer');
+  if (!String(r.name || '').trim() || _korbNameIstFirma(r)) fehlt.push('Ansprechpartner');
+  const kopf = fehlt.length
+    ? '<div class="bg-amber-50 border border-amber-200 rounded-xl p-2.5 text-[12px] text-amber-900">Es fehlt: <b>' + fehlt.join('</b>, <b>') + '</b></div>'
+    : '<div class="bg-emerald-50 border border-emerald-200 rounded-xl p-2.5 text-[12px] text-emerald-900">Nummer und Ansprechpartner sind vorhanden.</div>';
+
+  const a = st.archiv;
+  const sig = (a && a.signatur) || {};
+  const zeile = (label, wert, feld, quelle) => {
+    if (!String(wert || '').trim()) return '';
+    const schon = String(r[feld] || '').trim().toLowerCase() === String(wert).trim().toLowerCase();
+    return '<div class="flex items-center gap-2 text-[12px] border border-ink-200 rounded-lg px-2 py-1.5">'
+      + '<span class="text-[10px] uppercase font-semibold text-ink-500 w-24 shrink-0">' + escapeHtml(label) + '</span>'
+      + '<span class="flex-1 truncate text-ink-800">' + escapeHtml(wert) + '</span>'
+      + (quelle ? '<a href="' + escapeAttr(quelle) + '" target="_blank" rel="noopener" class="text-[10px] text-brand-600 hover:underline shrink-0">Quelle</a>' : '')
+      + (schon
+          ? '<span class="text-[10px] text-emerald-700 font-bold shrink-0">steht schon</span>'
+          : '<button onclick="_korbNachfassUebernehmen(\'' + feld + '\', ' + JSON.stringify(String(wert)).replace(/"/g, '&quot;') + ', this)" class="px-2 py-0.5 rounded bg-violet-600 hover:bg-violet-700 text-white text-[10px] font-bold shrink-0">Übernehmen</button>')
+      + '</div>';
+  };
+
+  const archivBlock = a
+    ? (a.gefunden
+        ? '<div><p class="text-[10px] uppercase font-semibold text-ink-600 mb-1">Aus dem Archiv · ' + (a.nachrichten || 0) + ' Nachrichten gelesen</p>'
+          + '<div class="space-y-1">'
+            + zeile('Firma', sig.firma, 'firma')
+            + zeile('Telefon', sig.telefon || sig.mobil, 'telefon')
+            + zeile('Position', sig.position, 'position')
+            + zeile('Straße', sig.strasse, 'strasse')
+            + zeile('PLZ', sig.plz, 'plz')
+            + zeile('Ort', sig.ort, 'ort')
+          + '</div>'
+          + ((!sig.firma && !sig.telefon && !sig.mobil && !sig.position)
+              ? '<p class="text-[11px] text-ink-500 italic mt-1">Signatur gefunden, aber keine verwertbaren Felder.</p>' : '')
+          + '</div>'
+        : '<p class="text-[12px] text-ink-600">Im Archiv dieses Mandanten steht zu <b>' + escapeHtml(r.email || '') + '</b> keine auswertbare Signatur'
+          + (a.nachrichten ? ' (' + a.nachrichten + ' Nachrichten gelesen)' : '') + '.</p>')
+    : '<p class="text-[12px] text-ink-500">Archiv nicht erreichbar.</p>';
+
+  const netzBlock = st.netz
+    ? (st.netz.fehler
+        ? '<div class="bg-red-50 border border-red-200 rounded-xl p-2.5 text-[12px] text-red-800">' + escapeHtml(st.netz.fehler) + '</div>'
+        : '<div><p class="text-[10px] uppercase font-semibold text-ink-600 mb-1">Aus dem Internet · ungeprüfte Fundstücke</p>'
+          + '<div class="space-y-1">'
+            + zeile('Telefon', st.netz.telefon, 'telefon', st.netz.telefon_quelle)
+            + zeile('Ansprechpartner', st.netz.ansprechpartner, 'name', st.netz.ansprechpartner_quelle)
+            + zeile('Position', st.netz.position, 'position', st.netz.ansprechpartner_quelle)
+            + zeile('Straße', st.netz.strasse, 'strasse', st.netz.adresse_quelle)
+            + zeile('PLZ', st.netz.plz, 'plz', st.netz.adresse_quelle)
+            + zeile('Ort', st.netz.ort, 'ort', st.netz.adresse_quelle)
+          + '</div>'
+          + '<p class="text-[10px] text-ink-500 mt-1">Ungeprüft. Vor dem Übernehmen die Quelle ansehen — eine falsche Nummer führt später zum falschen Unternehmen.</p>'
+          + (st.netz.hinweis ? '<p class="text-[11px] text-ink-600 mt-1">' + escapeHtml(st.netz.hinweis) + '</p>' : '')
+          + '</div>')
+    : '<button onclick="_korbNachfassNetz(this)" class="w-full px-3 py-2 rounded-lg text-[12px] font-bold bg-white border border-violet-300 text-violet-700 hover:bg-violet-50 inline-flex items-center justify-center gap-1.5">'
+      + '<i data-lucide="globe" class="w-4 h-4"></i> Im Internet nach Nummer und Ansprechpartner suchen</button>';
+
+  host.innerHTML = rahmen(kopf + archivBlock + '<div class="border-t border-ink-200 pt-3">' + netzBlock + '</div>'
+    + '<div class="flex justify-end pt-1"><button onclick="_korbNachfassSchliessen()" class="px-3 py-2 rounded-lg text-[12px] font-bold bg-ink-800 hover:bg-ink-900 text-white">Fertig</button></div>');
+  if (window.lucide) lucide.createIcons();
+}
+
+/* Steht im Namensfeld in Wahrheit die Firma? Kommt bei Sammeladressen wie
+   info@… regelmäßig vor — dann fehlt der Ansprechpartner, auch wenn das Feld
+   gefüllt aussieht. */
+function _korbNameIstFirma(r) {
+  const n = String(r.name || '').trim();
+  if (!n) return true;
+  if (/\b(gmbh|ag|kg|mbh|ohg|gbr|ug|e\.?\s?k\.?|e\.?\s?v\.?|eg)\b/i.test(n)) return true;
+  return String(r.firma || '').trim().toLowerCase() === n.toLowerCase();
+}
+
+function _korbNachfassSchliessen() {
+  window._KORB_NACHFASS = null;
+  const h = document.getElementById('subModalHost');
+  if (h) h.innerHTML = '';
+}
+
+async function _korbNachfassUebernehmen(feld, wert, btn) {
+  const st = window._KORB_NACHFASS;
+  if (!st) return;
+  const r = st.rec;
+  if (btn) setBusy(btn, true, '…');
+  try {
+    const patch = { updated_at: nowIso() }; patch[feld] = wert;
+    if (feld === 'telefon') patch.telefon = _ccNummerNormalisieren(wert) || wert;
+    await airtableUpdateWithAutoField(CRAWLED_TABLE, r.recordId, patch, CRAWLED_TYPES_MAP);
+    Object.assign(r, patch);
+    if (btn) setBusy(btn, false);
+    _korbNachfassZeichnen();
+    _renderCrawledContacts();
+    toast('Übernommen: ' + feld, 'success', 2500);
+  } catch (e) {
+    if (btn) setBusy(btn, false);
+    toast('Übernehmen fehlgeschlagen: ' + (e.message || e), 'error', 8000);
+  }
+}
+
+/* Internetsuche über die Websuche des Sprachmodells.
+
+   Bewusst mit strengen Vorgaben: Quelle je Angabe, nichts raten, im Zweifel
+   leer lassen. Ein Sprachmodell, das eine Telefonnummer „erinnert", liefert
+   eine plausible und falsche — und die stünde danach in den Stammdaten. */
+async function _korbNachfassNetz(btn) {
+  const st = window._KORB_NACHFASS;
+  if (!st) return;
+  const r = st.rec;
+  const firma = String(r.firma || '').trim();
+  const ort = [r.plz, r.ort].filter(Boolean).join(' ').trim();
+  const domain = (String(r.email || '').split('@')[1] || '').trim();
+  if (!firma && !domain) {
+    st.netz = { fehler: 'Ohne Firmenname und ohne E-Mail-Domain gibt es nichts zu suchen.' };
+    return _korbNachfassZeichnen();
+  }
+  if (btn) setBusy(btn, true, 'Suche im Netz …');
+  try {
+    const frage = 'Gesucht sind Kontaktdaten dieses Unternehmens:\n'
+      + (firma ? 'Firma: ' + firma + '\n' : '')
+      + (domain ? 'Website/Domain: ' + domain + '\n' : '')
+      + (ort ? 'Ort: ' + ort + '\n' : '')
+      + (r.strasse ? 'Straße: ' + r.strasse + '\n' : '')
+      + (r.email ? 'Bekannte E-Mail: ' + r.email + '\n' : '')
+      + '\nFinde: die allgemeine Telefonnummer des Unternehmens und — falls auffindbar — '
+      + 'eine namentliche Kontaktperson (Geschäftsführung, Vertrieb oder Ansprechpartner) mit Position.';
+    const sys =
+      'Du recherchierst Firmenkontaktdaten im Web und antwortest AUSSCHLIESSLICH mit JSON.\n\n'
+      + 'HARTE REGELN:\n'
+      + '1. Gib NUR Angaben zurück, die du auf einer aufgerufenen Seite tatsächlich gelesen hast. Nichts aus dem Gedächtnis, nichts geraten, nichts abgeleitet.\n'
+      + '2. Zu JEDER Angabe gehört die URL der Seite, auf der sie steht. Ohne Quelle keine Angabe.\n'
+      + '3. Prüfe, dass die Seite wirklich zu DIESEM Unternehmen gehört (Domain, Ort, Firmierung). Bei gleichnamigen Firmen an anderem Ort: nichts zurückgeben.\n'
+      + '4. Im Zweifel Feld weglassen. Eine fehlende Angabe ist harmlos, eine falsche kostet einen Anruf beim falschen Unternehmen.\n'
+      + '5. Telefonnummern im Format +49 … oder 0… , ohne Zusätze.\n\n'
+      + 'JSON-FORMAT (alle Felder optional):\n'
+      + '{"telefon":"…","telefon_quelle":"https://…",'
+      + '"ansprechpartner":"Vorname Nachname","position":"…","ansprechpartner_quelle":"https://…",'
+      + '"strasse":"…","plz":"…","ort":"…","adresse_quelle":"https://…",'
+      + '"hinweis":"ein Satz, falls etwas unklar blieb"}';
+    const antwort = await _callAnthropicWithRetry({
+      model: 'claude-sonnet-4-5-20250929',
+      max_tokens: 2000,
+      system: sys,
+      tools: [{ type: 'web_search_20250305', name: 'web_search', max_uses: 6 }],
+      messages: [{ role: 'user', content: frage }],
+    });
+    const bloecke = (antwort && antwort.content) || [];
+    const text = bloecke.filter(b => b.type === 'text').map(b => b.text).join('\n');
+    const gesucht = bloecke.some(b => b.type === 'server_tool_use' || b.type === 'web_search_tool_result');
+    const daten = parseAIJson(text) || {};
+    if (!gesucht) {
+      st.netz = { fehler: 'Die Websuche stand nicht zur Verfügung — der Proxy hat das Werkzeug nicht durchgereicht. '
+        + 'Ohne echte Recherche wird hier bewusst nichts angezeigt.' };
+    } else if (!daten.telefon && !daten.ansprechpartner && !daten.strasse) {
+      st.netz = { fehler: 'Im Netz nichts belegbar gefunden'
+        + (daten.hinweis ? ' — ' + daten.hinweis : '.') };
+    } else {
+      st.netz = daten;
+    }
+  } catch (e) {
+    st.netz = { fehler: 'Suche fehlgeschlagen: ' + (e.message || e) };
+  }
+  if (btn) setBusy(btn, false);
+  _korbNachfassZeichnen();
 }
 
 /* ===== Falsche Firmen im Korb erkennen und richtigstellen (v2.93.0) ======
