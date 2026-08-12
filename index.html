@@ -824,7 +824,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.84.1';
+const APP_VERSION = 'v2.85.0';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -17025,6 +17025,88 @@ async function searchTicketsByKeyword(accountId, keyword) {
   }
 }
 
+/* Steht diese Adresse schon in den Stammdaten?
+
+   Für die Trefferliste der Suche gedacht: Von dort aus schreibt man dem
+   Kontakt eine Mail oder eine Marketing-Aktion — und dabei ist die erste Frage
+   immer, ob er überhaupt in den Stammdaten geführt wird. Das nachzusehen, indem
+   man jeden Treffer einzeln öffnet, ist die Arbeit, die diese Anzeige spart.
+
+   Ergebnis wird für die Sitzung gemerkt: Eine Suche zeigt schnell zehn
+   Kontakte, und jeder einzelne wäre sonst eine eigene Airtable-Abfrage. */
+const _ZDB_MITGLIED_CACHE = new Map();   // accountId|email → boolean
+
+async function _zdbIstErfasst(accountId, email) {
+  const mail = String(email || '').trim().toLowerCase();
+  if (!accountId || !mail.includes('@')) return null;
+  const key = accountId + '|' + mail;
+  if (_ZDB_MITGLIED_CACHE.has(key)) return _ZDB_MITGLIED_CACHE.get(key);
+  const acc = (APP_STATE.accounts || []).find(a => String(a.id) === String(accountId));
+  if (!acc) return null;
+  try {
+    const names = await _zdbEnsureTables(acc);
+    const hit = (await _zdbSelect(names.kontakt.name,
+      { filter: "LOWER({email})='" + _zdbEsc(mail) + "'", maxRecords: 1 }))[0] || null;
+    _ZDB_MITGLIED_CACHE.set(key, !!hit);
+    return !!hit;
+  } catch (e) { console.warn('[ZDB] Mitgliedsprüfung:', e.message); return null; }
+}
+
+/* Die Marken in der Trefferliste nachtragen, sobald die Antworten da sind.
+   Bewusst nachgelagert: Die Suchergebnisse sollen sofort stehen und nicht auf
+   Airtable warten. */
+async function _zdbMarkenNachtragen(kontakte) {
+  for (const c of (kontakte || [])) {
+    if (!c.email) continue;
+    const drin = await _zdbIstErfasst(c._accountId, c.email);
+    if (drin == null) continue;
+    const el = document.querySelector('[data-zdb-marke="' + c._accountId + '|' + String(c.email).toLowerCase() + '"]');
+    if (!el) continue;
+    el.innerHTML = drin
+      ? '<span class="text-[10px] font-bold text-emerald-700 bg-emerald-100 border border-emerald-200 px-1.5 py-0.5 rounded inline-flex items-center gap-1"><i data-lucide="database" class="w-3 h-3"></i> zentrale DB</span>'
+      : '<button type="button" onclick="event.stopPropagation(); _zdbAusSucheUebernehmen(this, \'' + escapeAttr(c._accountId) + '\', ' + c.id + ')" class="text-[10px] font-bold text-ink-600 bg-white border border-ink-300 hover:bg-emerald-50 hover:border-emerald-300 hover:text-emerald-700 px-1.5 py-0.5 rounded inline-flex items-center gap-1" title="Kontakt in die zentrale DB übernehmen"><i data-lucide="database" class="w-3 h-3"></i> + zentrale DB</button>';
+  }
+  if (window.lucide) lucide.createIcons();
+}
+
+/* Übernahme direkt aus der Trefferliste — ohne den Kontakt öffnen zu müssen.
+   Geladen wird der volle Freshdesk-Kontakt, weil die Trefferliste nur Name und
+   Adresse führt; Telefon, Position und Firma fehlten sonst im Stammsatz. */
+async function _zdbAusSucheUebernehmen(btnEl, accountId, contactId) {
+  const acc = (APP_STATE.accounts || []).find(a => String(a.id) === String(accountId));
+  if (!acc) return toast('Mandant nicht gefunden', 'warn', 5000);
+  setBusy(btnEl, true, '…');
+  try {
+    const c = await proxyJson('/freshdesk/' + encodeURIComponent(accountId) + '/api/v2/contacts/' + contactId);
+    let firma = null;
+    if (c.company_id) {
+      try {
+        const co = await proxyJson('/freshdesk/' + encodeURIComponent(accountId) + '/api/v2/companies/' + c.company_id);
+        firma = _zdbClean({ name: co.name, freshdesk_company_id: co.id, quelle: 'suche' });
+      } catch (_) {}
+    }
+    const teile = String(c.name || '').trim().split(/\s+/).filter(Boolean);
+    const kontakt = _zdbClean({
+      vorname: teile.length > 1 ? teile.slice(0, -1).join(' ') : (teile[0] || ''),
+      nachname: teile.length > 1 ? teile[teile.length - 1] : '',
+      email: c.email,
+      telefon: _ccNummerNormalisieren(c.phone) || c.phone,
+      mobil: _ccNummerNormalisieren(c.mobile) || c.mobile,
+      position: c.job_title, quelle: 'suche', freshdesk_contact_id: c.id,
+    });
+    const res = await zdbSaveFirmaKontakt(acc, firma, kontakt, { erzwingen: true });
+    if (!res || !res.kontaktId) throw new Error('Die zentrale DB hat nichts zurückgegeben');
+    _ZDB_MITGLIED_CACHE.set(accountId + '|' + String(c.email || '').toLowerCase(), true);
+    setBusy(btnEl, false);
+    btnEl.outerHTML = '<span class="text-[10px] font-bold text-emerald-700 bg-emerald-100 border border-emerald-200 px-1.5 py-0.5 rounded inline-flex items-center gap-1"><i data-lucide="database" class="w-3 h-3"></i> zentrale DB</span>';
+    if (window.lucide) lucide.createIcons();
+    toast('„' + (c.name || c.email) + '" ist jetzt in der zentralen DB.', 'success', 5000);
+  } catch (e) {
+    setBusy(btnEl, false);
+    toast('Übernahme fehlgeschlagen: ' + (e.message || e), 'error', 9000);
+  }
+}
+
 /* Contacts-Autocomplete liefert max 10 Treffer pro Account. */
 async function searchContactsByKeyword(accountId, keyword) {
   const safeKw = _sanitizeForFreshdeskQuery(keyword);
@@ -17638,7 +17720,7 @@ function renderSearchResults() {
                   <p class="font-semibold text-ink-900 text-sm truncate inline-flex items-center gap-1.5">${escapeHtml(c.name || '(ohne Name)')}<i data-lucide="user-cog" class="w-3 h-3 text-brand-500"></i></p>
                   ${c.job_title ? `<p class="text-[11px] text-ink-500 truncate">${escapeHtml(c.job_title)}</p>` : ''}
                   ${c.email ? `<p class="text-[11px] text-brand-600 inline-flex items-center gap-1 truncate"><i data-lucide="mail" class="w-3 h-3"></i>${escapeHtml(c.email)}</p>` : ''}
-                  <p class="text-[10px] text-ink-400 mt-0.5"><span class="inline-block w-1.5 h-1.5 rounded-full mr-1" style="background:${escapeAttr(c._accountColor)}"></span>${escapeHtml(c._accountName)}</p>
+                  <p class="text-[10px] text-ink-400 mt-0.5 flex items-center gap-1.5 flex-wrap"><span class="inline-flex items-center"><span class="inline-block w-1.5 h-1.5 rounded-full mr-1" style="background:${escapeAttr(c._accountColor)}"></span>${escapeHtml(c._accountName)}</span>${c.email ? `<span data-zdb-marke="${escapeAttr(c._accountId + '|' + String(c.email).toLowerCase())}"><span class="text-[10px] text-ink-300">prüfe…</span></span>` : ''}</p>
                 </div>
                 <i data-lucide="chevron-right" class="w-4 h-4 text-ink-400 shrink-0 mt-2"></i>
               </button>
@@ -17751,6 +17833,8 @@ function renderSearchResults() {
   // Tickets zuerst — sie sind in aller Regel das Gesuchte.
   $('searchResults').innerHTML = headerSummary + ticketBlock + hiddenTicketsHint + contactBlock + hiddenContactsHint;
   if (window.lucide) lucide.createIcons();
+  // Stammdaten-Marken nachtragen — nicht abwarten, die Treffer stehen schon.
+  if (contacts.length && !hideContacts) _zdbMarkenNachtragen(contacts).catch(() => {});
 }
 
 async function aiSummarizeTicket(ticket) {
@@ -27379,15 +27463,31 @@ async function _searchFdContactsByPlan(accountId, plan) {
   }
   const found = [];
   const seen = new Set();
+  const aufnehmen = (list) => (list || []).forEach(function (c) {
+    if (c && c.id != null && !seen.has(c.id) && c.email) { seen.add(c.id); found.push(c); }
+  });
   for (const q of queries) {
     try {
       const res = await proxyJson(base + '/search/contacts?query=' + encodeURIComponent(q));
-      const list = Array.isArray(res?.results) ? res.results : [];
-      list.forEach(function (c) {
-        if (!seen.has(c.id) && c.email) { seen.add(c.id); found.push(c); }
-      });
+      aufnehmen(Array.isArray(res?.results) ? res.results : []);
       if (found.length >= 5) break;
     } catch (e) { console.warn('contact-search query fehlgeschlagen:', q, e.message); }
+  }
+
+  /* Die Filtersuche oben vergleicht EXAKT: `name:'Mondl'` findet „Robert Mondl"
+     nicht, und eine Anrede aus dem KI-Plan („Hr. Mondl") schon gar nicht.
+     Deshalb dieselbe Teiltreffer-Suche wie auf der Suchseite als zweiter Anlauf
+     — mit dem Namen ohne Anrede und mit dem Nachnamen allein. */
+  if (found.length < 3 && typeof searchContactsByKeyword === 'function') {
+    const ohneAnrede = String(plan.recipient_name || '')
+      .replace(/^\s*(herrn?|frau|hr\.?|fr\.?|mr\.?|mrs\.?|ms\.?|dr\.?|prof\.?|dipl\.?-?\s?ing\.?)\s+/gi, '')
+      .trim();
+    const nachname = ohneAnrede.split(/\s+/).filter(Boolean).pop() || '';
+    for (const begriff of [...new Set([ohneAnrede, nachname, plan.company_name].filter(w => w && String(w).length >= 2))]) {
+      try { aufnehmen(await searchContactsByKeyword(accountId, begriff)); }
+      catch (e) { console.warn('contact-autocomplete fehlgeschlagen:', begriff, e.message); }
+      if (found.length >= 8) break;
+    }
   }
   return found.slice(0, 8);
 }
