@@ -824,7 +824,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.99.0';
+const APP_VERSION = 'v2.99.1';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -48412,11 +48412,26 @@ function _korbNachfassZeichnen(platzhalter) {
      wird man einen falsch erkannten Namen wieder los. */
   const handBlock = '<div class="border-t border-ink-200 pt-3">'
     + '<p class="text-[10px] uppercase font-semibold text-ink-600 mb-1">Von Hand</p>'
+    /* Alle Felder, nicht nur Name und Firma. Der Signaturleser trifft nicht
+       jeden Fall — „IVG Immobilienverwaltung , Singerstraße 26" landete komplett
+       im Straßenfeld, eine zitierte Betreffzeile als Firma. Wer den Kontakt vor
+       sich hat, sieht es sofort und soll es hier geradeziehen können, statt den
+       Eintrag zu verwerfen. */
     + '<div class="grid grid-cols-2 gap-2">'
       + '<label class="block"><span class="text-[10px] text-ink-500">Ansprechpartner</span>'
         + '<input id="nfName" value="' + escapeAttr(r.name || '') + '" class="w-full mt-0.5 px-2 py-1.5 border border-ink-300 rounded text-sm"></label>'
       + '<label class="block"><span class="text-[10px] text-ink-500">Firma</span>'
         + '<input id="nfFirma" value="' + escapeAttr(r.firma || '') + '" class="w-full mt-0.5 px-2 py-1.5 border border-ink-300 rounded text-sm"></label>'
+      + '<label class="block"><span class="text-[10px] text-ink-500">Position</span>'
+        + '<input id="nfPosition" value="' + escapeAttr(r.position || '') + '" class="w-full mt-0.5 px-2 py-1.5 border border-ink-300 rounded text-sm"></label>'
+      + '<label class="block"><span class="text-[10px] text-ink-500">Telefon</span>'
+        + '<input id="nfTelefon" value="' + escapeAttr(r.telefon || '') + '" class="w-full mt-0.5 px-2 py-1.5 border border-ink-300 rounded text-sm font-mono"></label>'
+      + '<label class="block col-span-2"><span class="text-[10px] text-ink-500">Straße + Hausnr.</span>'
+        + '<input id="nfStrasse" value="' + escapeAttr(r.strasse || '') + '" class="w-full mt-0.5 px-2 py-1.5 border border-ink-300 rounded text-sm"></label>'
+      + '<label class="block"><span class="text-[10px] text-ink-500">PLZ</span>'
+        + '<input id="nfPlz" value="' + escapeAttr(r.plz || '') + '" class="w-full mt-0.5 px-2 py-1.5 border border-ink-300 rounded text-sm"></label>'
+      + '<label class="block"><span class="text-[10px] text-ink-500">Ort</span>'
+        + '<input id="nfOrt" value="' + escapeAttr(r.ort || '') + '" class="w-full mt-0.5 px-2 py-1.5 border border-ink-300 rounded text-sm"></label>'
     + '</div>'
     + '<div class="flex items-center gap-2 mt-1.5">'
       + '<button onclick="_korbNachfassHand(this)" class="px-3 py-1.5 rounded-lg text-[12px] font-bold bg-ink-800 hover:bg-ink-900 text-white">Speichern</button>'
@@ -48501,11 +48516,21 @@ async function _korbNachfassHand(btn) {
   const st = window._KORB_NACHFASS;
   if (!st) return;
   const r = st.rec;
-  const name = (document.getElementById('nfName')?.value || '').trim();
-  const firma = (document.getElementById('nfFirma')?.value || '').trim();
+  const hole = (id) => (document.getElementById(id)?.value || '').trim();
+  const telefonRoh = hole('nfTelefon');
   if (btn) setBusy(btn, true, 'Speichere…');
   try {
-    const patch = { name, firma, updated_at: nowIso() };
+    const patch = {
+      name: hole('nfName'),
+      firma: hole('nfFirma'),
+      position: hole('nfPosition'),
+      telefon: telefonRoh ? (_ccNummerNormalisieren(telefonRoh) || telefonRoh) : '',
+      strasse: hole('nfStrasse'),
+      plz: hole('nfPlz'),
+      ort: hole('nfOrt'),
+      updated_at: nowIso(),
+    };
+    const firma = patch.firma;
     await airtableUpdateWithAutoField(CRAWLED_TABLE, r.recordId, patch, CRAWLED_TYPES_MAP);
     Object.assign(r, patch);
     if (btn) setBusy(btn, false);
