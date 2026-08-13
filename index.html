@@ -824,7 +824,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v3.0.0';
+const APP_VERSION = 'v3.1.0';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -44417,6 +44417,105 @@ async function _zdbMcStandUebernehmen(btn) {
   toast(n + ' Vermerk' + (n === 1 ? '' : 'e') + ' berichtigt' + (fehler ? ' · ' + fehler + ' fehlgeschlagen (siehe Fehler-Pille)' : ' ✓'), fehler ? 'warn' : 'success', 6000);
 }
 
+/* ===== Markieren + Typ per KI in der zentralen DB (v3.1.0) ===============
+   Dieselbe Bedienung wie im Korb: Häkchen je Zeile, „alle markieren", und ein
+   Knopf, der auf die Markierten wirkt — oder auf alle sichtbaren, wenn nichts
+   markiert ist. Zwei verschiedene Bedienlogiken für dieselbe Aufgabe wären
+   schlimmer als eine mittelmäßige. */
+const ZDB_AUSWAHL = new Set();
+
+function _zdbAuswahlUm(recId, an) {
+  if (an) ZDB_AUSWAHL.add(recId); else ZDB_AUSWAHL.delete(recId);
+  _zdbPaintView();
+}
+function _zdbAlleMarkieren(an) {
+  _zdbSichtbareKontakte().forEach(r => { if (an) ZDB_AUSWAHL.add(r.id); else ZDB_AUSWAHL.delete(r.id); });
+  _zdbPaintView();
+}
+function _zdbAuswahlLeeren() { ZDB_AUSWAHL.clear(); _zdbPaintView(); }
+
+/* Was gerade in der Kontaktliste steht — dieselbe Filterung wie beim Zeichnen. */
+function _zdbSichtbareKontakte() {
+  const d = ZDB_VIEW_STATE.data || {};
+  let rows = d.kontakte || [];
+  const filter = ZDB_VIEW_STATE.firmaFilter;
+  if (filter) rows = rows.filter(r => ((r.fields && r.fields.firma) || []).includes(filter));
+  const q = String(ZDB_VIEW_STATE.search || '').trim().toLowerCase();
+  if (q) rows = rows.filter(r => { const f = r.fields || {}; return [f.name, f.vorname, f.nachname, f.email, f.telefon, f.mobil, f.typ, f.position, (f.firma || []).map(id => (d.firmaName || {})[id]).join(' ')].join(' ').toLowerCase().includes(q); });
+  return rows;
+}
+
+async function _zdbTypKi(btn) {
+  const acc = _zdbCurrentAccount();
+  if (!acc) return toast('Kein Mandant gewählt', 'warn', 4000);
+  const sichtbar = _zdbSichtbareKontakte();
+  const markiert = sichtbar.filter(r => ZDB_AUSWAHL.has(r.id));
+  const grund = markiert.length ? markiert : sichtbar;
+  const offen = grund.filter(r => !String((r.fields || {}).typ || '').trim());
+  if (!offen.length) return toast('Alle betroffenen Kontakte haben bereits einen Typ.', 'info', 5000);
+  const typen = _ccTypenListe();
+  if (!typen.length) return toast('Es ist keine Typenliste gepflegt.', 'warn', 6000);
+  if (!confirm('Für ' + offen.length + ' Kontakte ohne Typ einen Vorschlag ermitteln?\n\n'
+    + (markiert.length ? 'Grundlage: die markierten Kontakte.\n' : 'Grundlage: alle gerade sichtbaren Kontakte.\n')
+    + 'Gewählt wird nur aus der gepflegten Liste:\n' + typen.join(' · ')
+    + '\n\nBereits gesetzte Typen bleiben unangetastet. Wo die KI unsicher ist, bleibt das Feld leer.')) return;
+
+  const d = ZDB_VIEW_STATE.data || {};
+  const namen = _zdbTableNames(acc);
+  const sys =
+    'Du ordnest Geschäftskontakte eines Aufzug-Serviceunternehmens einer Kategorie zu.\n\n'
+    + 'ERLAUBTE KATEGORIEN — nichts anderes ist zulässig:\n' + typen.map(t => '· ' + t).join('\n') + '\n\n'
+    + 'ENTSCHEIDUNGSGRUNDLAGE, in dieser Reihenfolge:\n'
+    + '1. Firmenname — er sagt es meist selbst („… Hausverwaltung", „Stadt …", „Hotel …", „… Immobilien").\n'
+    + '2. Position der Person.\n3. E-Mail-Domain.\n\n'
+    + 'REGELN:\n· Aufzugsfirmen sind Mitbewerber, keine Lieferanten — es sei denn, die Liste kennt „Aufzugsunternehmen".\n'
+    + '· Freemail ohne Firma ist „Privat", sofern die Liste das kennt.\n'
+    + '· Bist du unsicher, gib "" zurück. Ein falscher Typ steuert später Werbeaussendungen.\n\n'
+    + 'ANTWORTE NUR MIT JSON: {"zuordnung":[{"i":0,"typ":"Hausverwaltung"},{"i":1,"typ":""}]}';
+
+  setBusy(btn, true, '0/' + offen.length);
+  let gesetzt = 0, unsicher = 0, fehler = 0;
+  for (let i = 0; i < offen.length; i += 40) {
+    const teil = offen.slice(i, i + 40);
+    try {
+      const liste = teil.map((r, j) => {
+        const f = r.fields || {};
+        return {
+          i: j,
+          firma: ((f.firma || []).map(id => (d.firmaName || {})[id]).filter(Boolean).join(', ') || '').slice(0, 80),
+          person: (f.name || [f.vorname, f.nachname].filter(Boolean).join(' ') || '').slice(0, 60),
+          position: String(f.position || '').slice(0, 60),
+          domain: (String(f.email || '').split('@')[1] || ''),
+        };
+      });
+      const data = await _callAnthropicWithRetry({
+        model: 'claude-sonnet-4-5-20250929', max_tokens: 4000, system: sys,
+        messages: [{ role: 'user', content: 'KONTAKTE:\n' + JSON.stringify(liste, null, 1) }],
+      });
+      const parsed = parseAIJson((data.content && data.content[0] && data.content[0].text) || '') || {};
+      const zuo = Array.isArray(parsed.zuordnung) ? parsed.zuordnung : [];
+      for (const z of zuo) {
+        const r = teil[+z.i];
+        const typ = String(z.typ || '').trim();
+        if (!r) continue;
+        if (!typ || !typen.includes(typ)) { unsicher++; continue; }
+        try {
+          await _zdbUpdateSafe(namen.kontakt, r.id, { typ, updated_at: nowIso() });
+          r.fields = Object.assign({}, r.fields, { typ });
+          gesetzt++;
+        } catch (e) { fehler++; console.warn('[ZDB-Typ-KI]', e.message); }
+        await new Promise(x => setTimeout(x, 160));
+      }
+      unsicher += Math.max(0, teil.length - zuo.length);
+    } catch (e) { fehler += teil.length; console.warn('[ZDB-Typ-KI] Stapel:', e.message); }
+    setBusy(btn, true, Math.min(i + 40, offen.length) + '/' + offen.length);
+  }
+  setBusy(btn, false);
+  _zdbPaintView();
+  toast(gesetzt + ' Typen gesetzt' + (unsicher ? ' · ' + unsicher + ' offen gelassen (KI unsicher)' : '')
+    + (fehler ? ' · ' + fehler + ' fehlgeschlagen' : ''), fehler ? 'warn' : 'success', 9000);
+}
+
 function _zdbKontakteBody(d) {
   const cols = [['name', 'Name'], ['email', 'E-Mail'], ['telefon', 'Telefon'], ['mobil', 'Mobil'], ['typ', 'Typ'], ['firma', 'Firma'], ['position', 'Position'], ['mailchimp', 'Mailchimp'], ['aktionen', 'Aktionen']];
   const filter = ZDB_VIEW_STATE.firmaFilter;
@@ -44439,6 +44538,9 @@ function _zdbKontakteBody(d) {
     // v2.68.16: Fehlende Felder ergaben bisher wörtlich „undefined" in der Zelle.
     cols.forEach(c => { if (cells[c[0]] == null) cells[c[0]] = f[c[0]] || ''; });
     return '<tr class="hover:bg-indigo-50/60 cursor-pointer" onclick="_zdbEditRecord(\'kontakt\',\'' + r.id + '\')" title="Zum Bearbeiten tippen">' +
+      '<td class="px-2 py-1.5 border-b border-ink-100 align-middle" onclick="event.stopPropagation()">'
+        + '<input type="checkbox" class="w-4 h-4"' + (ZDB_AUSWAHL.has(r.id) ? ' checked' : '')
+        + ' onchange="_zdbAuswahlUm(\'' + r.id + '\', this.checked)"></td>' +
       '<td class="px-2 py-1.5 border-b border-ink-100 text-indigo-600 align-middle"><i data-lucide="edit-3" class="w-4 h-4"></i></td>' +
       cols.map(c => '<td class="px-2 py-1.5 border-b border-ink-100 whitespace-nowrap">' +
         (c[0] === 'mailchimp' ? _zdbMcZelle(r, f)
@@ -44454,7 +44556,22 @@ function _zdbKontakteBody(d) {
       + (((ZDB_VIEW_STATE.data || {}).kontakte || []).length !== rows.length
           ? ' <span class="font-normal text-ink-400">von ' + ((ZDB_VIEW_STATE.data || {}).kontakte || []).length + '</span>' : '')
       + ' <span class="font-normal text-ink-400">· Zeile tippen = bearbeiten</span></p>' +
-    '<div class="overflow-x-auto"><table class="w-full text-[12px] border-collapse"><thead><tr><th class="border-b border-ink-200 bg-ink-50 w-8"></th>' + _zdbHeadCells(cols) + '</tr></thead><tbody>' + trs + '</tbody></table></div></div>';
+    (() => {
+      const markiert = rows.filter(r => ZDB_AUSWAHL.has(r.id)).length;
+      const ohneTyp = (markiert ? rows.filter(r => ZDB_AUSWAHL.has(r.id)) : rows)
+        .filter(r => !String((r.fields || {}).typ || '').trim()).length;
+      return '<div class="flex items-center gap-2 flex-wrap mb-2">'
+        + '<label class="inline-flex items-center gap-1.5 text-[11px] text-ink-700 cursor-pointer bg-white border border-ink-200 rounded-lg px-2 py-1">'
+          + '<input type="checkbox"' + (markiert === rows.length && rows.length ? ' checked' : '')
+          + ' onchange="_zdbAlleMarkieren(this.checked)"> alle ' + rows.length + ' markieren</label>'
+        + (markiert ? '<span class="text-[11px] font-bold text-indigo-700">' + markiert + ' markiert</span>'
+            + '<button onclick="_zdbAuswahlLeeren()" class="px-2 py-1 rounded-lg text-[11px] font-bold bg-white border border-ink-300 text-ink-600 hover:bg-ink-50">Markierung aufheben</button>' : '')
+        + (ohneTyp ? '<button onclick="_zdbTypKi(this)" class="px-2.5 py-1 rounded-lg text-[11px] font-bold bg-violet-600 hover:bg-violet-700 text-white inline-flex items-center gap-1" title="Kontakttyp aus Firmenname, Position und Domain ableiten — nur aus der gepflegten Liste, im Zweifel leer">'
+            + '<i data-lucide="sparkles" class="w-3.5 h-3.5"></i> Typ per KI (' + ohneTyp + ' offen)</button>'
+            : '<span class="text-[11px] text-ink-400 italic">alle haben einen Typ</span>')
+      + '</div>';
+    })() +
+    '<div class="overflow-x-auto"><table class="w-full text-[12px] border-collapse"><thead><tr><th class="border-b border-ink-200 bg-ink-50 w-8"></th><th class="border-b border-ink-200 bg-ink-50 w-8"></th>' + _zdbHeadCells(cols) + '</tr></thead><tbody>' + trs + '</tbody></table></div></div>';
 }
 function _zdbFirmenBody(d) {
   const cols = [['name', 'Name'], ['strasse', 'Strasse'], ['plz', 'PLZ'], ['ort', 'Ort'], ['land', 'Land'], ['telefon', 'Telefon'], ['email', 'E-Mail'], ['webseite', 'Webseite'], ['ust_id', 'USt-ID']];
