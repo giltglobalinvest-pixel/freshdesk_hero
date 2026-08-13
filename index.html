@@ -824,7 +824,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v3.8.2';
+const APP_VERSION = 'v3.8.3';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -38899,7 +38899,7 @@ async function openUserModal(user) {
               <!-- Trägt den gespeicherten Stand, solange die Liste lädt — und
                    bleibt die Rückfallebene, falls sie gar nicht lädt. -->
               <input id="usrKampagnen" type="hidden" value="${escapeAttr(user?.kampagnen || '')}">
-              <p class="text-[10px] text-ink-500 mt-1">Mehrere mit ⌘ bzw. Strg. Der User sieht dann nur diese Kampagnen und kann keine neuen anlegen. Welche <b>Firmen</b> er sieht, steuert der Account-Zugriff weiter unten.</p>
+              <p class="text-[10px] text-ink-500 mt-1">Je Eintrag <b>eine Firma und eine Kampagne</b> — gleiche Namen bei zwei Firmen sind zwei getrennte Einträge. Mehrere mit ⌘ bzw. Strg. Der User kann keine neuen Kampagnen anlegen. Welche <b>Firmen</b> er überhaupt sieht, steuert der Account-Zugriff weiter unten.</p>
             </div>
             <div>
               <label class="text-xs font-semibold text-ink-700">Status</label>
@@ -39044,24 +39044,32 @@ async function _usrKampagnenFuellen(gespeichert) {
   const sel = document.getElementById('usrKampagnenSel');
   if (!sel) return;
   const gewaehlt = _userKampagnenListe(gespeichert);
+  const istGewaehlt = (e) => gewaehlt.some(g => {
+    const i = g.indexOf('::');
+    // Alter Eintrag ohne Firma: gilt für jede Firma mit diesem Namen und wird
+    // beim nächsten Speichern automatisch zu Firma+Kampagne verfestigt.
+    if (i < 0) return g.trim().toLowerCase() === e.name.toLowerCase();
+    return g.trim() === e.key;
+  });
   try {
     const liste = await _ccKampagnenUebersicht();
-    // Gespeicherte Namen, zu denen es (noch) keine Leads gibt, gehen sonst beim
-    // nächsten Speichern verloren.
-    gewaehlt.forEach(n => {
-      if (!liste.some(e => e.name.toLowerCase() === n.toLowerCase())) liste.push({ name: n, anzahl: 0, firmen: new Set() });
+    // Gespeicherte Freigaben, zu denen es (noch) keine Leads gibt, gehen sonst
+    // beim nächsten Speichern verloren.
+    gewaehlt.forEach(g => {
+      if (liste.some(e => istGewaehlt(e))) return;
+      if (!liste.some(e => e.key === g.trim())) {
+        const i = g.indexOf('::');
+        const name = i > 0 ? g.slice(i + 2) : g;
+        liste.push({ key: g.trim(), name, accountId: i > 0 ? g.slice(0, i) : '', firma: 'derzeit ohne Einträge', anzahl: 0 });
+      }
     });
     if (!liste.length) {
       sel.innerHTML = '<option disabled>Noch keine Kampagnen vorhanden</option>';
       return;
     }
-    sel.innerHTML = liste.map(e => {
-      const firmen = [...e.firmen];
-      const zusatz = firmen.length ? ' — ' + firmen.join(' + ') : ' — noch keine Einträge';
-      const an = gewaehlt.some(n => n.toLowerCase() === e.name.toLowerCase());
-      return '<option value="' + escapeAttr(e.name) + '"' + (an ? ' selected' : '') + '>'
-        + escapeHtml(e.name + zusatz + (e.anzahl ? ' (' + e.anzahl + ')' : '')) + '</option>';
-    }).join('');
+    sel.innerHTML = liste.map(e =>
+      '<option value="' + escapeAttr(e.key) + '"' + (istGewaehlt(e) ? ' selected' : '') + '>'
+        + escapeHtml(e.firma + ' · ' + e.name + (e.anzahl ? ' (' + e.anzahl + ')' : '')) + '</option>').join('');
     sel.dataset.fertig = '1';
   } catch (e) {
     console.warn('[User] Kampagnen laden:', e.message);
@@ -45556,19 +45564,26 @@ function _ccIstCallcenter() {
    er betrifft — „Preisliste" gibt es bei mehreren Mandanten. */
 async function _ccKampagnenUebersicht() {
   const rows = await airtableRead(CC_TABLE, { fields: ['kampagne', 'account_id'] });
-  const namen = new Map();     // Name → { anzahl, firmen: Set }
+  /* Geführt wird JE FIRMA, nicht je Name. Dass zwei Mandanten ihre Kampagne
+     gleich nennen, ist Zufall und darf keine Freigabe für beide bedeuten —
+     die Anrufliste der einen Firma hat mit der anderen nichts zu tun. */
+  const map = new Map();       // "<accountId>::<Name>" → Eintrag
   for (const r of (rows || [])) {
     const f = r.fields || {};
-    const k = String(f.kampagne || CC_KAMPAGNE_STANDARD).trim();
-    if (!k) continue;
-    if (!namen.has(k)) namen.set(k, { name: k, anzahl: 0, firmen: new Set() });
-    const e = namen.get(k);
-    e.anzahl++;
-    const acc = (APP_STATE.accounts || []).find(a => String(a.id) === String(f.account_id));
-    if (acc) e.firmen.add(acc.name || acc.id);
-    else if (f.account_id) e.firmen.add('unbekannter Mandant');
+    const name = String(f.kampagne || CC_KAMPAGNE_STANDARD).trim();
+    if (!name) continue;
+    const accId = String(f.account_id || '');
+    const key = accId + '::' + name;
+    if (!map.has(key)) {
+      const acc = (APP_STATE.accounts || []).find(a => String(a.id) === accId);
+      map.set(key, {
+        key, name, accountId: accId, anzahl: 0,
+        firma: acc ? (acc.name || acc.id) : (accId ? 'unbekannter Mandant' : 'ohne Mandant'),
+      });
+    }
+    map.get(key).anzahl++;
   }
-  return [...namen.values()].sort((a, b) => a.name.localeCompare(b.name, 'de'));
+  return [...map.values()].sort((a, b) => a.firma.localeCompare(b.firma, 'de') || a.name.localeCompare(b.name, 'de'));
 }
 
 /* Auf welche Kampagnen ist dieser Benutzer freigegeben? null = alle.
@@ -45576,11 +45591,29 @@ async function _ccKampagnenUebersicht() {
    Kampagnen, die sie bearbeiten sollen, und über den bestehenden
    Account-Zugriff die Mandanten. Admins sind nie eingeschränkt — sonst sperrt
    sich der Betreiber mit einem Tippfehler selbst aus. */
-function _ccKampagnenErlaubt() {
+function _ccKampagnenFreigabe() {
   const u = APP_KEYS.user || {};
   if (u.is_admin) return null;
   const l = Array.isArray(u.kampagnen) ? u.kampagnen.filter(Boolean) : [];
-  return l.length ? l : null;
+  if (!l.length) return null;
+  /* Gespeichert als „<accountId>::<Name>". Einträge ohne „::" stammen aus der
+     ersten Fassung (v3.8.0/3.8.1), in der nur der Name freigegeben wurde — die
+     gelten weiter für jede Firma, bis der Eintrag einmal neu gesetzt wird. */
+  return l.map(e => {
+    const i = String(e).indexOf('::');
+    return i > 0
+      ? { accountId: String(e).slice(0, i).trim(), name: String(e).slice(i + 2).trim() }
+      : { accountId: '', name: String(e).trim() };
+  }).filter(e => e.name);
+}
+
+/* Freigegebene Kampagnennamen FÜR DIE GERADE GEWÄHLTE FIRMA.
+   null = keine Einschränkung · leeres Feld = für diese Firma nichts freigegeben. */
+function _ccKampagnenErlaubt() {
+  const frei = _ccKampagnenFreigabe();
+  if (!frei) return null;
+  const accId = String(_ccAccount()?.id || '');
+  return [...new Set(frei.filter(e => !e.accountId || e.accountId === accId).map(e => e.name))];
 }
 
 function _ccKampagneErlaubt(name) {
@@ -45598,7 +45631,9 @@ function _ccKampagneErzwingen() {
   const erlaubt = _ccKampagnenErlaubt();
   if (!erlaubt) return;
   if (!_ccKampagneErlaubt(CC_STATE.kampagne)) {
-    CC_STATE.kampagne = erlaubt[0];
+    // Für diese Firma ist nichts freigegeben — dann steht dort auch keine
+    // Kampagne, statt einer aus einer anderen Firma.
+    CC_STATE.kampagne = erlaubt[0] || '';
     lsSetzen('fdh_cc_kampagne', CC_STATE.kampagne);
     _CC_VORLAGE = null;
   }
@@ -46106,6 +46141,10 @@ function _ccKampagnenWahl() {
      Auswahl — dann steht dort nur noch der Name. */
   const erlaubt = _ccKampagnenErlaubt();
   if (erlaubt) {
+    if (!erlaubt.length) {
+      return '<span class="px-3 py-2 rounded-lg text-sm font-bold text-amber-800 bg-amber-50 border border-amber-200 inline-flex items-center gap-1.5">'
+        + '<i data-lucide="lock" class="w-3.5 h-3.5"></i>Für diese Firma ist keine Kampagne freigegeben</span>';
+    }
     erlaubt.forEach(k => { if (!(k in zaehl)) zaehl[k] = 0; });
     keys = erlaubt.slice().sort();
     if (keys.length === 1) {
