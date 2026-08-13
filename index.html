@@ -824,7 +824,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.99.4';
+const APP_VERSION = 'v2.99.5';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -6598,7 +6598,7 @@ async function _ciZdbStatusPruefen() {
   try {
     const names = await _zdbEnsureTables(acc);
     const hit = (await _zdbSelect(names.kontakt.name,
-      { filter: "LOWER({email})='" + _zdbEsc(mail) + "'", maxRecords: 1 }))[0] || null;
+      { filter: "LOWER({email})=" + _zdbLit(mail) + "", maxRecords: 1 }))[0] || null;
     ctx._zdbStatus = { geprueft: true, drin: !!hit, recordId: hit ? hit.id : null };
     // Vorhandenen Typ übernehmen, damit die Auswahl den Bestand zeigt und ein
     // Speichern ihn nicht versehentlich leert.
@@ -17176,7 +17176,7 @@ async function _zdbIstErfasst(accountId, email) {
   try {
     const names = await _zdbEnsureTables(acc);
     const hit = (await _zdbSelect(names.kontakt.name,
-      { filter: "LOWER({email})='" + _zdbEsc(mail) + "'", maxRecords: 1 }))[0] || null;
+      { filter: "LOWER({email})=" + _zdbLit(mail) + "", maxRecords: 1 }))[0] || null;
     _ZDB_MITGLIED_CACHE.set(key, !!hit);
     return !!hit;
   } catch (e) { console.warn('[ZDB] Mitgliedsprüfung:', e.message); return null; }
@@ -19940,9 +19940,9 @@ async function _kontaktSuchenAlleQuellen(accountId, term) {
     const acc = (APP_STATE.accounts || []).find(a => String(a.id) === String(accountId));
     if (acc && q.length >= 3) {
       const names = await _zdbEnsureTables(acc);
-      const qq = _zdbEsc(q.toLowerCase());
+      const qq = _zdbLit(q.toLowerCase());
       const rows = await _zdbSelect(names.kontakt.name, {
-        filter: "OR(FIND('" + qq + "',LOWER({nachname}&'')),FIND('" + qq + "',LOWER({vorname}&'')),FIND('" + qq + "',LOWER({email}&'')))",
+        filter: "OR(FIND(" + qq + ",LOWER({nachname}&'')),FIND(" + qq + ",LOWER({vorname}&'')),FIND(" + qq + ",LOWER({email}&'')))",
         maxRecords: 10,
       });
       (rows || []).forEach(r => {
@@ -43114,7 +43114,18 @@ function _zdbClean(o) {
   }
   return r;
 }
+/* Airtable kennt in Formeln KEINE Backslash-Escapes. Ein Firmenname mit
+   Apostroph — „D'Angelo Immobilien" — erzeugte mit dem alten `\'` eine
+   ungültige Formel und damit HTTP 422; die Suche schlug fehl und der Kontakt
+   wurde doppelt angelegt. Deshalb wird der Apostroph nicht escaped, sondern
+   der ganze Literalwert in doppelte Anführungszeichen gesetzt. */
 const _zdbEsc = s => String(s == null ? '' : s).replace(/'/g, "\\'");
+function _zdbLit(v) {
+  const t = String(v == null ? '' : v);
+  return t.includes("'")
+    ? '"' + t.replace(/\\/g, '\\\\').replace(/"/g, '\\"') + '"'
+    : "'" + t + "'";
+}
 
 function _zdbNorm(v) { return String(v == null ? '' : v).trim().toLowerCase(); }
 async function _zdbUpdateSafe(tableName, id, patch) {
@@ -43127,8 +43138,8 @@ async function _zdbUpdateSafe(tableName, id, patch) {
 async function _zdbUpsertFirma(names, data) {
   let hit = null;
   try {
-    if (data.freshdesk_company_id) hit = (await _zdbSelect(names.firma.name, { filter: "{freshdesk_company_id}='" + _zdbEsc(data.freshdesk_company_id) + "'", maxRecords: 1 }))[0] || null;
-    if (!hit && data.name) hit = (await _zdbSelect(names.firma.name, { filter: "AND(LOWER({name})='" + _zdbEsc(String(data.name).toLowerCase()) + "',LOWER({ort})='" + _zdbEsc(String(data.ort || '').toLowerCase()) + "')", maxRecords: 1 }))[0] || null;
+    if (data.freshdesk_company_id) hit = (await _zdbSelect(names.firma.name, { filter: "{freshdesk_company_id}=" + _zdbLit(data.freshdesk_company_id) + "", maxRecords: 1 }))[0] || null;
+    if (!hit && data.name) hit = (await _zdbSelect(names.firma.name, { filter: "AND(LOWER({name})=" + _zdbLit(String(data.name).toLowerCase()) + ",LOWER({ort})=" + _zdbLit(String(data.ort || '').toLowerCase()) + ")", maxRecords: 1 }))[0] || null;
   } catch (_) {}
   if (!hit) return (await _zdbWrite(names.firma.name, _zdbClean(Object.assign({}, data, { created_at: nowIso(), updated_at: nowIso() })))).id;
   const ex = hit.fields || {};
@@ -43150,8 +43161,8 @@ async function _zdbUpsertFirma(names, data) {
 async function _zdbUpsertKontakt(names, data, firmaRecId) {
   let hit = null;
   try {
-    if (data.email) hit = (await _zdbSelect(names.kontakt.name, { filter: "LOWER({email})='" + _zdbEsc(String(data.email).toLowerCase()) + "'", maxRecords: 1 }))[0] || null;
-    if (!hit && (data.vorname || data.nachname)) hit = (await _zdbSelect(names.kontakt.name, { filter: "AND(LOWER({vorname})='" + _zdbEsc(String(data.vorname || '').toLowerCase()) + "',LOWER({nachname})='" + _zdbEsc(String(data.nachname || '').toLowerCase()) + "')", maxRecords: 1 }))[0] || null;
+    if (data.email) hit = (await _zdbSelect(names.kontakt.name, { filter: "LOWER({email})=" + _zdbLit(String(data.email).toLowerCase()) + "", maxRecords: 1 }))[0] || null;
+    if (!hit && (data.vorname || data.nachname)) hit = (await _zdbSelect(names.kontakt.name, { filter: "AND(LOWER({vorname})=" + _zdbLit(String(data.vorname || '').toLowerCase()) + ",LOWER({nachname})=" + _zdbLit(String(data.nachname || '').toLowerCase()) + ")", maxRecords: 1 }))[0] || null;
   } catch (_) {}
   const nm = [data.vorname, data.nachname].filter(x => x && String(x).trim()).join(' ').trim();
   if (!hit) {
@@ -43283,7 +43294,7 @@ async function _zdbMigrateAccount(account, log) {
   }
 
   log('Gecrawlte Kontakte laden…');
-  const crawled = await _zdbSelect(CRAWLED_TABLE, { filter: "{account_id}='" + _zdbEsc(account.id) + "'", maxRecords: 5000 }).catch(() => []);
+  const crawled = await _zdbSelect(CRAWLED_TABLE, { filter: "{account_id}=" + _zdbLit(account.id) + "", maxRecords: 5000 }).catch(() => []);
   let cCount = 0;
   for (const rec of crawled) {
     const f = rec.fields || {};
@@ -43608,11 +43619,17 @@ async function _ccHistorieFuer(recId) {
    der Werbeversand auch hierhin und nicht in den Korb. Dort ist der Knopf
    bewusst gesperrt, solange nichts freigegeben wurde.
    Beleg bleibt Bedingung: ohne Mailverkehr oder Freshdesk-Kontakt kein Versand. */
+/* Beleg heißt: Mit dieser Person hat das Haus nachweislich zu tun gehabt.
+   Zugekaufte oder importierte Listen sind KEIN Beleg — dorthin darf keine
+   Werbung gehen. Die Herkünfte „archiv", „suche" und „kontakt-editor" fehlten
+   hier; sie stammen alle aus tatsächlichem Schriftverkehr bzw. aus einem
+   bestehenden Freshdesk-Kontakt und wurden trotzdem als beleglos geführt —
+   deshalb übersprang der Sammellauf sie stillschweigend. */
+const ZDB_MC_BELEG_QUELLEN = ['crawl', 'archiv', 'servicebox', 'erp-hero', 'flp-push', 'suche', 'kontakt-editor'];
 function _zdbMcBeleg(f) {
   if (!f) return false;
   if (f.freshdesk_contact_id) return true;
-  const q = String(f.quelle || '').toLowerCase();
-  return q === 'crawl' || q === 'servicebox' || q === 'erp-hero' || q === 'flp-push';
+  return ZDB_MC_BELEG_QUELLEN.includes(String(f.quelle || '').toLowerCase());
 }
 function _zdbMcZelle(r, f) {
   const stand = String(f.mailchimp || '').trim();
@@ -49077,8 +49094,8 @@ async function _korbAusDbEntfernen(i, btn) {
   try {
     const names = await _zdbEnsureTables(account);
     let hit = null;
-    if (r.email) hit = (await _zdbSelect(names.kontakt.name, { filter: "LOWER({email})='" + _zdbEsc(String(r.email).toLowerCase()) + "'", maxRecords: 1 }))[0] || null;
-    if (!hit && r.name) hit = (await _zdbSelect(names.kontakt.name, { filter: "LOWER({name})='" + _zdbEsc(String(r.name).toLowerCase()) + "'", maxRecords: 1 }))[0] || null;
+    if (r.email) hit = (await _zdbSelect(names.kontakt.name, { filter: "LOWER({email})=" + _zdbLit(String(r.email).toLowerCase()) + "", maxRecords: 1 }))[0] || null;
+    if (!hit && r.name) hit = (await _zdbSelect(names.kontakt.name, { filter: "LOWER({name})=" + _zdbLit(String(r.name).toLowerCase()) + "", maxRecords: 1 }))[0] || null;
     if (hit) await _zdbDeleteRecord(names.kontakt.name, hit.id);
     const stempel = 'verworfen ' + nowIso() + ' · ' + ((APP_KEYS.user && APP_KEYS.user.name) || 'Hero');
     await airtableUpdateWithAutoField(CRAWLED_TABLE, r.recordId,
@@ -49158,8 +49175,8 @@ async function _crawlPushFs(i, btn) {
 async function _zdbKontaktFinden(account, r) {
   const namen = await _zdbEnsureTables(account);
   let hit = null;
-  if (r.email) hit = (await _zdbSelect(namen.kontakt.name, { filter: "LOWER({email})='" + _zdbEsc(String(r.email).toLowerCase()) + "'", maxRecords: 1 }))[0] || null;
-  if (!hit && r.name) hit = (await _zdbSelect(namen.kontakt.name, { filter: "LOWER({name})='" + _zdbEsc(String(r.name).toLowerCase()) + "'", maxRecords: 1 }))[0] || null;
+  if (r.email) hit = (await _zdbSelect(namen.kontakt.name, { filter: "LOWER({email})=" + _zdbLit(String(r.email).toLowerCase()) + "", maxRecords: 1 }))[0] || null;
+  if (!hit && r.name) hit = (await _zdbSelect(namen.kontakt.name, { filter: "LOWER({name})=" + _zdbLit(String(r.name).toLowerCase()) + "", maxRecords: 1 }))[0] || null;
   return { namen, hit };
 }
 
