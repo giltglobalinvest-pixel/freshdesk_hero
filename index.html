@@ -824,7 +824,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v3.15.2';
+const APP_VERSION = 'v3.16.0';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -32936,15 +32936,31 @@ function openAngStammdatenEditor() {
              hier bearbeitbar zu lassen hieße, eine von sechs Nummern zur
              offiziellen zu machen. */
           ((Array.isArray(s._erpAnlagen) && s._erpAnlagen.length > 1)
-            ? '<div class="border-t border-ink-200 pt-3">' +
-                '<label class="text-[11px] font-bold text-ink-500 uppercase tracking-wider">Aufzugsanlage</label>' +
-                '<div class="bg-ink-50 border border-ink-200 rounded-lg p-2.5 text-[12px] text-ink-600">' +
-                  '<b>' + s._erpAnlagen.length + ' Aufzüge</b> — Standort und Fabriknummer gibt es hier nicht einzeln. ' +
-                  'Gepflegt werden sie über <b>Aufzüge</b> in der Leiste oben.' +
-                '</div>' +
-                '<input id="sdStandort" type="hidden" value="' + escapeAttr(s.collected?.standort || '') + '">' +
-                '<input id="sdFabrik" type="hidden" value="' + escapeAttr(s.collected?.fabriknummer || '') + '">' +
-              '</div>'
+            ? (function () {
+                /* Auswahl, welche der angelegten Aufzüge in DIESES Angebot
+                   gehören. Vorausgewählt sind alle — sie stammen aus demselben
+                   Ticket. Wer nur drei von sechs anbietet, hakt die anderen ab;
+                   das ist häufiger als es klingt (zwei Aufzüge stillgelegt,
+                   einer noch im Fremdvertrag). */
+                const gew = Array.isArray(s.collected?.aufzuege) && s.collected.aufzuege.length
+                  ? s.collected.aufzuege.map(a => String(a.id))
+                  : s._erpAnlagen.map(a => String(a.id));
+                return '<div class="border-t border-ink-200 pt-3">' +
+                  '<label class="text-[11px] font-bold text-ink-700 uppercase tracking-wider">Aufzüge in diesem Angebot</label>' +
+                  '<div class="mt-1 rounded-lg border border-ink-200 divide-y divide-ink-100 max-h-56 overflow-y-auto">' +
+                    s._erpAnlagen.map((a, i) =>
+                      '<label class="flex items-center gap-2 px-2.5 py-2 text-[12px] cursor-pointer hover:bg-ink-50">' +
+                        '<input type="checkbox" class="w-4 h-4 accent-emerald-600 shrink-0" data-sd-aufzug="' + escapeAttr(String(a.id)) + '"' +
+                        (gew.includes(String(a.id)) ? ' checked' : '') + ' onchange="_sdAufzugAuswahlZaehlen()">' +
+                      '<span class="flex-1 min-w-0"><b class="text-ink-900">' + escapeHtml(a.adresse || '?') + '</b>' +
+                      (a.fabriknummer ? ' · <span class="font-mono text-ink-600">' + escapeHtml(a.fabriknummer) + '</span>'
+                                      : ' · <span class="text-amber-700">ohne Fabriknummer</span>') + '</span></label>').join('') +
+                  '</div>' +
+                  '<p id="sdAufzugZaehler" class="text-[10px] text-ink-500 mt-1"></p>' +
+                  '<input id="sdStandort" type="hidden" value="' + escapeAttr(s.collected?.standort || '') + '">' +
+                  '<input id="sdFabrik" type="hidden" value="' + escapeAttr(s.collected?.fabriknummer || '') + '">' +
+                '</div>';
+              })()
             : '<div class="border-t border-ink-200 pt-3">' +
                 '<label class="text-[11px] font-bold text-ink-700 uppercase tracking-wider">Standort/Anschrift der Aufzugsanlage</label>' +
                 '<input id="sdStandort" type="text" value="' + escapeAttr(s.collected?.standort || '') + '" placeholder="Otto-Hahn-Platz 9-15 · 69120 Heidelberg" class="w-full px-2 py-1.5 border border-ink-300 rounded-lg text-sm">' +
@@ -33018,6 +33034,7 @@ function openAngStammdatenEditor() {
       '</div>' +
     '</div>';
   if (window.lucide) lucide.createIcons();
+  _sdAufzugAuswahlZaehlen();
 }
 
 function closeAngStammdatenEditor() {
@@ -33037,6 +33054,30 @@ function saveAngStammdaten(btn) {
   s.collected.stammdaten.ansprechpartner_vor_ort= ($('sdAnsprech')?.value || '').trim();
   s.collected.standort     = ($('sdStandort')?.value || '').trim();
   s.collected.fabriknummer = ($('sdFabrik')?.value || '').trim();
+  /* Mehrere Aufzüge: Die Auswahl aus den Kästchen ist maßgeblich. Standort und
+     Fabriknummer werden daraus abgeleitet — bei genau einem verhält sich das
+     Angebot danach wie ein gewöhnliches Einzelangebot, inklusive Fabriknummer
+     im Nummernkreis. */
+  const kaesten = Array.from(document.querySelectorAll('[data-sd-aufzug]'));
+  if (kaesten.length) {
+    const gewaehlt = kaesten.filter(k => k.checked).map(k => String(k.getAttribute('data-sd-aufzug')));
+    const alle = Array.isArray(s._erpAnlagen) ? s._erpAnlagen : [];
+    s.collected.aufzuege = alle.filter(a => gewaehlt.includes(String(a.id)))
+      .map(a => ({ id: a.id, adresse: a.adresse || '', fabriknummer: a.fabriknummer || '' }));
+    const gew = s.collected.aufzuege;
+    if (gew.length === 1) {
+      s.collected.standort = gew[0].adresse || s.collected.standort;
+      s.collected.fabriknummer = gew[0].fabriknummer || '';
+    } else if (gew.length > 1) {
+      const orte = [...new Set(gew.map(a => String(a.adresse || '').trim()).filter(Boolean))];
+      s.collected.standort = orte.length === 1 ? orte[0]
+        : (orte[0] || '') + (orte.length > 1 ? ' und ' + (orte.length - 1) + ' weitere' : '');
+      const nummern = gew.map(a => String(a.fabriknummer || '').trim()).filter(Boolean);
+      s.collected.fabriknummer = nummern.length
+        ? nummern.join(', ') + (nummern.length < gew.length ? ' (' + (gew.length - nummern.length) + ' ohne Nummer)' : '')
+        : gew.length + ' Aufzüge ohne Fabriknummer';
+    }
+  }
   // v2.46.254: Brief-Anrede an den gewählten ERP-Kontakt angleichen (Geschlecht +
   // Nachname aus dem ERP) — überschreibt eine ggf. falsch geratene KI-Anrede.
   const _detA = _angDeriveAnredeFromErp(s);
@@ -34060,6 +34101,22 @@ async function _erpMehrfachAnlegen(btn) {
     setBusy(btn, false);
     toast('Anlegen fehlgeschlagen: ' + (e.message || e), 'error', 10000);
   }
+}
+
+/* Zählt die angehakten Aufzüge im Stammdaten-Dialog mit. Ohne Rückmeldung
+   sieht niemand, dass „alle" vorausgewählt sind — und ein Angebot über sechs
+   Aufzüge, von dem man drei wollte, fällt erst im PDF auf. */
+function _sdAufzugAuswahlZaehlen() {
+  const kaesten = Array.from(document.querySelectorAll('[data-sd-aufzug]'));
+  const el = document.getElementById('sdAufzugZaehler');
+  if (!el || !kaesten.length) return;
+  const n = kaesten.filter(k => k.checked).length;
+  el.innerHTML = n === 0
+    ? '<span class="text-amber-700">Kein Aufzug ausgewählt — das Angebot hätte keine Anlage.</span>'
+    : (n === kaesten.length
+        ? 'Alle ' + n + ' Aufzüge sind im Angebot.'
+        : n + ' von ' + kaesten.length + ' Aufzügen im Angebot.')
+      + (n === 1 ? ' Bei genau einem gilt dessen Fabriknummer wie bei einem Einzelangebot.' : '');
 }
 
 /* Ergebnis zurück in den Angebots-Chat. Ohne das wüssten die beiden Knöpfe
