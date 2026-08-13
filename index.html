@@ -824,7 +824,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v3.10.0';
+const APP_VERSION = 'v3.10.1';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -46874,8 +46874,20 @@ function _ccLeitfadenFensterHtml() {
     + 'button:hover{background:#f1f5f9}'
     + '#banner{display:none;background:#fef3c7;border-bottom:1px solid #fcd34d;color:#78350f;padding:9px 14px;font-size:12px;font-weight:600;align-items:center;gap:8px}'
     + '#banner.an{display:flex}'
-    + '#txt{white-space:pre-wrap;padding:14px 16px 40px;font-size:14px}'
-    + '@media print{header,#banner{display:none!important}}'
+    + '#txt{white-space:pre-wrap;padding:14px 16px 20px;font-size:14px}'
+    + '#ki{position:sticky;bottom:0;background:#fff;border-top:1px solid #e2e8f0;padding:10px 14px}'
+    + '#kizeile{display:flex;gap:6px;flex-wrap:wrap}'
+    + '#wunsch{flex:1;min-width:180px;font:inherit;font-size:12px;padding:6px 9px;border:1px solid #cbd5e1;border-radius:7px}'
+    + '#ki button.haupt{background:#7c3aed;border-color:#7c3aed;color:#fff}'
+    + '#ki button.haupt:hover{background:#6d28d9}'
+    + '#kihinweis{font-size:11px;color:#64748b;margin:6px 0 0}'
+    + '#panel{display:none;border-top:1px solid #e2e8f0;background:#faf5ff;padding:12px 14px}'
+    + '#panel.an{display:block}'
+    + '#panel h2{font-size:12px;margin:0 0 6px;color:#5b21b6}'
+    + '#panel ul{margin:0 0 10px;padding-left:18px;font-size:12px;line-height:1.5}'
+    + '#neu{white-space:pre-wrap;background:#fff;border:1px solid #ddd6fe;border-radius:8px;padding:10px;font-size:13px;max-height:320px;overflow:auto}'
+    + '#panelknopf{display:flex;gap:6px;margin-top:8px}'
+    + '@media print{header,#banner,#ki,#panel{display:none!important}}'
     + '</style></head><body>'
     + '<header><div><h1 id="kamp">Gesprächsleitfaden</h1><p id="meta">wird geladen …</p></div>'
     + '<div id="gr"><button onclick="window.print()">Drucken</button>'
@@ -46884,6 +46896,15 @@ function _ccLeitfadenFensterHtml() {
     + '<div id="banner"><span id="bantext">Der Leitfaden wurde geändert.</span>'
     + '<button onclick="uebernehmen()" style="margin-left:auto">Neue Fassung anzeigen</button></div>'
     + '<div id="txt"></div>'
+    + '<div id="panel"><h2 id="paneltitel">Vorschlag</h2><ul id="panelliste"></ul>'
+      + '<div id="neu"></div>'
+      + '<div id="panelknopf"><button class="haupt" onclick="uebernehmenUndSpeichern(this)">Übernehmen und speichern</button>'
+      + '<button onclick="verwerfen()">Verwerfen</button></div></div>'
+    + '<div id="ki"><div id="kizeile">'
+      + '<input id="wunsch" placeholder="Was soll anders werden? z. B. Einstieg kürzer">'
+      + '<button class="haupt" onclick="ueberarbeiten(this)">Überarbeiten</button>'
+      + '<button onclick="ausNotizen(this)">Aus Gesprächsnotizen lernen</button>'
+    + '</div><p id="kihinweis">Die Auswertung liest die Notizen aller Kampagnen. Gespeichert wird erst, wenn du den Vorschlag übernimmst.</p></div>'
     + '<scr' + 'ipt>'
     + 'var KEY="' + CC_LEITFADEN_KEY + '", stand="", wartend=null;'
     + 'function lesen(){try{return JSON.parse(localStorage.getItem(KEY)||"null")}catch(e){return null}}'
@@ -46897,6 +46918,42 @@ function _ccLeitfadenFensterHtml() {
     + 'document.getElementById("bantext").textContent="Der Leitfaden wurde geändert ("+new Date(d.stand).toLocaleTimeString("de")+").";'
     + 'document.getElementById("banner").classList.add("an");}}'
     + 'setInterval(pruefen,2000);pruefen();'
+    // --- KI-Assistent. Rechnen kann das Fenster nicht selbst: Schlüssel und
+    // Proxy liegen im Hauptfenster. Es ruft deshalb dort eine schmale
+    // Schnittstelle auf — und sagt es klar, wenn die Hauptseite zu ist.
+    + 'function api(){var o=null;try{o=window.opener&&!window.opener.closed?window.opener._ccLeitfadenApi:null}catch(e){}return o}'
+    + 'function busy(b,t){if(!b)return;if(t){b.dataset.alt=b.textContent;b.textContent=t;b.disabled=true;}'
+    + 'else{if(b.dataset.alt)b.textContent=b.dataset.alt;b.disabled=false;}}'
+    + 'function fehler(m){var p=document.getElementById("panel");document.getElementById("paneltitel").textContent="Das hat nicht geklappt";'
+    + 'document.getElementById("panelliste").innerHTML="";document.getElementById("neu").textContent=m;'
+    + 'document.getElementById("panelknopf").style.display="none";p.classList.add("an");}'
+    + 'var vorschlag="";'
+    + 'function zeigeVorschlag(titel,punkte,text){vorschlag=text||"";'
+    + 'document.getElementById("paneltitel").textContent=titel;'
+    + 'var ul=document.getElementById("panelliste");ul.innerHTML="";'
+    + '(punkte||[]).forEach(function(p){var li=document.createElement("li");li.textContent=p;ul.appendChild(li);});'
+    + 'document.getElementById("neu").textContent=vorschlag;'
+    + 'document.getElementById("panelknopf").style.display=vorschlag?"flex":"none";'
+    + 'document.getElementById("panel").classList.add("an");'
+    + 'document.getElementById("panel").scrollIntoView({behavior:"smooth",block:"start"});}'
+    + 'function verwerfen(){vorschlag="";document.getElementById("panel").classList.remove("an");}'
+    + 'async function ueberarbeiten(b){var a=api();if(!a)return fehler("Die Anrufliste ist nicht mehr offen. Bitte das Hauptfenster öffnen und es noch einmal versuchen.");'
+    + 'var w=(document.getElementById("wunsch").value||"").trim();'
+    + 'if(!w)return fehler("Sag in einem Satz, was anders werden soll.");'
+    + 'busy(b,"Schreibt…");try{var t=await a.ueberarbeiten(w,document.getElementById("txt").textContent);'
+    + 'busy(b);zeigeVorschlag("Überarbeiteter Leitfaden",[],t);}catch(e){busy(b);fehler(String(e&&e.message||e));}}'
+    + 'async function ausNotizen(b){var a=api();if(!a)return fehler("Die Anrufliste ist nicht mehr offen. Bitte das Hauptfenster öffnen und es noch einmal versuchen.");'
+    + 'busy(b,"Liest Notizen…");try{var r=await a.ausNotizen(document.getElementById("txt").textContent);'
+    + 'busy(b);'
+    + 'if(r.zuWenig){return fehler("Erst "+r.anzahl+" Gespräche sind notiert. Ab etwa 30 Notizen wird die Auswertung brauchbar.");}'
+    + 'var punkte=[];(r.erkenntnisse||[]).forEach(function(e){punkte.push(e)});'
+    + 'zeigeVorschlag("Aus "+r.anzahl+" Gesprächsnotizen",punkte,r.vorschlag);}'
+    + 'catch(e){busy(b);fehler(String(e&&e.message||e));}}'
+    + 'async function uebernehmenUndSpeichern(b){var a=api();if(!a)return fehler("Die Anrufliste ist nicht mehr offen.");'
+    + 'if(!vorschlag)return;busy(b,"Speichert…");try{await a.speichern(vorschlag);busy(b);'
+    + 'document.getElementById("panel").classList.remove("an");document.getElementById("wunsch").value="";'
+    // Wer selbst gespeichert hat, braucht kein „wurde geändert" — direkt anzeigen.
+    + 'stand="";wartend=null;pruefen();}catch(e){busy(b);fehler(String(e&&e.message||e));}}'
     + '</scr' + 'ipt></body></html>';
 }
 
@@ -47978,16 +48035,7 @@ async function _ccVorlageOeffnen() {
           + '<label class="block"><span class="text-[11px] font-semibold text-ink-700">Gesprächsleitfaden</span>'
             + '<textarea id="ccVorlageLeitfaden" rows="10" class="w-full mt-0.5 px-2.5 py-2 border border-ink-300 rounded-lg text-[12px] font-sans">' + escapeHtml(v.leitfaden || CC_LEITFADEN_STANDARD) + '</textarea>'
             + '<span class="text-[10px] text-ink-500">Öffnet der Anrufer über „Leitfaden" in einem eigenen Fenster. Je Kampagne eigen; nach dem Speichern meldet das Fenster die Änderung von selbst.</span></label>'
-          + '<div class="rounded-xl border border-violet-200 bg-violet-50/60 p-3">'
-            + '<p class="text-[11px] text-violet-900 mb-1.5 font-semibold">Leitfaden mit KI schärfen</p>'
-            + '<div class="flex gap-2 flex-wrap mb-2">'
-              + '<input id="ccLeitfadenWunsch" placeholder="z. B. Einstieg kürzer, mehr auf Kosten eingehen" class="flex-1 min-w-[220px] px-2.5 py-1.5 border border-violet-300 rounded-lg text-[12px]">'
-              + '<button onclick="_ccLeitfadenKi(this)" class="px-3 py-1.5 bg-violet-600 hover:bg-violet-700 text-white rounded-lg text-[12px] font-bold">Überarbeiten</button>'
-            + '</div>'
-            + '<button onclick="_ccLeitfadenAusNotizen(this)" class="px-3 py-1.5 rounded-lg text-[12px] font-bold bg-white border border-violet-300 text-violet-700 hover:bg-violet-100 inline-flex items-center gap-1.5"><i data-lucide="lightbulb" class="w-3.5 h-3.5"></i> Aus den Gesprächsnotizen lernen</button>'
-            + '<p class="text-[10px] text-violet-800/80 mt-1">Wertet die Notizen ALLER Kampagnen und Mandanten aus — was am Telefon wirklich gesagt wurde, steht dort und nirgends sonst.</p>'
-            + '<div id="ccLeitfadenBefund" class="mt-2"></div>'
-          + '</div>'
+          + '<p class="text-[10px] text-ink-500 -mt-1">Der KI-Assistent zum Schärfen des Leitfadens sitzt im Leitfaden-Fenster — dort, wo telefoniert wird.</p>'
           + '<div class="rounded-xl border border-violet-200 bg-violet-50/60 p-3">'
             + '<p class="text-[11px] text-violet-900 mb-1.5">Anschreiben von der KI schreiben lassen — beschreib in einem Satz, worum es geht:</p>'
             + '<div class="flex gap-2 flex-wrap">'
@@ -48138,24 +48186,44 @@ async function _ccVorlageKi(btn) {
 /* --- Leitfaden mit der KI überarbeiten ----------------------------------
    Ein Leitfaden ist nie fertig: Nach hundert Anrufen weiß man, welcher Satz
    trägt und an welcher Stelle aufgelegt wird. Beides steckt in den Notizen. */
-async function _ccLeitfadenKi(btn) {
-  const feld = document.getElementById('ccVorlageLeitfaden');
-  if (!feld) return;
-  const wunsch = (document.getElementById('ccLeitfadenWunsch')?.value || '').trim();
-  if (!wunsch) return toast('Bitte in einem Satz sagen, was anders werden soll.', 'warn', 5000);
+/* Was das Leitfaden-Fenster aufruft. Bewusst eine kleine, benannte Schnittstelle
+   statt Zugriff auf beliebige Funktionen des Hauptfensters: Das Fenster lebt
+   länger als eine Fassung der App, und was es braucht, soll an einer Stelle
+   stehen. */
+window._ccLeitfadenApi = {
+  async ueberarbeiten(wunsch, aktuell) {
+    return await _ccLeitfadenBauen('Überarbeite den Leitfaden nach diesem Wunsch: ' + wunsch,
+      aktuell, _ccAccount(), null);
+  },
+  async ausNotizen(aktuell) {
+    const notizen = await _ccNotizenSammeln(400);
+    if (notizen.length < 5) return { zuWenig: true, anzahl: notizen.length };
+    const erg = await _ccLeitfadenBauen('Werte die Gesprächsnotizen aus und verbessere den Leitfaden daraufhin.',
+      aktuell, _ccAccount(), notizen);
+    return { anzahl: notizen.length, erkenntnisse: erg.erkenntnisse, vorschlag: erg.vorschlag };
+  },
+  async speichern(text) { return await _ccLeitfadenSpeichern(text); },
+};
+
+/* Speichern aus dem Fenster heraus — derselbe Datensatz, den auch der
+   Vorlagen-Dialog schreibt. Danach steht der neue Stand im localStorage, und
+   jedes offene Leitfaden-Fenster meldet die Änderung von selbst. */
+async function _ccLeitfadenSpeichern(text) {
   const acc = _ccAccount();
-  setBusy(btn, true, 'Schreibt…');
-  try {
-    const neu = await _ccLeitfadenBauen(
-      'Überarbeite den Leitfaden nach diesem Wunsch: ' + wunsch,
-      feld.value, acc, null);
-    feld.value = neu;
-    setBusy(btn, false);
-    toast('Vorschlag eingesetzt — durchlesen und speichern.', 'success', 6000);
-  } catch (e) {
-    setBusy(btn, false);
-    toast('KI: ' + (e.message || e), 'error', 9000);
+  if (!acc) throw new Error('Kein Mandant aktiv.');
+  const kampagne = CC_STATE.kampagne || CC_KAMPAGNE_STANDARD;
+  const sauber = String(text || '').trim();
+  if (!sauber) throw new Error('Der Leitfaden wäre leer.');
+  const v = await _ccVorlageLaden();
+  const felder = { kampagne, account_id: acc.id, leitfaden: sauber, updated_at: nowIso() };
+  if (v && v.recordId) await airtableUpdateWithAutoField(CC_VORLAGE_TABLE, v.recordId, felder, CC_VORLAGE_TYPEN);
+  else {
+    const rec = await airtableWriteWithAutoField(CC_VORLAGE_TABLE, felder, CC_VORLAGE_TYPEN);
+    if (_CC_VORLAGE) _CC_VORLAGE.recordId = rec && rec.id;
   }
+  if (_CC_VORLAGE) _CC_VORLAGE.leitfaden = sauber;
+  _ccLeitfadenStandSetzen(sauber);
+  return true;
 }
 
 /* Notizen ALLER Kampagnen und Mandanten. Kampagnenübergreifend, weil dieselben
@@ -48179,54 +48247,6 @@ async function _ccNotizenSammeln(max) {
       kampagne: String(f.kampagne || CC_KAMPAGNE_STANDARD),
       firma: namen[String(f.account_id)] || '–',
     }));
-}
-
-async function _ccLeitfadenAusNotizen(btn) {
-  const feld = document.getElementById('ccVorlageLeitfaden');
-  const befund = document.getElementById('ccLeitfadenBefund');
-  if (!feld || !befund) return;
-  setBusy(btn, true, 'Lese Notizen…');
-  befund.innerHTML = '';
-  try {
-    const notizen = await _mitZeitlimit(_ccNotizenSammeln(400), 60000, 'Airtable');
-    if (notizen.length < 5) {
-      setBusy(btn, false);
-      befund.innerHTML = '<p class="text-[11px] text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-2 py-1.5">'
-        + 'Erst ' + notizen.length + ' Gespräche sind notiert. Daraus lässt sich noch nichts ableiten — '
-        + 'ab etwa 30 Notizen wird die Auswertung brauchbar.</p>';
-      return;
-    }
-    setBusy(btn, true, notizen.length + ' Notizen…');
-    const auswertung = await _ccLeitfadenBauen(
-      'Werte die Gesprächsnotizen aus und verbessere den Leitfaden daraufhin.',
-      feld.value, _ccAccount(), notizen);
-    setBusy(btn, false);
-    _CC_LEITFADEN_VORSCHLAG = auswertung.vorschlag;
-    befund.innerHTML =
-      '<div class="rounded-lg border border-violet-300 bg-white p-2.5">'
-      + '<p class="text-[11px] font-bold text-violet-900 mb-1">Aus ' + notizen.length + ' Gesprächsnotizen:</p>'
-      + '<ul class="text-[11px] text-ink-700 space-y-1 list-disc list-inside">'
-      + (auswertung.erkenntnisse || []).map(e => '<li>' + escapeHtml(e) + '</li>').join('')
-      + '</ul>'
-      + (auswertung.vorschlag
-          ? '<button onclick="_ccLeitfadenVorschlagUebernehmen(this)" class="mt-2 px-3 py-1.5 bg-violet-600 hover:bg-violet-700 text-white rounded-lg text-[12px] font-bold">Überarbeiteten Leitfaden einsetzen</button>'
-            + '<span class="text-[10px] text-ink-500 ml-2">ersetzt den Text oben — gespeichert wird erst mit „Speichern"</span>'
-          : '')
-      + '</div>';
-    if (window.lucide) lucide.createIcons();
-  } catch (e) {
-    setBusy(btn, false);
-    befund.innerHTML = '<p class="text-[11px] text-red-700">' + escapeHtml(e.message || String(e)) + '</p>';
-  }
-}
-
-let _CC_LEITFADEN_VORSCHLAG = '';
-function _ccLeitfadenVorschlagUebernehmen(btn) {
-  const feld = document.getElementById('ccVorlageLeitfaden');
-  if (!feld || !_CC_LEITFADEN_VORSCHLAG) return;
-  feld.value = _CC_LEITFADEN_VORSCHLAG;
-  if (btn) btn.disabled = true;
-  toast('Eingesetzt — durchlesen und speichern.', 'success', 6000);
 }
 
 /* Gemeinsamer Weg zur KI. Mit Notizen kommt eine Auswertung zurück, ohne nur
