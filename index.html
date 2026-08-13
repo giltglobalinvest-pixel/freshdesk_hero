@@ -824,7 +824,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v3.7.5';
+const APP_VERSION = 'v3.8.0';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -2514,9 +2514,40 @@ async function _bootstrapLogin(userKey) {
     is_admin: role === 'admin' || rec.fields.is_admin === true,
     allow_default_keys: _truthyFieldValue(rec.fields.allow_default_keys),
     phone:   rec.fields.phone || '',
+    kampagnen: _userKampagnenListe(rec.fields.kampagnen),
   };
   localStorage.setItem(LEGACY_USER_KEY, userKey);
   return APP_KEYS.user;
+}
+
+/* Freigegebene Kampagnen eines Benutzers. Leere Liste = keine Einschränkung —
+   so bleibt jeder bestehende Benutzer unverändert, ohne dass irgendwo ein Feld
+   nachgetragen werden muss. */
+function _userKampagnenListe(v) {
+  return String(v == null ? '' : v).split(/[,;\n]/).map(s => s.trim()).filter(Boolean);
+}
+
+/* Der Proxy-Login (/login, /me) liefert nur die Kernfelder zurück — die
+   Kampagnen-Freigabe steht in Airtable am Benutzer. Sie wird deshalb nach der
+   Anmeldung einmal nachgeladen, bevor die Anrufliste zum ersten Mal zeichnet.
+   Schlägt das fehl, bleibt die Liste leer: Eine Einschränkung, die auf einem
+   fehlgeschlagenen Ladevorgang beruht, wäre schlimmer als keine. */
+async function _userKampagnenLaden() {
+  const u = APP_KEYS.user;
+  if (!u || Array.isArray(u.kampagnen)) return;
+  u.kampagnen = [];
+  if (!u.api_key) return;
+  try {
+    const filter = "{api_key}='" + escapeFormula(u.api_key) + "'";
+    const res = await fetch(
+      'https://api.airtable.com/v0/' + APP_CONFIG.APP_BASE_ID + '/User?maxRecords=1&filterByFormula=' + encodeURIComponent(filter),
+      { headers: { Authorization: 'Bearer ' + APP_CONFIG.AIRTABLE_READ_KEY } });
+    if (!res.ok) return;
+    const d = await res.json();
+    const f = (d.records && d.records[0] && d.records[0].fields) || {};
+    u.kampagnen = _userKampagnenListe(f.kampagnen);
+    if (!u.role && f.role) u.role = f.role;
+  } catch (_) {}
 }
 
 /* Hilfsfunktion: 'ja' / true / 'true' / 1 → true, sonst false */
@@ -8839,21 +8870,24 @@ async function _hydrateUserEmail(userId) {
     console.warn('[hydrateUserEmail]', e.message);
   }
 }
-async function createUser({ api_key, name, role, status, phone, allow_default_keys }) {
+async function createUser({ api_key, name, role, status, phone, allow_default_keys, kampagnen }) {
   const fields = {
     api_key, name, role: role || 'user', status: status || 'aktiv', created: nowIso(),
   };
   if (phone) fields.phone = phone;
   if (allow_default_keys) fields.allow_default_keys = allow_default_keys;
+  if (kampagnen) fields.kampagnen = kampagnen;
   return await airtableWriteWithAutoField('User', fields, {
     phone: 'singleLineText',
     allow_default_keys: 'singleLineText',
+    kampagnen: 'singleLineText',
   });
 }
 async function updateUser(id, fields) {
   return await airtableUpdateWithAutoField('User', id, fields, {
     phone: 'singleLineText',
     allow_default_keys: 'singleLineText',
+    kampagnen: 'singleLineText',
   });
 }
 async function deleteUser(id)         { return await airtableDelete('User', id); }
@@ -8878,6 +8912,12 @@ function setActiveNav(name) {
   });
 }
 function navTo(page) {
+  /* Callcenter-Kräfte kommen nur auf diese eine Seite. Das Ausblenden von Menü
+     und Navigationsleiste allein genügt nicht: Die Fehlerseite bietet „Zur
+     Startseite" an, der Deep-Link führt auf ein Ticket, und goHome() ging bis
+     v3.8.0 ebenfalls auf die Ticketliste. Alle drei landeten an der Sperre
+     vorbei. */
+  if (page !== 'callcenter' && _ccIstCallcenter()) page = 'callcenter';
   APP_STATE.page = page;
   setActiveNav(['tickets','tasks','accounts','contacts','callcenter','profile'].includes(page) ? page : '');
   // v2.46.63: FAB nur auf Seiten zeigen wo "Neue Email schreiben" sinnvoll ist
@@ -9288,6 +9328,12 @@ function goHome() {
   if (typeof TYPE_CTX           !== 'undefined') TYPE_CTX           = null;
   if (typeof WV_CTX             !== 'undefined') WV_CTX             = null;
   closeMenu && closeMenu();
+  // Für Callcenter-Kräfte ist die Anrufliste die Startseite.
+  if (_ccIstCallcenter()) {
+    if (APP_STATE.page === 'callcenter' && !hadOverlay) window.scrollTo({ top: 0, behavior: 'smooth' });
+    else navTo('callcenter');
+    return;
+  }
   if (APP_STATE.page === 'tickets' && !hadOverlay) {
     // Schon auf Home, kein Overlay zu schließen → zum Listenanfang scrollen
     window.scrollTo({ top: 0, behavior: 'smooth' });
@@ -38842,6 +38888,11 @@ async function openUserModal(user) {
               </select>
               ${(user?.role||'')==='callcenter' ? '<p class="text-[10px] text-amber-700 mt-1">Sieht nach dem Login ausschließlich die Anrufliste — keine Tickets, keine Einstellungen.</p>' : ''}
             </div>
+            <div class="col-span-2">
+              <label class="text-xs font-semibold text-ink-700">Kampagnen (leer = alle)</label>
+              <input id="usrKampagnen" type="text" value="${escapeAttr(user?.kampagnen || '')}" placeholder="z. B. Sonderkonditionen, Wartung 2026" class="mt-1 w-full px-3 py-2 border border-ink-200 rounded-lg text-sm">
+              <p class="text-[10px] text-ink-500 mt-1">Mit Komma trennen — exakt so geschrieben wie in der Anrufliste. Der User sieht dann nur diese Kampagnen und kann keine neuen anlegen. Welche <b>Firmen</b> er sieht, steuert der Account-Zugriff weiter unten.</p>
+            </div>
             <div>
               <label class="text-xs font-semibold text-ink-700">Status</label>
               <select id="usrStatus" class="mt-1 w-full px-3 py-2 border border-ink-200 rounded-lg text-sm">
@@ -39039,6 +39090,9 @@ async function submitUserForm() {
       status:  $('usrStatus').value,
       phone:   $('usrPhone')?.value.trim() || '',
       allow_default_keys: allowDefault ? 'ja' : 'nein',
+      // Leer = alle Kampagnen. Normalisiert gespeichert, damit die Liste beim
+      // Vergleich nicht an einem Leerzeichen scheitert.
+      kampagnen: _userKampagnenListe($('usrKampagnen')?.value || '').join(', '),
     };
     if (!userFields.name)    throw new Error('Name fehlt');
     if (!userFields.api_key) throw new Error('Login-Key fehlt');
@@ -39051,6 +39105,7 @@ async function submitUserForm() {
         status:             userFields.status,
         phone:              userFields.phone,
         allow_default_keys: userFields.allow_default_keys,
+        kampagnen:          userFields.kampagnen,
       };
       await updateUser(user.id, upd);
     } else {
@@ -45445,6 +45500,39 @@ function _ccIstCallcenter() {
   return String(u.role || '').toLowerCase() === 'callcenter' && !u.is_admin;
 }
 
+/* Auf welche Kampagnen ist dieser Benutzer freigegeben? null = alle.
+   Gedacht für externe Agenturen: Sie bekommen einen eigenen Benutzer, dort die
+   Kampagnen, die sie bearbeiten sollen, und über den bestehenden
+   Account-Zugriff die Mandanten. Admins sind nie eingeschränkt — sonst sperrt
+   sich der Betreiber mit einem Tippfehler selbst aus. */
+function _ccKampagnenErlaubt() {
+  const u = APP_KEYS.user || {};
+  if (u.is_admin) return null;
+  const l = Array.isArray(u.kampagnen) ? u.kampagnen.filter(Boolean) : [];
+  return l.length ? l : null;
+}
+
+function _ccKampagneErlaubt(name) {
+  const erlaubt = _ccKampagnenErlaubt();
+  if (!erlaubt) return true;
+  const n = String(name || CC_KAMPAGNE_STANDARD).trim().toLowerCase();
+  return erlaubt.some(k => k.trim().toLowerCase() === n);
+}
+
+/* Vor jedem Zeichnen: Steht eine nicht freigegebene Kampagne im Zustand — aus
+   dem localStorage einer früheren Sitzung oder aus der Vorbelegung —, wird auf
+   die erste erlaubte umgestellt. Ohne das säße ein Agentur-Benutzer vor einer
+   leeren Liste und hielte sie für einen Fehler. */
+function _ccKampagneErzwingen() {
+  const erlaubt = _ccKampagnenErlaubt();
+  if (!erlaubt) return;
+  if (!_ccKampagneErlaubt(CC_STATE.kampagne)) {
+    CC_STATE.kampagne = erlaubt[0];
+    lsSetzen('fdh_cc_kampagne', CC_STATE.kampagne);
+    _CC_VORLAGE = null;
+  }
+}
+
 /** Telefonnummer auf Ziffern reduzieren — Grundlage der Dublettenprüfung. */
 function _ccNummerNormal(nr) {
   let n = String(nr || '').replace(/[^\d+]/g, '');
@@ -45614,6 +45702,11 @@ async function _ccLaden() {
   CC_STATE.laden = true;
   const rows = await airtableRead(CC_TABLE, { filter: "{account_id}='" + escapeFormula(acc.id) + "'" }).catch(() => []);
   CC_STATE.leads = (rows || []).map(r => Object.assign({ recordId: r.id }, r.fields || {}));
+  /* Freigegebene Kampagnen: alles andere gar nicht erst in den Zustand lassen.
+     Nur die Auswahlliste zu filtern würde nicht reichen — Dublettenprüfung,
+     Statistik und Import rechnen über CC_STATE.leads und würden fremde
+     Kampagnen mitzählen. */
+  if (_ccKampagnenErlaubt()) CC_STATE.leads = CC_STATE.leads.filter(r => _ccKampagneErlaubt(r.kampagne));
   CC_STATE.laden = false;
 }
 
@@ -45674,6 +45767,7 @@ async function renderCallcenterPage() {
 function _ccZeichnen() {
   const host = $('pageContent');
   if (!host) return;
+  _ccKampagneErzwingen();
   const acc = _ccAccount();
   const alle = _ccKampagnenLeads().filter(r => CC_STATE.zeigeVersteckte || String(r.versteckt || '') !== 'ja');
   const offen = alle.filter(r => ['offen', 'rueckruf', 'kein_kontakt'].includes(_ccStatusVon(r))).length;
@@ -45934,10 +46028,24 @@ function _ccKampagnenWahl() {
   meine.forEach(r => { const k = String(r.kampagne || CC_KAMPAGNE_STANDARD); zaehl[k] = (zaehl[k] || 0) + 1; });
   const aktuell = CC_STATE.kampagne || CC_KAMPAGNE_STANDARD;
   if (!zaehl[aktuell]) zaehl[aktuell] = 0;
-  const keys = Object.keys(zaehl).sort();
+  let keys = Object.keys(zaehl).sort();
+
+  /* Eingeschränkter Benutzer: Nur die freigegebenen Kampagnen stehen zur Wahl,
+     und angelegt werden dürfen keine neuen. Bei genau einer erübrigt sich die
+     Auswahl — dann steht dort nur noch der Name. */
+  const erlaubt = _ccKampagnenErlaubt();
+  if (erlaubt) {
+    erlaubt.forEach(k => { if (!(k in zaehl)) zaehl[k] = 0; });
+    keys = erlaubt.slice().sort();
+    if (keys.length === 1) {
+      return '<span class="px-3 py-2 rounded-lg text-sm font-bold text-ink-800 bg-ink-100 border border-ink-200 inline-flex items-center gap-1.5">'
+        + '<i data-lucide="megaphone" class="w-3.5 h-3.5 text-ink-500"></i>'
+        + escapeHtml(keys[0]) + ' (' + (zaehl[keys[0]] || 0) + ')</span>';
+    }
+  }
   return '<select onchange="_ccKampagneWechseln(this.value)" class="px-3 py-2 border border-ink-200 rounded-lg text-sm font-bold text-ink-800 bg-white" title="Kampagne">'
-    + keys.map(k => '<option value="' + escapeAttr(k) + '"' + (k === aktuell ? ' selected' : '') + '>' + escapeHtml(k) + ' (' + zaehl[k] + ')</option>').join('')
-    + '<option value="__neu__">+ Neue Kampagne …</option>'
+    + keys.map(k => '<option value="' + escapeAttr(k) + '"' + (k === aktuell ? ' selected' : '') + '>' + escapeHtml(k) + ' (' + (zaehl[k] || 0) + ')</option>').join('')
+    + (erlaubt ? '' : '<option value="__neu__">+ Neue Kampagne …</option>')
     + '</select>';
 }
 
@@ -46030,11 +46138,15 @@ async function _ccKampagneUmbenennen(btn) {
 
 function _ccKampagneWechseln(wert) {
   if (wert === '__neu__') {
+    // Freigegebene Benutzer legen keine Kampagnen an — sie arbeiten die ab,
+    // die sie bekommen haben.
+    if (_ccKampagnenErlaubt()) return _ccZeichnen();
     const name = (prompt('Name der neuen Kampagne:', '') || '').trim();
     if (!name) return _ccZeichnen();
     if (name === '__neu__') return _ccZeichnen();
     CC_STATE.kampagne = name;
   } else {
+    if (!_ccKampagneErlaubt(wert)) return _ccZeichnen();
     CC_STATE.kampagne = wert;
   }
   CC_STATE.aktiv = null;
@@ -47098,6 +47210,9 @@ async function _ccAdresseErgaenzen(r) {
     if (!String(r.ort || '').trim() && f.ort)         neu.ort     = String(f.ort).trim();
     if (!Object.keys(neu).length) continue;
     Object.assign(r, neu);
+    // Woher sie kam — damit eine Korrektur im Versanddialog auch dort ankommt
+    // und nicht bloß am Lead hängen bleibt.
+    r._zdbFirma = { tabelle: _zdbTableNames(a).firma, id: rows[0].id, mandant: a.name || a.id };
     try { await _ccSpeichern(r.recordId, neu); } catch (_) {}
     return r;
   }
@@ -47709,6 +47824,25 @@ function _ccVersandDialog(r, v, konfigs, signatur) {
               : '<input type="hidden" id="ccVersandAbsender" value="' + konfigs[0].id + '">')
           + '<label class="block"><span class="text-[11px] font-semibold text-ink-700">Betreff</span>'
             + '<input id="ccVersandBetreff" value="' + escapeAttr(betreff) + '" class="w-full mt-0.5 px-2.5 py-1.5 border border-ink-300 rounded-lg text-sm"></label>'
+          /* Anschrift zum Nachsehen und Ändern. Sie steht im „Für:"-Kopf der
+             Preisliste und im Anschriftenblock des Anschreibens — beides sieht
+             der Empfänger sofort, und eine aus der Datenbank geerbte Adresse
+             ist nicht automatisch die richtige. */
+          + '<details class="rounded-lg border border-ink-200 bg-ink-50/60" open>'
+            + '<summary class="text-[11px] font-semibold text-ink-700 cursor-pointer select-none px-2.5 py-1.5">Anschrift auf der Preisliste — prüfen und ggf. korrigieren</summary>'
+            + '<div class="px-2.5 pb-2.5 pt-1 space-y-1.5 bg-white border-t border-ink-200">'
+              + '<input id="ccVersandFirma" value="' + escapeAttr(r.firma || '') + '" placeholder="Firma" class="w-full px-2.5 py-1.5 border border-ink-300 rounded-lg text-[13px]">'
+              + '<input id="ccVersandStrasse" value="' + escapeAttr(r.strasse || '') + '" placeholder="Straße und Hausnummer" class="w-full px-2.5 py-1.5 border border-ink-300 rounded-lg text-[13px]">'
+              + '<div class="flex gap-1.5">'
+                + '<input id="ccVersandPlz" value="' + escapeAttr(r.plz || '') + '" placeholder="PLZ" class="w-24 px-2.5 py-1.5 border border-ink-300 rounded-lg text-[13px]">'
+                + '<input id="ccVersandOrt" value="' + escapeAttr(r.ort || '') + '" placeholder="Ort" class="flex-1 px-2.5 py-1.5 border border-ink-300 rounded-lg text-[13px]">'
+              + '</div>'
+              + (r._zdbFirma
+                  ? '<label class="flex items-start gap-1.5 text-[11px] text-ink-600 pt-0.5"><input type="checkbox" id="ccVersandZdbSchreiben" checked class="mt-0.5 w-3.5 h-3.5 accent-brand-500">'
+                    + '<span>Korrektur auch in der zentralen Datenbank speichern (' + escapeHtml(r._zdbFirma.mandant) + ')</span></label>'
+                  : '<p class="text-[11px] text-ink-500 pt-0.5">Änderungen werden am Kontakt der Anrufliste gespeichert.</p>')
+              + (String(r.strasse || '').trim() ? '' : '<p class="text-[11px] text-amber-700">Keine Anschrift hinterlegt — ohne sie steht auf der Preisliste nur die Firma.</p>')
+            + '</div></details>'
           + '<label class="block"><span class="text-[11px] font-semibold text-ink-700">Anschreiben</span>'
             + '<textarea id="ccVersandText" rows="10" class="w-full mt-0.5 px-2.5 py-2 border border-ink-300 rounded-lg text-[13px]">' + escapeHtml(text) + '</textarea></label>'
           + '<p class="text-[11px] text-ink-600 inline-flex items-center gap-1.5"><i data-lucide="paperclip" class="w-3.5 h-3.5"></i> Anhang: <b>' + escapeHtml(_ccDateiname(v.pdf_datei, r)) + '</b></p>'
@@ -47731,6 +47865,31 @@ function _ccVersandDialog(r, v, konfigs, signatur) {
 }
 function _ccVersandSchliessen() { const h = document.getElementById('ccVersandHost'); if (h) h.innerHTML = ''; }
 
+/* Übernimmt die im Versanddialog geprüfte Anschrift: an den Lead immer, in die
+   zentrale Datenbank nur auf Wunsch. Beides still zu tun wäre falsch — die
+   Firmenanschrift dort gilt für alle Mandanten und alle Vorgänge, nicht nur
+   für dieses eine Anschreiben. */
+async function _ccAnschriftUebernehmen(r) {
+  const w = (id) => (document.getElementById(id)?.value || '').trim();
+  const neu = { firma: w('ccVersandFirma'), strasse: w('ccVersandStrasse'), plz: w('ccVersandPlz'), ort: w('ccVersandOrt') };
+  if (!neu.firma) delete neu.firma;          // Firma nie leer überschreiben
+  const geaendert = Object.keys(neu).filter(k => String(r[k] || '').trim() !== neu[k]);
+  Object.assign(r, neu);
+  if (!geaendert.length) return;
+  try { await _ccSpeichern(r.recordId, neu); } catch (e) { console.warn('[CC] Anschrift am Lead:', e.message); }
+
+  const inZdb = document.getElementById('ccVersandZdbSchreiben');
+  if (!inZdb || !inZdb.checked || !r._zdbFirma) return;
+  try {
+    await airtableUpdateWithAutoField(r._zdbFirma.tabelle, r._zdbFirma.id, {
+      strasse: neu.strasse, plz: neu.plz, ort: neu.ort,
+    }, { strasse: 'singleLineText', plz: 'singleLineText', ort: 'singleLineText' });
+    toast('Anschrift auch in der zentralen Datenbank aktualisiert.', 'success', 5000);
+  } catch (e) {
+    toast('Anschrift am Kontakt gespeichert, in der zentralen DB nicht: ' + (e.message || e), 'warn', 8000);
+  }
+}
+
 async function _ccVersandAbsenden(recordId, btn) {
   const r = CC_STATE.leads.find(x => x.recordId === recordId);
   const acc = _ccAccount();
@@ -47740,6 +47899,10 @@ async function _ccVersandAbsenden(recordId, btn) {
   const slug = _archivSlugFuer(acc.id);
   setBusy(btn, true, 'Hole PDF…');
   try {
+    // Anschrift aus dem Dialog übernehmen, BEVOR das PDF gebaut wird — sie
+    // steht dort im „Für:"-Kopf und im Anschriftenblock.
+    await _ccAnschriftUebernehmen(r);
+
     const res = await fetch(ARCHIV_URL + '/vorlage/' + slug + '/' + encodeURIComponent(_ccVorlageSchluessel()), { headers: { 'X-Hero-Key': key } });
     if (!res.ok) throw new Error('Die hinterlegte Preisliste ist nicht abrufbar (HTTP ' + res.status + ')');
     const roh = await res.arrayBuffer();
@@ -55415,6 +55578,9 @@ async function showApp() {
   // ist eine Sichtsperre, keine Sicherheitsgrenze — sie hält niemanden auf, der
   // die Konsole öffnet. Sie hält aber die Oberfläche frei von allem, was eine
   // Agentur weder braucht noch versehentlich anfassen soll.
+  // Kampagnen-Freigabe steht am Benutzer in Airtable und muss vor dem ersten
+  // Zeichnen der Anrufliste bekannt sein — sonst blitzt eine fremde Kampagne auf.
+  await _userKampagnenLaden();
   if (_ccIstCallcenter()) {
     document.body.classList.add('nur-callcenter');
     navTo('callcenter');
