@@ -824,7 +824,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v3.7.1';
+const APP_VERSION = 'v3.7.2';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -46241,7 +46241,10 @@ function _ccTabelle(rows) {
         + '<span class="font-bold text-ink-900 text-[14px]">' + escapeHtml(r.firma || '—') + '</span>'
         + (String(r.bestand || '') === 'ja' ? ' <span class="text-[10px] px-1 py-0.5 rounded bg-emerald-100 text-emerald-700 font-bold align-middle">Kunde</span>' : '')
         + (r.ort ? ' <span class="text-[12px] text-ink-400">· ' + escapeHtml(r.ort) + '</span>' : '')
-        + (belegt ? ' <span class="text-[11px] text-amber-700 font-semibold">· bei ' + escapeHtml(belegt) + '</span>' : '')
+        + (belegt
+            ? ' <span class="text-[11px] text-amber-700 font-semibold">· bei ' + escapeHtml(belegt) + '</span>'
+              + ' <button onclick="event.stopPropagation(); _ccSperreUebernehmen(\'' + r.recordId + '\', this)" class="text-[10px] px-1.5 py-0.5 rounded bg-amber-100 hover:bg-amber-200 border border-amber-300 text-amber-800 font-bold align-middle" title="Der Kontakt ist gerade bei ' + escapeAttr(belegt) + ' in Arbeit — trotzdem öffnen">übernehmen</button>'
+            : '')
         + '</td>'
       + '<td class="' + td + ' text-[14px] text-ink-800" title="' + escapeAttr(person) + '">' + escapeHtml(r.ansprechpartner || '—')
         + (r.position ? '<span class="text-[12px] text-ink-400"> · ' + escapeHtml(r.position) + '</span>' : '') + '</td>'
@@ -46332,6 +46335,33 @@ function _ccBelegtVon(r, ich) {
   const wer = String(r.bearbeiter || '').trim();
   if (!wer || wer === ich) return '';
   return wer;
+}
+
+/* Belegte Zeile an sich ziehen.
+
+   Die 20-Minuten-Sperre soll verhindern, dass zwei Anrufer denselben Menschen
+   anrufen. Sie darf aber keine Sackgasse sein: Bisher war eine belegte Zeile
+   nicht anklickbar — wer sie unter einem anderen Gerät oder Namen geöffnet
+   hatte, kam zwanzig Minuten nicht mehr an den eigenen Kontakt.
+
+   Deshalb: Sperre sichtbar, mit einem Knopf daneben. Wer sie übernimmt, sieht
+   vorher, wem er sie wegnimmt. */
+async function _ccSperreUebernehmen(recordId, btn) {
+  const r = (CC_STATE.leads || []).find(x => x.recordId === recordId);
+  if (!r) return;
+  const wer = String(r.bearbeiter || 'jemand anderem').trim();
+  if (!confirm('Dieser Kontakt ist gerade bei ' + wer + ' in Arbeit.\n\n'
+    + 'Übernehmen? Falls dort tatsächlich jemand telefoniert, ruft ihr beide denselben Menschen an.')) return;
+  if (btn) setBusy(btn, true, '…');
+  try {
+    await _ccSpeichern(recordId, { gesperrt_bis: '', bearbeiter: (APP_KEYS.user && APP_KEYS.user.name) || '' });
+    r.gesperrt_bis = ''; r.bearbeiter = (APP_KEYS.user && APP_KEYS.user.name) || '';
+    if (btn) setBusy(btn, false);
+    await _ccAktiv(recordId);
+  } catch (e) {
+    if (btn) setBusy(btn, false);
+    toast('Übernehmen fehlgeschlagen: ' + (e.message || e), 'error', 8000);
+  }
 }
 
 /* Der aufgeklappte Bereich unter der aktiven Zeile: Vorgeschichte, die vier
