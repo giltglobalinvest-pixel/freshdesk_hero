@@ -824,7 +824,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v3.8.5';
+const APP_VERSION = 'v3.8.6';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -4442,7 +4442,13 @@ async function loadAccounts() {
     const isOwner = (r.fields.api_key || '').trim() === userKey;
     const hasOwnKey = !!(access?.fields?.freshdesk_api_key && String(access.fields.freshdesk_api_key).trim());
     const hasAccountDefault = !!(r.fields.freshdesk_api_key && String(r.fields.freshdesk_api_key).trim());
-    const canUseDefault = (userAllowsDefault || isOwner) && hasAccountDefault;
+    /* „Schlüssel von <Master>" und der Master arbeitet selbst mit dem
+       Default-Key des Accounts: Dann steht in seinem Zugriffssatz nichts, der
+       Verweis läuft leer — und der Benutzer stand ohne Zugang da, obwohl alles
+       richtig eingerichtet war. Der Default-Key IST in dem Fall der Schlüssel
+       des Masters; ihn zu nehmen ist genau das, was der Verweis meint. */
+    const hatMasterVerweis = !!String(access?.fields?._von_master || '').trim();
+    const canUseDefault = (userAllowsDefault || isOwner || hatMasterVerweis) && hasAccountDefault;
     const canAccess = hasOwnKey || canUseDefault;
     return {
       id:       r.id,
@@ -46007,13 +46013,41 @@ function _ccZeichnen() {
     + (!acc
         ? '<div class="bg-amber-50 border border-amber-200 rounded-xl p-6 text-sm text-amber-900">'
           + '<p class="font-bold inline-flex items-center gap-1.5"><i data-lucide="key-round" class="w-4 h-4"></i> Kein Mandant freigeschaltet</p>'
-          + '<p class="mt-1 leading-relaxed">Für diesen Benutzer ist kein Freshdesk-Zugang nutzbar. Der Admin muss in der Userverwaltung beim Account-Zugriff entweder '
-          + '<b>„Darf Account-Default-API-Keys nutzen"</b> setzen oder einen eigenen API-Key eintragen.</p></div>'
+          + '<p class="mt-1 leading-relaxed">Für diesen Benutzer ist kein Freshdesk-Zugang nutzbar. Woran es liegt:</p>'
+          + '<ul class="mt-1.5 space-y-1 list-disc list-inside">'
+          + _ccZugriffDiagnose().map(z => '<li>' + escapeHtml(z) + '</li>').join('')
+          + '</ul></div>'
         : rows.length ? _ccTabelle(rows) : '<div class="bg-white rounded-xl border border-ink-200 p-8 text-center text-sm text-ink-500">'
         + (alle.length ? 'Hier ist nichts mehr zu tun.' : 'Noch keine Leads in der Kampagne.'
            + (APP_KEYS.user?.is_admin ? '<br><button onclick="_ccImportOeffnen()" class="mt-3 px-3 py-2 bg-brand-600 hover:bg-brand-700 text-white rounded-lg text-[12px] font-bold">Kontakte importieren</button>' : ''))
         + '</div>');
   if (window.lucide) lucide.createIcons();
+}
+
+/* Warum ist kein Mandant nutzbar? Die Bedingung steht in loadAccounts:
+   eigener Key ODER (Default-Keys erlaubt UND der Account hat einen Default).
+   Welche Hälfte fehlt, sieht man von außen nicht — und ohne das rät man.
+
+   Der häufigste Fall ist der Verweis „Schlüssel von <Master>": Er wird beim
+   Laden aufgelöst, indem der Zugriffssatz des Masters für DIESEN Account
+   gelesen wird. Arbeitet der Master selbst mit dem Default-Key des Accounts,
+   steht dort nichts — dann bleibt der Verweis leer. */
+function _ccZugriffDiagnose() {
+  const zugewiesen = (APP_STATE.allAssignedAccounts || []).filter(a => a._hasOwnAccess || a._isOwner);
+  if (!zugewiesen.length) return ['Diesem Benutzer ist in der Userverwaltung kein Account zugewiesen.'];
+  const darfDefault = APP_KEYS.user?.allow_default_keys === true || APP_KEYS.user?.is_admin === true;
+  const zeilen = zugewiesen.filter(a => !a._canAccess).map(a => {
+    const gruende = [];
+    if (!a._hasOwnKey) gruende.push('kein eigener API-Key — ist „Schlüssel von <Master>" gesetzt, hat der Master für diesen Account selbst keinen Key hinterlegt');
+    if (!a._hasDefault) gruende.push('der Account hat auch keinen Default-API-Key');
+    else if (!darfDefault) gruende.push('der Default-Key des Accounts wäre da, aber „Darf Account-Default-API-Keys nutzen" ist bei diesem Benutzer aus');
+    return a.name + ': ' + gruende.join(' · ');
+  });
+  if (!zeilen.length) {
+    // Zugriff wäre da, der Account ist aber lokal abgeschaltet.
+    zeilen.push('Der Zugriff besteht, der Mandant ist in dieser Installation aber unter „Accounts" abgeschaltet.');
+  }
+  return zeilen;
 }
 
 /* Mandantenwahl. Jede Kampagne gehört zu genau einem Mandanten — deshalb keine
