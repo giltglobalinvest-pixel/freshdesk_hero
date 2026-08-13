@@ -824,7 +824,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v3.8.3';
+const APP_VERSION = 'v3.8.4';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -38893,9 +38893,10 @@ async function openUserModal(user) {
             </div>
             <div class="col-span-2">
               <label class="text-xs font-semibold text-ink-700">Kampagnen (nichts ausgewählt = alle)</label>
-              <select id="usrKampagnenSel" multiple size="6" class="mt-1 w-full px-2 py-1.5 border border-ink-200 rounded-lg text-sm bg-white">
-                <option disabled>Kampagnen werden geladen …</option>
-              </select>
+              <div id="usrKampagnenBox" class="mt-1 max-h-56 overflow-y-auto rounded-lg border border-ink-200 bg-white divide-y divide-ink-100">
+                <p class="px-3 py-2 text-[11px] text-ink-500">Kampagnen werden geladen …</p>
+              </div>
+              <p id="usrKampagnenWarn" class="hidden text-[10px] text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-2 py-1.5 mt-1"></p>
               <!-- Trägt den gespeicherten Stand, solange die Liste lädt — und
                    bleibt die Rückfallebene, falls sie gar nicht lädt. -->
               <input id="usrKampagnen" type="hidden" value="${escapeAttr(user?.kampagnen || '')}">
@@ -39041,7 +39042,7 @@ async function openUserModal(user) {
    Feld mit dem gespeicherten Stand maßgeblich — dann ändert ein Speichern die
    Freigabe eben nicht, statt sie versehentlich zu leeren. */
 async function _usrKampagnenFuellen(gespeichert) {
-  const sel = document.getElementById('usrKampagnenSel');
+  const sel = document.getElementById('usrKampagnenBox');
   if (!sel) return;
   const gewaehlt = _userKampagnenListe(gespeichert);
   const istGewaehlt = (e) => gewaehlt.some(g => {
@@ -39064,17 +39065,50 @@ async function _usrKampagnenFuellen(gespeichert) {
       }
     });
     if (!liste.length) {
-      sel.innerHTML = '<option disabled>Noch keine Kampagnen vorhanden</option>';
+      sel.innerHTML = '<p class="px-3 py-2 text-[11px] text-ink-500">Noch keine Kampagnen vorhanden</p>';
       return;
     }
     sel.innerHTML = liste.map(e =>
-      '<option value="' + escapeAttr(e.key) + '"' + (istGewaehlt(e) ? ' selected' : '') + '>'
-        + escapeHtml(e.firma + ' · ' + e.name + (e.anzahl ? ' (' + e.anzahl + ')' : '')) + '</option>').join('');
+      '<label class="flex items-center gap-2 px-3 py-2 text-sm cursor-pointer hover:bg-ink-50">'
+        + '<input type="checkbox" class="w-4 h-4 accent-brand-500 shrink-0" onchange="_usrKampagnenPruefen()"'
+          + ' data-kampagne="' + escapeAttr(e.key) + '" data-account="' + escapeAttr(e.accountId) + '"'
+          + (istGewaehlt(e) ? ' checked' : '') + '>'
+        + '<span class="flex-1 min-w-0"><b class="text-ink-900">' + escapeHtml(e.firma) + '</b>'
+        + ' · ' + escapeHtml(e.name) + (e.anzahl ? ' <span class="text-ink-400">(' + e.anzahl + ')</span>' : '')
+        + '</span></label>').join('');
     sel.dataset.fertig = '1';
+    // Ein Haken bei einer Kampagne nützt nichts, wenn der Account-Zugriff für
+    // deren Firma fehlt — dann sieht der User genau nichts. Also mitprüfen.
+    document.querySelectorAll('.access-toggle').forEach(t => t.addEventListener('change', _usrKampagnenPruefen));
+    _usrKampagnenPruefen();
   } catch (e) {
     console.warn('[User] Kampagnen laden:', e.message);
-    sel.innerHTML = '<option disabled>Kampagnen konnten nicht geladen werden — bisherige Freigabe bleibt</option>';
+    sel.innerHTML = '<p class="px-3 py-2 text-[11px] text-amber-700">Kampagnen konnten nicht geladen werden — die bisherige Freigabe bleibt unverändert.</p>';
   }
+}
+
+/* Warnt, wenn eine angehakte Kampagne zu einer Firma gehört, für die der
+   Benutzer keinen Account-Zugriff hat. Das ist der Fehler, der sich sonst erst
+   beim Anmelden des Externen zeigt — als leere Liste ohne erkennbaren Grund. */
+function _usrKampagnenPruefen() {
+  const box = document.getElementById('usrKampagnenBox');
+  const warn = document.getElementById('usrKampagnenWarn');
+  if (!box || !warn || box.dataset.fertig !== '1') return;
+  const aktiv = new Set([...document.querySelectorAll('[data-access-row]')]
+    .filter(z => z.querySelector('.access-toggle')?.checked)
+    .map(z => String(z.dataset.accountId)));
+  const fehlend = [...new Set([...box.querySelectorAll('[data-kampagne]')]
+    .filter(c => c.checked)
+    .map(c => c.getAttribute('data-account'))
+    .filter(id => id && !aktiv.has(String(id))))];
+  if (!fehlend.length) { warn.classList.add('hidden'); warn.textContent = ''; return; }
+  const namen = fehlend.map(id => {
+    const a = (APP_STATE.accounts || []).find(x => String(x.id) === String(id));
+    return a ? (a.name || a.id) : id;
+  });
+  warn.textContent = 'Achtung: Für ' + namen.join(', ') + ' fehlt unten der Account-Zugriff — '
+    + 'ohne ihn sieht der Benutzer die angehakte Kampagne nicht.';
+  warn.classList.remove('hidden');
 }
 
 /* Einmaliger Signatur-Import (v2.62.1): kopiert die Freshdesk-Signatur des
@@ -39123,10 +39157,13 @@ async function fdhSigAusFreshdesk(btn, accountId) {
 }
 
 function _usrKampagnenLesen() {
-  const sel = document.getElementById('usrKampagnenSel');
-  if (sel && sel.dataset.fertig === '1') {
-    return [...sel.selectedOptions].map(o => o.value.trim()).filter(Boolean).join(', ');
+  const box = document.getElementById('usrKampagnenBox');
+  if (box && box.dataset.fertig === '1') {
+    return [...box.querySelectorAll('[data-kampagne]')]
+      .filter(c => c.checked).map(c => c.getAttribute('data-kampagne').trim()).filter(Boolean).join(', ');
   }
+  // Liste noch nicht geladen: den gespeicherten Stand unverändert zurückgeben,
+  // statt die Freigabe beim Speichern versehentlich zu leeren.
   return _userKampagnenListe(document.getElementById('usrKampagnen')?.value || '').join(', ');
 }
 
@@ -46142,8 +46179,17 @@ function _ccKampagnenWahl() {
   const erlaubt = _ccKampagnenErlaubt();
   if (erlaubt) {
     if (!erlaubt.length) {
-      return '<span class="px-3 py-2 rounded-lg text-sm font-bold text-amber-800 bg-amber-50 border border-amber-200 inline-flex items-center gap-1.5">'
-        + '<i data-lucide="lock" class="w-3.5 h-3.5"></i>Für diese Firma ist keine Kampagne freigegeben</span>';
+      // Den Firmennamen nennen: „diese Firma" hilft niemandem beim Suchen des
+      // Fehlers, und in neun von zehn Fällen ist die Freigabe für eine andere
+      // Firma gesetzt worden.
+      const frei = _ccKampagnenFreigabe() || [];
+      const andere = [...new Set(frei.map(e => {
+        const a = (APP_STATE.accounts || []).find(x => String(x.id) === e.accountId);
+        return (a ? (a.name || a.id) : 'andere Firma') + ' · ' + e.name;
+      }))];
+      return '<span class="px-3 py-2 rounded-lg text-sm font-bold text-amber-800 bg-amber-50 border border-amber-200 inline-flex items-center gap-1.5" '
+        + 'title="' + escapeAttr('Freigegeben ist: ' + (andere.join(' | ') || 'nichts')) + '">'
+        + '<i data-lucide="lock" class="w-3.5 h-3.5"></i>Für ' + escapeHtml((acc && acc.name) || 'diese Firma') + ' ist keine Kampagne freigegeben</span>';
     }
     erlaubt.forEach(k => { if (!(k in zaehl)) zaehl[k] = 0; });
     keys = erlaubt.slice().sort();
@@ -47970,6 +48016,7 @@ function _ccVersandDialog(r, v, konfigs, signatur) {
           // Der Anhang ist das, was der Kunde als Erstes öffnet — er gehört vor
           // dem Senden angesehen, nicht danach im gesendeten Ticket.
           + '<button onclick="_ccVersandPdfAnsehen(\'' + r.recordId + '\', this)" class="px-3 py-2 text-sm font-bold bg-white border border-ink-300 text-ink-700 hover:bg-ink-50 rounded-lg inline-flex items-center gap-1.5"><i data-lucide="file-search" class="w-4 h-4"></i> PDF ansehen</button>'
+          + '<button onclick="_ccVersandPdfAnsehen(\'' + r.recordId + '\', this, true)" class="px-3 py-2 text-sm font-bold bg-white border border-ink-300 text-ink-700 hover:bg-ink-50 rounded-lg inline-flex items-center gap-1.5" title="Als Datei speichern"><i data-lucide="download" class="w-4 h-4"></i> Laden</button>'
           + '<button onclick="_ccVersandAbsenden(\'' + r.recordId + '\', this)" class="px-4 py-2 text-sm font-bold bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg inline-flex items-center gap-1.5"><i data-lucide="send" class="w-4 h-4"></i> Senden</button>'
         + '</div>'
       + '</div>'
@@ -48014,29 +48061,34 @@ async function _ccPreislistePdfBauen(r, v, stumm) {
   }
 }
 
-/** Vorschau des Anhangs mit dem Stand, der im Dialog steht — ohne zu speichern. */
-async function _ccVersandPdfAnsehen(recordId, btn) {
+/** Anhang mit dem Stand aus dem Dialog — ansehen oder speichern, ohne zu senden. */
+async function _ccVersandPdfAnsehen(recordId, btn, speichern) {
   const r = CC_STATE.leads.find(x => x.recordId === recordId);
   const v = _CC_VORLAGE;
   if (!r || !v) return;
-  setBusy(btn, true, 'Baue…');
+  setBusy(btn, true, speichern ? 'Lade…' : 'Baue…');
   try {
     const stand = Object.assign({}, r, _ccAnschriftLesen());
     const blob = await _ccPreislistePdfBauen(stand, v);
     const url = URL.createObjectURL(blob);
-    const fenster = window.open(url, '_blank');
-    if (!fenster) {
-      // Popup-Blocker: dann eben als Download, statt kommentarlos nichts zu tun.
+    const laden = () => {
       const a = document.createElement('a');
       a.href = url; a.download = _ccDateiname(v.pdf_datei, stand);
       document.body.appendChild(a); a.click(); a.remove();
+    };
+    if (speichern) {
+      laden();
+      toast('PDF gespeichert: ' + _ccDateiname(v.pdf_datei, stand), 'success', 5000);
+    } else if (!window.open(url, '_blank')) {
+      // Popup-Blocker: dann eben als Download, statt kommentarlos nichts zu tun.
+      laden();
       toast('Das Fenster wurde blockiert — das PDF liegt jetzt in den Downloads.', 'warn', 7000);
     }
     setTimeout(() => URL.revokeObjectURL(url), 120000);
     setBusy(btn, false);
   } catch (e) {
     setBusy(btn, false);
-    toast('Vorschau: ' + (e.message || e), 'error', 9000);
+    toast((speichern ? 'Download' : 'Vorschau') + ': ' + (e.message || e), 'error', 9000);
   }
 }
 
