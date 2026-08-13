@@ -824,7 +824,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v3.13.1';
+const APP_VERSION = 'v3.14.0';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -33469,6 +33469,7 @@ async function openErpMehrfachAnlagen(accountId, ticketId) {
     ]);
     ERP_MEHRFACH.kunden = kunden || [];
     ERP_MEHRFACH.kundeVorschlag = vorschlag.kunde || {};
+    ERP_MEHRFACH.dateien = vorschlag._dateien || [];
     ERP_MEHRFACH.anlagen = (vorschlag.anlagen || []).map(a => Object.assign({ nehmen: true, status: '' }, a));
 
     // Vorhandene Anlagen erkennen — Fabriknummern doppelt anzulegen wäre der
@@ -33500,33 +33501,57 @@ async function openErpMehrfachAnlagen(accountId, ticketId) {
 /* Die KI liest Ticket UND Anhänge — Aufstellungen stehen oft in einer Tabelle
    im Anhang, nicht im Mailtext. */
 async function _erpMehrfachAnalyse(accountId, ticketId, t) {
+  /* Großzügige Grenzen: Die Fabriknummern stehen in aller Regel NICHT in der
+     Mail, sondern in den Anhängen — je Aufzug ein Wartungsvertrag, ein
+     TÜV-Bericht, ein Übergabeprotokoll. Bei sechs Aufzügen sind das sechs
+     Dateien, und die abzuschneiden heißt, genau das wegzuwerfen, wonach
+     gesucht wird. */
   let dateien = [];
   try {
     dateien = await _qaCollectAttachments(accountId, ticketId, t,
-      { maxCount: 6, maxBytes: 20 * 1024 * 1024, maxPerFile: 12 * 1024 * 1024 });
-  } catch (_) {}
+      { maxCount: 14, maxBytes: 30 * 1024 * 1024, maxPerFile: 15 * 1024 * 1024 });
+  } catch (e) { console.warn('[ERP-Mehrfach] Anhänge:', e.message); }
+
   const sys =
     'Du liest eine Kundenanfrage eines Aufzug-Serviceunternehmens und ziehst daraus die AUFZUGSANLAGEN heraus, '
     + 'die beim Kunden stehen — als Vorbereitung, sie im ERP anzulegen.\n\n'
     + 'REGELN:\n'
     + '1. Eine Anlage je AUFZUG, nicht je Adresse. Steht „Alexandrinenstr. 35 = 2 Aufzüge (11776024 + 11776025)", sind das ZWEI Anlagen mit je einer Fabriknummer.\n'
-    + '2. Fabriknummer nur, wenn sie dasteht. Nicht raten, nicht aus Auftragsnummern ableiten.\n'
-    + '3. Adresse vollständig mit Hausnummer, PLZ und Ort — sie wird für die Adresssuche gebraucht.\n'
-    + '4. Der Kunde ist der ANFRAGENDE (Auftraggeber), nicht der Aufzugshersteller. „von KONE" beschreibt das Fabrikat, nicht den Kunden.\n'
-    + '5. Nichts erfinden. Fehlt etwas, lass das Feld leer.\n\n'
+    + '2. DIE FABRIKNUMMERN STEHEN MEIST IN DEN ANHÄNGEN, nicht im Mailtext — in Wartungsverträgen, TÜV-/ZÜS-Berichten, Übergabeprotokollen, Angeboten des Vorlieferanten. Lies JEDEN Anhang daraufhin durch.\n'
+    + '3. Die Nummer steht dort unter wechselnden Bezeichnungen: „Fabriknummer", „Fabrik-Nr.", „Fabr.-Nr.", „Werk-Nr.", „Werknummer", „Anlagennummer", „Anlagen-Nr.", „Equipmentnummer", „Equipment-Nr.", „Seriennummer", „Serien-Nr.", „ID-Nr.". Alle meinen dasselbe.\n'
+    + '4. Ordne jede Nummer der RICHTIGEN Adresse zu. Ein Wartungsvertrag betrifft in der Regel genau einen Aufzug; die Adresse steht im selben Dokument. Nimm die Zuordnung aus dem Dokument, nicht aus der Reihenfolge der Dateien.\n'
+    + '5. Steht ein Aufzug nur im Anhang und nicht in der Mail, gehört er trotzdem in die Liste. Steht er in beiden, nimm ihn EINMAL.\n'
+    + '6. Nicht raten. Keine Nummer aus Auftrags-, Vertrags-, Rechnungs-, Angebots- oder Kundennummern ableiten. Ist keine Fabriknummer auffindbar, lass das Feld leer — das ist richtig und nicht schlimm.\n'
+    + '7. Adresse vollständig mit Hausnummer, PLZ und Ort — sie wird für die Adresssuche gebraucht. Fehlt die PLZ in der Mail, hol sie aus dem Anhang.\n'
+    + '8. Der Kunde ist der ANFRAGENDE (Auftraggeber), nicht der Aufzugshersteller und nicht der bisherige Wartungsdienstleister. „von KONE" oder „Vertrag mit Schindler" beschreibt Fabrikat bzw. Vorlieferant, nicht den Kunden.\n'
+    + '9. Nichts erfinden. Fehlt etwas, lass das Feld leer.\n\n'
     + 'ANTWORTE NUR MIT JSON:\n'
     + '{"kunde":{"firmenname":"…","adresse":"…","email":"…","telefon":"…"},'
-    + '"anlagen":[{"adresse":"Straße Nr, PLZ Ort","fabriknummer":"…","hinweis":"z.B. Fabrikat oder Bemerkung"}]}';
+    + '"anlagen":[{"adresse":"Straße Nr, PLZ Ort","fabriknummer":"…","hinweis":"z.B. Fabrikat oder Bemerkung",'
+    + '"quelle":"woher die Fabriknummer stammt — exakter Dateiname des Anhangs oder „Anfrage" bei Fund im Mailtext, leer wenn keine Nummer"}]}';
+  /* Auch der weitere Schriftwechsel zählt: Verträge werden selten mit der
+     ersten Mail geschickt, sondern nachgereicht („Vertrag muß ich
+     nachreichen"). Interne Notizen bleiben draußen — dort steht Internes,
+     keine Anlagendaten. */
+  const weitere = (t.conversations || [])
+    .filter(c => !c.private)
+    .map(c => htmlToText(c.body_text || c.body || '').trim())
+    .filter(Boolean).slice(-6).join('\n---\n').slice(0, 6000);
+
   const inhalt = [{ type: 'text', text:
     'BETREFF: ' + (t.subject || '') + '\n\n'
     + 'ANFRAGENDER: ' + (t.requester?.name || '') + (t.requester?.email ? ' <' + t.requester.email + '>' : '') + '\n\n'
-    + 'ERSTE ANFRAGE:\n' + htmlToText(t.description_text || t.description || '').slice(0, 8000) }];
+    + 'ERSTE ANFRAGE:\n' + htmlToText(t.description_text || t.description || '').slice(0, 8000)
+    + (weitere ? '\n\nWEITERER SCHRIFTWECHSEL:\n' + weitere : '')
+    + '\n\nANGEHÄNGTE DATEIEN (' + dateien.length + '): '
+    + (dateien.length ? dateien.map(a => a.name).join(', ') : 'keine')
+    + '\nDie Fabriknummern stehen erfahrungsgemäß in diesen Dateien.' }];
   dateien.forEach(a => {
     if (a.mediaType === 'application/pdf') {
-      inhalt.push({ type: 'text', text: 'Anhang: ' + a.name });
+      inhalt.push({ type: 'text', text: 'Anhang „' + a.name + '":' });
       inhalt.push({ type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: a.base64 } });
     } else if (String(a.mediaType || '').startsWith('image/')) {
-      inhalt.push({ type: 'text', text: 'Anhang: ' + a.name });
+      inhalt.push({ type: 'text', text: 'Anhang „' + a.name + '":' });
       inhalt.push({ type: 'image', source: { type: 'base64', media_type: a.mediaType, data: a.base64 } });
     }
   });
@@ -33534,7 +33559,11 @@ async function _erpMehrfachAnalyse(accountId, ticketId, t) {
     model: 'claude-sonnet-4-5-20250929', max_tokens: 4000, system: sys,
     messages: [{ role: 'user', content: inhalt }],
   });
-  return parseAIJson((data.content && data.content[0] && data.content[0].text) || '') || {};
+  const erg = parseAIJson((data.content && data.content[0] && data.content[0].text) || '') || {};
+  // Welche Dateien tatsächlich gelesen wurden — steht im Dialog, damit eine
+  // fehlende Fabriknummer erklärbar wird statt rätselhaft zu bleiben.
+  erg._dateien = dateien.map(a => a.name);
+  return erg;
 }
 
 /* Konditionen für neue Anlagen: Stundensatz, Einsatzpauschale, Objekt- und
@@ -33632,8 +33661,17 @@ function _erpMehrfachZeichnen(platzhalter) {
       + '<label class="block col-span-2"><span class="text-[10px] text-ink-500">Standort</span>'
         + '<input value="' + escapeAttr(a.adresse || '') + '" oninput="_erpMehrfachFeld(' + i + ',\'adresse\',this.value)" class="w-full mt-0.5 px-2 py-1 border border-ink-300 rounded text-[12px]"></label>'
       + '<label class="block"><span class="text-[10px] text-ink-500">Fabriknummer</span>'
-        + '<input value="' + escapeAttr(a.fabriknummer || '') + '" oninput="_erpMehrfachFeld(' + i + ',\'fabriknummer\',this.value)" class="w-full mt-0.5 px-2 py-1 border border-ink-300 rounded text-[12px] font-mono"></label>'
-    + '</div></div>').join('')
+        + '<input value="' + escapeAttr(a.fabriknummer || '') + '" oninput="_erpMehrfachFeld(' + i + ',\'fabriknummer\',this.value)" class="w-full mt-0.5 px-2 py-1 border ' + (a.fabriknummer ? 'border-ink-300' : 'border-amber-400 bg-amber-50/40') + ' rounded text-[12px] font-mono"></label>'
+    + '</div>'
+    /* Herkunft der Nummer. Eine Fabriknummer, die aus einem Vertrag im Anhang
+       stammt, ist etwas anderes als eine aus dem Fließtext — und wer sie im
+       ERP wiederfindet, muss wissen, worauf sie sich stützt. */
+    + (a.fabriknummer && a.quelle
+        ? '<p class="text-[10px] text-ink-500 inline-flex items-center gap-1"><i data-lucide="paperclip" class="w-3 h-3"></i>Nummer aus: ' + escapeHtml(a.quelle) + '</p>'
+        : (!a.fabriknummer
+            ? '<p class="text-[10px] text-amber-700">Keine Fabriknummer gefunden — die Anlage entsteht ohne. Für ein ANG-Angebot muss sie nachgetragen werden.</p>'
+            : ''))
+    + '</div>').join('')
     : '<p class="text-[12px] text-ink-500 italic">Aus dem Ticket ließen sich keine Anlagen herauslesen. Über „+ Anlage" von Hand ergänzen.</p>';
 
   const offen = s.anlagen.filter(a => a.nehmen).length;
@@ -33642,6 +33680,16 @@ function _erpMehrfachZeichnen(platzhalter) {
     + '<div><div class="flex items-center justify-between mb-1">'
       + '<p class="text-[10px] uppercase font-semibold text-ink-600">Anlagen (' + s.anlagen.length + ')</p>'
       + '<button onclick="_erpMehrfachZeile()" class="text-[11px] font-bold text-emerald-700 hover:underline">+ Anlage</button></div>'
+      // Welche Anhänge gelesen wurden. Fehlt eine Fabriknummer, ist das die
+      // erste Frage — und ohne diese Zeile die am schwersten zu beantwortende.
+      + (Array.isArray(s.dateien)
+          ? '<p class="text-[10px] text-ink-500 mb-1.5">'
+            + (s.dateien.length
+                ? 'Gelesen: Anfrage, Schriftwechsel und ' + s.dateien.length + ' Anhang' + (s.dateien.length === 1 ? '' : 'änge')
+                  + ' <span class="text-ink-400">(' + escapeHtml(s.dateien.join(', ')) + ')</span>'
+                : 'Gelesen: nur Anfrage und Schriftwechsel — <b>keine Anhänge lesbar</b>. Fabriknummern stehen meist dort.')
+            + '</p>'
+          : '')
       + '<div class="space-y-2">' + zeilen + '</div></div>'
     /* Konditionen sichtbar machen. Sie werden nicht abgefragt, sondern aus dem
        Bestand übernommen — aber ungesehen ins ERP zu schreiben, was später die
@@ -33675,7 +33723,14 @@ function _angErpAnlagenOeffnen() {
   if (!s || !s.accountId || !s.ticketId) return toast('Kein Ticket im Angebots-Chat.', 'warn', 5000);
   openErpMehrfachAnlagen(s.accountId, s.ticketId);
 }
-function _erpMehrfachFeld(i, feld, wert) { if (ERP_MEHRFACH?.anlagen?.[i]) { ERP_MEHRFACH.anlagen[i][feld] = wert; if (feld === 'nehmen') _erpMehrfachZeichnen(); } }
+function _erpMehrfachFeld(i, feld, wert) {
+  const a = ERP_MEHRFACH?.anlagen?.[i];
+  if (!a) return;
+  a[feld] = wert;
+  // Von Hand geänderte Nummer: Die Herkunftsangabe der KI gilt dann nicht mehr.
+  if (feld === 'fabriknummer') a.quelle = wert ? 'von Hand eingetragen' : '';
+  if (feld === 'nehmen') _erpMehrfachZeichnen();
+}
 function _erpMehrfachZeile() { ERP_MEHRFACH.anlagen.push({ adresse: '', fabriknummer: '', nehmen: true, status: '' }); _erpMehrfachZeichnen(); }
 function _erpMehrfachKundeWechsel(nr) {
   const s = ERP_MEHRFACH;
