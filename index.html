@@ -824,7 +824,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v3.8.6';
+const APP_VERSION = 'v3.9.0';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -2518,6 +2518,7 @@ async function _bootstrapLogin(userKey) {
     allow_default_keys: _truthyFieldValue(rec.fields.allow_default_keys),
     phone:   rec.fields.phone || '',
     kampagnen: _userKampagnenListe(rec.fields.kampagnen),
+    darf_import: _truthyFieldValue(rec.fields.darf_import),
   };
   localStorage.setItem(LEGACY_USER_KEY, userKey);
   return APP_KEYS.user;
@@ -2549,6 +2550,7 @@ async function _userKampagnenLaden() {
     const d = await res.json();
     const f = (d.records && d.records[0] && d.records[0].fields) || {};
     u.kampagnen = _userKampagnenListe(f.kampagnen);
+    u.darf_import = _truthyFieldValue(f.darf_import);
     if (!u.role && f.role) u.role = f.role;
   } catch (_) {}
 }
@@ -8879,17 +8881,19 @@ async function _hydrateUserEmail(userId) {
     console.warn('[hydrateUserEmail]', e.message);
   }
 }
-async function createUser({ api_key, name, role, status, phone, allow_default_keys, kampagnen }) {
+async function createUser({ api_key, name, role, status, phone, allow_default_keys, kampagnen, darf_import }) {
   const fields = {
     api_key, name, role: role || 'user', status: status || 'aktiv', created: nowIso(),
   };
   if (phone) fields.phone = phone;
   if (allow_default_keys) fields.allow_default_keys = allow_default_keys;
   if (kampagnen) fields.kampagnen = kampagnen;
+  if (darf_import) fields.darf_import = darf_import;
   return await airtableWriteWithAutoField('User', fields, {
     phone: 'singleLineText',
     allow_default_keys: 'singleLineText',
     kampagnen: 'singleLineText',
+    darf_import: 'singleLineText',
   });
 }
 async function updateUser(id, fields) {
@@ -8897,6 +8901,7 @@ async function updateUser(id, fields) {
     phone: 'singleLineText',
     allow_default_keys: 'singleLineText',
     kampagnen: 'singleLineText',
+    darf_import: 'singleLineText',
   });
 }
 async function deleteUser(id)         { return await airtableDelete('User', id); }
@@ -38923,12 +38928,19 @@ async function openUserModal(user) {
           </div>
 
           <!-- Berechtigungs-Optionen -->
-          <div class="bg-ink-50 border border-ink-200 rounded-xl p-3">
+          <div class="bg-ink-50 border border-ink-200 rounded-xl p-3 space-y-3">
             <label class="flex items-start gap-2 cursor-pointer">
               <input id="usrAllowDefault" type="checkbox" ${(user?.allow_default_keys === true || user?.allow_default_keys === 'ja') ? 'checked' : ''} class="mt-0.5 w-4 h-4 accent-brand-500">
               <div class="flex-1 min-w-0">
                 <p class="text-xs font-semibold text-ink-900">Darf Account-Default-API-Keys nutzen</p>
                 <p class="text-[11px] text-ink-600 leading-snug mt-0.5">Wenn aktiv: User kann auf einen Account auch ohne eigenen Key zugreifen — der in „Accounts" hinterlegte Default-Key wird genutzt. Wenn aus: User muss zwingend seinen eigenen API-Key eintragen, sonst keine Tickets sichtbar.</p>
+              </div>
+            </label>
+            <label class="flex items-start gap-2 cursor-pointer border-t border-ink-200 pt-3">
+              <input id="usrDarfImport" type="checkbox" ${(user?.darf_import === true || user?.darf_import === 'ja') ? 'checked' : ''} class="mt-0.5 w-4 h-4 accent-brand-500">
+              <div class="flex-1 min-w-0">
+                <p class="text-xs font-semibold text-ink-900">Darf externe Kontakte importieren</p>
+                <p class="text-[11px] text-ink-600 leading-snug mt-0.5">Für den Leiter einer externen Agentur: Er darf eigene Listen als <b>Excel oder CSV</b> in seine Kampagne laden, mit Spaltenzuordnung, Vorschau und Dublettenprüfung — und einen Import hinterher wieder ausblenden. Zentrale Datenbank und Archiv bleiben ihm verschlossen.</p>
               </div>
             </label>
           </div>
@@ -39229,6 +39241,7 @@ async function submitUserForm() {
       // Leer = alle Kampagnen. Aus der Auswahlliste, sobald sie geladen ist —
       // sonst bleibt der gespeicherte Stand aus dem versteckten Feld stehen.
       kampagnen: _usrKampagnenLesen(),
+      darf_import: $('usrDarfImport')?.checked ? 'ja' : 'nein',
     };
     if (!userFields.name)    throw new Error('Name fehlt');
     if (!userFields.api_key) throw new Error('Login-Key fehlt');
@@ -39242,6 +39255,7 @@ async function submitUserForm() {
         phone:              userFields.phone,
         allow_default_keys: userFields.allow_default_keys,
         kampagnen:          userFields.kampagnen,
+        darf_import:        userFields.darf_import,
       };
       await updateUser(user.id, upd);
     } else {
@@ -45591,6 +45605,8 @@ const CC_TYPES = {
   letzter_versuch: 'singleLineText', notiz: 'multilineText', bearbeiter: 'singleLineText',
   gesperrt_bis: 'singleLineText', preisliste_am: 'singleLineText', ticket_id: 'singleLineText',
   created_at: 'singleLineText', updated_at: 'singleLineText',
+  // Herkunft eines Imports — Grundlage für „Import rückgängig".
+  import_id: 'singleLineText', import_von: 'singleLineText', import_extern: 'singleLineText',
 };
 
 const CC_STATUS = {
@@ -45691,6 +45707,26 @@ function _ccKampagnenErlaubt() {
   if (!frei) return null;
   const accId = String(_ccAccount()?.id || '');
   return [...new Set(frei.filter(e => !e.accountId || e.accountId === accId).map(e => e.name))];
+}
+
+/* Darf dieser Benutzer Kontakte importieren? Gedacht für den Leiter einer
+   externen Agentur: Er bringt eigene Listen mit, soll aber weiterhin weder
+   Tickets noch Einstellungen sehen. Admins dürfen immer. */
+function _ccDarfImportieren() {
+  const u = APP_KEYS.user || {};
+  return u.is_admin === true || u.darf_import === true;
+}
+
+/* Kennzeichen für jeden importierten Satz. Ohne das lässt sich ein Import
+   hinterher nicht mehr von einem anderen unterscheiden — und genau das braucht
+   man, wenn eine Liste falsch war. */
+function _ccImportStempel() {
+  const u = APP_KEYS.user || {};
+  return {
+    import_id: 'imp_' + nowIso().replace(/[^0-9]/g, '').slice(0, 14) + '_' + Math.random().toString(36).slice(2, 6),
+    import_von: u.name || u.email || 'unbekannt',
+    import_extern: u.is_admin ? '' : 'ja',
+  };
 }
 
 function _ccKampagneErlaubt(name) {
@@ -45970,7 +46006,12 @@ function _ccZeichnen() {
         + '<p class="text-[12px] text-ink-500">Der Reihe nach von oben. Eine Zeile antippen öffnet den Anruf.</p>'
       + '</div>'
       + '<div class="flex items-center gap-2">' + _ccKampagnenWahl()
-        + '<button onclick="_ccKampagneUmbenennen(this)" class="px-2 py-2 rounded-lg border border-ink-200 bg-white text-ink-500 hover:bg-ink-50 hover:text-ink-800" title="Kampagne umbenennen"><i data-lucide="pencil" class="w-4 h-4"></i></button>'
+        // Umbenennen ändert den Namen an JEDEM Lead der Kampagne und damit auch
+        // die Freigabe, über die eine Agentur überhaupt hereinkommt. Das ist
+        // keine Arbeit für den, der die Liste abtelefoniert.
+        + (APP_KEYS.user?.is_admin
+            ? '<button onclick="_ccKampagneUmbenennen(this)" class="px-2 py-2 rounded-lg border border-ink-200 bg-white text-ink-500 hover:bg-ink-50 hover:text-ink-800" title="Kampagne umbenennen"><i data-lucide="pencil" class="w-4 h-4"></i></button>'
+            : '')
         + _ccMandantWahl(acc) + '</div>'
     + '</div>'
     + '<div class="flex items-center gap-2 flex-wrap mb-3">'
@@ -46003,6 +46044,15 @@ function _ccZeichnen() {
           ? '<button onclick="_ccDublettenPruefen(this)" class="px-3 py-1.5 rounded-lg text-[12px] font-bold bg-white border border-ink-200 text-ink-600 hover:bg-ink-50 inline-flex items-center gap-1" title="Dubletten, Werbesperre und Bestandskunden prüfen"><i data-lucide="copy" class="w-3.5 h-3.5"></i> Dubletten</button>'
             + '<button onclick="_ccVorlageOeffnen()" class="px-3 py-1.5 rounded-lg text-[12px] font-bold bg-white border border-ink-200 text-ink-600 hover:bg-ink-50 inline-flex items-center gap-1" title="Preisliste und Anschreiben für diese Kampagne festlegen"><i data-lucide="file-text" class="w-3.5 h-3.5"></i> Vorlage</button>'
             + '<button onclick="_ccKampagneLeeren(this)" class="px-3 py-1.5 rounded-lg text-[12px] font-bold bg-white border border-rose-300 text-rose-700 hover:bg-rose-50 inline-flex items-center gap-1" title="Alle Kontakte dieser Kampagne löschen, um frisch zu importieren"><i data-lucide="trash-2" class="w-3.5 h-3.5"></i> Leeren</button>'
+          : '')
+      /* Import und Rücknahme gehören zusammen: Wer importieren darf, muss es
+         auch zurücknehmen können — sonst bleibt eine falsch zugeordnete Liste
+         stehen, bis ein Admin Zeit hat. */
+      + (_ccDarfImportieren()
+          ? (APP_KEYS.user?.is_admin ? '' : '<button onclick="_ccDublettenPruefen(this)" class="px-3 py-1.5 rounded-lg text-[12px] font-bold bg-white border border-ink-200 text-ink-600 hover:bg-ink-50 inline-flex items-center gap-1" title="Dubletten, Werbesperre und Bestandskunden prüfen"><i data-lucide="copy" class="w-3.5 h-3.5"></i> Dubletten</button>')
+            + (_ccImportStapel().length
+                ? '<button onclick="_ccImportRueckgaengigOeffnen()" class="px-3 py-1.5 rounded-lg text-[12px] font-bold bg-white border border-amber-300 text-amber-800 hover:bg-amber-50 inline-flex items-center gap-1" title="Einen Import wieder ausblenden"><i data-lucide="undo-2" class="w-3.5 h-3.5"></i> Import rückgängig</button>'
+                : '')
             + '<button onclick="_ccImportOeffnen()" class="px-3 py-1.5 rounded-lg text-[12px] font-bold bg-brand-600 hover:bg-brand-700 text-white inline-flex items-center gap-1"><i data-lucide="upload" class="w-3.5 h-3.5"></i> Import</button>'
           : '')
     + '</div>'
@@ -46019,7 +46069,7 @@ function _ccZeichnen() {
           + '</ul></div>'
         : rows.length ? _ccTabelle(rows) : '<div class="bg-white rounded-xl border border-ink-200 p-8 text-center text-sm text-ink-500">'
         + (alle.length ? 'Hier ist nichts mehr zu tun.' : 'Noch keine Leads in der Kampagne.'
-           + (APP_KEYS.user?.is_admin ? '<br><button onclick="_ccImportOeffnen()" class="mt-3 px-3 py-2 bg-brand-600 hover:bg-brand-700 text-white rounded-lg text-[12px] font-bold">Kontakte importieren</button>' : ''))
+           + (_ccDarfImportieren() ? '<br><button onclick="_ccImportOeffnen()" class="mt-3 px-3 py-2 bg-brand-600 hover:bg-brand-700 text-white rounded-lg text-[12px] font-bold">Kontakte importieren</button>' : ''))
         + '</div>');
   if (window.lucide) lucide.createIcons();
 }
@@ -48377,7 +48427,22 @@ function _ccImportOeffnen() {
           + '<p class="text-[11px] text-ink-500">Ziel: Kampagne „' + escapeHtml(CC_STATE.kampagne || CC_KAMPAGNE_STANDARD) + '" · ' + escapeHtml(acc ? (acc.name || '') : '') + '</p></div>'
           + '<button onclick="_ccImportSchliessen()" class="text-ink-400 hover:text-ink-700"><i data-lucide="x" class="w-5 h-5"></i></button></div>'
         + '<div class="p-4 space-y-3">'
+          /* Datei zuerst: Für alle, die keine Admins sind, ist das der einzige
+             Weg — die zentrale DB und das Archiv sind interne Bestände und
+             gehen eine externe Agentur nichts an. */
           + '<div class="rounded-xl border border-ink-200 p-3">'
+            + '<p class="text-[12px] font-bold text-ink-800 mb-1">Aus einer Datei (Excel oder CSV)</p>'
+            + '<p class="text-[11px] text-ink-500 mb-2">Zugekaufte Listen, Messekontakte, Recherche. <b>.xlsx</b>, <b>.xls</b> oder <b>.csv</b> — bei CSV werden Komma und Semikolon sowie UTF-8 und Windows-1252 selbst erkannt. Danach ordnest du die Spalten zu und siehst eine Vorschau, bevor etwas geschrieben wird.</p>'
+            + '<input type="file" id="ccCsvDatei" accept=".csv,.txt,.xlsx,.xls,text/csv" onchange="_ccCsvGewaehlt(this)" class="w-full text-[12px]">'
+            + '<p class="text-[11px] text-ink-500 mt-1.5">Dubletten innerhalb der Kampagne, Kontakte auf der Werbesperre und Zeilen ohne Nummer und E-Mail werden beim Import übersprungen und gezählt.</p>'
+          + '</div>'
+          + (APP_KEYS.user?.is_admin ? ''
+              : '<div class="rounded-xl border border-amber-200 bg-amber-50/60 p-3 text-[11px] text-amber-900">'
+                + 'Der Import landet in der Kampagne „' + escapeHtml(CC_STATE.kampagne || CC_KAMPAGNE_STANDARD) + '". '
+                + 'War die Datei falsch, lässt sich der ganze Import über <b>Import rückgängig</b> wieder ausblenden.'
+              + '</div>')
+          + (!APP_KEYS.user?.is_admin ? '' :
+          '<div class="rounded-xl border border-ink-200 p-3">'
             + '<p class="text-[12px] font-bold text-ink-800 mb-1">Aus einer zentralen DB</p>'
             + '<p class="text-[11px] text-ink-500 mb-2">Auch von einem anderen Mandanten — Liftaro-Kontakte für eine Aszendio-Kampagne sind ausdrücklich möglich.</p>'
             + '<div class="flex gap-2 flex-wrap">'
@@ -48395,11 +48460,6 @@ function _ccImportOeffnen() {
               + '</div>'
               + '<p class="text-[10px] text-ink-500 mt-1">Alles angehakt = alle übernehmen.</p>'
             + '</details>'
-          + '</div>'
-          + '<div class="rounded-xl border border-ink-200 p-3">'
-            + '<p class="text-[12px] font-bold text-ink-800 mb-1">Aus einer CSV-Datei</p>'
-            + '<p class="text-[11px] text-ink-500 mb-2">Zugekaufte Listen, Messekontakte, Recherche. Komma oder Semikolon, Umlaute in UTF-8 oder Windows-1252 — beides wird erkannt.</p>'
-            + '<input type="file" id="ccCsvDatei" accept=".csv,.txt,text/csv" onchange="_ccCsvGewaehlt(this)" class="w-full text-[12px]">'
           + '</div>'
           + '<div class="rounded-xl border border-ink-200 p-3">'
             + '<p class="text-[12px] font-bold text-ink-800 mb-1">Aus dem Archiv</p>'
@@ -48427,7 +48487,7 @@ function _ccImportOeffnen() {
               + '<button onclick="_ccImportAusArchiv(this)" class="px-3 py-1.5 bg-teal-600 hover:bg-teal-700 text-white rounded-lg text-[12px] font-bold">Übernehmen</button>'
             + '</div>'
             + '<div id="ccArchivMeldung" class="text-[11px] mt-1"></div>'
-          + '</div>'
+          + '</div>')
           + '<div id="ccImportMeldung" class="text-[11px]"></div>'
         + '</div>'
       + '</div>'
@@ -48436,13 +48496,120 @@ function _ccImportOeffnen() {
 }
 function _ccImportSchliessen() { const h = document.getElementById('ccImportHost'); if (h) h.innerHTML = ''; }
 
+/* --- Import rückgängig machen -------------------------------------------
+   Eine falsche Liste ist der wahrscheinlichste Unfall beim Import: falsche
+   Spalte zugeordnet, falsche Datei, doppelt gedrückt. Ausgeblendet statt
+   gelöscht — wer es doch braucht, holt es zurück, und niemand vernichtet mit
+   einem Klick Arbeit, die andere schon an diesen Kontakten getan haben. */
+function _ccImportStapel() {
+  const acc = _ccAccount();
+  const kamp = CC_STATE.kampagne || CC_KAMPAGNE_STANDARD;
+  const map = new Map();
+  for (const r of CC_STATE.leads) {
+    if (acc && r.account_id !== acc.id) continue;
+    if (String(r.kampagne || CC_KAMPAGNE_STANDARD) !== kamp) continue;
+    const id = String(r.import_id || '').trim();
+    if (!id) continue;
+    if (!map.has(id)) {
+      map.set(id, {
+        id, von: r.import_von || '–', quelle: r.quelle || '–', extern: String(r.import_extern || '') === 'ja',
+        wann: r.created_at || '', gesamt: 0, sichtbar: 0,
+      });
+    }
+    const e = map.get(id);
+    e.gesamt++;
+    if (String(r.versteckt || '') !== 'ja') e.sichtbar++;
+  }
+  return [...map.values()].sort((a, b) => String(b.wann).localeCompare(String(a.wann)));
+}
+
+function _ccImportRueckgaengigOeffnen() {
+  const stapel = _ccImportStapel();
+  let host = document.getElementById('ccImportHost');
+  if (!host) { host = document.createElement('div'); host.id = 'ccImportHost'; document.body.appendChild(host); }
+  const zeile = (s) => '<div class="flex items-center gap-2 py-2 border-b border-ink-100 last:border-0">'
+    + '<div class="flex-1 min-w-0">'
+      + '<p class="text-[13px] font-semibold text-ink-900 truncate">' + escapeHtml(s.quelle)
+      + (s.extern ? ' <span class="text-[10px] uppercase tracking-wider bg-amber-100 text-amber-800 px-1.5 py-0.5 rounded">extern</span>' : '') + '</p>'
+      + '<p class="text-[11px] text-ink-500">' + escapeHtml(s.wann ? fmtDate(s.wann) : '–') + ' · ' + escapeHtml(s.von)
+      + ' · ' + s.gesamt + ' Kontakte' + (s.sichtbar < s.gesamt ? ' · ' + (s.gesamt - s.sichtbar) + ' bereits ausgeblendet' : '') + '</p>'
+    + '</div>'
+    + (s.sichtbar
+        ? '<button onclick="_ccImportAusblenden(\'' + escapeAttr(s.id) + '\', this)" class="px-3 py-1.5 rounded-lg text-[12px] font-bold bg-white border border-rose-300 text-rose-700 hover:bg-rose-50 shrink-0">Ausblenden</button>'
+        : '<button onclick="_ccImportEinblenden(\'' + escapeAttr(s.id) + '\', this)" class="px-3 py-1.5 rounded-lg text-[12px] font-bold bg-white border border-ink-300 text-ink-600 hover:bg-ink-50 shrink-0">Wieder einblenden</button>')
+    + '</div>';
+  host.innerHTML =
+    '<div class="fixed inset-0 z-[80] bg-black/40 flex items-start justify-center overflow-y-auto p-4" onclick="if(event.target===this)_ccImportSchliessen()">'
+      + '<div class="bg-white rounded-2xl shadow-xl w-full max-w-lg my-8">'
+        + '<div class="flex items-center justify-between p-4 border-b border-ink-200">'
+          + '<div><h3 class="font-bold text-ink-900">Import rückgängig</h3>'
+          + '<p class="text-[11px] text-ink-500">Kampagne „' + escapeHtml(CC_STATE.kampagne || CC_KAMPAGNE_STANDARD) + '"</p></div>'
+          + '<button onclick="_ccImportSchliessen()" class="text-ink-400 hover:text-ink-700"><i data-lucide="x" class="w-5 h-5"></i></button></div>'
+        + '<div class="p-4">'
+          + (stapel.length
+              ? '<p class="text-[11px] text-ink-600 mb-2">Ausgeblendete Kontakte bleiben erhalten und lassen sich wieder einblenden — gelöscht wird nichts.</p>'
+                + stapel.map(zeile).join('')
+              : '<p class="text-sm text-ink-500 text-center py-6">Für diese Kampagne ist kein Import verzeichnet.<br><span class="text-[11px]">Nur Importe ab v3.9.0 tragen die Kennung, ältere lassen sich hier nicht einzeln zurücknehmen.</span></p>')
+        + '</div>'
+        + '<div class="flex items-center justify-end gap-2 p-4 border-t border-ink-200">'
+          + '<button onclick="_ccImportSchliessen()" class="px-3 py-2 text-sm text-ink-600 hover:bg-ink-100 rounded-lg">Schließen</button>'
+        + '</div>'
+      + '</div>'
+    + '</div>';
+  if (window.lucide) lucide.createIcons();
+}
+
+async function _ccImportSichtbarkeit(importId, versteckt, btn) {
+  const betroffen = CC_STATE.leads.filter(r => String(r.import_id || '') === String(importId)
+    && (String(r.versteckt || '') === 'ja') !== versteckt);
+  if (!betroffen.length) return;
+  setBusy(btn, true, versteckt ? 'Blende aus…' : 'Blende ein…');
+  try {
+    const wert = versteckt ? 'ja' : '';
+    await _ccStapelAendern(betroffen.map(r => ({ id: r.recordId, fields: { versteckt: wert, updated_at: nowIso() } })));
+    betroffen.forEach(r => { r.versteckt = wert; });
+    setBusy(btn, false);
+    toast(betroffen.length + (versteckt ? ' Kontakte ausgeblendet.' : ' Kontakte wieder eingeblendet.'), 'success', 5000);
+    _ccImportRueckgaengigOeffnen();
+    _ccZeichnen();
+  } catch (e) {
+    setBusy(btn, false);
+    toast('Fehlgeschlagen: ' + (e.message || e), 'error', 9000);
+  }
+}
+function _ccImportAusblenden(id, btn)  { return _ccImportSichtbarkeit(id, true, btn); }
+function _ccImportEinblenden(id, btn)  { return _ccImportSichtbarkeit(id, false, btn); }
+
+const XLSX_URL = 'https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js';
+
+/* Excel-Datei zu Zeilen. Wer Listen kauft oder von einer Messe mitbringt, hat
+   sie als .xlsx — den Umweg über „vorher als CSV speichern" versteht zu Recht
+   niemand, und beim Speichern gehen regelmäßig Umlaute oder führende Nullen
+   von Postleitzahlen verloren. Gelesen wird das ERSTE Blatt. */
+async function _ccExcelZeilen(bytes) {
+  await _loadScriptOnce(XLSX_URL);
+  if (!window.XLSX) throw new Error('Die Excel-Bibliothek konnte nicht geladen werden.');
+  const buch = window.XLSX.read(bytes, { type: 'array' });
+  const blatt = buch.Sheets[buch.SheetNames[0]];
+  if (!blatt) throw new Error('Die Datei enthält kein Tabellenblatt.');
+  // raw:false → Zahlen und Daten so, wie sie in Excel angezeigt werden.
+  // Sonst wird aus der PLZ 07743 die Zahl 7743 und aus einem Datum 45678.
+  return window.XLSX.utils.sheet_to_json(blatt, { header: 1, blankrows: false, defval: '', raw: false })
+    .map(z => (z || []).map(x => String(x == null ? '' : x)))
+    .filter(z => z.some(x => String(x).trim()));
+}
+
 async function _ccCsvGewaehlt(input) {
   const datei = input && input.files && input.files[0];
   if (!datei) return;
   const meld = document.getElementById('ccImportMeldung');
+  if (meld) meld.innerHTML = '<span class="text-ink-500">Datei wird gelesen …</span>';
   try {
-    const zeilen = _ccCsvParsen(_ccTextAusDatei(await datei.arrayBuffer()));
+    const bytes = await datei.arrayBuffer();
+    const istExcel = /\.(xlsx|xlsm|xls)$/i.test(datei.name || '');
+    const zeilen = istExcel ? await _ccExcelZeilen(bytes) : _ccCsvParsen(_ccTextAusDatei(bytes));
     if (zeilen.length < 2) throw new Error('Die Datei enthält keine Datenzeilen.');
+    if (meld) meld.innerHTML = '';
     _ccZuordnungOeffnen(zeilen, datei.name);
   } catch (e) {
     if (meld) meld.innerHTML = '<span class="text-red-700">' + escapeHtml(e.message || String(e)) + '</span>';
@@ -48472,7 +48639,7 @@ function _ccZuordnungOeffnen(zeilen, dateiname) {
                 + (k === 'firma' || k === 'telefon' ? '' : '') + '</span>' + spaltenWahl(k) + '</label>').join('')
           + '</div>'
           + '<label class="block mb-3"><span class="text-[11px] font-semibold text-ink-700">Quelle — Name dieser Liste</span>'
-            + '<input id="ccQuelleName" value="' + escapeAttr(dateiname.replace(/\.(csv|txt)$/i, '')) + '" class="w-full mt-0.5 px-2.5 py-1.5 border border-ink-300 rounded-lg text-sm">'
+            + '<input id="ccQuelleName" value="' + escapeAttr(dateiname.replace(/\.(csv|txt|xlsx|xlsm|xls)$/i, '')) + '" class="w-full mt-0.5 px-2.5 py-1.5 border border-ink-300 rounded-lg text-sm">'
             + '<span class="text-[10px] text-ink-500">Steht später als Stichwort an jedem Kontakt und im Filter oben.</span></label>'
           + '<div id="ccVorschau"></div>'
         + '</div>'
@@ -48547,6 +48714,8 @@ async function _ccCsvImportieren(btn) {
     const bestand = await _ccBestandsKennungen(acc);
     const typen = await _ccTypenLaden(true);
     const jetzt = nowIso();
+    // Kennung dieses Imports — daran hängt später das Rückgängigmachen.
+    const stempel = _ccImportStempel();
     const saetze = [];
     let uebersprungen = 0, gesperrt = 0, bekannt = 0;
     for (const zeile of _CC_IMPORT.zeilen) {
@@ -48564,7 +48733,7 @@ async function _ccCsvImportieren(btn) {
         dedupe_key: kenn.mail || kenn.tel, dedupe_tel: kenn.tel,
         bestand: istBestand ? 'ja' : '',
         status: 'offen', versuche: '0', created_at: jetzt, updated_at: jetzt,
-      }));
+      }, stempel));
     }
     if (!saetze.length) {
       setBusy(btn, false);
@@ -48574,10 +48743,13 @@ async function _ccCsvImportieren(btn) {
     const n = await _ccStapelSchreiben(saetze);
     setBusy(btn, false);
     _ccImportSchliessen();
+    // v3.9.0: Hier stand bis zuletzt „ausgefiltert" — eine Variable aus dem
+    // Import der zentralen DB, die es in dieser Funktion nie gab. Jeder
+    // CSV-Import endete deshalb mit „Import fehlgeschlagen", obwohl die
+    // Kontakte längst geschrieben waren.
     toast(n + ' Kontakte importiert als „' + quelle + '"'
-      + (uebersprungen ? ' · ' + uebersprungen + ' übersprungen' : '')
+      + (uebersprungen ? ' · ' + uebersprungen + ' übersprungen (Dublette oder ohne Kennung)' : '')
       + (gesperrt ? ' · ' + gesperrt + ' wegen Werbesperre ausgelassen' : '')
-      + (ausgefiltert ? ' · ' + ausgefiltert + ' wegen Typauswahl ausgelassen' : '')
       + (bekannt ? ' · ' + bekannt + ' davon bereits Kunde' : ''), 'success', 9000);
     renderCallcenterPage();
   } catch (e) {
