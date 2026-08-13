@@ -824,7 +824,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v3.7.2';
+const APP_VERSION = 'v3.7.3';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -45377,8 +45377,9 @@ const CC_VORLAGE_TYPEN = {
 const CC_PLATZHALTER = [
   ['{firma}', 'Firmenname'], ['{name}', 'Ansprechpartner'], ['{vorname}', 'Vorname'],
   ['{nachname}', 'Nachname'],
-  ['{anrede}', 'Sehr geehrte Frau Mayer, — von der KI gebildet'],
-  ['{zhd}', 'z. Hd. Frau Anja Mayer — für den Anschriftenblock'],
+  // Bewusst ohne Beispielnamen: Wer den abschreibt, verschickt ihn an alle.
+  ['{anrede}', 'Anrede mit Herr/Frau und Nachname — von der KI gebildet'],
+  ['{zhd}', 'z.Hd.-Zeile für den Anschriftenblock'],
   ['{strasse}', 'Straße'], ['{plz}', 'PLZ'], ['{ort}', 'Ort'],
   ['{position}', 'Position'], ['{gueltig_bis}', 'Gültigkeitsdatum'],
 ];
@@ -46797,14 +46798,16 @@ async function _ccAnredeErmitteln(r) {
     /* Auch eine GESPEICHERTE Anrede wird geprüft. Sie steht am Kontakt und
        würde sonst bei jedem weiteren Versand erneut verwendet — genau so kam
        „Frau Mayer" in den Brief an Frau Finsterwalder und wäre dort geblieben. */
-    const teileV = name.split(/\s+/).filter(Boolean);
-    const nachnameV = teileV[teileV.length - 1] || '';
-    const okV = /^Sehr geehrte Damen/i.test(vorhanden)
-      || !nachnameV
-      || vorhanden.toLowerCase().includes(nachnameV.toLowerCase());
-    if (okV) return { anrede: vorhanden, zhd: String(r.zhd || '').trim() };
-    console.warn('[CC] Gespeicherte Anrede „' + vorhanden + '" passt nicht zu „' + name + '" — wird neu gebildet');
-    r.anrede = ''; r.zhd = '';
+    /* Nur mit z.Hd.-Zeile ist der Datensatz fertig — fehlt sie, wird sie
+       unten einmal mitgebildet und gespeichert, sonst fragt jeder Versand
+       aufs Neue. */
+    if (_ccAnredePasst(vorhanden, name) && String(r.zhd || '').trim()) {
+      return { anrede: vorhanden, zhd: String(r.zhd || '').trim() };
+    }
+    if (!_ccAnredePasst(vorhanden, name)) {
+      console.warn('[CC] Gespeicherte Anrede „' + vorhanden + '" passt nicht zu „' + name + '" — wird neu gebildet');
+      r.anrede = ''; r.zhd = '';
+    }
   }
 
   if (!name || !name.includes(' ')) {
@@ -46887,7 +46890,49 @@ function _ccPlatzhalterFuellen(text, r) {
     '{strasse}': r.strasse || '', '{plz}': r.plz || '',
     '{gueltig_bis}': '31.12.' + new Date().getFullYear(),
   };
-  return String(text || '').replace(/\{[a-z_]+\}/g, m => (m in werte ? werte[m] : m));
+  const gefuellt = String(text || '').replace(/\{[a-z_]+\}/g, m => (m in werte ? werte[m] : m));
+  return _ccFremdenNamenTilgen(gefuellt, r, werte['{anrede}'], werte['{zhd}']);
+}
+
+/* Letzte Instanz gegen den falschen Namen im Brief.
+   Nicht jede Anrede kommt aus {anrede}: Wer die Vorlage einmal MIT einem
+   konkreten Namen gespeichert hat — etwa abgeschrieben aus dem Beispiel neben
+   der Platzhalterliste —, schickt diesen Namen danach an jeden weiteren
+   Kontakt, ohne dass irgendeine Prüfung an der Anrede das bemerkt. Genau so
+   stand „Frau Mayer" im Brief an Frau Finsterwalder.
+
+   Deshalb wird der FERTIGE Text noch einmal gelesen: Steht dort eine Anrede
+   oder eine z.Hd.-Zeile mit einem Namen, der nicht der des Empfängers ist,
+   wird sie ersetzt. Ein Serienbrief mit fremdem Namen ist der eine Fehler,
+   den der Empfänger garantiert bemerkt. */
+function _ccFremdenNamenTilgen(text, r, anrede, zhd) {
+  const name = String(r.ansprechpartner || '').trim();
+  const teile = name.split(/\s+/).filter(Boolean);
+  const nachname = (teile[teile.length - 1] || '').toLowerCase();
+  if (!nachname) return text;      // Ohne Empfängernamen gibt es nichts zu vergleichen
+  let raus = String(text || '');
+  raus = raus.replace(/Sehr geehrte[rs]?\s+(?:Herr|Frau)\s+[^\n,;]{1,60},?/g, treffer => {
+    if (treffer.toLowerCase().includes(nachname)) return treffer;
+    console.warn('[CC] Fremde Anrede im Brieftext ersetzt: „' + treffer + '" → „' + anrede + '"');
+    return anrede || treffer;
+  });
+  raus = raus.replace(/z\.\s*Hd\.[^\n]{1,80}/gi, treffer => {
+    if (treffer.toLowerCase().includes(nachname)) return treffer;
+    console.warn('[CC] Fremde z.Hd.-Zeile ersetzt: „' + treffer + '"');
+    return zhd || ('z. Hd. ' + name);
+  });
+  return raus;
+}
+
+/* Passt eine Anrede zu diesem Namen? „Sehr geehrte Damen und Herren" passt
+   immer — sie nennt niemanden. Sonst muss der Nachname darin vorkommen. */
+function _ccAnredePasst(anrede, name) {
+  const a = String(anrede || '').trim();
+  if (!a) return false;
+  if (/^Sehr geehrte Damen/i.test(a)) return true;
+  const teile = String(name || '').trim().split(/\s+/).filter(Boolean);
+  const nachname = teile[teile.length - 1] || '';
+  return !nachname || a.toLowerCase().includes(nachname.toLowerCase());
 }
 
 /* --- Personalisierung der Preisliste (v2.74.0) --------------------------
@@ -47275,6 +47320,15 @@ function _ccAdressatVerwerfen() {
   _ccVorlageAbschnittNeu();
 }
 
+/* Ein konkreter Name gehört in keine Vorlage — sie geht an alle. Findet sich
+   dort eine Anrede oder z.Hd.-Zeile mit Namen, wird daraus der Platzhalter.
+   Gibt den bereinigten Text zurück; unverändert, wenn nichts zu tun war. */
+function _ccVorlageNamenEntschaerfen(text) {
+  return String(text || '')
+    .replace(/Sehr geehrte[rs]?\s+(?:Herr|Frau)\s+[^\n,;]{1,60},?/g, '{anrede}')
+    .replace(/z\.\s*Hd\.\s*(?:Herrn?|Frau)?\s*[^\n]{1,80}/gi, '{zhd}');
+}
+
 async function _ccVorlageKi(btn) {
   const wunsch = (document.getElementById('ccVorlageKiWunsch')?.value || '').trim();
   if (!wunsch) return toast('Bitte in einem Satz beschreiben, worum es geht.', 'warn', 5000);
@@ -47298,7 +47352,10 @@ async function _ccVorlageKi(btn) {
     const text = (data.content && data.content[0] && data.content[0].text || '').trim();
     if (!text) throw new Error('Die KI hat nichts zurückgegeben.');
     const ta = document.getElementById('ccVorlageText');
-    if (ta) ta.value = text;
+    // Auch mit der Vorgabe „beginne mit {anrede}" schreibt ein Sprachmodell
+    // gelegentlich einen erfundenen Namen hin. In einer Vorlage steht der dann
+    // für immer — deshalb wird er hier zurück zum Platzhalter gemacht.
+    if (ta) ta.value = _ccVorlageNamenEntschaerfen(text);
     setBusy(btn, false);
     toast('Vorschlag eingesetzt — bitte durchlesen und anpassen.', 'success', 5000);
   } catch (e) {
@@ -47311,10 +47368,20 @@ async function _ccVorlageSpeichern(btn) {
   const acc = _ccAccount();
   if (!acc) return;
   const kampagne = CC_STATE.kampagne || CC_KAMPAGNE_STANDARD;
+  /* Vor dem Speichern noch einmal entschärfen. Eine Vorlage mit festem Namen
+     ist immer ein Fehler — sie wird an jeden verschickt, und gemerkt hat es
+     bisher niemand vor dem Empfänger. */
+  const roher = (document.getElementById('ccVorlageText')?.value || '').trim();
+  const sauber = _ccVorlageNamenEntschaerfen(roher);
+  if (sauber !== roher) {
+    const ta = document.getElementById('ccVorlageText');
+    if (ta) ta.value = sauber;
+    toast('In der Vorlage stand ein fester Name — ersetzt durch {anrede} bzw. {zhd}, damit jeder Empfänger richtig angesprochen wird.', 'warn', 9000);
+  }
   const felder = {
     kampagne, account_id: acc.id,
     betreff: (document.getElementById('ccVorlageBetreff')?.value || '').trim(),
-    anschreiben: (document.getElementById('ccVorlageText')?.value || '').trim(),
+    anschreiben: sauber,
     pdf_name: (_CC_VORLAGE && _CC_VORLAGE.pdf_name) || '',
     updated_at: nowIso(),
   };
@@ -47371,7 +47438,11 @@ async function _ccPreislisteAnfordern(recordId, btn) {
       const me = await _mitZeitlimit(fetchAgentMe(acc.id), 20000, 'Freshdesk');
       sig = (me && me.signature) || '';
     } catch (e) { console.warn('[CC] Signatur:', e.message); }
-    if (!String(r.anrede || '').trim()) {
+    /* Auch eine bereits gespeicherte Anrede läuft hier durch: _ccAnredeErmitteln
+       prüft sie gegen den Namen und kommt sofort zurück, wenn sie passt. Der
+       frühere Kurzschluss („nur wenn leer") hat genau die Prüfung übersprungen,
+       die eine einmal falsch gespeicherte Anrede hätte finden müssen. */
+    if (!_ccAnredePasst(r.anrede, r.ansprechpartner) || !String(r.zhd || '').trim()) {
       if (btn) setBusy(btn, true, 'Anrede…');
       try {
         Object.assign(r, await _mitZeitlimit(_ccAnredeErmitteln(r), 25000, 'Die KI'));
