@@ -824,7 +824,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.99.6';
+const APP_VERSION = 'v2.99.7';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -44479,12 +44479,58 @@ function _zdbKonflikteBody(d) {
       '<p class="font-bold text-sm text-ink-900 mb-1.5 inline-flex items-center gap-1.5"><span class="text-[9px] font-bold px-1.5 py-0.5 rounded bg-rose-100 text-rose-700 border border-rose-300 uppercase">' + (it.kind === 'firma' ? 'Firma' : 'Kontakt') + '</span> ' + escapeHtml(disp) + '</p>' +
       rowsHtml +
       '<div class="flex gap-2 mt-2 justify-end">' +
+        /* Manche Konflikte löst man nicht, man wirft den Satz weg — „Dako
+           Aufzüge GmbH" ist ein Artefakt aus einer fremden Helpdesk-Fußzeile
+           und gehört gar nicht in die Stammdaten. Ohne diesen Weg müsste man
+           erst einen Wert wählen und den Satz danach anderswo suchen. */
+        '<button onclick="_zdbKonfliktLoeschen(\'' + it.kind + '\',\'' + it.id + '\', this)" class="px-3 py-1.5 text-[12px] font-bold bg-white border border-rose-300 text-rose-700 hover:bg-rose-50 rounded-lg mr-auto inline-flex items-center gap-1"><i data-lucide="trash-2" class="w-3.5 h-3.5"></i> Datensatz löschen</button>' +
         '<button onclick="_zdbResolveConflict(\'' + it.kind + '\',\'' + it.id + '\',\'keep\', this)" class="px-3 py-1.5 text-[12px] font-bold bg-ink-100 hover:bg-ink-200 text-ink-700 rounded-lg">Bestand behalten</button>' +
         '<button onclick="_zdbResolveConflict(\'' + it.kind + '\',\'' + it.id + '\',\'take\', this)" class="px-3 py-1.5 text-[12px] font-bold bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg inline-flex items-center gap-1"><i data-lucide="check" class="w-3.5 h-3.5"></i> Neu übernehmen</button>' +
       '</div></div>';
   }).join('');
   return '<div><p class="text-[11px] text-rose-600 mb-1.5 font-semibold">' + items.length + ' Datensatz/-sätze mit abweichenden Werten — bitte prüfen</p>' + cards + '</div>';
 }
+/* Datensatz aus der zentralen DB entfernen — aus der Konfliktliste heraus.
+
+   Bei einer FIRMA bleiben die verknüpften Kontakte bestehen; sie verlieren nur
+   den Bezug. Das ist die mildere Variante: Kontakte mitzulöschen würde Menschen
+   entfernen, die es durchaus gibt — nur die Firma war falsch. */
+async function _zdbKonfliktLoeschen(kind, recId, btn) {
+  const d = ZDB_VIEW_STATE.data;
+  const account = _zdbCurrentAccount();
+  if (!d || !account) return;
+  const names = _zdbTableNames(account);
+  const tableName = kind === 'firma' ? names.firma : names.kontakt;
+  const arr = kind === 'firma' ? d.firmen : d.kontakte;
+  const rec = arr.find(r => r.id === recId);
+  if (!rec) return;
+  const f = rec.fields || {};
+  const wie = kind === 'firma'
+    ? String(f.name || '(ohne Namen)')
+    : [f.vorname, f.nachname].filter(Boolean).join(' ') || String(f.email || '(ohne Namen)');
+  let anhang = 0;
+  if (kind === 'firma') anhang = (d.kontakte || []).filter(k => ((k.fields || {}).firma || [])[0] === recId).length;
+
+  if (!confirm((kind === 'firma' ? 'Firma' : 'Kontakt') + ' „' + wie + '" endgültig aus der zentralen DB löschen?\n\n'
+    + (anhang ? anhang + ' Kontakte sind mit dieser Firma verknüpft. Sie bleiben bestehen und verlieren nur den Firmenbezug.\n\n' : '')
+    + 'Rückgängig gibt es nicht. Der Korb-Eintrag bleibt unberührt — von dort aus lässt sich der Kontakt erneut übernehmen.')) return;
+
+  if (btn) setBusy(btn, true, '…');
+  try {
+    await _zdbDeleteRecord(tableName, recId);
+    const i = arr.findIndex(r => r.id === recId);
+    if (i >= 0) arr.splice(i, 1);
+    if (kind === 'firma') delete d.firmaName[recId];
+    const rest = (d.firmen || []).concat(d.kontakte || []).some(r => r.fields && String(r.fields.sync_konflikt || '').trim());
+    if (!rest) ZDB_VIEW_STATE.tab = 'kontakte';
+    _zdbPaintView();
+    toast((kind === 'firma' ? 'Firma' : 'Kontakt') + ' „' + wie + '" gelöscht', 'success', 5000);
+  } catch (e) {
+    if (btn) setBusy(btn, false);
+    toast('Löschen fehlgeschlagen: ' + (e.message || e), 'error', 8000);
+  }
+}
+
 async function _zdbResolveConflict(kind, recId, action, btn) {
   const d = ZDB_VIEW_STATE.data; const account = _zdbCurrentAccount();
   if (!d || !account) return;
