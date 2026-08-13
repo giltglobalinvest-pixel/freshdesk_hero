@@ -824,7 +824,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v3.15.0';
+const APP_VERSION = 'v3.15.1';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -32887,6 +32887,22 @@ function openAngStammdatenEditor() {
           '<button onclick="closeAngStammdatenEditor()" class="w-9 h-9 rounded-lg hover:bg-ink-100 flex items-center justify-center"><i data-lucide="x" class="w-5 h-5 text-ink-700"></i></button>' +
         '</div>' +
         '<div class="flex-1 overflow-y-auto p-4 space-y-3">' +
+          /* Mehrere Aufzüge: Dieser Dialog pflegt den KUNDEN. Die Aufzüge
+             stehen darunter zur Kenntnis — sie werden über „Aufzüge" gepflegt,
+             und eine einzelne Fabriknummer gibt es hier nicht mehr. */
+          ((Array.isArray(s._erpAnlagen) && s._erpAnlagen.length > 1)
+            ? '<div class="bg-emerald-50 border border-emerald-300 rounded-lg p-2.5 text-[11px] text-emerald-900">' +
+                '<p class="font-bold inline-flex items-center gap-1 mb-1"><i data-lucide="building-2" class="w-3.5 h-3.5"></i> ' + s._erpAnlagen.length + ' Aufzüge im ERP</p>' +
+                '<div class="space-y-0.5">' +
+                  s._erpAnlagen.slice(0, 12).map((a, i) =>
+                    '<div class="flex items-start gap-1.5"><span class="text-emerald-600 font-bold shrink-0">' + (i + 1) + '.</span><span>' +
+                    escapeHtml(a.adresse || '?') +
+                    (a.fabriknummer ? ' · <span class="font-mono">' + escapeHtml(a.fabriknummer) + '</span>' : ' · <span class="text-amber-700">ohne Fabriknummer</span>') +
+                    '</span></div>').join('') +
+                '</div>' +
+                '<p class="text-[10px] text-emerald-700 mt-1.5">Hier unten werden die <b>Kundendaten</b> gepflegt. Die Aufzüge selbst über den Knopf <b>Aufzüge</b> oben.</p>' +
+              '</div>'
+            : '') +
           // v2.46.210: Klare Herkunfts-Anzeige — grünes ERP-Panel wenn aus ERP geladen, sonst Ticket+Email
           ((s._erpLoaded)
             ? '<div class="bg-emerald-50 border border-emerald-300 rounded-lg p-2.5 text-[11px] text-emerald-900">' +
@@ -34004,6 +34020,7 @@ async function _erpMehrfachAnlegen(btn) {
           hinweis: a.hinweis || '',
         });
         a.status = 'angelegt (ID ' + (created && created.id) + ')';
+        a.vorhandenId = (created && created.id) || a.vorhandenId;
         a.nehmen = false;
         ok++;
       } catch (e) {
@@ -34013,17 +34030,51 @@ async function _erpMehrfachAnlegen(btn) {
     }
     setBusy(btn, false);
     _ERP_ANLAGEN_CACHE.delete(s.slug);   // frisch laden, damit die neuen sofort auffindbar sind
+    _erpMehrfachZurueckMelden(s, kunde);
     _erpMehrfachZeichnen();
     if (fehler.length) {
       console.warn('[ERP-Mehrfach]', fehler);
       toast(ok + ' Anlagen angelegt · ' + fehler.length + ' fehlgeschlagen — erster Fehler: ' + fehler[0], 'error', 12000);
     } else {
-      toast(ok + ' Anlagen im ERP angelegt. Im Angebot lässt sich die passende jetzt über die Fabriknummer wählen.', 'success', 9000);
+      toast(ok + ' Aufzüge im ERP angelegt.', 'success', 8000);
     }
   } catch (e) {
     setBusy(btn, false);
     toast('Anlegen fehlgeschlagen: ' + (e.message || e), 'error', 10000);
   }
+}
+
+/* Ergebnis zurück in den Angebots-Chat. Ohne das wüssten die beiden Knöpfe
+   nichts voneinander: „Stammdaten" zeigte weiter eine einzelne Anlage, während
+   im ERP längst sechs Aufzüge stehen. Der Kunde wird mitgegeben — er ist das,
+   was beide gemeinsam haben. */
+function _erpMehrfachZurueckMelden(s, kunde) {
+  const chat = window._ANG_CHAT;
+  if (!chat || String(chat.ticketId) !== String(s.ticketId)) return;
+  const liste = (s.anlagen || [])
+    .filter(a => a.vorhandenId)
+    .map(a => ({ id: a.vorhandenId, adresse: a.adresse || '', fabriknummer: a.fabriknummer || '' }));
+  if (!liste.length) return;
+  chat._erpAnlagen = liste;
+  chat._erpKunde = kunde || chat._erpKunde;
+  /* Stammdaten = Kunde. Vertragspartner und Anschrift kommen aus dem ERP-Kunden,
+     sofern dort noch nichts Belastbares steht — die Anlage bleibt außen vor,
+     weil es sie im Plural gibt. */
+  try {
+    const st = chat.collected && chat.collected.stammdaten;
+    if (st && kunde) {
+      if (!String(st.vertragspartner || '').trim()) st.vertragspartner = kunde.firmenname || '';
+      if (!String(st.rechnungs_anschrift || '').trim()) {
+        st.rechnungs_anschrift = [kunde.strasse, [kunde.plz, kunde.ort].filter(Boolean).join(' ')].filter(Boolean).join(', ')
+          || kunde.anzeigeAdresse || '';
+      }
+    }
+    if (chat.collected && liste.length > 1) {
+      // Eine einzelne Fabriknummer gibt es hier nicht — ehrlicher ist die Anzahl.
+      chat.collected.fabriknummer = liste.length + ' Aufzüge (siehe Aufzugsliste)';
+    }
+  } catch (_) {}
+  try { if (typeof _angChatRenderPreview === 'function') _angChatRenderPreview(); } catch (_) {}
 }
 
 function openErpAnlageCreate(prefillFabrik) {
@@ -35380,7 +35431,14 @@ async function _angChatRenderPreview() {
   const erpBadge = document.getElementById('angErpBadge');
   if (erpBadge) {
     const el = s._erpLoaded;
-    erpBadge.innerHTML = el
+    /* Mehrere Aufzüge sprengen die Zählung „n/3": Die 3 stehen für Anlage,
+       Kunde und Kontakt — eine Anlage. Sind mehrere Aufzüge im ERP angelegt,
+       sagt das Abzeichen das auch, statt einen davon als „die" Anlage
+       auszugeben. Die Stammdaten dahinter bleiben der KUNDE. */
+    const mehrfach = Array.isArray(s._erpAnlagen) ? s._erpAnlagen.length : 0;
+    erpBadge.innerHTML = mehrfach > 1
+      ? '<button onclick="openAngStammdatenEditor()" class="inline-flex items-center gap-1 px-2 py-1 bg-emerald-100 hover:bg-emerald-200 border border-emerald-300 text-emerald-800 rounded-md text-[10px] font-bold" title="Kunde aus dem ERP · ' + mehrfach + ' Aufzüge im ERP angelegt — klicken zum Prüfen"><i data-lucide="database" class="w-3 h-3"></i> ERP · ' + mehrfach + ' Aufzüge ✓</button>'
+      : el
       ? '<button onclick="openAngStammdatenEditor()" class="inline-flex items-center gap-1 px-2 py-1 bg-emerald-100 hover:bg-emerald-200 border border-emerald-300 text-emerald-800 rounded-md text-[10px] font-bold" title="Anlage/Kunde/Kontakt aus dem ERP geladen — klicken zum Prüfen"><i data-lucide="database" class="w-3 h-3"></i> ERP ' + [el.anlage.ok, el.kunde.ok, el.kontakt.ok].filter(Boolean).length + '/3 ✓</button>'
       : (s._erpAutoTried && APP_KEYS.erpProxyUrl
           ? '<span class="inline-flex items-center gap-1 px-2 py-1 bg-amber-50 border border-amber-300 text-amber-700 rounded-md text-[10px] font-bold" title="Kein ERP-Treffer — Stammdaten aus Ticket/manuell"><i data-lucide="database" class="w-3 h-3"></i> kein ERP</span>'
