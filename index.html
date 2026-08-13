@@ -824,7 +824,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v3.1.0';
+const APP_VERSION = 'v3.1.1';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -33329,6 +33329,20 @@ async function submitErpAnlageCreate(btn) {
     try {
       const items = await erpLoadAnlagen(firmaSlug);
       const full = items.find(a => String(a.id) === String(created.id)) || created;
+      // v3.1.1: WURZEL-FIX — die frisch angelegte Anlage SOFORT ans aktuelle Angebot verknüpfen (anlage_id nachtragen).
+      //   Vorher blieb der App_Angebote-Datensatz ohne anlage_id → Servicebox konnte nicht ins ERP pushen, und die
+      //   Anlage sah beim nächsten Mal wieder „fehlend" aus → Dubletten-Gefahr. Jetzt wird der Bezug direkt gesetzt.
+      try {
+        const s = window._ANG_CHAT;
+        if (s && s.bkRecordId) {
+          const bez = await _bkSchreibeErpBezug(s.bkRecordId, full, firmaSlug);
+          if (bez) {
+            s._erpBezug = { anlage: bez.anlage, kunde: bez.kunde, kontakt: bez.kontakt };
+            toast('Anlage am Angebot verknüpft (anlage_id ' + bez.anlage + ')' + (bez.kunde ? ' · Kunde ' + bez.kunde : '')
+              + ' — die Servicebox kann das Angebot jetzt ins ERP pushen.', bez.kunde ? 'success' : 'warn', 8000);
+          }
+        }
+      } catch (e) { console.warn('[Anlage-Create] ERP-Bezug nachtragen:', e.message); }
       window._ERP_PICKER = { items: [full], filtered: [full], firmaSlug };
       await pickErpAnlage(0);
     } catch (e) {
@@ -37428,6 +37442,23 @@ async function _bkErpBezugSetzen(recordId, s) {
     }
     return;
   }
+  // v3.1.1: gemeinsamer Schreib-Helfer (auch vom Anlage-Anlegen-Dialog genutzt).
+  const res = await _bkSchreibeErpBezug(recordId, anlage, slug);
+  if (res) {
+    s._erpBezug = { anlage: res.anlage, kunde: res.kunde, kontakt: res.kontakt };
+    toast('ERP-Bezug gesetzt: Anlage ' + res.anlage + (res.kunde ? ' · Kunde ' + res.kunde : '')
+      + (res.kontakt ? ' · Kontakt ' + res.kontakt : '')
+      + '. In der Servicebox ist „Ins ERP pushen" jetzt möglich.'
+      + (res.kunde ? '' : ' — ohne Kundennummer lehnt der Push aber weiterhin ab.'), res.kunde ? 'success' : 'warn', 9000);
+  }
+}
+
+/* v3.1.1: Schreibt anlage_id/kunde_nummer/kontakt_id einer BEKANNTEN Anlage an den App_Angebote-Datensatz.
+   Ausgelagert aus _bkErpBezugSetzen, damit auch der Anlage-Anlegen-Dialog den Bezug direkt nachträgt —
+   OHNE erneuten „Anlage anlegen?"-Prompt (der bisher zum Endlos-/Doppel-Dialog führte). Rückgabe:
+   { anlage, kunde, kontakt } bei Erfolg, sonst null. */
+async function _bkSchreibeErpBezug(recordId, anlage, slug) {
+  if (!recordId || !anlage || !anlage.id) return null;
   const kdNr = anlage.kunde?.kundennummer || anlage.kundennummer || '';
   const felder = { anlage_id: String(anlage.id || ''), erp_firma_slug: slug };
   if (kdNr) felder.kunde_nummer = String(kdNr);
@@ -37435,8 +37466,7 @@ async function _bkErpBezugSetzen(recordId, s) {
   let kontaktId = anlage.standardansprechpartnerId || anlage.standardAnsprechpartnerId
     || anlage.standardAnsprechpartner?.id || anlage.ansprechpartner?.id || null;
   if (!kontaktId && kdNr) {
-    const kontakte = await erpLoadKundenKontakte(slug, kdNr);
-    kontaktId = (kontakte || [])[0]?.id || null;
+    try { const kontakte = await erpLoadKundenKontakte(slug, kdNr); kontaktId = (kontakte || [])[0]?.id || null; } catch (_) {}
   }
   if (kontaktId) felder.kontakt_id = String(kontaktId);
   try {
@@ -37445,14 +37475,10 @@ async function _bkErpBezugSetzen(recordId, s) {
       headers: { 'Authorization': 'Bearer ' + APP_KEYS.airtableWriteKey, 'Content-Type': 'application/json' },
       body: JSON.stringify({ fields: felder, typecast: true }),
     });
-    if (!r.ok) { console.warn('[BK-Save] ERP-Bezug schreiben:', r.status, (await r.text()).slice(0, 200)); return; }
-    s._erpBezug = { anlage: anlage.id, kunde: kdNr, kontakt: kontaktId };
+    if (!r.ok) { console.warn('[BK-Save] ERP-Bezug schreiben:', r.status, (await r.text()).slice(0, 200)); return null; }
     console.log('[BK-Save] ERP-Bezug gesetzt:', felder);
-    toast('ERP-Bezug gesetzt: Anlage ' + anlage.id + (kdNr ? ' · Kunde ' + kdNr : '')
-      + (kontaktId ? ' · Kontakt ' + kontaktId : '')
-      + '. In der Servicebox ist „Ins ERP pushen" jetzt möglich.'
-      + (kdNr ? '' : ' — ohne Kundennummer lehnt der Push aber weiterhin ab.'), kdNr ? 'success' : 'warn', 9000);
-  } catch (e) { console.warn('[BK-Save] ERP-Bezug:', e.message); }
+    return { anlage: anlage.id, kunde: kdNr, kontakt: kontaktId };
+  } catch (e) { console.warn('[BK-Save] ERP-Bezug:', e.message); return null; }
 }
 
 /* v2.46.178: KOMPLETT umgestellt auf den _fdhChatToBkRec-Mapper — derselbe der
