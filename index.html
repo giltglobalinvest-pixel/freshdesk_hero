@@ -824,7 +824,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v3.16.0';
+const APP_VERSION = 'v3.17.0';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -33550,6 +33550,18 @@ async function openErpMehrfachAnlagen(accountId, ticketId) {
     ]);
     ERP_MEHRFACH.kunden = kunden || [];
     ERP_MEHRFACH.kundeVorschlag = vorschlag.kunde || {};
+    /* Kontaktvorschlag: Der Absender ist fast immer der richtige Ansprechpartner.
+       Fehlt er in der Analyse, tritt der Ticket-Anfragende an seine Stelle. */
+    const kv0 = vorschlag.kontakt || {};
+    const reqName = String((t.requester && t.requester.name) || '').trim().split(/\s+/).filter(Boolean);
+    ERP_MEHRFACH.kontaktVorschlag = {
+      anrede: kv0.anrede || '',
+      vorname: kv0.vorname || (reqName.length > 1 ? reqName.slice(0, -1).join(' ') : ''),
+      nachname: kv0.nachname || (reqName.length ? reqName[reqName.length - 1] : ''),
+      email: kv0.email || (t.requester && t.requester.email) || '',
+      telefon: kv0.telefon || (t.requester && (t.requester.phone || t.requester.mobile)) || '',
+      position: kv0.position || '',
+    };
     ERP_MEHRFACH.dateien = vorschlag._dateien || [];
     ERP_MEHRFACH.uebersprungen = vorschlag._uebersprungen || [];
     ERP_MEHRFACH.anlagen = (vorschlag.anlagen || []).map(a => Object.assign({ nehmen: true, status: '' }, a));
@@ -33608,8 +33620,15 @@ async function _erpMehrfachAnalyse(accountId, ticketId, t, melden) {
     + '7. Adresse vollständig mit Hausnummer, PLZ und Ort — sie wird für die Adresssuche gebraucht. Fehlt die PLZ in der Mail, hol sie aus dem Anhang.\n'
     + '8. Der Kunde ist der ANFRAGENDE (Auftraggeber), nicht der Aufzugshersteller und nicht der bisherige Wartungsdienstleister. „von KONE" oder „Vertrag mit Schindler" beschreibt Fabrikat bzw. Vorlieferant, nicht den Kunden.\n'
     + '9. Nichts erfinden. Fehlt etwas, lass das Feld leer.\n\n'
+    + 'ZUM KUNDEN (er wird im ERP angelegt, deshalb genau):\n'
+    + 'A. „firmenname" ist der Name, unter dem der Auftraggeber Rechnungen bekommt — aus der Signatur der Mail, dem Briefkopf eines Anhangs oder dem Vertrag.\n'
+    + 'B. ROLLENWÖRTER SIND KEINE FIRMENNAMEN: „Eigentümer", „Betreiber", „Hausverwaltung", „Verwalter", „WEG", „Eigentümergemeinschaft", „Mieter", „Bauherr", „Privat". Steht nur so etwas da, lass „firmenname" LEER — lieber leer als ein Kunde namens „Eigentümer" im ERP.\n'
+    + 'C. Bei einer Privatperson ist der vollständige Name der Firmenname („Dr. Marlene Jentzsch").\n'
+    + 'D. „adresse" ist die POSTANSCHRIFT des Kunden (Rechnungsanschrift) — nicht der Standort eines Aufzugs. Straße, Hausnummer, PLZ, Ort.\n'
+    + 'E. „kontakt" ist die Person, mit der man spricht: die Person aus der Signatur bzw. der Absender. Vorname und Nachname getrennt, Anrede „Herr" oder „Frau" nur wenn erkennbar.\n\n'
     + 'ANTWORTE NUR MIT JSON:\n'
     + '{"kunde":{"firmenname":"…","adresse":"…","email":"…","telefon":"…"},'
+    + '"kontakt":{"anrede":"Herr|Frau|","vorname":"…","nachname":"…","email":"…","telefon":"…","position":"z.B. Projektsteuerung"},'
     + '"anlagen":[{"adresse":"Straße Nr, PLZ Ort","fabriknummer":"…","hinweis":"z.B. Fabrikat oder Bemerkung",'
     + '"quelle":"woher die Fabriknummer stammt — exakter Dateiname des Anhangs oder „Anfrage" bei Fund im Mailtext, leer wenn keine Nummer"}]}';
   /* Auch der weitere Schriftwechsel zählt: Verträge werden selten mit der
@@ -33683,7 +33702,10 @@ async function _erpMehrfachAnalyse(accountId, ticketId, t, melden) {
     }
   }
 
-  return { kunde: basis.kunde || {}, anlagen, _dateien: gelesen, _uebersprungen: uebersprungen };
+  return {
+    kunde: basis.kunde || {}, kontakt: basis.kontakt || {},
+    anlagen, _dateien: gelesen, _uebersprungen: uebersprungen,
+  };
 }
 
 /* Ein Fund aus einem Dokument in die Liste einsortieren: bevorzugt in eine
@@ -33802,11 +33824,12 @@ function _erpMehrfachKundeBlock(s, kv) {
     + (k.anzeigeAdresse || k.strasse || k.ort ? ' · ' + escapeHtml([k.strasse, k.plz, k.ort].filter(Boolean).join(' ') || k.anzeigeAdresse) : '') + '</p></div>'
     + aktion + '</div>';
 
-  // 1 · Bestätigt — der Normalfall nach einem Klick
+  // 1 · Bestätigt — der Normalfall nach einem Klick, darunter der Kontakt
   if (s.kunde && s.kundeBestaetigt) {
     return '<div class="border border-emerald-300 bg-emerald-50/60 rounded-xl p-3">'
       + '<p class="text-[10px] uppercase font-semibold text-emerald-800 mb-1 inline-flex items-center gap-1.5"><i data-lucide="check-circle-2" class="w-3.5 h-3.5"></i> Kunde aus dem ERP bestätigt</p>'
       + zeile(s.kunde, '<button onclick="_erpMehrfachKundeLoesen()" class="text-[11px] font-bold text-ink-600 hover:underline shrink-0">ändern</button>')
+      + _erpMehrfachKontaktBlock(s)
       + '</div>';
   }
 
@@ -33861,6 +33884,114 @@ function _erpMehrfachKundeBlock(s, kv) {
     + '</div>';
 }
 
+/* Kontakt des Kunden — auswählen oder anlegen. Maxise hängt Anlagen und
+   Aufträge an einen Ansprechpartner; fehlt er, quittiert das ERP das Anlegen
+   mit einer NullPointerException. Deshalb gehört er in denselben Schritt wie
+   der Kunde und nicht in eine spätere Nacharbeit. */
+function _erpMehrfachKontaktBlock(s) {
+  const kv = s.kontaktVorschlag || {};
+  const name = (k) => [k.anrede, k.vorname, k.nachname].filter(Boolean).join(' ').trim()
+    || k.name || k.email || 'Kontakt';
+
+  if (s.kontaktNeu) {
+    return '<div class="mt-2 pt-2 border-t border-emerald-200">'
+      + '<div class="flex items-center justify-between mb-1">'
+        + '<p class="text-[10px] uppercase font-semibold text-emerald-800">Neuen Kontakt anlegen</p>'
+        + ((s.kontakte || []).length ? '<button onclick="_erpMehrfachKontaktAbbrechen()" class="text-[11px] font-bold text-ink-600 hover:underline">zurück zur Auswahl</button>' : '')
+      + '</div>'
+      + '<div class="grid grid-cols-2 gap-2">'
+        + '<label class="block"><span class="text-[10px] text-ink-500">Anrede</span>'
+          + '<select id="emKtAnrede" class="w-full mt-0.5 px-2 py-1.5 border border-ink-300 rounded text-sm bg-white">'
+          + ['', 'Herr', 'Frau'].map(a => '<option value="' + a + '"' + (String(kv.anrede || '') === a ? ' selected' : '') + '>' + (a || '—') + '</option>').join('')
+          + '</select></label>'
+        + '<label class="block"><span class="text-[10px] text-ink-500">Position</span>'
+          + '<input id="emKtRolle" value="' + escapeAttr(kv.position || '') + '" class="w-full mt-0.5 px-2 py-1.5 border border-ink-300 rounded text-sm"></label>'
+        + '<label class="block"><span class="text-[10px] text-ink-500">Vorname</span>'
+          + '<input id="emKtVorname" value="' + escapeAttr(kv.vorname || '') + '" class="w-full mt-0.5 px-2 py-1.5 border border-ink-300 rounded text-sm"></label>'
+        + '<label class="block"><span class="text-[10px] text-ink-500">Nachname *</span>'
+          + '<input id="emKtNachname" value="' + escapeAttr(kv.nachname || '') + '" class="w-full mt-0.5 px-2 py-1.5 border border-ink-300 rounded text-sm"></label>'
+        + '<label class="block"><span class="text-[10px] text-ink-500">E-Mail</span>'
+          + '<input id="emKtMail" value="' + escapeAttr(kv.email || '') + '" class="w-full mt-0.5 px-2 py-1.5 border border-ink-300 rounded text-sm"></label>'
+        + '<label class="block"><span class="text-[10px] text-ink-500">Telefon</span>'
+          + '<input id="emKtTel" value="' + escapeAttr(kv.telefon || '') + '" class="w-full mt-0.5 px-2 py-1.5 border border-ink-300 rounded text-sm"></label>'
+      + '</div>'
+      + '<button onclick="_erpMehrfachKontaktAnlegen(this)" class="mt-2 w-full px-3 py-1.5 rounded-lg text-[12px] font-bold bg-emerald-600 hover:bg-emerald-700 text-white">Kontakt im ERP anlegen</button>'
+      + '</div>';
+  }
+
+  if (s.kontakteLaden) {
+    return '<p class="mt-2 pt-2 border-t border-emerald-200 text-[11px] text-emerald-800">Kontakte des Kunden werden geladen …</p>';
+  }
+
+  const liste = s.kontakte || [];
+  return '<div class="mt-2 pt-2 border-t border-emerald-200">'
+    + '<p class="text-[10px] uppercase font-semibold text-emerald-800 mb-1">Ansprechpartner</p>'
+    + (liste.length
+        ? '<div class="max-h-32 overflow-y-auto rounded-lg bg-white border border-emerald-200 px-2">'
+          + liste.map(k => '<label class="flex items-center gap-2 py-1.5 text-[12px] cursor-pointer border-b border-ink-100 last:border-0">'
+            + '<input type="radio" name="emKontakt" class="w-4 h-4 accent-emerald-600"'
+            + (s.kontakt && String(s.kontakt.id) === String(k.id) ? ' checked' : '')
+            + ' onchange="_erpMehrfachKontaktWaehlen(\'' + escapeAttr(String(k.id)) + '\')">'
+            + '<span class="flex-1 min-w-0 truncate"><b>' + escapeHtml(name(k)) + '</b>'
+            + (k.email ? ' <span class="text-ink-500">· ' + escapeHtml(k.email) + '</span>' : '') + '</span></label>').join('')
+          + '</div>'
+        : '<p class="text-[11px] text-amber-800">Für diesen Kunden ist im ERP kein Kontakt hinterlegt.</p>')
+    + '<button onclick="_erpMehrfachKontaktNeu()" class="mt-1 text-[11px] font-bold text-emerald-800 hover:underline">'
+      + (liste.length ? 'Neuen Kontakt anlegen' : 'Kontakt jetzt anlegen (aus dem Ticket vorbelegt)') + '</button>'
+    + '</div>';
+}
+
+async function _erpMehrfachKontakteLaden(s) {
+  if (!s.kunde) return;
+  s.kontakteLaden = true;
+  _erpMehrfachZeichnen();
+  try {
+    const liste = await erpLoadKundenKontakte(s.slug, s.kunde.kundennummer || s.kunde.id);
+    if (ERP_MEHRFACH !== s) return;
+    s.kontakte = Array.isArray(liste) ? liste : [];
+    s.kontakt = s.kontakte[0] || null;
+    // Kein Kontakt da? Dann gleich das Anlegeformular — das ERP braucht einen.
+    s.kontaktNeu = !s.kontakte.length;
+  } catch (e) {
+    console.warn('[ERP-Mehrfach] Kontakte:', e.message);
+    s.kontakte = []; s.kontaktNeu = true;
+  } finally {
+    if (ERP_MEHRFACH === s) { s.kontakteLaden = false; _erpMehrfachZeichnen(); }
+  }
+}
+
+function _erpMehrfachKontaktWaehlen(id) {
+  const s = ERP_MEHRFACH;
+  if (!s) return;
+  s.kontakt = (s.kontakte || []).find(k => String(k.id) === String(id)) || null;
+}
+function _erpMehrfachKontaktNeu() { if (ERP_MEHRFACH) { ERP_MEHRFACH.kontaktNeu = true; _erpMehrfachZeichnen(); } }
+function _erpMehrfachKontaktAbbrechen() { if (ERP_MEHRFACH) { ERP_MEHRFACH.kontaktNeu = false; _erpMehrfachZeichnen(); } }
+
+async function _erpMehrfachKontaktAnlegen(btn) {
+  const s = ERP_MEHRFACH;
+  if (!s || !s.kunde) return;
+  const w = (id) => (document.getElementById(id)?.value || '').trim();
+  const kd = {
+    anrede: w('emKtAnrede') || 'Herr', vorname: w('emKtVorname'), nachname: w('emKtNachname'),
+    email: w('emKtMail'), telefon: w('emKtTel'), rolle: w('emKtRolle'),
+  };
+  if (!kd.nachname) return toast('Das ERP braucht mindestens den Nachnamen.', 'warn', 6000);
+  setBusy(btn, true, 'Lege an …');
+  try {
+    const neu = await erpCreateKundenKontakt(s.slug, s.kunde.kundennummer || s.kunde.id, kd);
+    s.kontakte = (s.kontakte || []).concat([Object.assign({ id: neu && neu.id }, kd, neu || {})]);
+    s.kontakt = s.kontakte[s.kontakte.length - 1];
+    s.kontaktNeu = false;
+    setBusy(btn, false);
+    toast('Kontakt „' + [kd.vorname, kd.nachname].filter(Boolean).join(' ') + '" im ERP angelegt.', 'success', 6000);
+    _erpMehrfachZeichnen();
+  } catch (e) {
+    setBusy(btn, false);
+    toast('Kontakt anlegen fehlgeschlagen: ' + (e.message || e), 'error', 10000);
+  }
+}
+
 function _erpMehrfachKundeSuche(v) {
   if (!ERP_MEHRFACH) return;
   ERP_MEHRFACH.kundeSuche = v;
@@ -33877,7 +34008,9 @@ function _erpMehrfachKundeWaehlen(nr) {
   s.kunde = (s.kunden || []).find(k => String(k.kundennummer || k.id) === String(nr)) || null;
   s.kundeBestaetigt = !!s.kunde;
   s.kundeNeu = false;
+  s.kontakte = null; s.kontakt = null; s.kontaktNeu = false;
   _erpMehrfachZeichnen();
+  if (s.kunde) _erpMehrfachKontakteLaden(s);
   // Konditionen hängen am Kunden — nach der Bestätigung neu holen.
   _erpMehrfachKonditionen(s.slug, nr)
     .then(k => { if (ERP_MEHRFACH === s) { s.kond = k; _erpMehrfachZeichnen(); } })
@@ -33916,8 +34049,12 @@ async function _erpMehrfachKundeAnlegen(btn) {
     const neu = await erpCreateKunde(s.slug, kd);
     s.kunden = (s.kunden || []).concat([neu]);
     s.kunde = neu; s.kundeBestaetigt = true; s.kundeNeu = false;
+    // Frisch angelegt heißt: noch kein Kontakt. Direkt ins Kontaktformular,
+    // vorbelegt aus dem Ticket — ohne Ansprechpartner scheitert das Anlegen
+    // der Anlagen im ERP.
+    s.kontakte = []; s.kontakt = null; s.kontaktNeu = true;
     setBusy(btn, false);
-    toast('Kunde „' + kd.firmenname + '" angelegt (Kd. ' + (neu.kundennummer || neu.id) + ')', 'success', 6000);
+    toast('Kunde „' + kd.firmenname + '" angelegt (Kd. ' + (neu.kundennummer || neu.id) + ') — jetzt noch den Ansprechpartner.', 'success', 7000);
     _erpMehrfachZeichnen();
     _erpMehrfachKonditionen(s.slug, neu.kundennummer || neu.id)
       .then(k => { if (ERP_MEHRFACH === s) { s.kond = k; _erpMehrfachZeichnen(); } }).catch(() => {});
