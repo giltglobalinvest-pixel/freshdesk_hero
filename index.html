@@ -824,7 +824,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v3.9.0';
+const APP_VERSION = 'v3.9.1';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -3190,6 +3190,7 @@ async function ensureAppTables() {
     { name: 'account_id',  type: 'singleLineText' },
     { name: 'betreff',     type: 'singleLineText' },
     { name: 'anschreiben', type: 'multilineText'  },
+    { name: 'leitfaden',   type: 'multilineText'  },   // Gesprächsleitfaden für den Anruf
     { name: 'pdf_name',    type: 'singleLineText' },
     { name: 'pdf_text',    type: 'singleLineText' },   // Aufdruck auf der Preisliste
     { name: 'pdf_ecke',    type: 'singleLineText' },
@@ -45572,6 +45573,7 @@ const CC_VORLAGE_TABLE = 'Kampagne_Vorlage';
 const CC_VORLAGE_TYPEN = {
   kampagne: 'singleLineText', account_id: 'singleLineText', betreff: 'singleLineText',
   anschreiben: 'multilineText', pdf_name: 'singleLineText', updated_at: 'singleLineText',
+  leitfaden: 'multilineText',
   pdf_text: 'singleLineText', pdf_ecke: 'singleLineText', pdf_x: 'singleLineText',
   pdf_y: 'singleLineText', pdf_size: 'singleLineText', pdf_seite: 'singleLineText',
   pdf_modus: 'singleLineText', pdf_empf_json: 'multilineText', pdf_datei: 'singleLineText',
@@ -45594,6 +45596,53 @@ const CC_ANSCHREIBEN_STANDARD =
   + 'vielen Dank für das freundliche Telefonat. Wie besprochen erhalten Sie anbei unsere aktuelle Preisliste.\n\n'
   + 'Die darin genannten Sonderkonditionen gelten für Neuabschlüsse bis {gueltig_bis}.\n\n'
   + 'Für Rückfragen oder ein persönliches Gespräch stehe ich Ihnen gerne zur Verfügung.';
+/* Gesprächsleitfaden für die Kaltakquise. Kurz gehalten und zum Vorlesen
+   geschrieben: Wer im Minutentakt telefoniert, liest keine Seite.
+
+   Das Ziel des Anrufs ist NICHT der Vertrag, sondern die Erlaubnis, eine
+   Preisliste zu schicken. Diese Hürde nimmt fast jeder — und ab da läuft das
+   Gespräch über eine Zahl auf Papier statt über ein Versprechen am Telefon. */
+const CC_LEITFADEN_STANDARD =
+  'ZIEL DES ANRUFS: die E-Mail-Adresse für die Preisliste. Nichts verkaufen.\n'
++ '\n'
++ '1 · ZENTRALE\n'
++ '„Guten Tag, [Name] von Aszendio Aufzugservice. Wer ist bei Ihnen für die Aufzüge zuständig?"\n'
++ '→ Verbinden lassen. Mit der Zentrale kein Gespräch über die Sache führen.\n'
++ '\n'
++ '2 · EINSTIEG BEIM ZUSTÄNDIGEN\n'
++ '„Guten Tag Herr/Frau [Nachname], [Name] von Aszendio Aufzugservice — wir machen bundesweit Wartung und Notruf für Aufzüge.\n'
++ 'Ich halte Sie eine Minute auf, es geht um die 2G-Abschaltung der Telekom. Passt das kurz?"\n'
++ '\n'
++ '3 · AUFHÄNGER (zwei Sätze, dann Pause)\n'
++ '„Die Telekom schaltet das 2G-Netz ab. Jeder Aufzugsnotruf, der noch über 2G oder 3G läuft, muss auf 5G umgerüstet werden — sonst kommt der Notruf irgendwann nicht mehr durch.\n'
++ 'Die meisten Betreiber zahlen diese Umrüstung je Anlage aus eigener Tasche."\n'
++ '\n'
++ '4 · UNSER UNTERSCHIED (ein Satz)\n'
++ '„Bei uns ist die Umrüstung auf 5G im Wartungsvertrag enthalten. Wir haben Rahmenvereinbarungen und geben die Konditionen weiter — unterm Strich Umrüstung inklusive und meist eine günstigere Wartung als heute."\n'
++ '\n'
++ '5 · DIE BITTE (das eigentliche Ziel)\n'
++ '„Ich will Ihnen jetzt nichts verkaufen. Ich schicke Ihnen unsere Preisliste per E-Mail, dann haben Sie eine Zahl zum Vergleichen, wenn Sie Ihre Wartungsverträge das nächste Mal prüfen.\n'
++ 'Die Konditionen gelten bis Jahresende. Auf welche Adresse darf ich sie schicken?"\n'
++ '\n'
++ '6 · ABSCHLUSS\n'
++ 'E-Mail-Adresse wiederholen und buchstabieren lassen. Dann:\n'
++ '„Wenn die Zahlen für Sie passen, machen wir Ihnen ein individuelles Angebot für Ihre Anlagen. Ich melde mich in zwei Wochen kurz — ist Ihnen das recht?"\n'
++ '\n'
++ 'EINWÄNDE\n'
++ '„Kein Interesse." → „Verstehe. Die Liste kostet Sie nichts und liegt im Postfach, wenn die Umrüstung ansteht. Auf welche Adresse darf ich sie schicken?"\n'
++ '„Wir haben schon einen Wartungsvertrag." → „Davon gehe ich aus, deshalb rufe ich an. Die Frage ist nur, ob die 5G-Umrüstung darin enthalten ist — steht das bei Ihnen drin?" (meist nein) „Genau da liegt der Unterschied. Ich schicke Ihnen die Liste zum Vergleich."\n'
++ '„Schicken Sie Unterlagen." → „Mache ich sofort. An welche Adresse?" (Ziel erreicht, Gespräch beenden)\n'
++ '„Keine Zeit." → „Kein Problem — dann nur die Adresse, der Rest kann warten."\n'
++ '„Das entscheide nicht ich." → „Wer prüft bei Ihnen die Wartungsverträge? Dann schicke ich es direkt dorthin."\n'
++ '\n'
++ 'NICHT SAGEN\n'
++ '· Keine Preise am Telefon nennen — die stehen in der Liste.\n'
++ '· Nicht behaupten, der Aufzug werde stillgelegt. Es geht um den Notruf.\n'
++ '· Keine Frist erfinden. „Bis Jahresende" gilt für unsere Sonderkonditionen, nicht für die Abschaltung.\n'
++ '· Nichts zusagen, was nicht in der Preisliste steht.\n'
++ '\n'
++ 'Wer keine Anrufe mehr will: sofort „Nie wieder anrufen" drücken. Das ist die Werbesperre, nicht nur diese Kampagne.';
+
 const CC_TYPES = {
   firma: 'singleLineText', account_id: 'singleLineText', kampagne: 'singleLineText',
   ansprechpartner: 'singleLineText', telefon: 'singleLineText', email: 'singleLineText',
@@ -45981,6 +46030,9 @@ async function renderCallcenterPage() {
   await _ccLaden();
   _ccZeichnen();
   _ccAbgleichStarten();
+  // Vorlage nachladen — darin steckt der Gesprächsleitfaden. Nicht davor: Die
+  // Liste soll stehen, bevor irgendetwas Nachrangiges sie aufhält.
+  _ccVorlageLaden().then(() => { if (APP_STATE.page === 'callcenter') _ccZeichnen(); }).catch(() => {});
 }
 
 function _ccZeichnen() {
@@ -46773,7 +46825,18 @@ function _ccArbeitsbereich(r) {
   const histText = hist === undefined ? '<span class="text-ink-400">Vorgeschichte wird geladen…</span>'
     : (hist ? escapeHtml(hist) : '<span class="text-ink-400">Kein früherer Schriftwechsel im Archiv.</span>');
   const erg = (key, text, cls) => '<button onclick="event.stopPropagation(); _ccErgebnis(\'' + r.recordId + '\',\'' + key + '\', this)" class="px-2.5 py-1.5 rounded-lg text-[11px] font-bold ' + cls + '">' + escapeHtml(text) + '</button>';
+  /* Der Leitfaden gehört an die Stelle, an der telefoniert wird — nicht auf
+     eine eigene Seite, die man vorher auswendig lernt. Zugeklappt, damit die
+     Ergebnisknöpfe da bleiben, wo die Hand sie erwartet; der Zustand hält für
+     die Sitzung, wer ihn einmal offen hat, behält ihn offen. */
+  const leitfaden = String((_CC_VORLAGE && _CC_VORLAGE.leitfaden) || '').trim();
   return '<div class="rounded-xl border border-brand-200 bg-white p-3">'
+    + (leitfaden
+        ? '<details class="mb-2 rounded-lg border border-ink-200 bg-ink-50/60"' + (CC_STATE.leitfadenOffen ? ' open' : '') + ' ontoggle="CC_STATE.leitfadenOffen=this.open" onclick="event.stopPropagation()">'
+          + '<summary class="text-[11px] font-semibold text-ink-700 cursor-pointer select-none px-2.5 py-1.5 inline-flex items-center gap-1.5">Gesprächsleitfaden</summary>'
+          + '<div class="px-2.5 pb-2.5 pt-1 bg-white border-t border-ink-200 text-[12px] leading-relaxed whitespace-pre-line max-h-72 overflow-y-auto">'
+          + escapeHtml(leitfaden) + '</div></details>'
+        : '')
     + '<p class="text-[11px] text-ink-600 mb-2"><b class="text-ink-800">Vorgeschichte:</b> ' + histText + '</p>'
     + '<div class="flex flex-wrap items-center gap-1.5 mb-2">'
       + erg('interessiert',   'Interessiert',    'bg-emerald-600 hover:bg-emerald-700 text-white')
@@ -47176,6 +47239,9 @@ async function _ccVorlageLaden(neu) {
   _CC_VORLAGE = r
     ? Object.assign({ recordId: r.id, _kampagne: kampagne }, r.fields)
     : { recordId: null, _kampagne: kampagne, betreff: 'Ihre Preisliste — Sonderkonditionen', anschreiben: CC_ANSCHREIBEN_STANDARD, pdf_name: '' };
+  // Ohne hinterlegten Leitfaden der Standard — besser als ein leeres Feld,
+  // und jede Kampagne kann ihn überschreiben.
+  if (!String(_CC_VORLAGE.leitfaden || '').trim()) _CC_VORLAGE.leitfaden = CC_LEITFADEN_STANDARD;
   // Fehlende Aufdruck-Einstellungen mit sinnvollen Vorgaben füllen
   for (const k of Object.keys(CC_PDF_STANDARD)) if (!_CC_VORLAGE[k]) _CC_VORLAGE[k] = CC_PDF_STANDARD[k];
   return _CC_VORLAGE;
@@ -47835,6 +47901,9 @@ async function _ccVorlageOeffnen() {
           + '<label class="block"><span class="text-[11px] font-semibold text-ink-700">Anschreiben</span>'
             + '<textarea id="ccVorlageText" rows="10" class="w-full mt-0.5 px-2.5 py-2 border border-ink-300 rounded-lg text-[13px] font-sans">' + escapeHtml(v.anschreiben || '') + '</textarea></label>'
           + '<p class="text-[11px] text-ink-500">Platzhalter: ' + CC_PLATZHALTER.map(pp => '<code class="bg-ink-100 px-1 rounded">' + pp[0] + '</code>').join(' ') + ' — werden beim Versand ersetzt.</p>'
+          + '<label class="block"><span class="text-[11px] font-semibold text-ink-700">Gesprächsleitfaden</span>'
+            + '<textarea id="ccVorlageLeitfaden" rows="10" class="w-full mt-0.5 px-2.5 py-2 border border-ink-300 rounded-lg text-[12px] font-sans">' + escapeHtml(v.leitfaden || CC_LEITFADEN_STANDARD) + '</textarea>'
+            + '<span class="text-[10px] text-ink-500">Steht dem Anrufer beim geöffneten Kontakt zum Aufklappen bereit. Je Kampagne eigen.</span></label>'
           + '<div class="rounded-xl border border-violet-200 bg-violet-50/60 p-3">'
             + '<p class="text-[11px] text-violet-900 mb-1.5">Anschreiben von der KI schreiben lassen — beschreib in einem Satz, worum es geht:</p>'
             + '<div class="flex gap-2 flex-wrap">'
@@ -48000,6 +48069,7 @@ async function _ccVorlageSpeichern(btn) {
     kampagne, account_id: acc.id,
     betreff: (document.getElementById('ccVorlageBetreff')?.value || '').trim(),
     anschreiben: sauber,
+    leitfaden: (document.getElementById('ccVorlageLeitfaden')?.value || '').trim(),
     pdf_name: (_CC_VORLAGE && _CC_VORLAGE.pdf_name) || '',
     updated_at: nowIso(),
   };
