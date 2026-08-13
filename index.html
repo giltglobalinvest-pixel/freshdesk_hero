@@ -824,7 +824,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v3.8.1';
+const APP_VERSION = 'v3.8.2';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -1371,6 +1371,9 @@ async function airtableRead(table, opts = {}) {
     if (opts.filter)    params.set('filterByFormula', opts.filter);
     if (opts.maxRecords) params.set('maxRecords', String(opts.maxRecords));
     if (opts.pageSize)  params.set('pageSize', String(opts.pageSize));
+    // Nur bestimmte Spalten holen. Für Übersichten über große Tabellen ist das
+    // der Unterschied zwischen ein paar Kilobyte und ein paar Megabyte.
+    (opts.fields || []).forEach(f => params.append('fields[]', f));
     (opts.sort || []).forEach((s, i) => {
       params.set(`sort[${i}][field]`, s.field);
       if (s.direction) params.set(`sort[${i}][direction]`, s.direction);
@@ -38889,9 +38892,14 @@ async function openUserModal(user) {
               ${(user?.role||'')==='callcenter' ? '<p class="text-[10px] text-amber-700 mt-1">Sieht nach dem Login ausschließlich die Anrufliste — keine Tickets, keine Einstellungen.</p>' : ''}
             </div>
             <div class="col-span-2">
-              <label class="text-xs font-semibold text-ink-700">Kampagnen (leer = alle)</label>
-              <input id="usrKampagnen" type="text" value="${escapeAttr(user?.kampagnen || '')}" placeholder="z. B. Sonderkonditionen, Wartung 2026" class="mt-1 w-full px-3 py-2 border border-ink-200 rounded-lg text-sm">
-              <p class="text-[10px] text-ink-500 mt-1">Mit Komma trennen — exakt so geschrieben wie in der Anrufliste. Der User sieht dann nur diese Kampagnen und kann keine neuen anlegen. Welche <b>Firmen</b> er sieht, steuert der Account-Zugriff weiter unten.</p>
+              <label class="text-xs font-semibold text-ink-700">Kampagnen (nichts ausgewählt = alle)</label>
+              <select id="usrKampagnenSel" multiple size="6" class="mt-1 w-full px-2 py-1.5 border border-ink-200 rounded-lg text-sm bg-white">
+                <option disabled>Kampagnen werden geladen …</option>
+              </select>
+              <!-- Trägt den gespeicherten Stand, solange die Liste lädt — und
+                   bleibt die Rückfallebene, falls sie gar nicht lädt. -->
+              <input id="usrKampagnen" type="hidden" value="${escapeAttr(user?.kampagnen || '')}">
+              <p class="text-[10px] text-ink-500 mt-1">Mehrere mit ⌘ bzw. Strg. Der User sieht dann nur diese Kampagnen und kann keine neuen anlegen. Welche <b>Firmen</b> er sieht, steuert der Account-Zugriff weiter unten.</p>
             </div>
             <div>
               <label class="text-xs font-semibold text-ink-700">Status</label>
@@ -39024,6 +39032,41 @@ async function openUserModal(user) {
 
   // Submit-Logik separat — wird von „Anlegen/Speichern"-Button direkt gerufen
   USER_MODAL_CTX = { isEdit, user, sigByAccount, allAccounts };
+  // Kampagnenliste nachladen — sie geht über die ganze Anrufliste und soll das
+  // Öffnen des Dialogs nicht aufhalten.
+  _usrKampagnenFuellen(user?.kampagnen || '');
+}
+
+/* Füllt die Kampagnen-Auswahl. Schlägt das Laden fehl, bleibt das versteckte
+   Feld mit dem gespeicherten Stand maßgeblich — dann ändert ein Speichern die
+   Freigabe eben nicht, statt sie versehentlich zu leeren. */
+async function _usrKampagnenFuellen(gespeichert) {
+  const sel = document.getElementById('usrKampagnenSel');
+  if (!sel) return;
+  const gewaehlt = _userKampagnenListe(gespeichert);
+  try {
+    const liste = await _ccKampagnenUebersicht();
+    // Gespeicherte Namen, zu denen es (noch) keine Leads gibt, gehen sonst beim
+    // nächsten Speichern verloren.
+    gewaehlt.forEach(n => {
+      if (!liste.some(e => e.name.toLowerCase() === n.toLowerCase())) liste.push({ name: n, anzahl: 0, firmen: new Set() });
+    });
+    if (!liste.length) {
+      sel.innerHTML = '<option disabled>Noch keine Kampagnen vorhanden</option>';
+      return;
+    }
+    sel.innerHTML = liste.map(e => {
+      const firmen = [...e.firmen];
+      const zusatz = firmen.length ? ' — ' + firmen.join(' + ') : ' — noch keine Einträge';
+      const an = gewaehlt.some(n => n.toLowerCase() === e.name.toLowerCase());
+      return '<option value="' + escapeAttr(e.name) + '"' + (an ? ' selected' : '') + '>'
+        + escapeHtml(e.name + zusatz + (e.anzahl ? ' (' + e.anzahl + ')' : '')) + '</option>';
+    }).join('');
+    sel.dataset.fertig = '1';
+  } catch (e) {
+    console.warn('[User] Kampagnen laden:', e.message);
+    sel.innerHTML = '<option disabled>Kampagnen konnten nicht geladen werden — bisherige Freigabe bleibt</option>';
+  }
 }
 
 /* Einmaliger Signatur-Import (v2.62.1): kopiert die Freshdesk-Signatur des
@@ -39071,6 +39114,14 @@ async function fdhSigAusFreshdesk(btn, accountId) {
   }
 }
 
+function _usrKampagnenLesen() {
+  const sel = document.getElementById('usrKampagnenSel');
+  if (sel && sel.dataset.fertig === '1') {
+    return [...sel.selectedOptions].map(o => o.value.trim()).filter(Boolean).join(', ');
+  }
+  return _userKampagnenListe(document.getElementById('usrKampagnen')?.value || '').join(', ');
+}
+
 let USER_MODAL_CTX = null;
 
 async function submitUserForm() {
@@ -39090,9 +39141,9 @@ async function submitUserForm() {
       status:  $('usrStatus').value,
       phone:   $('usrPhone')?.value.trim() || '',
       allow_default_keys: allowDefault ? 'ja' : 'nein',
-      // Leer = alle Kampagnen. Normalisiert gespeichert, damit die Liste beim
-      // Vergleich nicht an einem Leerzeichen scheitert.
-      kampagnen: _userKampagnenListe($('usrKampagnen')?.value || '').join(', '),
+      // Leer = alle Kampagnen. Aus der Auswahlliste, sobald sie geladen ist —
+      // sonst bleibt der gespeicherte Stand aus dem versteckten Feld stehen.
+      kampagnen: _usrKampagnenLesen(),
     };
     if (!userFields.name)    throw new Error('Name fehlt');
     if (!userFields.api_key) throw new Error('Login-Key fehlt');
@@ -45498,6 +45549,26 @@ async function _ccTypenSpeichern(liste) {
 function _ccIstCallcenter() {
   const u = APP_KEYS.user || {};
   return String(u.role || '').toLowerCase() === 'callcenter' && !u.is_admin;
+}
+
+/* Alle vorhandenen Kampagnen mit der Firma, zu der sie gehören. Grundlage der
+   Auswahlliste in der Userverwaltung: Ein Kampagnenname allein sagt nicht, wen
+   er betrifft — „Preisliste" gibt es bei mehreren Mandanten. */
+async function _ccKampagnenUebersicht() {
+  const rows = await airtableRead(CC_TABLE, { fields: ['kampagne', 'account_id'] });
+  const namen = new Map();     // Name → { anzahl, firmen: Set }
+  for (const r of (rows || [])) {
+    const f = r.fields || {};
+    const k = String(f.kampagne || CC_KAMPAGNE_STANDARD).trim();
+    if (!k) continue;
+    if (!namen.has(k)) namen.set(k, { name: k, anzahl: 0, firmen: new Set() });
+    const e = namen.get(k);
+    e.anzahl++;
+    const acc = (APP_STATE.accounts || []).find(a => String(a.id) === String(f.account_id));
+    if (acc) e.firmen.add(acc.name || acc.id);
+    else if (f.account_id) e.firmen.add('unbekannter Mandant');
+  }
+  return [...namen.values()].sort((a, b) => a.name.localeCompare(b.name, 'de'));
 }
 
 /* Auf welche Kampagnen ist dieser Benutzer freigegeben? null = alle.
