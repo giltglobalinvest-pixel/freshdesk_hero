@@ -824,7 +824,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v3.6.0';
+const APP_VERSION = 'v3.6.1';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -46624,10 +46624,22 @@ async function _ccVorlageLaden(neu) {
    Das Ergebnis wird am Kontakt gespeichert — ein Name ändert sich nicht, und
    niemand soll dieselbe Frage zweimal bezahlen. */
 async function _ccAnredeErmitteln(r) {
-  const vorhanden = String(r.anrede || '').trim();
-  if (vorhanden) return { anrede: vorhanden, zhd: String(r.zhd || '').trim() };
-
   const name = String(r.ansprechpartner || '').trim();
+  const vorhanden = String(r.anrede || '').trim();
+  if (vorhanden) {
+    /* Auch eine GESPEICHERTE Anrede wird geprüft. Sie steht am Kontakt und
+       würde sonst bei jedem weiteren Versand erneut verwendet — genau so kam
+       „Frau Mayer" in den Brief an Frau Finsterwalder und wäre dort geblieben. */
+    const teileV = name.split(/\s+/).filter(Boolean);
+    const nachnameV = teileV[teileV.length - 1] || '';
+    const okV = /^Sehr geehrte Damen/i.test(vorhanden)
+      || !nachnameV
+      || vorhanden.toLowerCase().includes(nachnameV.toLowerCase());
+    if (okV) return { anrede: vorhanden, zhd: String(r.zhd || '').trim() };
+    console.warn('[CC] Gespeicherte Anrede „' + vorhanden + '" passt nicht zu „' + name + '" — wird neu gebildet');
+    r.anrede = ''; r.zhd = '';
+  }
+
   if (!name || !name.includes(' ')) {
     // Ohne vollständigen Namen wird nicht geraten.
     const f = { anrede: 'Sehr geehrte Damen und Herren,', zhd: name ? ('z. Hd. ' + name) : '' };
@@ -46635,15 +46647,21 @@ async function _ccAnredeErmitteln(r) {
     return f;
   }
 
+  /* KEINE Beispielnamen im Prompt. Genau daran ist es gescheitert: Das Muster
+     enthielt „Anja Mayer", und im Brief an Frau Finsterwalder stand „Frau
+     Mayer". Ein Sprachmodell greift bei knapper Eingabe nach dem Beispiel.
+     Deshalb nur noch Platzhalter — und geprüft wird das Ergebnis unten
+     ohnehin gegen den echten Nachnamen. */
   const sys = 'Du bildest die Anrede für einen deutschen Geschäftsbrief.\n'
     + 'Erkenne am Vornamen, ob die Person männlich oder weiblich ist.\n'
-    + 'Antworte AUSSCHLIESSLICH mit JSON:\n'
-    + '{"anrede":"Sehr geehrter Herr Langer,","zhd":"z. Hd. Herrn Niklas Langer"}\n'
+    + 'Antworte AUSSCHLIESSLICH mit JSON dieser Form:\n'
+    + '{"anrede":"Sehr geehrter Herr <NACHNAME>,","zhd":"z. Hd. Herrn <VORNAME> <NACHNAME>"}\n'
     + 'REGELN:\n'
+    + '- Verwende AUSSCHLIESSLICH den Namen, der in der Nachricht steht. Übernimm niemals einen Namen aus dieser Anleitung.\n'
     + '- In der Anrede steht NUR der Nachname, niemals der Vorname.\n'
-    + '- Männlich: "Sehr geehrter Herr <Nachname>," · Weiblich: "Sehr geehrte Frau <Nachname>,"\n'
+    + '- Männlich: "Sehr geehrter Herr <NACHNAME>," · Weiblich: "Sehr geehrte Frau <NACHNAME>,"\n'
     + '- Die Anrede endet mit einem Komma.\n'
-    + '- In "zhd" steht der volle Name mit Anrede im Akkusativ: "z. Hd. Herrn Max Muster" bzw. "z. Hd. Frau Anja Mayer". KEIN "Sehr geehrte".\n'
+    + '- In "zhd" steht der volle Name mit Anrede im Akkusativ ("z. Hd. Herrn …" bzw. "z. Hd. Frau …"). KEIN "Sehr geehrte".\n'
     + '- Akademische Titel (Dr., Prof.) übernehmen, wenn sie im Namen stehen.\n'
     + '- Ist das Geschlecht nicht eindeutig bestimmbar, antworte {"anrede":"Sehr geehrte Damen und Herren,","zhd":"z. Hd. <voller Name>"}.\n'
     + '- Ist der Eintrag gar kein Personenname (Firma, Abteilung, E-Mail), ebenso.';
@@ -46652,7 +46670,8 @@ async function _ccAnredeErmitteln(r) {
       method: 'POST',
       body: JSON.stringify({
         model: 'claude-sonnet-4-5-20250929', max_tokens: 200, system: sys,
-        messages: [{ role: 'user', content: name + (r.position ? ' (' + r.position + ')' : '') }],
+        // Ausdrücklich benannt statt nackt — so ist klar, was der Name ist.
+        messages: [{ role: 'user', content: 'Name der Person: ' + name + (r.position ? '\nPosition: ' + r.position : '') }],
       }),
     });
     const roh = (data.content && data.content[0] && data.content[0].text || '').trim();
@@ -46660,6 +46679,22 @@ async function _ccAnredeErmitteln(r) {
     try { o = parseAIJson(roh); } catch (_) { try { o = JSON.parse(roh.replace(/^```(?:json)?|```$/g, '').trim()); } catch (_2) {} }
     if (o && o.anrede) {
       const f = { anrede: String(o.anrede).trim(), zhd: String(o.zhd || '').trim() };
+      /* Sicherheitsnetz: Die Anrede MUSS den echten Nachnamen enthalten.
+         Ein Brief mit fremdem Namen ist schlimmer als ein förmlicher — er
+         wirkt wie ein schlecht gemachter Serienbrief und ist es auch. */
+      const teile = name.split(/\s+/).filter(Boolean);
+      const nachname = teile[teile.length - 1] || '';
+      const passt = !/^Sehr geehrte Damen/i.test(f.anrede)
+        ? f.anrede.toLowerCase().includes(nachname.toLowerCase())
+        : true;
+      if (!passt) {
+        console.warn('[CC] Anrede verworfen — Nachname „' + nachname + '" fehlt in „' + f.anrede + '"');
+        const fallback = { anrede: 'Sehr geehrte Damen und Herren,', zhd: 'z. Hd. ' + name };
+        try { await _ccSpeichern(r.recordId, fallback); } catch (_) {}
+        toast('Die Anrede passte nicht zum Namen und wurde verworfen — bitte im Text prüfen.', 'warn', 8000);
+        return fallback;
+      }
+      if (f.zhd && !f.zhd.toLowerCase().includes(nachname.toLowerCase())) f.zhd = 'z. Hd. ' + name;
       try { await _ccSpeichern(r.recordId, f); } catch (_) {}
       return f;
     }
