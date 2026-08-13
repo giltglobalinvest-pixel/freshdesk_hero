@@ -824,7 +824,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v3.7.4';
+const APP_VERSION = 'v3.7.5';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -46953,7 +46953,27 @@ async function _ccPdfZeilen(bytes, seiteNr) {
   const doc = await window.pdfjsLib.getDocument({ data: bytes.slice(0) }).promise;
   const nr = seiteNr < 0 ? doc.numPages + 1 + seiteNr : Math.min(seiteNr || 1, doc.numPages);
   const seite = await doc.getPage(Math.max(1, nr));
-  const inhalt = await seite.getTextContent();
+  return { zeilen: _ccZeilenAus(await seite.getTextContent()), seiten: doc.numPages, seitenNr: Math.max(1, nr) };
+}
+
+/* Dasselbe für ALLE Seiten in einem Durchgang. Der Empfängername steht nicht
+   nur im Anschriftenblock des Anschreibens: Die Preisliste dahinter trägt ihn
+   im „Für:"-Kopf noch einmal. Zweimal die Datei zu öffnen wäre Verschwendung —
+   pdf.js parst sie ohnehin komplett. */
+async function _ccPdfAlleZeilen(bytes, maxSeiten) {
+  await _ensurePdfLibs();
+  if (!window.pdfjsLib) throw new Error('PDF-Bibliothek konnte nicht geladen werden');
+  const doc = await window.pdfjsLib.getDocument({ data: bytes.slice(0) }).promise;
+  const bis = Math.min(doc.numPages, maxSeiten || 12);
+  const raus = [];
+  for (let n = 1; n <= bis; n++) {
+    const s = await doc.getPage(n);
+    raus.push({ nr: n, zeilen: _ccZeilenAus(await s.getTextContent()) });
+  }
+  return raus;
+}
+
+function _ccZeilenAus(inhalt) {
   const roh = [];
   for (const it of (inhalt.items || [])) {
     const t = String(it.str || '');
@@ -46974,7 +46994,7 @@ async function _ccPdfZeilen(bytes, seiteNr) {
       zeilen.push({ text: s.text, x: s.x, y: s.y, breite: s.breite, groesse: s.groesse });
     }
   }
-  return { zeilen, seiten: doc.numPages, seitenNr: Math.max(1, nr) };
+  return zeilen;
 }
 
 /* Die KI sagt, welche Zeilen die Empfängeranschrift bilden. Warum überhaupt
@@ -47054,6 +47074,118 @@ async function _ccPdfAnredeErsetzen(seite, zeilen, werte, lib, doc) {
   return treffer.text.trim();
 }
 
+/* Anschrift nachtragen — aus der zentralen Datenbank, nicht geraten.
+   Der Lead aus der Anrufliste trägt oft nur Firma, Name und Nummer; Straße und
+   Ort stehen in der Firmentabelle des Mandanten. Gesucht wird in allen
+   freigeschalteten Mandanten, weil Leads bewusst mandantenübergreifend in eine
+   Kampagne kommen. Gefundenes wird am Lead gespeichert — dieselbe Suche beim
+   nächsten Versand wäre verschenkte Zeit. */
+async function _ccAdresseErgaenzen(r) {
+  if (String(r.strasse || '').trim() && String(r.ort || '').trim()) return r;
+  const firma = String(r.firma || '').trim();
+  if (!firma) return r;
+  for (const a of (APP_STATE.accounts || [])) {
+    if (!_zdbIsEnabled(a)) continue;
+    let rows = [];
+    try {
+      rows = await airtableRead(_zdbTableNames(a).firma, { filter: '{name}=' + _zdbLit(firma), maxRecords: 1 });
+    } catch (_) { continue; }          // Tabelle fehlt bei diesem Mandanten
+    const f = (rows && rows[0] && rows[0].fields) || null;
+    if (!f) continue;
+    const neu = {};
+    if (!String(r.strasse || '').trim() && f.strasse) neu.strasse = String(f.strasse).trim();
+    if (!String(r.plz || '').trim() && f.plz)         neu.plz     = String(f.plz).trim();
+    if (!String(r.ort || '').trim() && f.ort)         neu.ort     = String(f.ort).trim();
+    if (!Object.keys(neu).length) continue;
+    Object.assign(r, neu);
+    try { await _ccSpeichern(r.recordId, neu); } catch (_) {}
+    return r;
+  }
+  return r;
+}
+
+/* Der „Für:"-Kopf der Preisliste. Er steht nicht im Anschreiben, sondern auf
+   dem Deckblatt der Liste dahinter — und trägt in der hinterlegten Vorlage
+   fest den früheren Kunden („Für: Immobilienverwaltung Burgard"). Der
+   Empfängerblock des Anschreibens ersetzt ihn nicht, er liegt auf einer
+   anderen Seite.
+
+   Erkannt wird er an der Zeile „Für:" — entweder allein (Anschrift steht
+   darunter) oder mit dem Namen dahinter. Der Block endet, wo ein Absatz
+   beginnt oder eine größere Schrift eine Überschrift ankündigt. */
+function _ccFuerBlockFinden(zeilen) {
+  const nurLabel  = (t) => /^\s*(?:für|fuer)\s*:?\s*$/i.test(t);
+  const mitInhalt = (t) => /^\s*(?:für|fuer)\s*:\s*\S/i.test(t);
+  for (let i = 0; i < zeilen.length; i++) {
+    const z = zeilen[i];
+    const inline = mitInhalt(z.text);
+    if (!inline && !nurLabel(z.text)) continue;
+    const block = inline ? [z] : [];
+    for (let j = i + 1; j < zeilen.length && block.length < 4; j++) {
+      const vor = zeilen[j - 1], nun = zeilen[j];
+      if (vor.y - nun.y > Math.max(vor.groesse, nun.groesse) * 2.2) break;   // Absatz
+      /* Verglichen wird mit der ERSTEN Blockzeile, nicht mit dem Label: „Für:"
+         steht klein über einer größer gesetzten Firmenzeile, an der Labelgröße
+         gemessen sähe schon die Firma wie eine Überschrift aus. */
+      const bezug = block.length ? block[0].groesse : Math.max(z.groesse * 1.6, nun.groesse);
+      if (nun.groesse > bezug * 1.35) break;                                // Überschrift
+      block.push(nun);
+    }
+    if (block.length) return { labelZeile: inline ? null : z, zeilen: block };
+  }
+  return null;
+}
+
+/* Ersetzt den gefundenen Block durch Firma und — sofern bekannt — Anschrift.
+   Fehlt die Adresse, steht dort nur die Firma: Eine erfundene Anschrift auf
+   einem Preisblatt wäre schlimmer als eine fehlende. */
+async function _ccFuerBlockErsetzen(seite, zeilen, werte, lib, doc) {
+  const firma = String(werte.firma || '').trim();
+  if (!firma) return null;
+  const fund = _ccFuerBlockFinden(zeilen);
+  if (!fund) return null;
+  const alt = fund.zeilen.map(z => z.text).join(' ');
+  if (alt.toLowerCase().includes(firma.toLowerCase())) return null;   // steht schon richtig da
+
+  const plzOrt = [String(werte.plz || '').trim(), String(werte.ort || '').trim()].filter(Boolean).join(' ');
+  const neu = [
+    (fund.labelZeile ? '' : 'Für: ') + firma,
+    String(werte.strasse || '').trim(),
+    plzOrt,
+  ].filter(Boolean).map(t => t.replace(/[^\x20-\xFF]/g, '?'));
+
+  const fett = await doc.embedFont(lib.StandardFonts.HelveticaBold);
+  const normal = await doc.embedFont(lib.StandardFonts.Helvetica);
+  const b = fund.zeilen;
+  const gr0 = Math.max(7, Math.min(20, b[0].groesse || 11));
+  const abstand = b.length > 1 ? Math.max(gr0 * 1.1, b[0].y - b[1].y) : gr0 * 1.35;
+
+  const x0 = Math.min(...b.map(z => z.x));
+  const rechts = Math.max(...b.map(z => z.x + z.breite));
+  const unten = Math.min(...b.map(z => z.y));
+  const oben = Math.max(...b.map(z => z.y + z.groesse));
+  const breiteste = Math.max(...neu.map((t, i) => (i ? normal : fett).widthOfTextAtSize(t, gr0)));
+  seite.drawRectangle({
+    x: x0 - 2, y: unten - gr0 * 0.3,
+    width: Math.max(rechts - x0, breiteste) + 8, height: (oben - unten) + gr0 * 0.42,
+    color: lib.rgb(1, 1, 1),
+  });
+
+  // Die Firma fett im Navy der Vorlage, die Anschrift schlicht darunter —
+  // so, wie der Block vorher aussah.
+  neu.forEach((t, i) => {
+    const zeile = b[i];
+    seite.drawText(t, {
+      x: zeile ? zeile.x : x0,
+      y: zeile ? zeile.y : b[b.length - 1].y - abstand * (i - b.length + 1),
+      size: zeile ? Math.max(7, Math.min(20, zeile.groesse)) : gr0,
+      font: i === 0 ? fett : normal,
+      color: i === 0 ? lib.rgb(0.10, 0.20, 0.33) : lib.rgb(0.13, 0.13, 0.13),
+    });
+  });
+  return alt;
+}
+
 /* Steht der alte Name noch woanders im Brieftext („wie mit Frau Mayer
    besprochen"), ist die Vorlage selbst das Problem — dort hilft kein Aufdruck,
    sondern nur eine neue Datei. Das stillschweigend zu verschicken wäre der
@@ -47110,15 +47242,28 @@ async function _ccPdfPersonalisieren(bytes, werte, e) {
   let empf = null;
   try { empf = e.pdf_empf_json ? JSON.parse(e.pdf_empf_json) : null; } catch (_) {}
 
-  /* Erst die Anrede im Brieftext, dann der Empfängerblock — sie steht in
-     BEIDEN Betriebsarten im Weg, deshalb vor der Verzweigung. Scheitert es,
-     geht die Liste trotzdem raus: Ein fehlender Aufdruck ist ärgerlich, ein
-     nicht verschicktes Angebot schlimmer. */
+  /* Der Name des früheren Empfängers steht an mehreren Stellen der Vorlage:
+     im Anschriftenblock (unten ersetzt), in der Anredezeile des Anschreibens
+     und im „Für:"-Kopf der Preisliste — letzterer auf einer anderen Seite.
+     Deshalb werden ALLE Seiten gelesen, und das vor der Verzweigung: Beide
+     Betriebsarten haben dasselbe Problem.
+
+     Scheitert es, geht die Liste trotzdem raus — ein fehlender Aufdruck ist
+     ärgerlich, eine nicht verschickte Preisliste schlimmer. */
   try {
-    const gelesen = await _ccPdfZeilen(bytes, nr);
-    const alt = await _ccPdfAnredeErsetzen(seite, gelesen.zeilen, werte, lib, doc);
-    _ccPdfAltnameWarnen(gelesen.zeilen, alt, empf);
-  } catch (err) { console.warn('[CC] Anrede im PDF:', err.message); }
+    const seitenZeilen = await _ccPdfAlleZeilen(bytes);
+    let anredeAlt = null, anredeZeilen = null, fuerFertig = false;
+    for (const s of seitenZeilen) {
+      const ziel = seiten[s.nr - 1];
+      if (!ziel) continue;
+      if (!anredeAlt) {
+        const a = await _ccPdfAnredeErsetzen(ziel, s.zeilen, werte, lib, doc);
+        if (a) { anredeAlt = a; anredeZeilen = s.zeilen; }
+      }
+      if (!fuerFertig && await _ccFuerBlockErsetzen(ziel, s.zeilen, werte, lib, doc)) fuerFertig = true;
+    }
+    if (anredeAlt) _ccPdfAltnameWarnen(anredeZeilen, anredeAlt, empf);
+  } catch (err) { console.warn('[CC] Namen im PDF:', err.message); }
   // WinAnsi deckt deutsche Umlaute ab; alles darüber hinaus würde pdf-lib beim
   // Zeichnen abbrechen — deshalb vorher ersetzen statt hinterher raten.
   const saeubern = (t) => String(t).replace(/[^\x20-\xFF]/g, '?');
@@ -47203,7 +47348,8 @@ async function _ccPdfVorschau(btn) {
     const neu = await _ccPdfPersonalisieren(bytes, {
       // Mit Anrede und z.Hd.: Nur so zeigt die Probe auch, ob die Anredezeile
       // im Brieftext der Vorlage getroffen und ersetzt wird.
-      firma: 'Muster Hausverwaltung GmbH', ansprechpartner: 'Erika Musterfrau', ort: 'Stuttgart',
+      firma: 'Muster Hausverwaltung GmbH', ansprechpartner: 'Erika Musterfrau',
+      strasse: 'Musterweg 7', plz: '70173', ort: 'Stuttgart',
       anrede: 'Sehr geehrte Frau Musterfrau,', zhd: 'z. Hd. Frau Erika Musterfrau',
     }, e);
     const url = URL.createObjectURL(new Blob([neu], { type: 'application/pdf' }));
@@ -47523,6 +47669,12 @@ async function _ccPreislisteAnfordern(recordId, btn) {
         toast('Anrede konnte nicht gebildet werden — bitte im Text prüfen.', 'warn', 7000);
       }
     }
+    // Anschrift für den „Für:"-Kopf der Preisliste. Ohne sie steht dort nur
+    // die Firma — das ist in Ordnung, aber mit Adresse ist es ein Angebot.
+    try {
+      if (btn) setBusy(btn, true, 'Adresse…');
+      await _mitZeitlimit(_ccAdresseErgaenzen(r), 15000, 'Airtable');
+    } catch (e) { console.warn('[CC] Adresse:', e.message); }
     _ccVersandDialog(r, v, konfigs, sig);
   } catch (e) {
     toast('Versand vorbereiten: ' + (e.message || e), 'error', 9000);
