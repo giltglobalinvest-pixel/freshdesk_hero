@@ -824,7 +824,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v3.13.0';
+const APP_VERSION = 'v3.13.1';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -2248,7 +2248,9 @@ async function erpCreateAnlage(firmaSlug, data) {
     betreiberTyp:        data.betreiberTyp || 'Hausverwaltung',
     rechnungsempfaenger: kunde.firmenname || '',
     fabriknummer:        data.fabriknummer || '',
-    sonstigerHinweis:    '',
+    // Was die KI zur Anlage gelesen hat (Fabrikat, Bemerkung) — sonst geht es
+    // zwischen Ticket und ERP verloren.
+    sonstigerHinweis:    String(data.hinweis || '').slice(0, 500),
     archived:            false,
   };
   // Kontakt + Ansprechpartner mitgeben (alle Feld-Varianten — ERP-NPE-Workaround)
@@ -33484,6 +33486,9 @@ async function openErpMehrfachAnlagen(accountId, ticketId) {
       const k = (kunden || []).find(x => String(x.firmenname || '').toLowerCase().includes(suchName.split(' ')[0]));
       if (k) ERP_MEHRFACH.kunde = k;
     }
+    // Konditionen aus dem Bestand — sonst entstünden Anlagen mit 0 €/h.
+    ERP_MEHRFACH.kond = await _erpMehrfachKonditionen(slug,
+      ERP_MEHRFACH.kunde ? (ERP_MEHRFACH.kunde.kundennummer || ERP_MEHRFACH.kunde.id) : '');
     ERP_MEHRFACH.laden = false;
     _erpMehrfachZeichnen();
   } catch (e) {
@@ -33530,6 +33535,42 @@ async function _erpMehrfachAnalyse(accountId, ticketId, t) {
     messages: [{ role: 'user', content: inhalt }],
   });
   return parseAIJson((data.content && data.content[0] && data.content[0].text) || '') || {};
+}
+
+/* Konditionen für neue Anlagen: Stundensatz, Einsatzpauschale, Objekt- und
+   Betreibertyp. Hero hat sie bisher stumm auf 0 bzw. „Wohnen/Hausverwaltung"
+   gesetzt — eine Anlage mit 0 €/h fällt erst auf, wenn nach Aufwand abgerechnet
+   werden soll und niemand mehr weiß, warum die Rechnung leer ist.
+
+   Genommen wird, was bei DIESEM Kunden schon steht: Wer zehn Aufzüge unter einem
+   Vertrag hat, hat überall dieselben Sätze. Gibt es beim Kunden noch nichts, gilt
+   der häufigste Satz des Mandanten — und erst wenn auch der fehlt, die 0. */
+async function _erpMehrfachKonditionen(slug, kundenNr) {
+  const leer = { stundensatz: 0, einsatzPauschale: 0, objektTyp: 'Wohnen', betreiberTyp: 'Hausverwaltung', quelle: '' };
+  try {
+    const alle = await erpLoadAnlagen(slug);
+    if (!Array.isArray(alle) || !alle.length) return leer;
+    const nr = String(kundenNr || '');
+    const beimKunden = nr ? alle.filter(a => String(a.kundenId || a.kunde?.kundennummer || a.kunde?.id || '') === nr) : [];
+    const nehmen = (liste, quelle) => {
+      const mit = liste.filter(a => +a.stundensatz > 0);
+      const a = mit[0] || liste[0];
+      if (!a) return null;
+      return {
+        stundensatz: +a.stundensatz || 0,
+        einsatzPauschale: +a.einsatzPauschale || 0,
+        objektTyp: a.objektTyp || leer.objektTyp,
+        betreiberTyp: a.betreiberTyp || leer.betreiberTyp,
+        quelle,
+      };
+    };
+    return nehmen(beimKunden, 'von diesem Kunden')
+      || nehmen(alle.filter(a => +a.stundensatz > 0), 'aus dem Bestand des Mandanten')
+      || leer;
+  } catch (e) {
+    console.warn('[ERP-Mehrfach] Konditionen:', e.message);
+    return leer;
+  }
 }
 
 /* Eigener Host statt #subModalHost: Der Angebots-Chat liegt selbst dort drin.
@@ -33602,6 +33643,20 @@ function _erpMehrfachZeichnen(platzhalter) {
       + '<p class="text-[10px] uppercase font-semibold text-ink-600">Anlagen (' + s.anlagen.length + ')</p>'
       + '<button onclick="_erpMehrfachZeile()" class="text-[11px] font-bold text-emerald-700 hover:underline">+ Anlage</button></div>'
       + '<div class="space-y-2">' + zeilen + '</div></div>'
+    /* Konditionen sichtbar machen. Sie werden nicht abgefragt, sondern aus dem
+       Bestand übernommen — aber ungesehen ins ERP zu schreiben, was später die
+       Rechnung bestimmt, wäre genau die Art stiller Vorbelegung, die hinterher
+       niemand mehr erklären kann. */
+    + (s.kond
+        ? '<div class="rounded-lg border border-ink-200 bg-ink-50 px-2.5 py-2 text-[11px] text-ink-700">'
+          + '<b>Konditionen für alle neuen Anlagen:</b> '
+          + (s.kond.stundensatz ? s.kond.stundensatz + ' €/h' : '<span class="text-amber-700">kein Stundensatz</span>')
+          + ' · Einsatzpauschale ' + (s.kond.einsatzPauschale || 0) + ' €'
+          + ' · ' + escapeHtml(s.kond.objektTyp || '–') + ' / ' + escapeHtml(s.kond.betreiberTyp || '–')
+          + (s.kond.quelle ? ' <span class="text-ink-500">(' + escapeHtml(s.kond.quelle) + ')</span>' : '')
+          + (s.kond.stundensatz ? '' : '<br><span class="text-amber-700">Im Bestand war kein Stundensatz zu finden — die Anlagen entstehen mit 0 €/h und müssen im ERP nachgepflegt werden.</span>')
+        + '</div>'
+        : '')
     + '<div class="flex items-center gap-2 justify-end pt-1">'
       + '<button onclick="closeErpMehrfach()" class="px-3 py-2 rounded-lg text-[12px] font-bold bg-white border border-ink-300 text-ink-700 hover:bg-ink-50">Abbrechen</button>'
       + '<button onclick="_erpMehrfachAnlegen(this)" class="px-4 py-2 rounded-lg text-[12px] font-bold text-white ' + (offen ? 'bg-emerald-600 hover:bg-emerald-700' : 'bg-ink-300 cursor-not-allowed') + '"' + (offen ? '' : ' disabled') + '>'
@@ -33626,6 +33681,10 @@ function _erpMehrfachKundeWechsel(nr) {
   const s = ERP_MEHRFACH;
   s.kunde = nr ? (s.kunden || []).find(k => String(k.kundennummer || k.id) === String(nr)) || null : null;
   _erpMehrfachZeichnen();
+  // Anderer Kunde, andere Sätze — die Konditionen gehören zum Kunden, nicht zum Ticket.
+  _erpMehrfachKonditionen(s.slug, s.kunde ? (s.kunde.kundennummer || s.kunde.id) : '')
+    .then(k => { if (ERP_MEHRFACH === s) { s.kond = k; _erpMehrfachZeichnen(); } })
+    .catch(() => {});
 }
 
 async function _erpMehrfachAnlegen(btn) {
@@ -33660,9 +33719,12 @@ async function _erpMehrfachAnlegen(btn) {
       const a = ziel[i];
       setBusy(btn, true, (i + 1) + '/' + ziel.length);
       try {
+        const k = s.kond || {};
         const created = await erpCreateAnlage(s.slug, {
           kunde, adresse: a.adresse, fabriknummer: a.fabriknummer || '',
-          stundensatz: 0, einsatzPauschale: 0,
+          stundensatz: k.stundensatz || 0, einsatzPauschale: k.einsatzPauschale || 0,
+          objektTyp: k.objektTyp, betreiberTyp: k.betreiberTyp,
+          hinweis: a.hinweis || '',
         });
         a.status = 'angelegt (ID ' + (created && created.id) + ')';
         a.nehmen = false;
