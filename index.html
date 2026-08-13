@@ -824,7 +824,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v3.7.0';
+const APP_VERSION = 'v3.7.1';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -46351,6 +46351,9 @@ function _ccArbeitsbereich(r) {
       + erg('rueckruf',       'Rückruf',         'bg-white border border-sky-300 text-sky-700 hover:bg-sky-50')
       + erg('falsch',         'Falsche Nummer',  'bg-white border border-ink-300 text-ink-500 hover:bg-ink-50')
       + erg('sperre',         'Nie wieder anrufen', 'bg-white border border-rose-300 text-rose-700 hover:bg-rose-50')
+      + (_ccStatusVon(r) !== 'offen'
+          ? '<button onclick="event.stopPropagation(); _ccErgebnisZuruecknehmen(\'' + r.recordId + '\', this)" class="px-3 py-1.5 rounded-lg text-[12px] font-bold bg-white border border-ink-300 text-ink-600 hover:bg-ink-50 inline-flex items-center gap-1.5 ml-auto" title="Ergebnis zurücknehmen — der Kontakt erscheint wieder unter „Zu tun""><i data-lucide="rotate-ccw" class="w-3.5 h-3.5"></i> Zurück auf offen</button>'
+          : '')
     + '</div>'
     + '<div class="flex items-center gap-2 flex-wrap">'
       + '<input id="ccNotiz_' + r.recordId + '" value="' + escapeAttr(r.notiz || '') + '" onclick="event.stopPropagation()" onblur="_ccNotizSpeichern(\'' + r.recordId + '\', this.value)" placeholder="Was wurde gesagt? Wenige Worte genügen." class="flex-1 min-w-[180px] px-2.5 py-1.5 border border-ink-300 rounded-lg text-[12px]">'
@@ -46523,6 +46526,41 @@ async function _ccSpeichern(recordId, patch) {
   if (!r) return;
   Object.assign(r, patch);
   await airtableUpdateWithAutoField(CC_TABLE, recordId, Object.assign({ updated_at: nowIso() }, patch), CC_TYPES);
+}
+
+/* Ergebnis zurücknehmen — zurück auf „offen".
+
+   Nötig für Fehlgriffe und Tests: Ein versehentlich als „interessiert"
+   markierter Kontakt verschwindet aus „Zu tun" und taucht nie wieder auf.
+   Bisher gab es nur Wege hinaus, keinen zurück.
+
+   Was NICHT zurückgenommen wird: der Versandvermerk. Die Mail ist beim Kunden,
+   und das gehört sichtbar zu bleiben — auch wenn sie ein Fehlgriff war. Sonst
+   sieht der Vorgang später aus, als sei nie etwas hinausgegangen. */
+async function _ccErgebnisZuruecknehmen(recordId, btn) {
+  const r = (CC_STATE.leads || []).find(x => x.recordId === recordId);
+  if (!r) return;
+  const versendet = String(r.preisliste_am || '').trim();
+  if (!confirm('Ergebnis zurücknehmen und „' + (r.firma || r.ansprechpartner || 'Kontakt') + '" wieder auf „offen" setzen?\n\n'
+    + (versendet
+        ? 'Der Versandvermerk bleibt bestehen — die Mail ist beim Kunden und das soll sichtbar bleiben. Über „Versendetes ansehen" ist sie weiterhin nachlesbar.\n\n'
+        : '')
+    + 'Der Kontakt erscheint danach wieder unter „Zu tun".')) return;
+  if (btn) setBusy(btn, true, 'Setze zurück…');
+  try {
+    await _ccSpeichern(recordId, {
+      status: 'offen', gesperrt_bis: '',
+      bearbeiter: (APP_KEYS.user && APP_KEYS.user.name) || '',
+      letzter_versuch: nowIso(),
+    });
+    Object.assign(r, { status: 'offen', gesperrt_bis: '' });
+    if (btn) setBusy(btn, false);
+    _ccZeichnen();
+    toast('Wieder offen — der Kontakt steht erneut unter „Zu tun".', 'success', 5000);
+  } catch (e) {
+    if (btn) setBusy(btn, false);
+    toast('Zurücksetzen fehlgeschlagen: ' + (e.message || e), 'error', 8000);
+  }
 }
 
 async function _ccErgebnis(recordId, status, btn) {
