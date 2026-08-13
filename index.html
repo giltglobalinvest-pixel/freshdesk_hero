@@ -824,7 +824,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v3.15.1';
+const APP_VERSION = 'v3.15.2';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -32929,19 +32929,37 @@ function openAngStammdatenEditor() {
             '<div><label class="text-[11px] font-bold text-ink-700 uppercase tracking-wider">Telefon</label>' +
               '<input id="sdTel" type="text" value="' + escapeAttr(val('tel', req.phone || req.mobile)) + '" placeholder="0711 96 88 23 48" class="w-full px-2 py-1.5 border border-ink-300 rounded-lg text-sm"></div>' +
           '</div>' +
-          '<div class="border-t border-ink-200 pt-3">' +
-            '<label class="text-[11px] font-bold text-ink-700 uppercase tracking-wider">Standort/Anschrift der Aufzugsanlage</label>' +
-            '<input id="sdStandort" type="text" value="' + escapeAttr(s.collected?.standort || '') + '" placeholder="Otto-Hahn-Platz 9-15 · 69120 Heidelberg" class="w-full px-2 py-1.5 border border-ink-300 rounded-lg text-sm">' +
-          '</div>' +
+          /* Anlagenteil. Bei EINEM Aufzug ist er hier richtig — Standort und
+             Fabriknummer stehen so auf dem Angebot. Bei mehreren gibt es keine
+             eine Nummer mehr; die Felder bleiben lesbar, sind aber gesperrt und
+             verweisen dorthin, wo die Aufzüge wirklich gepflegt werden. Sie
+             hier bearbeitbar zu lassen hieße, eine von sechs Nummern zur
+             offiziellen zu machen. */
+          ((Array.isArray(s._erpAnlagen) && s._erpAnlagen.length > 1)
+            ? '<div class="border-t border-ink-200 pt-3">' +
+                '<label class="text-[11px] font-bold text-ink-500 uppercase tracking-wider">Aufzugsanlage</label>' +
+                '<div class="bg-ink-50 border border-ink-200 rounded-lg p-2.5 text-[12px] text-ink-600">' +
+                  '<b>' + s._erpAnlagen.length + ' Aufzüge</b> — Standort und Fabriknummer gibt es hier nicht einzeln. ' +
+                  'Gepflegt werden sie über <b>Aufzüge</b> in der Leiste oben.' +
+                '</div>' +
+                '<input id="sdStandort" type="hidden" value="' + escapeAttr(s.collected?.standort || '') + '">' +
+                '<input id="sdFabrik" type="hidden" value="' + escapeAttr(s.collected?.fabriknummer || '') + '">' +
+              '</div>'
+            : '<div class="border-t border-ink-200 pt-3">' +
+                '<label class="text-[11px] font-bold text-ink-700 uppercase tracking-wider">Standort/Anschrift der Aufzugsanlage</label>' +
+                '<input id="sdStandort" type="text" value="' + escapeAttr(s.collected?.standort || '') + '" placeholder="Otto-Hahn-Platz 9-15 · 69120 Heidelberg" class="w-full px-2 py-1.5 border border-ink-300 rounded-lg text-sm">' +
+              '</div>') +
           '<div class="grid grid-cols-1 sm:grid-cols-2 gap-2">' +
-            '<div><label class="text-[11px] font-bold text-ink-700 uppercase tracking-wider">Fabrik-/Anlagennummer</label>' +
+            ((Array.isArray(s._erpAnlagen) && s._erpAnlagen.length > 1)
+              ? ''
+              : '<div><label class="text-[11px] font-bold text-ink-700 uppercase tracking-wider">Fabrik-/Anlagennummer</label>' +
               '<div class="flex gap-1">' +
                 '<input id="sdFabrik" type="text" value="' + escapeAttr(s.collected?.fabriknummer || '') + '" placeholder="150623" class="flex-1 px-2 py-1.5 border border-ink-300 rounded-lg text-sm">' +
                 (APP_KEYS.erpProxyUrl
                   ? '<button onclick="fetchStammdatenFromErp(this)" class="shrink-0 px-2 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-[11px] font-bold inline-flex items-center gap-1" title="Anlage per Fabriknummer im ERP suchen und alle Stammdaten füllen"><i data-lucide="database" class="w-3 h-3"></i> ERP</button>'
                   : '') +
               '</div>' +
-            '</div>' +
+            '</div>') +
             '<div><label class="text-[11px] font-bold text-ink-700 uppercase tracking-wider">Kontakt (Empfänger)</label>' +
               '<input id="sdAnsprech" type="text" value="' + escapeAttr(val('ansprechpartner_vor_ort', req.name)) + '" placeholder="Ansprechpartner beim Kunden" class="w-full px-2 py-1.5 border border-ink-300 rounded-lg text-sm"></div>' +
           '</div>' +
