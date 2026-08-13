@@ -824,7 +824,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v3.14.1';
+const APP_VERSION = 'v3.15.0';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -31571,7 +31571,10 @@ function _renderAngChatShell() {
                    = 1 Aufzug …". Der Angebots-Chat legt genau EINE Anlage an —
                    deshalb von hier aus der Weg zum Mehrfach-Anlegen, statt das
                    Fenster zu schließen und die Werkzeugleiste zu suchen. */
-                '<button onclick="_angErpAnlagenOeffnen()" class="inline-flex items-center gap-1 px-2 py-1 bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 text-emerald-700 rounded-md text-[10px] font-bold" title="Kunde und mehrere Aufzüge im ERP anlegen — die KI liest die Aufstellung aus dem Ticket"><i data-lucide="building-2" class="w-3 h-3"></i> Anlagen im ERP</button>' +
+                /* „Stammdaten" ist der Kunde, „Aufzüge" sind die Anlagen —
+                   zwei Schritte, zwei Knöpfe, und die Beschriftung sagt, welcher
+                   welcher ist. */
+                '<button onclick="_angErpAnlagenOeffnen()" class="inline-flex items-center gap-1 px-2 py-1 bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 text-emerald-700 rounded-md text-[10px] font-bold" title="Mehrere Aufzüge im ERP anlegen — die KI liest die Aufstellung aus Ticket und Anhängen; der Kunde wird vorher im ERP bestätigt"><i data-lucide="building-2" class="w-3 h-3"></i> Aufzüge</button>' +
                 '<span id="angChatIterLabel" class="text-ink-500">Noch keine Daten</span>' +
               '</div>' +
             '</div>' +
@@ -33699,6 +33702,156 @@ function _erpMehrfachHost() {
   return h;
 }
 
+/* Kundensuche im geladenen ERP-Bestand. Alle Wörter des Suchbegriffs müssen
+   vorkommen — „jentzsch schwerin" findet den Richtigen, ohne dass die
+   Schreibweise stimmen muss. */
+function _erpKundenSuchen(liste, begriff) {
+  const norm = (x) => String(x || '').toLowerCase()
+    .replace(/ä/g, 'ae').replace(/ö/g, 'oe').replace(/ü/g, 'ue').replace(/ß/g, 'ss');
+  const worte = norm(begriff).split(/\s+/).filter(w => w.length >= 2);
+  if (!worte.length) return [];
+  return (liste || []).filter(k => {
+    const heu = norm([k.firmenname, k.name1, k.anzeigeAdresse, k.ort, k.strasse, k.kundennummer].filter(Boolean).join(' '));
+    return worte.every(w => heu.includes(w));
+  }).slice(0, 40);
+}
+
+/* Der Kundenblock: bestätigt, vorgeschlagen oder Suche — nie ein stilles
+   „wird schon der richtige sein". */
+function _erpMehrfachKundeBlock(s, kv) {
+  const kNr = (k) => String(k.kundennummer || k.id || '');
+  const zeile = (k, aktion) =>
+    '<div class="flex items-center gap-2 py-1.5 border-b border-ink-100 last:border-0">'
+    + '<div class="flex-1 min-w-0"><p class="text-[13px] font-semibold text-ink-900 truncate">' + escapeHtml(k.firmenname || k.name1 || '?') + '</p>'
+    + '<p class="text-[11px] text-ink-500 truncate">Kd. ' + escapeHtml(kNr(k))
+    + (k.anzeigeAdresse || k.strasse || k.ort ? ' · ' + escapeHtml([k.strasse, k.plz, k.ort].filter(Boolean).join(' ') || k.anzeigeAdresse) : '') + '</p></div>'
+    + aktion + '</div>';
+
+  // 1 · Bestätigt — der Normalfall nach einem Klick
+  if (s.kunde && s.kundeBestaetigt) {
+    return '<div class="border border-emerald-300 bg-emerald-50/60 rounded-xl p-3">'
+      + '<p class="text-[10px] uppercase font-semibold text-emerald-800 mb-1 inline-flex items-center gap-1.5"><i data-lucide="check-circle-2" class="w-3.5 h-3.5"></i> Kunde aus dem ERP bestätigt</p>'
+      + zeile(s.kunde, '<button onclick="_erpMehrfachKundeLoesen()" class="text-[11px] font-bold text-ink-600 hover:underline shrink-0">ändern</button>')
+      + '</div>';
+  }
+
+  // 2 · Neuanlage — nur bewusst erreichbar, mit Dublettenwarnung
+  if (s.kundeNeu) {
+    const aehnlich = _erpKundenSuchen(s.kunden, kv.firmenname || '').slice(0, 5);
+    const rolle = (typeof _zdbIstRolleKeineFirma === 'function') && _zdbIstRolleKeineFirma(kv.firmenname);
+    return '<div class="border border-amber-300 bg-amber-50/50 rounded-xl p-3 space-y-2">'
+      + '<div class="flex items-center justify-between">'
+        + '<p class="text-[10px] uppercase font-semibold text-amber-800">Neuen Kunden im ERP anlegen</p>'
+        + '<button onclick="_erpMehrfachKundeLoesen()" class="text-[11px] font-bold text-ink-600 hover:underline">zurück zur Suche</button></div>'
+      + (rolle ? '<p class="text-[11px] text-amber-900 font-semibold">„' + escapeHtml(kv.firmenname) + '" ist eine Rolle, kein Firmenname. Bitte den echten Namen des Auftraggebers eintragen.</p>' : '')
+      + (aehnlich.length
+          ? '<div class="rounded-lg border border-amber-300 bg-white p-2">'
+            + '<p class="text-[11px] font-semibold text-amber-900 mb-1">Es gibt bereits ähnliche Kunden — bitte prüfen, bevor du einen zweiten anlegst:</p>'
+            + aehnlich.map(k => zeile(k, '<button onclick="_erpMehrfachKundeWaehlen(\'' + escapeAttr(kNr(k)) + '\')" class="px-2 py-1 rounded bg-emerald-600 hover:bg-emerald-700 text-white text-[11px] font-bold shrink-0">der ist es</button>')).join('')
+            + '</div>'
+          : '')
+      + '<div class="grid grid-cols-2 gap-2">'
+        + '<label class="block col-span-2"><span class="text-[10px] text-ink-500">Firmenname *</span>'
+          + '<input id="emKFirma" value="' + escapeAttr(kv.firmenname || '') + '" class="w-full mt-0.5 px-2 py-1.5 border border-ink-300 rounded text-sm"></label>'
+        + '<label class="block col-span-2"><span class="text-[10px] text-ink-500">Anschrift (Straße Nr, PLZ Ort) *</span>'
+          + '<input id="emKAdresse" value="' + escapeAttr(kv.adresse || '') + '" class="w-full mt-0.5 px-2 py-1.5 border border-ink-300 rounded text-sm"></label>'
+        + '<label class="block"><span class="text-[10px] text-ink-500">E-Mail</span>'
+          + '<input id="emKMail" value="' + escapeAttr(kv.email || (s.ticket && s.ticket.requester && s.ticket.requester.email) || '') + '" class="w-full mt-0.5 px-2 py-1.5 border border-ink-300 rounded text-sm"></label>'
+        + '<label class="block"><span class="text-[10px] text-ink-500">Telefon</span>'
+          + '<input id="emKTel" value="' + escapeAttr(kv.telefon || '') + '" class="w-full mt-0.5 px-2 py-1.5 border border-ink-300 rounded text-sm"></label>'
+      + '</div>'
+      + '<button onclick="_erpMehrfachKundeAnlegen(this)" class="w-full px-3 py-2 rounded-lg text-[12px] font-bold bg-amber-600 hover:bg-amber-700 text-white">Kunde jetzt im ERP anlegen</button>'
+      + '</div>';
+  }
+
+  // 3 · Suche — Startzustand, vorbelegt mit dem Namen aus dem Ticket
+  const term = s.kundeSuche != null ? s.kundeSuche : (kv.firmenname || '');
+  const treffer = _erpKundenSuchen(s.kunden, term);
+  const vorschlag = s.kunde && !s.kundeBestaetigt ? s.kunde : null;
+  return '<div class="border border-ink-200 rounded-xl p-3 space-y-2">'
+    + '<p class="text-[10px] uppercase font-semibold text-ink-600">Kunde im ERP suchen und bestätigen</p>'
+    + (vorschlag
+        ? '<div class="rounded-lg border border-emerald-200 bg-emerald-50/60 p-2">'
+          + '<p class="text-[11px] font-semibold text-emerald-900 mb-1">Vorschlag aus dem Ticket:</p>'
+          + zeile(vorschlag, '<button onclick="_erpMehrfachKundeWaehlen(\'' + escapeAttr(kNr(vorschlag)) + '\')" class="px-2.5 py-1 rounded bg-emerald-600 hover:bg-emerald-700 text-white text-[11px] font-bold shrink-0">bestätigen</button>')
+          + '</div>'
+        : '')
+    + '<input id="emKSuche" value="' + escapeAttr(term) + '" oninput="_erpMehrfachKundeSuche(this.value)" placeholder="Name, Ort oder Kundennummer" class="w-full px-2.5 py-1.5 border border-ink-300 rounded text-sm">'
+    + '<div class="max-h-52 overflow-y-auto rounded-lg border border-ink-200 bg-white px-2">'
+      + (treffer.length
+          ? treffer.slice(0, 12).map(k => zeile(k, '<button onclick="_erpMehrfachKundeWaehlen(\'' + escapeAttr(kNr(k)) + '\')" class="px-2 py-1 rounded bg-white border border-emerald-300 text-emerald-700 hover:bg-emerald-50 text-[11px] font-bold shrink-0">wählen</button>')).join('')
+          : '<p class="text-[11px] text-ink-500 py-2">' + (term.trim() ? 'Kein Treffer im ERP.' : 'Suchbegriff eingeben.') + '</p>')
+    + '</div>'
+    + '<button onclick="_erpMehrfachKundeNeu()" class="text-[11px] font-bold text-amber-700 hover:underline">Keiner passt — neuen Kunden anlegen</button>'
+    + '</div>';
+}
+
+function _erpMehrfachKundeSuche(v) {
+  if (!ERP_MEHRFACH) return;
+  ERP_MEHRFACH.kundeSuche = v;
+  const el = document.getElementById('emKSuche');
+  const pos = el ? el.selectionStart : null;
+  _erpMehrfachZeichnen();
+  const neu = document.getElementById('emKSuche');
+  if (neu) { neu.focus(); if (pos != null) try { neu.setSelectionRange(pos, pos); } catch (_) {} }
+}
+
+function _erpMehrfachKundeWaehlen(nr) {
+  const s = ERP_MEHRFACH;
+  if (!s) return;
+  s.kunde = (s.kunden || []).find(k => String(k.kundennummer || k.id) === String(nr)) || null;
+  s.kundeBestaetigt = !!s.kunde;
+  s.kundeNeu = false;
+  _erpMehrfachZeichnen();
+  // Konditionen hängen am Kunden — nach der Bestätigung neu holen.
+  _erpMehrfachKonditionen(s.slug, nr)
+    .then(k => { if (ERP_MEHRFACH === s) { s.kond = k; _erpMehrfachZeichnen(); } })
+    .catch(() => {});
+}
+
+function _erpMehrfachKundeLoesen() {
+  const s = ERP_MEHRFACH;
+  if (!s) return;
+  s.kundeBestaetigt = false; s.kundeNeu = false;
+  _erpMehrfachZeichnen();
+}
+
+function _erpMehrfachKundeNeu() {
+  const s = ERP_MEHRFACH;
+  if (!s) return;
+  s.kundeNeu = true; s.kundeBestaetigt = false;
+  _erpMehrfachZeichnen();
+}
+
+/* Kunde anlegen ist ein eigener Schritt — nicht Nebenwirkung des Anlegens der
+   Aufzüge. Danach ist er bestätigt, und die Anlagen können folgen. */
+async function _erpMehrfachKundeAnlegen(btn) {
+  const s = ERP_MEHRFACH;
+  if (!s) return;
+  const kd = {
+    firmenname: (document.getElementById('emKFirma')?.value || '').trim(),
+    adresse: (document.getElementById('emKAdresse')?.value || '').trim(),
+    email: (document.getElementById('emKMail')?.value || '').trim(),
+    telefon: (document.getElementById('emKTel')?.value || '').trim(),
+  };
+  if (!kd.firmenname || !kd.adresse) return toast('Das ERP braucht Firmenname und Anschrift.', 'warn', 7000);
+  if (!confirm('Kunde „' + kd.firmenname + '" neu im produktiven ERP anlegen?')) return;
+  setBusy(btn, true, 'Lege an …');
+  try {
+    const neu = await erpCreateKunde(s.slug, kd);
+    s.kunden = (s.kunden || []).concat([neu]);
+    s.kunde = neu; s.kundeBestaetigt = true; s.kundeNeu = false;
+    setBusy(btn, false);
+    toast('Kunde „' + kd.firmenname + '" angelegt (Kd. ' + (neu.kundennummer || neu.id) + ')', 'success', 6000);
+    _erpMehrfachZeichnen();
+    _erpMehrfachKonditionen(s.slug, neu.kundennummer || neu.id)
+      .then(k => { if (ERP_MEHRFACH === s) { s.kond = k; _erpMehrfachZeichnen(); } }).catch(() => {});
+  } catch (e) {
+    setBusy(btn, false);
+    toast('Kunde anlegen fehlgeschlagen: ' + (e.message || e), 'error', 10000);
+  }
+}
+
 function _erpMehrfachZeichnen(platzhalter) {
   const s = ERP_MEHRFACH;
   const host = _erpMehrfachHost();
@@ -33707,35 +33860,25 @@ function _erpMehrfachZeichnen(platzhalter) {
     '<div class="fixed inset-0 z-[75] bg-black/40 flex items-start justify-center overflow-y-auto p-4" onclick="if(event.target===this)closeErpMehrfach()">'
     + '<div class="bg-white rounded-2xl shadow-xl w-full max-w-2xl my-8">'
       + '<div class="flex items-center justify-between p-4 border-b border-ink-200">'
-        + '<div><h3 class="font-bold text-ink-900 inline-flex items-center gap-2"><i data-lucide="building-2" class="w-5 h-5 text-emerald-600"></i> Kunde + Anlagen im ERP anlegen</h3>'
+        + '<div><h3 class="font-bold text-ink-900 inline-flex items-center gap-2"><i data-lucide="building-2" class="w-5 h-5 text-emerald-600"></i> Aufzüge im ERP anlegen</h3>'
         + '<p class="text-[11px] text-ink-500">Ticket #' + s.ticketId + ' · ' + escapeHtml((s.ticket && s.ticket.subject) || '') + '</p></div>'
         + '<button onclick="closeErpMehrfach()" class="text-ink-400 hover:text-ink-700"><i data-lucide="x" class="w-5 h-5"></i></button></div>'
       + '<div class="p-4 space-y-3">' + inhalt + '</div>'
     + '</div></div>';
   if (platzhalter) { host.innerHTML = rahmen(platzhalter); if (window.lucide) lucide.createIcons(); return; }
 
-  const kv = s.kundeVorschlag || {};
-  const kundenOpts = '<option value="">— neuen Kunden anlegen —</option>'
-    + (s.kunden || []).slice().sort((a, b) => String(a.firmenname || '').localeCompare(String(b.firmenname || ''), 'de'))
-        .map(k => '<option value="' + escapeAttr(String(k.kundennummer || k.id)) + '"'
-          + (s.kunde && String(s.kunde.kundennummer || s.kunde.id) === String(k.kundennummer || k.id) ? ' selected' : '') + '>'
-          + escapeHtml(k.firmenname || '?') + ' (Kd. ' + escapeHtml(String(k.kundennummer || k.id)) + ')</option>').join('');
+  /* ── Kunde: suchen und BESTÄTIGEN, nicht auswählen und hoffen ───────────
+     Ein Auswahlfeld mit hunderten Kunden verführt dazu, „neuen Kunden anlegen"
+     stehen zu lassen — und dann steht der Kunde zweimal im ERP, einmal richtig
+     und einmal als das, was die KI aus dem Ticket gelesen hat. Bei diesem
+     Ticket wäre das „Eigentümer" gewesen: ein Rollenwort, kein Firmenname.
 
-  const kundeBlock = '<div class="border border-ink-200 rounded-xl p-3 space-y-2">'
-    + '<p class="text-[10px] uppercase font-semibold text-ink-600">Kunde</p>'
-    + '<select id="emKunde" onchange="_erpMehrfachKundeWechsel(this.value)" class="w-full px-2 py-1.5 border border-ink-300 rounded text-sm bg-white">' + kundenOpts + '</select>'
-    + (s.kunde ? '' :
-        '<div class="grid grid-cols-2 gap-2">'
-        + '<label class="block col-span-2"><span class="text-[10px] text-ink-500">Firmenname</span>'
-          + '<input id="emKFirma" value="' + escapeAttr(kv.firmenname || '') + '" class="w-full mt-0.5 px-2 py-1.5 border border-ink-300 rounded text-sm"></label>'
-        + '<label class="block col-span-2"><span class="text-[10px] text-ink-500">Anschrift (Straße Nr, PLZ Ort)</span>'
-          + '<input id="emKAdresse" value="' + escapeAttr(kv.adresse || '') + '" class="w-full mt-0.5 px-2 py-1.5 border border-ink-300 rounded text-sm"></label>'
-        + '<label class="block"><span class="text-[10px] text-ink-500">E-Mail</span>'
-          + '<input id="emKMail" value="' + escapeAttr(kv.email || (s.ticket && s.ticket.requester && s.ticket.requester.email) || '') + '" class="w-full mt-0.5 px-2 py-1.5 border border-ink-300 rounded text-sm"></label>'
-        + '<label class="block"><span class="text-[10px] text-ink-500">Telefon</span>'
-          + '<input id="emKTel" value="' + escapeAttr(kv.telefon || '') + '" class="w-full mt-0.5 px-2 py-1.5 border border-ink-300 rounded text-sm"></label>'
-        + '</div>')
-    + '</div>';
+     Deshalb derselbe Ablauf wie bei den Stammdaten des Angebots: Treffer aus
+     dem ERP suchen, einen davon bestätigen — und erst wenn nachweislich keiner
+     passt, bewusst einen neuen anlegen. Ohne bestätigten Kunden bleibt der
+     Anlegen-Knopf gesperrt. */
+  const kv = s.kundeVorschlag || {};
+  const kundeBlock = _erpMehrfachKundeBlock(s, kv);
 
   const zeilen = s.anlagen.length ? s.anlagen.map((a, i) =>
     '<div class="border ' + (a.vorhandenId ? 'border-amber-300 bg-amber-50/50' : 'border-ink-200') + ' rounded-lg p-2.5 space-y-1.5">'
@@ -33763,6 +33906,7 @@ function _erpMehrfachZeichnen(platzhalter) {
     : '<p class="text-[12px] text-ink-500 italic">Aus dem Ticket ließen sich keine Anlagen herauslesen. Über „+ Anlage" von Hand ergänzen.</p>';
 
   const offen = s.anlagen.filter(a => a.nehmen).length;
+  const bereit = offen > 0 && !!s.kunde && !!s.kundeBestaetigt;
   host.innerHTML = rahmen(
     kundeBlock
     + '<div><div class="flex items-center justify-between mb-1">'
@@ -33798,8 +33942,10 @@ function _erpMehrfachZeichnen(platzhalter) {
         : '')
     + '<div class="flex items-center gap-2 justify-end pt-1">'
       + '<button onclick="closeErpMehrfach()" class="px-3 py-2 rounded-lg text-[12px] font-bold bg-white border border-ink-300 text-ink-700 hover:bg-ink-50">Abbrechen</button>'
-      + '<button onclick="_erpMehrfachAnlegen(this)" class="px-4 py-2 rounded-lg text-[12px] font-bold text-white ' + (offen ? 'bg-emerald-600 hover:bg-emerald-700' : 'bg-ink-300 cursor-not-allowed') + '"' + (offen ? '' : ' disabled') + '>'
-      + (offen ? offen + ' Anlage' + (offen === 1 ? '' : 'n') + ' anlegen' : 'Nichts ausgewählt') + '</button>'
+      + '<button onclick="_erpMehrfachAnlegen(this)" class="px-4 py-2 rounded-lg text-[12px] font-bold text-white ' + (bereit ? 'bg-emerald-600 hover:bg-emerald-700' : 'bg-ink-300 cursor-not-allowed') + '"' + (bereit ? '' : ' disabled') + '>'
+      + (!offen ? 'Nichts ausgewählt'
+          : (!s.kundeBestaetigt ? 'Erst Kunde bestätigen'
+            : offen + ' Anlage' + (offen === 1 ? '' : 'n') + ' anlegen')) + '</button>'
     + '</div>'
     + '<p class="text-[10px] text-ink-500">Angelegt wird im produktiven ERP. Bereits vorhandene Fabriknummern sind abgewählt — dieselbe Kabine zweimal anzulegen bringt später Aufträge durcheinander.</p>');
   if (window.lucide) lucide.createIcons();
@@ -33823,15 +33969,8 @@ function _erpMehrfachFeld(i, feld, wert) {
   if (feld === 'nehmen') _erpMehrfachZeichnen();
 }
 function _erpMehrfachZeile() { ERP_MEHRFACH.anlagen.push({ adresse: '', fabriknummer: '', nehmen: true, status: '' }); _erpMehrfachZeichnen(); }
-function _erpMehrfachKundeWechsel(nr) {
-  const s = ERP_MEHRFACH;
-  s.kunde = nr ? (s.kunden || []).find(k => String(k.kundennummer || k.id) === String(nr)) || null : null;
-  _erpMehrfachZeichnen();
-  // Anderer Kunde, andere Sätze — die Konditionen gehören zum Kunden, nicht zum Ticket.
-  _erpMehrfachKonditionen(s.slug, s.kunde ? (s.kunde.kundennummer || s.kunde.id) : '')
-    .then(k => { if (ERP_MEHRFACH === s) { s.kond = k; _erpMehrfachZeichnen(); } })
-    .catch(() => {});
-}
+// _erpMehrfachKundeWechsel entfiel mit dem Auswahlfeld — der Kunde wird jetzt
+// gesucht und bestätigt (_erpMehrfachKundeWaehlen).
 
 async function _erpMehrfachAnlegen(btn) {
   const s = ERP_MEHRFACH;
@@ -33839,27 +33978,19 @@ async function _erpMehrfachAnlegen(btn) {
   const ziel = s.anlagen.filter(a => a.nehmen && String(a.adresse || '').trim());
   if (!ziel.length) return toast('Keine Anlage mit Standort ausgewählt.', 'warn', 5000);
 
-  let kunde = s.kunde;
-  const neuKunde = !kunde;
-  const kd = neuKunde ? {
-    firmenname: (document.getElementById('emKFirma')?.value || '').trim(),
-    adresse: (document.getElementById('emKAdresse')?.value || '').trim(),
-    email: (document.getElementById('emKMail')?.value || '').trim(),
-    telefon: (document.getElementById('emKTel')?.value || '').trim(),
-  } : null;
-  if (neuKunde && (!kd.firmenname || !kd.adresse)) return toast('Für einen neuen Kunden braucht das ERP Firmenname und Anschrift.', 'warn', 7000);
+  /* Ohne bestätigten Kunden geht hier nichts mehr. Der Kunde ist ein eigener
+     Schritt (oben), und die Anlagen hängen an ihm — ihn nebenbei mitanzulegen
+     war der Weg, auf dem Dubletten entstanden sind. */
+  const kunde = s.kunde;
+  if (!kunde || !s.kundeBestaetigt) return toast('Erst den Kunden im ERP bestätigen — oben suchen und wählen.', 'warn', 8000);
 
-  if (!confirm((neuKunde ? 'Kunde „' + kd.firmenname + '" neu anlegen und ' : 'Bei „' + (kunde.firmenname || '') + '" ')
+  if (!confirm('Bei „' + (kunde.firmenname || '') + '" (Kd. ' + (kunde.kundennummer || kunde.id) + ') '
     + ziel.length + ' Anlage' + (ziel.length === 1 ? '' : 'n') + ' im ERP anlegen?\n\n'
     + ziel.map((a, i) => (i + 1) + '. ' + a.adresse + (a.fabriknummer ? ' · Fabr.-Nr. ' + a.fabriknummer : ' · ohne Fabriknummer')).join('\n')
     + '\n\nDas schreibt ins produktive ERP.')) return;
 
   setBusy(btn, true, 'Lege an …');
   try {
-    if (neuKunde) {
-      kunde = await erpCreateKunde(s.slug, kd);
-      toast('Kunde „' + kd.firmenname + '" angelegt (Kd. ' + (kunde.kundennummer || kunde.id) + ')', 'success', 5000);
-    }
     let ok = 0; const fehler = [];
     for (let i = 0; i < ziel.length; i++) {
       const a = ziel[i];
