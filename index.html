@@ -824,7 +824,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.99.7';
+const APP_VERSION = 'v3.0.0';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -20032,10 +20032,39 @@ async function processAssistantCommand(btn) {
   try {
     const plan = await aiInterpretCommand(ctx.ticket, cmd, ctx.accountId, ctx.leseAnhaenge);
     // v2.46.94: Pre-Anhänge aus der Eingabe-Phase an die erste passende Action übergeben
-    if (ctx.preAttachments?.length) {
+    /* v3.00.0: Angehakte Ticket-Dateien gehen jetzt AUCH mit hinaus.
+
+       Vorher galt: angehakt = die KI liest mit, eigene Datei = wird angehängt.
+       Die Trennung war zu fein. Wer „Antworte ihr mit dem PDF im Anhang" sagt,
+       meint beides — und bekam eine Antwort, die auf einen Anhang verwies, der
+       nicht mitging. Angehängt wird sichtbar: In der Aktion stehen die Dateien
+       einzeln und lassen sich vor dem Bestätigen entfernen. */
+    let mitgeben = (ctx.preAttachments || []).slice();
+    if (Array.isArray(ctx.leseAnhaenge) && ctx.leseAnhaenge.length) {
+      const t = ctx.ticket || {};
+      const alle = [];
+      const nimm = (a) => { if (a && a.attachment_url && ctx.leseAnhaenge.includes(a.name)) alle.push(a); };
+      (t.attachments || []).forEach(nimm);
+      (t.conversations || []).forEach(c => (c.attachments || []).forEach(nimm));
+      for (const a of alle) {
+        if (mitgeben.some(x => x.name === a.name)) continue;
+        try {
+          let blob = null;
+          if (!/s3[.\-]|amazonaws\.com|freshdesk\.com/i.test(a.attachment_url)) {
+            try { const r = await fetch(a.attachment_url, { mode: 'cors' }); if (r.ok) blob = await r.blob(); } catch (_) {}
+          }
+          if (!blob) {
+            const r = await proxyFetch('/attachment-fetch?url=' + encodeURIComponent(a.attachment_url));
+            if (r.ok) blob = await r.blob();
+          }
+          if (blob) mitgeben.push({ name: a.name, type: a.content_type || 'application/octet-stream', size: blob.size, blob });
+        } catch (e) { console.warn('[Assistent] Anhang mitgeben:', a.name, e.message); }
+      }
+    }
+    if (mitgeben.length) {
       const target = plan.actions.find(a => ['reply', 'note', 'forward', 'marketing_email'].includes(a.type));
       if (target) {
-        target._attachments = ctx.preAttachments.slice();
+        target._attachments = mitgeben;
         ctx.preAttachments = []; // verbraucht
       } else {
         toast('Anhänge konnten keiner passenden Aktion zugeordnet werden — sie werden ignoriert.', 'warn', 7000);
@@ -21340,11 +21369,11 @@ function _detailAssistAnhangUi(accId, ticket) {
         + '<input type="file" multiple class="hidden" onchange="_detailAssistEigeneDazu(this)"></label>'
     + '</div>'
     + (tAtts.length
-        ? '<p class="text-[10px] text-ink-600 mb-0.5">Aus dem Ticket — angehakte liest die KI mit:</p>'
+        ? '<p class="text-[10px] text-ink-600 mb-0.5">Aus dem Ticket — angehakte liest die KI mit und hängt sie an:</p>'
           + '<div class="max-h-28 overflow-y-auto">' + tAtts.map(zeile).join('') + '</div>'
         : '<p class="text-[10px] text-ink-500 italic">Keine Dateien am Ticket.</p>')
     + eigene
-    + '<p class="text-[9px] text-ink-500 mt-1">Angehakte Ticket-Dateien werden von der KI gelesen. Eigene Dateien werden an die erzeugte Antwort gehängt (max 20 MB).</p>'
+    + '<p class="text-[9px] text-ink-500 mt-1">Angehakte Ticket-Dateien werden von der KI gelesen <b>und an die Antwort gehängt</b> — im nächsten Schritt einzeln entfernbar. Eigene Dateien ebenso (max 20 MB).</p>'
     + '</div>';
 }
 
