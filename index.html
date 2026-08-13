@@ -824,7 +824,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v3.8.0';
+const APP_VERSION = 'v3.8.1';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -47857,6 +47857,9 @@ function _ccVersandDialog(r, v, konfigs, signatur) {
         + '</div>'
         + '<div class="flex items-center justify-end gap-2 p-4 border-t border-ink-200">'
           + '<button onclick="_ccVersandSchliessen()" class="px-3 py-2 text-sm text-ink-600 hover:bg-ink-100 rounded-lg">Abbrechen</button>'
+          // Der Anhang ist das, was der Kunde als Erstes öffnet — er gehört vor
+          // dem Senden angesehen, nicht danach im gesendeten Ticket.
+          + '<button onclick="_ccVersandPdfAnsehen(\'' + r.recordId + '\', this)" class="px-3 py-2 text-sm font-bold bg-white border border-ink-300 text-ink-700 hover:bg-ink-50 rounded-lg inline-flex items-center gap-1.5"><i data-lucide="file-search" class="w-4 h-4"></i> PDF ansehen</button>'
           + '<button onclick="_ccVersandAbsenden(\'' + r.recordId + '\', this)" class="px-4 py-2 text-sm font-bold bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg inline-flex items-center gap-1.5"><i data-lucide="send" class="w-4 h-4"></i> Senden</button>'
         + '</div>'
       + '</div>'
@@ -47869,10 +47872,66 @@ function _ccVersandSchliessen() { const h = document.getElementById('ccVersandHo
    zentrale Datenbank nur auf Wunsch. Beides still zu tun wäre falsch — die
    Firmenanschrift dort gilt für alle Mandanten und alle Vorgänge, nicht nur
    für dieses eine Anschreiben. */
-async function _ccAnschriftUebernehmen(r) {
+/* Was gerade in den Anschriftfeldern des Dialogs steht — ohne zu speichern.
+   Die Vorschau braucht denselben Stand wie der Versand, darf ihn aber nicht
+   festschreiben: Wer sich das PDF ansieht und dann abbricht, hat nichts
+   geändert. */
+function _ccAnschriftLesen() {
   const w = (id) => (document.getElementById(id)?.value || '').trim();
   const neu = { firma: w('ccVersandFirma'), strasse: w('ccVersandStrasse'), plz: w('ccVersandPlz'), ort: w('ccVersandOrt') };
   if (!neu.firma) delete neu.firma;          // Firma nie leer überschreiben
+  return neu;
+}
+
+/* Baut das Anhangs-PDF genau so, wie es hinausginge — eine Quelle für Vorschau
+   und Versand. Zwei getrennte Wege wären zwei Stände, und dann zeigt die
+   Vorschau irgendwann etwas anderes als der Anhang. */
+async function _ccPreislistePdfBauen(r, v, stumm) {
+  const key = APP_KEYS.user?.api_key;
+  const slug = _archivSlugFuer(_ccAccount()?.id);
+  const res = await fetch(ARCHIV_URL + '/vorlage/' + slug + '/' + encodeURIComponent(_ccVorlageSchluessel()), { headers: { 'X-Hero-Key': key } });
+  if (!res.ok) throw new Error('Die hinterlegte Preisliste ist nicht abrufbar (HTTP ' + res.status + ')');
+  const roh = await res.arrayBuffer();
+  try {
+    return new Blob([await _ccPdfPersonalisieren(roh, r, v)], { type: 'application/pdf' });
+  } catch (e) {
+    // Lieber die unpersonalisierte Liste als gar keine — aber ausdrücklich
+    // sagen, dass der Aufdruck fehlt. Stillschweigend wäre es schlimmer:
+    // Der Empfänger bekäme etwas anderes, als am Bildschirm stand.
+    console.warn('[CC] Personalisierung:', e.message);
+    if (!stumm) toast('Aufdruck nicht möglich (' + (e.message || e) + ') — die Liste geht ohne Firmennamen raus.', 'warn', 9000);
+    return new Blob([roh], { type: 'application/pdf' });
+  }
+}
+
+/** Vorschau des Anhangs mit dem Stand, der im Dialog steht — ohne zu speichern. */
+async function _ccVersandPdfAnsehen(recordId, btn) {
+  const r = CC_STATE.leads.find(x => x.recordId === recordId);
+  const v = _CC_VORLAGE;
+  if (!r || !v) return;
+  setBusy(btn, true, 'Baue…');
+  try {
+    const stand = Object.assign({}, r, _ccAnschriftLesen());
+    const blob = await _ccPreislistePdfBauen(stand, v);
+    const url = URL.createObjectURL(blob);
+    const fenster = window.open(url, '_blank');
+    if (!fenster) {
+      // Popup-Blocker: dann eben als Download, statt kommentarlos nichts zu tun.
+      const a = document.createElement('a');
+      a.href = url; a.download = _ccDateiname(v.pdf_datei, stand);
+      document.body.appendChild(a); a.click(); a.remove();
+      toast('Das Fenster wurde blockiert — das PDF liegt jetzt in den Downloads.', 'warn', 7000);
+    }
+    setTimeout(() => URL.revokeObjectURL(url), 120000);
+    setBusy(btn, false);
+  } catch (e) {
+    setBusy(btn, false);
+    toast('Vorschau: ' + (e.message || e), 'error', 9000);
+  }
+}
+
+async function _ccAnschriftUebernehmen(r) {
+  const neu = _ccAnschriftLesen();
   const geaendert = Object.keys(neu).filter(k => String(r[k] || '').trim() !== neu[k]);
   Object.assign(r, neu);
   if (!geaendert.length) return;
@@ -47895,30 +47954,14 @@ async function _ccVersandAbsenden(recordId, btn) {
   const acc = _ccAccount();
   const v = _CC_VORLAGE;
   if (!r || !acc || !v) return;
-  const key = APP_KEYS.user?.api_key;
-  const slug = _archivSlugFuer(acc.id);
   setBusy(btn, true, 'Hole PDF…');
   try {
     // Anschrift aus dem Dialog übernehmen, BEVOR das PDF gebaut wird — sie
     // steht dort im „Für:"-Kopf und im Anschriftenblock.
     await _ccAnschriftUebernehmen(r);
 
-    const res = await fetch(ARCHIV_URL + '/vorlage/' + slug + '/' + encodeURIComponent(_ccVorlageSchluessel()), { headers: { 'X-Hero-Key': key } });
-    if (!res.ok) throw new Error('Die hinterlegte Preisliste ist nicht abrufbar (HTTP ' + res.status + ')');
-    const roh = await res.arrayBuffer();
-
     setBusy(btn, true, 'Personalisiere…');
-    let blob;
-    try {
-      blob = new Blob([await _ccPdfPersonalisieren(roh, r, v)], { type: 'application/pdf' });
-    } catch (e) {
-      // Lieber die unpersonalisierte Liste als gar keine — aber ausdrücklich
-      // sagen, dass der Aufdruck fehlt. Stillschweigend wäre es schlimmer:
-      // Der Empfänger bekäme etwas anderes, als am Bildschirm stand.
-      console.warn('[CC] Personalisierung:', e.message);
-      toast('Aufdruck nicht möglich (' + (e.message || e) + ') — die Liste geht ohne Firmennamen raus.', 'warn', 9000);
-      blob = new Blob([roh], { type: 'application/pdf' });
-    }
+    const blob = await _ccPreislistePdfBauen(r, v);
 
     setBusy(btn, true, 'Sende…');
     const erstellt = await _fdPostMultipart(acc.id, 'tickets/outbound_email', {
@@ -48710,11 +48753,17 @@ async function _ccInZentraleDb(recordId, btn) {
   try {
     const teile = String(r.ansprechpartner || '').trim().split(/\s+/).filter(Boolean);
     const res = await zdbSaveFirmaKontakt(acc,
-      r.firma ? { name: r.firma, ort: r.ort || '', quelle: 'Kaltakquise · ' + (r.quelle || '') } : null,
+      // Anschrift und Typ gehören mit: Sie stehen am Lead und sind genau das,
+      // was in den Stammdaten sonst wieder von Hand nachgetragen wird.
+      r.firma ? {
+        name: r.firma, strasse: r.strasse || '', plz: r.plz || '', ort: r.ort || '',
+        quelle: 'Kaltakquise · ' + (r.quelle || ''),
+      } : null,
       {
         vorname: teile.length > 1 ? teile.slice(0, -1).join(' ') : (teile[0] || ''),
         nachname: teile.length > 1 ? teile[teile.length - 1] : '',
         email: r.email || '', telefon: r.telefon || '', position: r.position || '',
+        typ: r.typ || '',
         quelle: 'Kaltakquise · ' + (r.quelle || ''),
       },
       { erzwingen: true });
