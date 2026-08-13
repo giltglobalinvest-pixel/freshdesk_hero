@@ -824,7 +824,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v3.11.1';
+const APP_VERSION = 'v3.12.0';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -15581,6 +15581,13 @@ async function openForwardModal(accountId, ticketId) {
           <label class="inline-flex items-center gap-2 text-sm text-ink-700">
             <input id="fwdAnhaenge" type="checkbox" checked class="w-4 h-4 accent-brand-500"> Original-Anhänge mitschicken
           </label>
+          <div>
+            <label class="inline-flex items-center gap-2 text-sm text-ink-700">
+              <input id="fwdVerlauf" type="checkbox" checked class="w-4 h-4 accent-brand-500"> Bisherigen Schriftwechsel mitschicken
+            </label>
+            <p class="text-[10px] text-ink-500 mt-1 ml-6">Ohne Haken geht nur dein Text hinaus — der Empfänger sieht den Vorgang dann nicht.
+            <b>Interne Notizen werden nie mitgeschickt.</b></p>
+          </div>
           <div id="fwdFehler" class="hidden text-xs text-red-700 bg-red-50 border border-red-200 rounded px-2 py-1.5"></div>
         </div>
         <div class="px-4 py-3 border-t border-ink-100 flex gap-2">
@@ -15595,6 +15602,60 @@ function closeForwardModal() {
   const host = document.getElementById('subModalHost');
   if (host) host.innerHTML = '';
 }
+/* Der bisherige Schriftwechsel als zitierter Block unter der Nachricht.
+
+   Freshdesks Weiterleitung schickt NUR den mitgegebenen Text — anders als im
+   Freshdesk-Fenster, wo der Verlauf beim Öffnen in den Entwurf kopiert wird.
+   Wer also weiterleitet, hat bisher eine Mail ohne den Vorgang verschickt.
+
+   INTERNE NOTIZEN BLEIBEN DRAUSSEN. Sie sind für Kollegen geschrieben und in
+   einem Ton, den niemand außerhalb des Hauses lesen soll; ein einziger solcher
+   Satz in einer Weiterleitung ist ein Schaden, den keine Erklärung repariert.
+   Freshdesk kennzeichnet sie mit private=true — danach wird gefiltert. */
+async function _fwdVerlaufHtml(accountId, ticketId) {
+  const GRENZE = 20;             // mehr liest ohnehin niemand
+  const MAX_ZEICHEN = 180000;    // eine Mail ist kein Archiv
+  try {
+    const t = await proxyJson('/freshdesk/' + encodeURIComponent(accountId) + '/api/v2/tickets/' + ticketId + '?include=conversations');
+    if (!t) return '';
+    const wann = (iso) => { try { return new Date(iso).toLocaleString('de'); } catch (_) { return ''; } };
+    const abschnitt = (kopf, html) =>
+      '<div style="margin:18px 0 0;padding:10px 0 0;border-top:1px solid #d1d5db">'
+      + '<p style="margin:0 0 6px;font-size:12px;color:#6b7280">' + escapeHtml(kopf) + '</p>'
+      + (html || '') + '</div>';
+
+    const teile = [];
+    if (String(t.description || '').trim()) {
+      teile.push(abschnitt('Ursprüngliche Nachricht · ' + (t.requester?.email || t.requester_id || '') + ' · ' + wann(t.created_at),
+        t.description));
+    }
+    const beitraege = (t.conversations || [])
+      .filter(c => !c.private)            // interne Notizen niemals
+      .slice(-GRENZE);
+    const ausgelassen = (t.conversations || []).filter(c => !c.private).length - beitraege.length;
+    for (const c of beitraege) {
+      teile.push(abschnitt(
+        (c.incoming ? 'Vom Kunden' : 'Von uns') + ' · ' + (c.from_email || '') + ' · ' + wann(c.created_at),
+        c.body || ''));
+    }
+    if (!teile.length) return '';
+    let raus = '<div style="margin-top:24px">'
+      + '<p style="margin:0 0 4px;font-size:13px;font-weight:bold;color:#374151">Bisheriger Schriftwechsel zu Vorgang #' + ticketId + '</p>'
+      + (ausgelassen > 0 ? '<p style="margin:0;font-size:12px;color:#6b7280">' + ausgelassen + ' ältere Nachrichten sind hier nicht enthalten.</p>' : '')
+      + teile.join('') + '</div>';
+    if (raus.length > MAX_ZEICHEN) {
+      raus = raus.slice(0, MAX_ZEICHEN)
+        + '<p style="font-size:12px;color:#6b7280">… der Verlauf wurde gekürzt.</p></div>';
+    }
+    return raus;
+  } catch (e) {
+    // Lieber ohne Verlauf verschicken als gar nicht — aber gesagt wird es.
+    console.warn('[Weiterleitung] Verlauf:', e.message);
+    toast('Der Verlauf konnte nicht geladen werden — es geht nur dein Text hinaus.', 'warn', 8000);
+    return '';
+  }
+}
+
 async function fdhWeiterleiten(btn, accountId, ticketId) {
   const fehler = document.getElementById('fwdFehler');
   fehler.classList.add('hidden');
@@ -15602,6 +15663,7 @@ async function fdhWeiterleiten(btn, accountId, ticketId) {
   const cc = String(document.getElementById('fwdCc')?.value || '').split(',').map(s => s.trim()).filter(s => /@/.test(s));
   const text = String(document.getElementById('fwdText')?.value || '').trim();
   const mitAnhaengen = !!document.getElementById('fwdAnhaenge')?.checked;
+  const mitVerlauf = !!document.getElementById('fwdVerlauf')?.checked;
   if (!an.length) { fehler.textContent = 'Mindestens eine gültige Empfänger-Adresse angeben.'; fehler.classList.remove('hidden'); return; }
   if (!text) { fehler.textContent = 'Bitte eine Nachricht schreiben.'; fehler.classList.remove('hidden'); return; }
   setBusy(btn, true, 'Sende…');
@@ -15609,7 +15671,13 @@ async function fdhWeiterleiten(btn, accountId, ticketId) {
     let sig = '';
     try { const me = await fetchAgentMe(accountId); sig = me?.signature || ''; } catch (_) {}
     _sigLog('versand-weiterleitung', { acc: String(accountId), ticket: ticketId, quelle: _sigQuelleFuer(accountId).quelle, angehaengt: sig.length });
-    const body = textToHtmlForFreshdesk(text) + (sig ? '<br><br>' + sig : '');
+    let verlauf = '';
+    if (mitVerlauf) {
+      setBusy(btn, true, 'Verlauf…');
+      verlauf = await _fwdVerlaufHtml(accountId, ticketId);
+    }
+    const body = textToHtmlForFreshdesk(text) + (sig ? '<br><br>' + sig : '') + verlauf;
+    setBusy(btn, true, 'Sende…');
     const payload = { body, to_emails: an, include_original_attachments: mitAnhaengen };
     if (cc.length) payload.cc_emails = cc;
     await proxyJson('/freshdesk/' + encodeURIComponent(accountId) + '/api/v2/tickets/' + ticketId + '/forward', {
@@ -28630,37 +28698,58 @@ async function processNewEmailAi(btn) {
 
 /* Sucht FD-Kontakte basierend auf Plan (recipient_name + company_name). Probiert
    /api/v2/search/contacts mit verschiedenen Query-Strategien. */
+/* Welche Suchfelder dieser Freshdesk-Zugang NICHT kennt. Nicht jeder Plan
+   erlaubt in /search/contacts dieselben Felder: „name" quittiert mancher mit
+   400 „Unexpected/invalid field". Das einmal zu merken spart bei jeder
+   weiteren Suche drei vergebliche Anfragen — und die roten Zeilen in der
+   Konsole, die wie ein Defekt aussehen, aber keiner sind. */
+const _FD_SUCHFELD_TOT = new Set();
+function _fdFeldTot(accountId, feld) { return _FD_SUCHFELD_TOT.has(accountId + '|' + feld); }
+function _fdFeldSterben(accountId, feld, e) {
+  if (!/invalid[_ ]field|Unexpected\/invalid/i.test(String((e && e.message) || ''))) return false;
+  _FD_SUCHFELD_TOT.add(accountId + '|' + feld);
+  console.info('[Kontaktsuche] Feld „' + feld + '" kennt dieser Freshdesk-Zugang nicht — wird übersprungen.');
+  return true;
+}
+
 async function _searchFdContactsByPlan(accountId, plan) {
   const base = '/freshdesk/' + encodeURIComponent(accountId) + '/api/v2';
   const queries = [];
+  const zufuegen = (feld, q) => { if (!_fdFeldTot(accountId, feld)) queries.push({ feld, q }); };
   // Strategie 1: Name + Firma
   if (plan.recipient_name && plan.company_name) {
-    queries.push('"name:\'' + plan.recipient_name.replace(/'/g, '\\\'') + '\' AND company_name:\'' + plan.company_name.replace(/'/g, '\\\'') + '\'"');
+    zufuegen('name', '"name:\'' + plan.recipient_name.replace(/'/g, '\\\'') + '\' AND company_name:\'' + plan.company_name.replace(/'/g, '\\\'') + '\'"');
   }
   // Strategie 2: Nur Name
   if (plan.recipient_name) {
-    queries.push('"name:\'' + plan.recipient_name.replace(/'/g, '\\\'') + '\'"');
+    zufuegen('name', '"name:\'' + plan.recipient_name.replace(/'/g, '\\\'') + '\'"');
   }
   // Strategie 3: Nachname only
   const lastName = (plan.recipient_name || '').trim().split(/\s+/).pop();
   if (lastName && lastName !== plan.recipient_name) {
-    queries.push('"name:\'' + lastName.replace(/'/g, '\\\'') + '\'"');
+    zufuegen('name', '"name:\'' + lastName.replace(/'/g, '\\\'') + '\'"');
   }
   // Strategie 4: Firma only
   if (plan.company_name) {
-    queries.push('"company_name:\'' + plan.company_name.replace(/'/g, '\\\'') + '\'"');
+    zufuegen('company_name', '"company_name:\'' + plan.company_name.replace(/'/g, '\\\'') + '\'"');
   }
   const found = [];
   const seen = new Set();
   const aufnehmen = (list) => (list || []).forEach(function (c) {
     if (c && c.id != null && !seen.has(c.id) && c.email) { seen.add(c.id); found.push(c); }
   });
-  for (const q of queries) {
+  for (const eintrag of queries) {
+    if (_fdFeldTot(accountId, eintrag.feld)) continue;
     try {
-      const res = await proxyJson(base + '/search/contacts?query=' + encodeURIComponent(q));
+      const res = await proxyJson(base + '/search/contacts?query=' + encodeURIComponent(eintrag.q));
       aufnehmen(Array.isArray(res?.results) ? res.results : []);
       if (found.length >= 5) break;
-    } catch (e) { console.warn('contact-search query fehlgeschlagen:', q, e.message); }
+    } catch (e) {
+      // Kennt der Zugang das Feld nicht, ist die Suche danach keine „gescheiterte
+      // Anfrage", sondern schlicht nicht möglich — dann still weiter über die
+      // Teiltreffer-Suche unten.
+      if (!_fdFeldSterben(accountId, eintrag.feld, e)) console.warn('contact-search query fehlgeschlagen:', eintrag.q, e.message);
+    }
   }
 
   /* Die Filtersuche oben vergleicht EXAKT: `name:'Mondl'` findet „Robert Mondl"
