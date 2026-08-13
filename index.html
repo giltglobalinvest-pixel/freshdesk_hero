@@ -824,7 +824,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v3.6.1';
+const APP_VERSION = 'v3.7.0';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -46355,8 +46355,107 @@ function _ccArbeitsbereich(r) {
     + '<div class="flex items-center gap-2 flex-wrap">'
       + '<input id="ccNotiz_' + r.recordId + '" value="' + escapeAttr(r.notiz || '') + '" onclick="event.stopPropagation()" onblur="_ccNotizSpeichern(\'' + r.recordId + '\', this.value)" placeholder="Was wurde gesagt? Wenige Worte genügen." class="flex-1 min-w-[180px] px-2.5 py-1.5 border border-ink-300 rounded-lg text-[12px]">'
       + '<button onclick="event.stopPropagation(); _ccPreislisteAnfordern(\'' + r.recordId + '\', this)" class="px-3 py-1.5 rounded-lg text-[12px] font-bold bg-brand-600 hover:bg-brand-700 text-white inline-flex items-center gap-1.5"><i data-lucide="mail" class="w-3.5 h-3.5"></i> Preisliste senden</button>'
+      + (String(r.ticket_id || '').trim()
+          ? '<button onclick="event.stopPropagation(); _ccBelegAnsehen(\'' + r.recordId + '\', this)" class="px-3 py-1.5 rounded-lg text-[12px] font-bold bg-white border border-emerald-300 text-emerald-700 hover:bg-emerald-50 inline-flex items-center gap-1.5" title="Den versendeten Brief samt Preisliste ansehen und herunterladen"><i data-lucide="mail-check" class="w-3.5 h-3.5"></i> Versendetes ansehen</button>'
+          : '')
       + '<button onclick="event.stopPropagation(); _ccInZentraleDb(\'' + r.recordId + '\', this)" class="px-3 py-1.5 rounded-lg text-[12px] font-bold bg-white border border-indigo-300 text-indigo-700 hover:bg-indigo-50 inline-flex items-center gap-1.5" title="Aus dem Lead einen Stammdatensatz machen — erst wenn jemand angebissen hat"><i data-lucide="database" class="w-3.5 h-3.5"></i> In zentrale DB</button>'
     + '</div></div>';
+}
+
+/* ===== Versendeten Brief nachträglich ansehen (v3.7.0) ===================
+   Was beim Kunden ankam, muss man nachlesen können — spätestens wenn er
+   anruft und sich auf einen Preis beruft. Bisher endete die Spur bei einer
+   Ticketnummer im Datensatz.
+
+   Bewusst kein zweiter Speicherort: Der Beleg IST die versendete Mail in
+   Freshdesk. Sie wird hier geholt und gezeigt, samt Anhang zum Herunterladen.
+   Eine Kopie daneben könnte abweichen — und dann wüsste niemand, welche gilt. */
+async function _ccBelegAnsehen(recordId, btn) {
+  const r = (CC_STATE.leads || []).find(x => x.recordId === recordId);
+  const acc = _ccAccount();
+  if (!r || !acc) return;
+  const tid = String(r.ticket_id || '').trim();
+  if (!tid) return toast('Zu diesem Kontakt ist kein Versand vermerkt.', 'warn', 5000);
+  if (btn) setBusy(btn, true, 'Lade…');
+  try {
+    const t = await fetchTicketDetail(acc.id, tid);
+    if (!t) throw new Error('Vorgang #' + tid + ' nicht gefunden');
+    const anhaenge = [];
+    const nimm = (a) => { if (a && a.attachment_url) anhaenge.push(a); };
+    (t.attachments || []).forEach(nimm);
+    (t.conversations || []).forEach(c => (c.attachments || []).forEach(nimm));
+    window._CC_BELEG = { acc, r, ticket: t, anhaenge };
+    if (btn) setBusy(btn, false);
+
+    let host = document.getElementById('subModalHost');
+    if (!host) { host = document.createElement('div'); host.id = 'subModalHost'; document.body.appendChild(host); }
+    const koerper = t.description || '';
+    const fdUrl = acc.domain ? ('https://' + acc.domain + '.freshdesk.com/a/tickets/' + tid) : '';
+    host.innerHTML =
+      '<div class="fixed inset-0 z-[75] bg-black/40 flex items-start justify-center overflow-y-auto p-4" onclick="if(event.target===this)document.getElementById(\'subModalHost\').innerHTML=\'\'">'
+      + '<div class="bg-white rounded-2xl shadow-xl w-full max-w-2xl my-8">'
+        + '<div class="flex items-center justify-between p-4 border-b border-ink-200">'
+          + '<div><h3 class="font-bold text-ink-900 inline-flex items-center gap-2"><i data-lucide="mail-check" class="w-5 h-5 text-emerald-600"></i> Versendeter Brief</h3>'
+          + '<p class="text-[11px] text-ink-500">' + escapeHtml(r.firma || '') + ' · an ' + escapeHtml(r.email || '')
+          + (r.preisliste_am ? ' · ' + new Date(r.preisliste_am).toLocaleString('de-DE') : '') + ' · Vorgang #' + escapeHtml(tid) + '</p></div>'
+          + '<button onclick="document.getElementById(\'subModalHost\').innerHTML=\'\'" class="text-ink-400 hover:text-ink-700"><i data-lucide="x" class="w-5 h-5"></i></button></div>'
+        + '<div class="p-4 space-y-3">'
+          + '<div><p class="text-[10px] uppercase font-semibold text-ink-600 mb-1">Betreff</p>'
+            + '<p class="text-[13px] text-ink-900 font-semibold">' + escapeHtml(t.subject || '') + '</p></div>'
+          + '<div><p class="text-[10px] uppercase font-semibold text-ink-600 mb-1">Text, wie er hinausging</p>'
+            + '<div class="border border-ink-200 rounded-lg p-3 max-h-[45vh] overflow-y-auto email-body text-[13px]">'
+            + (koerper && /<[a-z]/i.test(koerper) ? sanitizeHtml(koerper) : '<pre class="whitespace-pre-wrap">' + escapeHtml(htmlToText(koerper)) + '</pre>')
+            + '</div></div>'
+          + '<div><p class="text-[10px] uppercase font-semibold text-ink-600 mb-1">Anhänge (' + anhaenge.length + ')</p>'
+            + (anhaenge.length
+                ? '<div class="space-y-1">' + anhaenge.map((a, i) =>
+                    '<div class="flex items-center gap-2 border border-ink-200 rounded-lg px-2 py-1.5 text-[12px]">'
+                    + '<i data-lucide="file-text" class="w-3.5 h-3.5 text-ink-500 shrink-0"></i>'
+                    + '<span class="flex-1 truncate">' + escapeHtml(a.name || 'Anhang') + '</span>'
+                    + '<span class="text-[10px] text-ink-400">' + Math.round((+a.size || 0) / 1024) + ' KB</span>'
+                    + '<button onclick="_ccBelegLaden(' + i + ', this)" class="px-2 py-0.5 rounded bg-brand-600 hover:bg-brand-700 text-white text-[11px] font-bold">Herunterladen</button>'
+                    + '</div>').join('') + '</div>'
+                : '<p class="text-[12px] text-ink-500 italic">Kein Anhang am Vorgang — bitte prüfen, ob die Preisliste wirklich mitging.</p>')
+          + '</div>'
+          + '<div class="flex justify-end gap-2 pt-1">'
+            + (fdUrl ? '<a href="' + escapeAttr(fdUrl) + '" target="_blank" rel="noopener" class="px-3 py-2 rounded-lg text-[12px] font-bold bg-white border border-ink-300 text-ink-700 hover:bg-ink-50">In Freshdesk öffnen</a>' : '')
+            + '<button onclick="document.getElementById(\'subModalHost\').innerHTML=\'\'" class="px-4 py-2 rounded-lg text-[12px] font-bold bg-ink-800 hover:bg-ink-900 text-white">Schließen</button>'
+          + '</div>'
+        + '</div></div></div>';
+    if (window.lucide) lucide.createIcons();
+  } catch (e) {
+    if (btn) setBusy(btn, false);
+    toast('Beleg laden: ' + (e.message || e), 'error', 9000);
+  }
+}
+
+/* Herunterladen über den Proxy: Freshdesks Anhang-Adressen sind vorsignierte
+   S3-Links, die der Browser meist nicht direkt holen darf. */
+async function _ccBelegLaden(i, btn) {
+  const s = window._CC_BELEG;
+  const a = s && s.anhaenge[i];
+  if (!a) return;
+  setBusy(btn, true, '…');
+  try {
+    let blob = null;
+    if (!/s3[.\-]|amazonaws\.com|freshdesk\.com/i.test(a.attachment_url)) {
+      try { const r = await fetch(a.attachment_url, { mode: 'cors' }); if (r.ok) blob = await r.blob(); } catch (_) {}
+    }
+    if (!blob) {
+      const r = await proxyFetch('/attachment-fetch?url=' + encodeURIComponent(a.attachment_url));
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      blob = await r.blob();
+    }
+    const url = URL.createObjectURL(blob);
+    const el = document.createElement('a');
+    el.href = url; el.download = a.name || 'anhang.pdf';
+    document.body.appendChild(el); el.click(); el.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 20000);
+    setBusy(btn, false);
+  } catch (e) {
+    setBusy(btn, false);
+    toast('Herunterladen fehlgeschlagen: ' + (e.message || e), 'error', 8000);
+  }
 }
 
 /* v2.71.4: Öffnen heißt übernehmen. Ohne das rufen zwei Anrufer denselben
