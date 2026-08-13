@@ -824,7 +824,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v3.7.3';
+const APP_VERSION = 'v3.7.4';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -47019,6 +47019,60 @@ async function _ccAdressatErkennen(zeilen) {
   };
 }
 
+/* Die Anrede IM Brief — Seite 1 der hinterlegten Vorlage.
+   Die Vorlage ist ein echter Brief an einen früheren Empfänger. Der
+   Empfängerblock wird ersetzt, die Anredezeile darunter bisher nicht: Dort
+   stand weiterhin „Sehr geehrte Frau Mayer," — die erste Zeile, die der neue
+   Empfänger liest.
+
+   Gefunden wird sie ohne KI: „Sehr geehrte…" am Zeilenanfang ist eindeutig,
+   und eine Rückfrage bei jedem Versand wäre weder schnell noch billig.
+   Ersetzt wird nur, wenn der Nachname des Empfängers NICHT darin steht —
+   passt sie bereits, bleibt die Vorlage unangetastet.
+
+   Rückgabe: die alte Anredezeile, wenn ersetzt wurde, sonst null. */
+async function _ccPdfAnredeErsetzen(seite, zeilen, werte, lib, doc) {
+  const name = String(werte.ansprechpartner || '').trim();
+  const teile = name.split(/\s+/).filter(Boolean);
+  const nachname = (teile[teile.length - 1] || '').toLowerCase();
+  const neu = String(werte.anrede || '').trim() || 'Sehr geehrte Damen und Herren,';
+  const treffer = (zeilen || []).find(z => /^\s*Sehr\s+geehrte/i.test(z.text));
+  if (!treffer) return null;
+  if (nachname && treffer.text.toLowerCase().includes(nachname)) return null;   // passt schon
+  const font = await doc.embedFont(lib.StandardFonts.Helvetica);   // Anrede ist nicht fett
+  const gr = Math.max(6, Math.min(20, treffer.groesse || 11));
+  // Ober- und Unterlängen ragen über die Grundlinie hinaus — ohne Zuschlag
+  // bliebe ein Streifen des alten Namens stehen.
+  seite.drawRectangle({
+    x: treffer.x - 2, y: treffer.y - gr * 0.3,
+    width: Math.max(treffer.breite, font.widthOfTextAtSize(neu, gr)) + 8, height: gr * 1.32,
+    color: lib.rgb(1, 1, 1),
+  });
+  seite.drawText(neu.replace(/[^\x20-\xFF]/g, '?'), {
+    x: treffer.x, y: treffer.y, size: gr, font, color: lib.rgb(0, 0, 0),
+  });
+  return treffer.text.trim();
+}
+
+/* Steht der alte Name noch woanders im Brieftext („wie mit Frau Mayer
+   besprochen"), ist die Vorlage selbst das Problem — dort hilft kein Aufdruck,
+   sondern nur eine neue Datei. Das stillschweigend zu verschicken wäre der
+   gleiche Fehler noch einmal, also wird es gesagt. */
+function _ccPdfAltnameWarnen(zeilen, alteAnrede, empf) {
+  if (!alteAnrede) return;
+  const m = alteAnrede.match(/Sehr\s+geehrte[rs]?\s+(?:Herr|Frau)\s+([^\n,;]{2,60})/i);
+  if (!m) return;
+  const teile = m[1].trim().split(/\s+/).filter(Boolean);
+  const alt = (teile[teile.length - 1] || '').toLowerCase();
+  if (alt.length < 4) return;      // zu kurz, um es sicher wiederzuerkennen
+  const imBlock = (z) => empf && empf.rect
+    && z.y >= empf.rect.y && z.y <= empf.rect.y + empf.rect.h;   // wird ohnehin überschrieben
+  const rest = (zeilen || []).filter(z =>
+    !/^\s*Sehr\s+geehrte/i.test(z.text) && !imBlock(z) && z.text.toLowerCase().includes(alt));
+  if (!rest.length) return;
+  toast('Anrede auf Seite 1 korrigiert — der alte Name „' + m[1].trim() + '" steht aber noch im Brieftext der Vorlage. Bitte die hinterlegte PDF-Vorlage austauschen.', 'warn', 12000);
+}
+
 const CC_PDF_ECKEN = {
   'oben-links':   'oben links',
   'oben-rechts':  'oben rechts',
@@ -47052,6 +47106,19 @@ async function _ccPdfPersonalisieren(bytes, werte, e) {
   const nr = parseInt(e.pdf_seite || '1', 10) || 1;
   const seite = nr < 0 ? seiten[seiten.length + nr] : seiten[Math.min(nr, seiten.length) - 1];
   const roh = _ccPlatzhalterFuellen(e.pdf_text || CC_PDF_STANDARD.pdf_text, werte);
+
+  let empf = null;
+  try { empf = e.pdf_empf_json ? JSON.parse(e.pdf_empf_json) : null; } catch (_) {}
+
+  /* Erst die Anrede im Brieftext, dann der Empfängerblock — sie steht in
+     BEIDEN Betriebsarten im Weg, deshalb vor der Verzweigung. Scheitert es,
+     geht die Liste trotzdem raus: Ein fehlender Aufdruck ist ärgerlich, ein
+     nicht verschicktes Angebot schlimmer. */
+  try {
+    const gelesen = await _ccPdfZeilen(bytes, nr);
+    const alt = await _ccPdfAnredeErsetzen(seite, gelesen.zeilen, werte, lib, doc);
+    _ccPdfAltnameWarnen(gelesen.zeilen, alt, empf);
+  } catch (err) { console.warn('[CC] Anrede im PDF:', err.message); }
   // WinAnsi deckt deutsche Umlaute ab; alles darüber hinaus würde pdf-lib beim
   // Zeichnen abbrechen — deshalb vorher ersetzen statt hinterher raten.
   const saeubern = (t) => String(t).replace(/[^\x20-\xFF]/g, '?');
@@ -47061,11 +47128,10 @@ async function _ccPdfPersonalisieren(bytes, werte, e) {
      überdeckt und an derselben Stelle neu geschrieben — dieselbe Zeilenhöhe,
      derselbe linke Rand. Ein Aufdruck daneben wäre falsch: Dann stünde auf der
      Preisliste weiterhin der Name des anderen Kunden. */
-  let empf = null;
-  try { empf = e.pdf_empf_json ? JSON.parse(e.pdf_empf_json) : null; } catch (_) {}
   if ((e.pdf_modus || 'ersetzen') === 'ersetzen' && empf && empf.rect) {
     const zeilenText = roh.split('\n').map(z => saeubern(z.trim())).filter(Boolean);
-    if (!zeilenText.length) return new Uint8Array(bytes);
+    // doc.save() statt der Rohbytes: Die Anrede oben wurde schon korrigiert.
+    if (!zeilenText.length) return await doc.save();
     const gr = Math.max(6, Math.min(28, parseFloat(empf.groesse) || parseFloat(e.pdf_size) || 11));
     seite.drawRectangle({
       x: empf.rect.x, y: empf.rect.y, width: empf.rect.w, height: empf.rect.h,
@@ -47080,7 +47146,7 @@ async function _ccPdfPersonalisieren(bytes, werte, e) {
   }
 
   const text = roh.replace(/\s+/g, ' ').trim();
-  if (!text) return new Uint8Array(bytes);
+  if (!text) return await doc.save();
   const sicher = saeubern(text);
   const groesse = Math.max(6, Math.min(28, parseFloat(e.pdf_size || '11') || 11));
   const mm = (v) => (parseFloat(v) || 0) * 2.8346;   // Millimeter → Punkte
@@ -47135,7 +47201,10 @@ async function _ccPdfVorschau(btn) {
     const bytes = await _ccVorlagePdfHolen();
     const e = _ccPdfEinstellungenLesen();
     const neu = await _ccPdfPersonalisieren(bytes, {
+      // Mit Anrede und z.Hd.: Nur so zeigt die Probe auch, ob die Anredezeile
+      // im Brieftext der Vorlage getroffen und ersetzt wird.
       firma: 'Muster Hausverwaltung GmbH', ansprechpartner: 'Erika Musterfrau', ort: 'Stuttgart',
+      anrede: 'Sehr geehrte Frau Musterfrau,', zhd: 'z. Hd. Frau Erika Musterfrau',
     }, e);
     const url = URL.createObjectURL(new Blob([neu], { type: 'application/pdf' }));
     window.open(url, '_blank');
