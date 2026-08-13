@@ -824,7 +824,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v3.8.4';
+const APP_VERSION = 'v3.8.5';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -39079,7 +39079,12 @@ async function _usrKampagnenFuellen(gespeichert) {
     sel.dataset.fertig = '1';
     // Ein Haken bei einer Kampagne nützt nichts, wenn der Account-Zugriff für
     // deren Firma fehlt — dann sieht der User genau nichts. Also mitprüfen.
-    document.querySelectorAll('.access-toggle').forEach(t => t.addEventListener('change', _usrKampagnenPruefen));
+    document.querySelectorAll('.access-toggle, .access-fd-key, .access-von-master')
+      .forEach(t => t.addEventListener('change', _usrKampagnenPruefen));
+    ['usrRole', 'usrAllowDefault'].forEach(id => {
+      const el = document.getElementById(id);
+      if (el) el.addEventListener('change', _usrKampagnenPruefen);
+    });
     _usrKampagnenPruefen();
   } catch (e) {
     console.warn('[User] Kampagnen laden:', e.message);
@@ -39097,17 +39102,46 @@ function _usrKampagnenPruefen() {
   const aktiv = new Set([...document.querySelectorAll('[data-access-row]')]
     .filter(z => z.querySelector('.access-toggle')?.checked)
     .map(z => String(z.dataset.accountId)));
+  const nameVon = (id) => {
+    const a = (APP_STATE.accounts || []).find(x => String(x.id) === String(id));
+    return a ? (a.name || a.id) : String(id);
+  };
+  const meldungen = [];
+
   const fehlend = [...new Set([...box.querySelectorAll('[data-kampagne]')]
     .filter(c => c.checked)
     .map(c => c.getAttribute('data-account'))
     .filter(id => id && !aktiv.has(String(id))))];
-  if (!fehlend.length) { warn.classList.add('hidden'); warn.textContent = ''; return; }
-  const namen = fehlend.map(id => {
-    const a = (APP_STATE.accounts || []).find(x => String(x.id) === String(id));
-    return a ? (a.name || a.id) : id;
-  });
-  warn.textContent = 'Achtung: Für ' + namen.join(', ') + ' fehlt unten der Account-Zugriff — '
-    + 'ohne ihn sieht der Benutzer die angehakte Kampagne nicht.';
+  if (fehlend.length) {
+    meldungen.push('Für ' + fehlend.map(nameVon).join(', ') + ' fehlt unten der Account-Zugriff — '
+      + 'ohne ihn sieht der Benutzer die angehakte Kampagne nicht.');
+  }
+
+  /* Häufigster Stolperstein: Zugriff angehakt, aber weder eigener API-Key noch
+     die Erlaubnis für den Default-Key. Für normale Benutzer ist das in Ordnung —
+     sie tragen ihren Key unter „Accounts" selbst ein. Eine Callcenter-Kraft
+     kommt auf diese Seite nie und sieht deshalb schlicht gar nichts. */
+  const rolle = String(document.getElementById('usrRole')?.value || '').toLowerCase();
+  const darfDefault = !!document.getElementById('usrAllowDefault')?.checked;
+  if (rolle === 'callcenter' && !darfDefault) {
+    const ohneKey = [...document.querySelectorAll('[data-access-row]')]
+      .filter(z => z.querySelector('.access-toggle')?.checked)
+      .filter(z => {
+        const master = z.querySelector('.access-von-master')?.value.trim() || '';
+        const key = z.querySelector('.access-fd-key')?.value.trim() || '';
+        return !master && !key;
+      })
+      .map(z => nameVon(z.dataset.accountId));
+    if (ohneKey.length) {
+      meldungen.push('Für ' + ohneKey.join(', ') + ' ist kein eigener API-Key hinterlegt und '
+        + '„Darf Account-Default-API-Keys nutzen" ist aus. Eine Callcenter-Kraft kann den Key nicht '
+        + 'selbst nachtragen (die Seite „Accounts" ist für sie gesperrt) und sieht eine leere Liste. '
+        + 'Entweder die Option setzen oder einen Key eintragen.');
+    }
+  }
+
+  if (!meldungen.length) { warn.classList.add('hidden'); warn.textContent = ''; return; }
+  warn.textContent = 'Achtung: ' + meldungen.join(' — ');
   warn.classList.remove('hidden');
 }
 
@@ -45966,7 +46000,16 @@ function _ccZeichnen() {
             + '<button onclick="_ccImportOeffnen()" class="px-3 py-1.5 rounded-lg text-[12px] font-bold bg-brand-600 hover:bg-brand-700 text-white inline-flex items-center gap-1"><i data-lucide="upload" class="w-3.5 h-3.5"></i> Import</button>'
           : '')
     + '</div>'
-    + (rows.length ? _ccTabelle(rows) : '<div class="bg-white rounded-xl border border-ink-200 p-8 text-center text-sm text-ink-500">'
+    /* Ohne nutzbaren Mandanten ist die Liste zwangsläufig leer — dann ist
+       „keine Leads" die falsche Auskunft. Der Grund liegt immer beim
+       Account-Zugriff des Benutzers, und der Externe kann ihn nicht selbst
+       eintragen: Die Seite „Accounts" ist für diese Rolle gesperrt. */
+    + (!acc
+        ? '<div class="bg-amber-50 border border-amber-200 rounded-xl p-6 text-sm text-amber-900">'
+          + '<p class="font-bold inline-flex items-center gap-1.5"><i data-lucide="key-round" class="w-4 h-4"></i> Kein Mandant freigeschaltet</p>'
+          + '<p class="mt-1 leading-relaxed">Für diesen Benutzer ist kein Freshdesk-Zugang nutzbar. Der Admin muss in der Userverwaltung beim Account-Zugriff entweder '
+          + '<b>„Darf Account-Default-API-Keys nutzen"</b> setzen oder einen eigenen API-Key eintragen.</p></div>'
+        : rows.length ? _ccTabelle(rows) : '<div class="bg-white rounded-xl border border-ink-200 p-8 text-center text-sm text-ink-500">'
         + (alle.length ? 'Hier ist nichts mehr zu tun.' : 'Noch keine Leads in der Kampagne.'
            + (APP_KEYS.user?.is_admin ? '<br><button onclick="_ccImportOeffnen()" class="mt-3 px-3 py-2 bg-brand-600 hover:bg-brand-700 text-white rounded-lg text-[12px] font-bold">Kontakte importieren</button>' : ''))
         + '</div>');
@@ -46178,6 +46221,11 @@ function _ccKampagnenWahl() {
      Auswahl — dann steht dort nur noch der Name. */
   const erlaubt = _ccKampagnenErlaubt();
   if (erlaubt) {
+    if (!acc) {
+      // Kein Mandant nutzbar — dann liegt es nicht an der Kampagnenfreigabe.
+      return '<span class="px-3 py-2 rounded-lg text-sm font-bold text-amber-800 bg-amber-50 border border-amber-200 inline-flex items-center gap-1.5">'
+        + '<i data-lucide="key-round" class="w-3.5 h-3.5"></i>Kein Mandant freigeschaltet</span>';
+    }
     if (!erlaubt.length) {
       // Den Firmennamen nennen: „diese Firma" hilft niemandem beim Suchen des
       // Fehlers, und in neun von zehn Fällen ist die Freigabe für eine andere
