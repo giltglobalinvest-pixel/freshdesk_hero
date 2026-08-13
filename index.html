@@ -824,7 +824,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v3.14.0';
+const APP_VERSION = 'v3.14.1';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -33463,13 +33463,17 @@ async function openErpMehrfachAnlagen(accountId, ticketId) {
   try {
     const t = await fetchTicketDetail(accountId, ticketId);
     ERP_MEHRFACH.ticket = t;
+    const melde = (txt) => _erpMehrfachZeichnen('<div class="text-center py-10 text-sm text-ink-500">'
+      + '<span class="spinner inline-block w-5 h-5 border-[2px] text-emerald-500"></span>'
+      + '<p class="mt-2">' + escapeHtml(txt) + '</p></div>');
     const [kunden, vorschlag] = await Promise.all([
       erpLoadKunden(slug).catch(() => []),
-      _erpMehrfachAnalyse(accountId, ticketId, t),
+      _erpMehrfachAnalyse(accountId, ticketId, t, melde),
     ]);
     ERP_MEHRFACH.kunden = kunden || [];
     ERP_MEHRFACH.kundeVorschlag = vorschlag.kunde || {};
     ERP_MEHRFACH.dateien = vorschlag._dateien || [];
+    ERP_MEHRFACH.uebersprungen = vorschlag._uebersprungen || [];
     ERP_MEHRFACH.anlagen = (vorschlag.anlagen || []).map(a => Object.assign({ nehmen: true, status: '' }, a));
 
     // Vorhandene Anlagen erkennen — Fabriknummern doppelt anzulegen wäre der
@@ -33500,12 +33504,13 @@ async function openErpMehrfachAnlagen(accountId, ticketId) {
 
 /* Die KI liest Ticket UND Anhänge — Aufstellungen stehen oft in einer Tabelle
    im Anhang, nicht im Mailtext. */
-async function _erpMehrfachAnalyse(accountId, ticketId, t) {
+async function _erpMehrfachAnalyse(accountId, ticketId, t, melden) {
+  const melde = (txt) => { try { if (melden) melden(txt); } catch (_) {} };
   /* Großzügige Grenzen: Die Fabriknummern stehen in aller Regel NICHT in der
      Mail, sondern in den Anhängen — je Aufzug ein Wartungsvertrag, ein
      TÜV-Bericht, ein Übergabeprotokoll. Bei sechs Aufzügen sind das sechs
-     Dateien, und die abzuschneiden heißt, genau das wegzuwerfen, wonach
-     gesucht wird. */
+     Dateien. Gelesen werden sie EINZELN (siehe unten), deshalb ist die Menge
+     hier unkritisch. */
   let dateien = [];
   try {
     dateien = await _qaCollectAttachments(accountId, ticketId, t,
@@ -33538,32 +33543,115 @@ async function _erpMehrfachAnalyse(accountId, ticketId, t) {
     .map(c => htmlToText(c.body_text || c.body || '').trim())
     .filter(Boolean).slice(-6).join('\n---\n').slice(0, 6000);
 
-  const inhalt = [{ type: 'text', text:
+  const ticketText =
     'BETREFF: ' + (t.subject || '') + '\n\n'
     + 'ANFRAGENDER: ' + (t.requester?.name || '') + (t.requester?.email ? ' <' + t.requester.email + '>' : '') + '\n\n'
     + 'ERSTE ANFRAGE:\n' + htmlToText(t.description_text || t.description || '').slice(0, 8000)
-    + (weitere ? '\n\nWEITERER SCHRIFTWECHSEL:\n' + weitere : '')
-    + '\n\nANGEHÄNGTE DATEIEN (' + dateien.length + '): '
-    + (dateien.length ? dateien.map(a => a.name).join(', ') : 'keine')
-    + '\nDie Fabriknummern stehen erfahrungsgemäß in diesen Dateien.' }];
-  dateien.forEach(a => {
-    if (a.mediaType === 'application/pdf') {
-      inhalt.push({ type: 'text', text: 'Anhang „' + a.name + '":' });
-      inhalt.push({ type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: a.base64 } });
-    } else if (String(a.mediaType || '').startsWith('image/')) {
-      inhalt.push({ type: 'text', text: 'Anhang „' + a.name + '":' });
-      inhalt.push({ type: 'image', source: { type: 'base64', media_type: a.mediaType, data: a.base64 } });
-    }
+    + (weitere ? '\n\nWEITERER SCHRIFTWECHSEL:\n' + weitere : '');
+
+  /* ── Schritt 1: nur der Text ──────────────────────────────────────────
+     Erst die Liste der Aufzüge aus der Anfrage. Sie ist klein, schnell und
+     scheitert nicht — und sie ist das Gerüst, in das die Nummern aus den
+     Anhängen einsortiert werden. */
+  melde('Anfrage und Schriftwechsel lesen …');
+  const basis = await _kiJsonSicher({
+    system: sys, text: ticketText + '\n\nANGEHÄNGTE DATEIEN (' + dateien.length + '): '
+      + (dateien.length ? dateien.map(a => a.name).join(', ') : 'keine')
+      + '\nDeren Inhalt bekommst du gleich einzeln — hier nur den Text auswerten.',
   });
+  const anlagen = (basis.anlagen || []).map(a => Object.assign({}, a));
+
+  /* ── Schritt 2: Anhang für Anhang ─────────────────────────────────────
+     Alle Dateien in einem Aufruf sprengten die Grenze des Modells (204 536
+     von 200 000 Token bei sieben Verträgen). Einzeln gelesen bleibt jeder
+     Aufruf klein, der Fortschritt ist sichtbar, und ein zu großes Dokument
+     kostet nur sich selbst statt den ganzen Durchlauf. */
+  const gelesen = [], uebersprungen = [];
+  const sysDoc =
+    'Du bekommst EIN Dokument aus dem Schriftverkehr eines Aufzug-Serviceunternehmens '
+    + '(Wartungsvertrag, TÜV-/ZÜS-Bericht, Übergabeprotokoll, Angebot).\n'
+    + 'Finde darin die AUFZÜGE mit ihrer FABRIKNUMMER und der zugehörigen Adresse.\n\n'
+    + 'REGELN:\n'
+    + '1. Die Nummer heißt je nach Dokument „Fabriknummer", „Fabrik-Nr.", „Werk-Nr.", „Anlagennummer", „Equipmentnummer", „Seriennummer", „ID-Nr." — alle meinen dasselbe.\n'
+    + '2. Vertrags-, Rechnungs-, Angebots-, Kunden- und Auftragsnummern sind KEINE Fabriknummern.\n'
+    + '3. Adresse so vollständig, wie sie im Dokument steht (Straße Hausnummer, PLZ Ort).\n'
+    + '4. Steht keine Fabriknummer drin, antworte mit leerer Liste. Nichts erfinden, nichts raten.\n\n'
+    + 'ANTWORTE NUR MIT JSON: {"treffer":[{"adresse":"…","fabriknummer":"…","hinweis":"z.B. Fabrikat"}]}';
+
+  for (let i = 0; i < dateien.length; i++) {
+    const d = dateien[i];
+    melde('Anhang ' + (i + 1) + '/' + dateien.length + ' lesen: ' + d.name);
+    const block = d.mediaType === 'application/pdf'
+      ? { type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: d.base64 } }
+      : (String(d.mediaType || '').startsWith('image/')
+          ? { type: 'image', source: { type: 'base64', media_type: d.mediaType, data: d.base64 } }
+          : null);
+    if (!block) { uebersprungen.push(d.name + ' (Format)'); continue; }
+    try {
+      const r = await _kiJsonSicher({
+        system: sysDoc, extra: block,
+        text: 'Bekannte Standorte aus der Anfrage:\n'
+          + (anlagen.map((a, n) => (n + 1) + '. ' + (a.adresse || '?') + (a.fabriknummer ? ' — Nr. ' + a.fabriknummer : ' — Nummer fehlt noch')).join('\n') || '(keine)')
+          + '\n\nDokument „' + d.name + '":',
+      });
+      const treffer = Array.isArray(r.treffer) ? r.treffer : [];
+      treffer.forEach(x => _erpAnlageEinsortieren(anlagen, x, d.name));
+      gelesen.push(d.name);
+    } catch (e) {
+      const msg = String((e && e.message) || e);
+      // Ein einzelnes Dokument, das zu groß ist, darf den Rest nicht mitreißen.
+      uebersprungen.push(d.name + (/too long|too large|maximum/i.test(msg) ? ' (zu groß)' : ' (Fehler)'));
+      console.warn('[ERP-Mehrfach] Anhang „' + d.name + '":', msg);
+    }
+  }
+
+  return { kunde: basis.kunde || {}, anlagen, _dateien: gelesen, _uebersprungen: uebersprungen };
+}
+
+/* Ein Fund aus einem Dokument in die Liste einsortieren: bevorzugt in eine
+   Zeile mit derselben Adresse, der die Nummer noch fehlt. „Alexandrinenstr. 35
+   = 2 Aufzüge" steht als zwei Zeilen da — der erste Vertrag füllt die erste,
+   der zweite die zweite. Gibt es die Nummer schon, passiert nichts; kennt die
+   Anfrage die Adresse gar nicht, kommt eine Zeile dazu. */
+function _erpAnlageEinsortieren(anlagen, fund, dateiname) {
+  const nr = String((fund && fund.fabriknummer) || '').trim();
+  if (!nr) return;
+  const norm = (s) => String(s || '').toLowerCase()
+    .replace(/ä/g, 'ae').replace(/ö/g, 'oe').replace(/ü/g, 'ue').replace(/ß/g, 'ss')
+    .replace(/stra(ss|ß)e|str\./g, 'str')
+    .replace(/[^a-z0-9]/g, '');
+  const nrN = nr.replace(/\s/g, '').toLowerCase();
+  if (anlagen.some(a => String(a.fabriknummer || '').replace(/\s/g, '').toLowerCase() === nrN)) return;   // schon da
+
+  const fa = norm(fund.adresse);
+  const passt = (a) => {
+    const aa = norm(a.adresse);
+    if (!aa || !fa) return false;
+    return aa.startsWith(fa.slice(0, 12)) || fa.startsWith(aa.slice(0, 12));
+  };
+  const ziel = anlagen.find(a => passt(a) && !String(a.fabriknummer || '').trim());
+  if (ziel) {
+    ziel.fabriknummer = nr;
+    ziel.quelle = dateiname;
+    if (!ziel.hinweis && fund.hinweis) ziel.hinweis = fund.hinweis;
+    if (!ziel.adresse) ziel.adresse = fund.adresse || '';
+    return;
+  }
+  anlagen.push({
+    adresse: fund.adresse || '', fabriknummer: nr,
+    hinweis: fund.hinweis || '', quelle: dateiname,
+  });
+}
+
+/* Ein KI-Aufruf, der JSON zurückgibt — mit oder ohne angehängtem Dokument. */
+async function _kiJsonSicher(opt) {
+  const inhalt = [{ type: 'text', text: opt.text }];
+  if (opt.extra) inhalt.push(opt.extra);
   const data = await _callAnthropicWithRetry({
-    model: 'claude-sonnet-4-5-20250929', max_tokens: 4000, system: sys,
+    model: 'claude-sonnet-4-5-20250929', max_tokens: 4000, system: opt.system,
     messages: [{ role: 'user', content: inhalt }],
   });
-  const erg = parseAIJson((data.content && data.content[0] && data.content[0].text) || '') || {};
-  // Welche Dateien tatsächlich gelesen wurden — steht im Dialog, damit eine
-  // fehlende Fabriknummer erklärbar wird statt rätselhaft zu bleiben.
-  erg._dateien = dateien.map(a => a.name);
-  return erg;
+  return parseAIJson((data.content && data.content[0] && data.content[0].text) || '') || {};
 }
 
 /* Konditionen für neue Anlagen: Stundensatz, Einsatzpauschale, Objekt- und
@@ -33688,6 +33776,9 @@ function _erpMehrfachZeichnen(platzhalter) {
                 ? 'Gelesen: Anfrage, Schriftwechsel und ' + s.dateien.length + ' Anhang' + (s.dateien.length === 1 ? '' : 'änge')
                   + ' <span class="text-ink-400">(' + escapeHtml(s.dateien.join(', ')) + ')</span>'
                 : 'Gelesen: nur Anfrage und Schriftwechsel — <b>keine Anhänge lesbar</b>. Fabriknummern stehen meist dort.')
+            + ((s.uebersprungen && s.uebersprungen.length)
+                ? '<br><span class="text-amber-700">Übersprungen: ' + escapeHtml(s.uebersprungen.join(', ')) + '</span>'
+                : '')
             + '</p>'
           : '')
       + '<div class="space-y-2">' + zeilen + '</div></div>'
