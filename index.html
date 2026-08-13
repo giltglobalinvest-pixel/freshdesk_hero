@@ -824,7 +824,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v3.10.1';
+const APP_VERSION = 'v3.11.0';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -15446,6 +15446,97 @@ async function _fdhTicketSchliessen(accountId, ticketId, btn) {
 }
 /* Weiterleiten (v2.61.0) — wie in Freshdesk: Konversation an beliebige
    E-Mail-Adressen, mit Hero-Signatur und optional den Original-Anhängen. */
+/* ===== Empfängersuche für Adressfelder (v3.11.0) ========================
+   Eine E-Mail-Adresse aus dem Kopf zu tippen ist die Stelle, an der man sich
+   vertippt und es erst merkt, wenn nichts ankommt. Gesucht wird deshalb dort,
+   wo die Adressen ohnehin stehen: in der zentralen Kontaktdatenbank und in den
+   Freshdesk-Kontakten des Mandanten. */
+async function _kontaktSuche(begriff, accountId, max) {
+  const q = String(begriff || '').trim();
+  const grenze = max || 8;
+  if (q.length < 2) return [];
+  const treffer = [], gesehen = new Set();
+  const add = (name, email, zusatz, quelle) => {
+    const m = String(email || '').trim().toLowerCase();
+    if (!m || !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(m) || gesehen.has(m)) return;
+    gesehen.add(m);
+    treffer.push({ name: String(name || '').trim(), email: m, zusatz: zusatz || '', quelle });
+  };
+
+  const lit = _zdbLit(q.toLowerCase());
+  for (const a of (APP_STATE.accounts || [])) {
+    if (treffer.length >= grenze) break;
+    if (!_zdbIsEnabled(a)) continue;
+    try {
+      const rows = await airtableRead(_zdbTableNames(a).kontakt, {
+        // FIND statt SEARCH: gleiche Wirkung, aber SEARCH liefert bei leerem
+        // Feld einen Fehler statt 0. Das &"" fängt leere Felder ab.
+        filter: 'OR(FIND(' + lit + ',LOWER({name}&"")),FIND(' + lit + ',LOWER({email}&"")),FIND(' + lit + ',LOWER({nachname}&"")))',
+        maxRecords: grenze, fields: ['name', 'vorname', 'nachname', 'email', 'position'],
+      });
+      (rows || []).forEach(r => {
+        const f = r.fields || {};
+        add(f.name || [f.vorname, f.nachname].filter(Boolean).join(' '), f.email,
+          [a.name || a.id, f.position].filter(Boolean).join(' · '), 'DB');
+      });
+    } catch (_) { /* Tabelle fehlt bei diesem Mandanten */ }
+  }
+
+  if (treffer.length < grenze && accountId) {
+    try {
+      (await searchContactsByKeyword(accountId, q)).forEach(c => add(c.name, c.email, c._accountName, 'FD'));
+    } catch (_) {}
+  }
+  return treffer.slice(0, grenze);
+}
+
+/* Ein Adressfeld mit Vorschlagsliste. Gesucht wird immer nur der Teil hinter
+   dem letzten Komma — mehrere Empfänger bleiben so nebeneinander möglich. */
+let _ADR_TIMER = null;
+function _adrTippen(el, listeId, accountId, einzeln) {
+  clearTimeout(_ADR_TIMER);
+  // Einzelfelder (eine Adresse) werden komplett ersetzt, Mehrfachfelder nur im
+  // letzten Abschnitt — sonst hängt hinter einer einzelnen Adresse ein Komma.
+  const teil = einzeln ? String(el.value || '').trim() : String(el.value || '').split(',').pop().trim();
+  const liste = document.getElementById(listeId);
+  if (!liste) return;
+  if (teil.length < 2 || /@/.test(teil)) { liste.classList.add('hidden'); return; }
+  _ADR_TIMER = setTimeout(async () => {
+    liste.innerHTML = '<div class="px-3 py-2 text-[12px] text-ink-500">sucht …</div>';
+    liste.classList.remove('hidden');
+    let gefunden = [];
+    try { gefunden = await _kontaktSuche(teil, accountId, 8); } catch (_) {}
+    if (!gefunden.length) {
+      liste.innerHTML = '<div class="px-3 py-2 text-[12px] text-ink-500">Nichts gefunden — Adresse von Hand eingeben.</div>';
+      return;
+    }
+    liste.innerHTML = gefunden.map(t =>
+      '<button type="button" onmousedown="event.preventDefault();_adrWaehlen(\'' + el.id + '\',\'' + listeId + '\',\'' + escapeAttr(t.email) + '\',' + (einzeln ? 'true' : 'false') + ')"'
+      + ' class="w-full text-left px-3 py-2 hover:bg-brand-50 border-b border-ink-100 last:border-0">'
+      + '<span class="block text-[13px] font-semibold text-ink-900 truncate">' + escapeHtml(t.name || t.email) + '</span>'
+      + '<span class="block text-[11px] text-ink-500 truncate">' + escapeHtml(t.email)
+      + (t.zusatz ? ' · ' + escapeHtml(t.zusatz) : '') + '</span></button>').join('');
+  }, 300);
+}
+function _adrWaehlen(feldId, listeId, email, einzeln) {
+  const el = document.getElementById(feldId);
+  if (!el) return;
+  if (einzeln) {
+    el.value = email;
+  } else {
+    const teile = String(el.value || '').split(',');
+    teile[teile.length - 1] = ' ' + email;
+    el.value = teile.join(',').replace(/^\s+/, '') + ', ';
+  }
+  const liste = document.getElementById(listeId);
+  if (liste) liste.classList.add('hidden');
+  el.focus();
+}
+function _adrSchliessen(listeId) {
+  // Verzögert, sonst schließt der Blur die Liste, bevor der Klick ankommt.
+  setTimeout(() => { const l = document.getElementById(listeId); if (l) l.classList.add('hidden'); }, 150);
+}
+
 async function openForwardModal(accountId, ticketId) {
   let host = document.getElementById('subModalHost');
   if (!host) { host = document.createElement('div'); host.id = 'subModalHost'; document.body.appendChild(host); }
@@ -15460,13 +15551,19 @@ async function openForwardModal(accountId, ticketId) {
           <button onclick="closeForwardModal()" class="w-9 h-9 rounded-lg hover:bg-ink-100 flex items-center justify-center"><i data-lucide="x" class="w-5 h-5 text-ink-700"></i></button>
         </div>
         <div class="flex-1 overflow-y-auto p-4 space-y-3">
-          <div>
+          <div class="relative">
             <label class="text-xs font-semibold text-ink-700">An (mehrere mit Komma)</label>
-            <input id="fwdAn" type="text" placeholder="empfaenger@firma.de" class="mt-1 w-full px-3 py-2 border border-ink-200 rounded-lg text-sm">
+            <input id="fwdAn" type="text" autocomplete="off" placeholder="Name oder E-Mail eingeben — wird in den Kontakten gesucht"
+              oninput="_adrTippen(this,'fwdAnListe','${escapeAttr(accountId)}')" onblur="_adrSchliessen('fwdAnListe')"
+              class="mt-1 w-full px-3 py-2 border border-ink-200 rounded-lg text-sm">
+            <div id="fwdAnListe" class="hidden absolute z-20 left-0 right-0 mt-1 bg-white border border-ink-200 rounded-lg shadow-xl max-h-64 overflow-y-auto"></div>
           </div>
-          <div>
+          <div class="relative">
             <label class="text-xs font-semibold text-ink-700">Cc (optional)</label>
-            <input id="fwdCc" type="text" class="mt-1 w-full px-3 py-2 border border-ink-200 rounded-lg text-sm">
+            <input id="fwdCc" type="text" autocomplete="off" placeholder="Name oder E-Mail"
+              oninput="_adrTippen(this,'fwdCcListe','${escapeAttr(accountId)}')" onblur="_adrSchliessen('fwdCcListe')"
+              class="mt-1 w-full px-3 py-2 border border-ink-200 rounded-lg text-sm">
+            <div id="fwdCcListe" class="hidden absolute z-20 left-0 right-0 mt-1 bg-white border border-ink-200 rounded-lg shadow-xl max-h-64 overflow-y-auto"></div>
           </div>
           <div>
             <label class="text-xs font-semibold text-ink-700">Nachricht</label>
@@ -27005,7 +27102,12 @@ function _renderDealEmailModal(accountId, dealId, deal, contact, responses, conf
           '<label class="text-xs font-bold text-ink-700 uppercase tracking-wider block">Von</label>' +
           '<select id="deFrom" class="w-full px-3 py-2.5 border border-ink-300 rounded-xl text-sm bg-white">' + cfgOpts + '</select>' +
           '<label class="text-xs font-bold text-ink-700 uppercase tracking-wider block">An *</label>' +
-          '<input id="deTo" type="email" value="' + escapeAttr(contact?.email || '') + '" placeholder="empfaenger@firma.de" class="w-full px-3 py-2.5 border border-ink-300 rounded-xl text-sm">' +
+          '<div class="relative">'
+          + '<input id="deTo" type="text" autocomplete="off" value="' + escapeAttr(contact?.email || '') + '" placeholder="Name oder E-Mail — wird in den Kontakten gesucht"'
+            + ' oninput="_adrTippen(this,\'deToListe\',\'' + escapeAttr(accountId) + '\',true)" onblur="_adrSchliessen(\'deToListe\')"'
+            + ' class="w-full px-3 py-2.5 border border-ink-300 rounded-xl text-sm">'
+          + '<div id="deToListe" class="hidden absolute z-20 left-0 right-0 mt-1 bg-white border border-ink-200 rounded-lg shadow-xl max-h-64 overflow-y-auto"></div>'
+          + '</div>' +
           (contactName ? '<p class="text-[10px] text-ink-500 -mt-1">Primary-Contact: ' + escapeHtml(contactName) + '</p>' : '') +
           '<label class="text-xs font-bold text-ink-700 uppercase tracking-wider block">Betreff *</label>' +
           '<input id="deSubject" type="text" value="" class="w-full px-3 py-2.5 border border-ink-300 rounded-xl text-sm">' +
@@ -27279,7 +27381,12 @@ function _renderTicketEmailModal(accountId, ticketId, ticket, responses, configs
           '<label class="text-xs font-bold text-ink-700 uppercase tracking-wider block">Von</label>' +
           '<select id="teFrom" class="w-full px-3 py-2.5 border border-ink-300 rounded-xl text-sm bg-white">' + cfgOpts + '</select>' +
           '<label class="text-xs font-bold text-ink-700 uppercase tracking-wider block">An *</label>' +
-          '<input id="teTo" type="email" value="' + escapeAttr(ctx.contactEmail || '') + '" placeholder="empfaenger@firma.de" class="w-full px-3 py-2.5 border border-ink-300 rounded-xl text-sm">' +
+          '<div class="relative">'
+          + '<input id="teTo" type="text" autocomplete="off" value="' + escapeAttr(ctx.contactEmail || '') + '" placeholder="Name oder E-Mail — wird in den Kontakten gesucht"'
+            + ' oninput="_adrTippen(this,\'teToListe\',\'' + escapeAttr(accountId) + '\',true)" onblur="_adrSchliessen(\'teToListe\')"'
+            + ' class="w-full px-3 py-2.5 border border-ink-300 rounded-xl text-sm">'
+          + '<div id="teToListe" class="hidden absolute z-20 left-0 right-0 mt-1 bg-white border border-ink-200 rounded-lg shadow-xl max-h-64 overflow-y-auto"></div>'
+          + '</div>' +
           '<label class="text-xs font-bold text-ink-700 uppercase tracking-wider block">Betreff *</label>' +
           '<input id="teSubject" type="text" value="" class="w-full px-3 py-2.5 border border-ink-300 rounded-xl text-sm">' +
           '<div class="flex items-center justify-between">' +
