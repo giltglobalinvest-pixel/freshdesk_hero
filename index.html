@@ -824,7 +824,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v3.5.0';
+const APP_VERSION = 'v3.6.0';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -45644,6 +45644,8 @@ function _ccSichtbar() {
   if (CC_STATE.quelle) l = l.filter(r => String(r.quelle || '').toLowerCase() === CC_STATE.quelle);
   if (CC_STATE.typ) l = l.filter(r => String(r.typ || '') === CC_STATE.typ);
   if (CC_STATE.ohneBestand) l = l.filter(r => String(r.bestand || '') !== 'ja');
+  // Auffällige Zeilen gezielt herausgreifen — sie sind der Aufräumvorrat.
+  if (CC_STATE.nurFehler) l = l.filter(r => !!_ccZeileFehlerhaft(r));
   // Ohne Nummer ist ein Kontakt für eine ANRUFliste wertlos — er bleibt in der
   // Kampagne (die Adresse taugt für Post), gehört aber nicht in den Arbeitsstapel.
   if (CC_STATE.nurMitNummer) l = l.filter(r => _ccNummerNormal(r.telefon).length >= 6);
@@ -45707,12 +45709,20 @@ function _ccZeichnen() {
       + (ohneNr && APP_KEYS.user?.is_admin ? '<button onclick="_ccNummernSuchen(this)" class="px-2.5 py-1.5 rounded-lg text-[11px] font-bold bg-white border border-teal-300 text-teal-700 hover:bg-teal-50 inline-flex items-center gap-1" title="Fehlende Nummern im Archiv suchen"><i data-lucide="phone-incoming" class="w-3.5 h-3.5"></i> Nummern suchen</button>' : '')
       + (versteckt ? '<label class="inline-flex items-center gap-1.5 text-[11px] text-ink-600 cursor-pointer"><input type="checkbox"' + (CC_STATE.zeigeVersteckte ? ' checked' : '') + ' onchange="_ccVersteckteFilter(this.checked)"> ausgeblendete zeigen <span class="text-ink-400">(' + versteckt + ')</span></label>' : '')
       + (Object.keys(CC_STATE.spalten || {}).length ? '<button onclick="_ccSpaltenZuruecksetzen()" class="px-2 py-1.5 rounded-lg text-[11px] bg-white border border-ink-200 text-ink-500 hover:bg-ink-50" title="Spaltenbreiten auf die Vorgabe zurücksetzen"><i data-lucide="rotate-ccw" class="w-3.5 h-3.5"></i></button>' : '')
+      + (() => {
+          const n = alle.filter(r => !!_ccZeileFehlerhaft(r)).length;
+          if (!n && !CC_STATE.nurFehler) return '';
+          return '<button onclick="CC_STATE.nurFehler=!CC_STATE.nurFehler;_ccZeichnen()" class="px-2.5 py-1.5 rounded-lg text-[11px] font-bold inline-flex items-center gap-1 '
+            + (CC_STATE.nurFehler ? 'bg-rose-600 text-white' : 'bg-white border border-rose-300 text-rose-700 hover:bg-rose-50')
+            + '" title="Zeilen ohne brauchbaren Firmen- oder Personennamen — z.B. Einträge der Telefonanlage">'
+            + '<i data-lucide="alert-triangle" class="w-3.5 h-3.5"></i> Fehlerhafte (' + n + ')</button>';
+        })()
       + '<button onclick="_ccZustandSpeichernKnopf(this)" class="px-2.5 py-1.5 rounded-lg text-[11px] font-bold bg-white border border-brand-300 text-brand-700 hover:bg-brand-50 inline-flex items-center gap-1" title="Diese Auswahl beim nächsten Öffnen wieder verwenden"><i data-lucide="bookmark" class="w-3.5 h-3.5"></i> Filter merken</button>'
       + '<input type="search" value="' + escapeAttr(CC_STATE.suche || '') + '" oninput="_ccSuche(this.value)" placeholder="Suchen…" class="ml-auto px-3 py-1.5 border border-ink-200 rounded-lg text-sm w-44">'
       + '<button onclick="_ccDashboardOeffnen()" class="px-3 py-1.5 rounded-lg text-[12px] font-bold bg-white border border-ink-200 text-ink-600 hover:bg-ink-50 inline-flex items-center gap-1" title="Wie läuft die Kampagne?"><i data-lucide="bar-chart-3" class="w-3.5 h-3.5"></i> Statistik</button>'
       + '<button onclick="renderCallcenterPage()" class="px-3 py-1.5 rounded-lg text-[12px] font-bold bg-white border border-ink-200 text-ink-600 hover:bg-ink-50" title="Liste neu laden"><i data-lucide="refresh-cw" class="w-3.5 h-3.5"></i></button>'
       + (APP_KEYS.user?.is_admin
-          ? '<button onclick="_ccDublettenPruefen(this)" class="px-3 py-1.5 rounded-lg text-[12px] font-bold bg-white border border-ink-200 text-ink-600 hover:bg-ink-50" title="Dubletten, Werbesperre und Bestandskunden prüfen"><i data-lucide="search-check" class="w-3.5 h-3.5"></i></button>'
+          ? '<button onclick="_ccDublettenPruefen(this)" class="px-3 py-1.5 rounded-lg text-[12px] font-bold bg-white border border-ink-200 text-ink-600 hover:bg-ink-50 inline-flex items-center gap-1" title="Dubletten, Werbesperre und Bestandskunden prüfen"><i data-lucide="copy" class="w-3.5 h-3.5"></i> Dubletten</button>'
             + '<button onclick="_ccVorlageOeffnen()" class="px-3 py-1.5 rounded-lg text-[12px] font-bold bg-white border border-ink-200 text-ink-600 hover:bg-ink-50 inline-flex items-center gap-1" title="Preisliste und Anschreiben für diese Kampagne festlegen"><i data-lucide="file-text" class="w-3.5 h-3.5"></i> Vorlage</button>'
             + '<button onclick="_ccKampagneLeeren(this)" class="px-3 py-1.5 rounded-lg text-[12px] font-bold bg-white border border-rose-300 text-rose-700 hover:bg-rose-50 inline-flex items-center gap-1" title="Alle Kontakte dieser Kampagne löschen, um frisch zu importieren"><i data-lucide="trash-2" class="w-3.5 h-3.5"></i> Leeren</button>'
             + '<button onclick="_ccImportOeffnen()" class="px-3 py-1.5 rounded-lg text-[12px] font-bold bg-brand-600 hover:bg-brand-700 text-white inline-flex items-center gap-1"><i data-lucide="upload" class="w-3.5 h-3.5"></i> Import</button>'
@@ -46113,6 +46123,100 @@ function _ccSpaltenZuruecksetzen() {
   _ccZeichnen();
 }
 
+/* ===== Fehlerhafte Zeilen erkennen und berichtigen (v3.6.0) ==============
+   In einer Anrufliste steht die Firma im Kopf des Gesprächs — wer „+49 1567
+   9062409 · Aircall new person" vor sich hat, weiß beim Abheben nicht, wen er
+   anruft. Solche Zeilen entstehen, wenn eine Telefonanlage einen unbekannten
+   Anrufer als Kontakt anlegt, oder wenn ein Bildplatzhalter als Firma gelesen
+   wurde.
+
+   Sie werden nicht automatisch gelöscht: Die NUMMER stimmt ja, nur Name und
+   Firma fehlen. Wer nachträgt, hat einen brauchbaren Kontakt. */
+function _ccZeileFehlerhaft(r) {
+  const firma = String((r && r.firma) || '').trim();
+  const person = String((r && r.ansprechpartner) || '').trim();
+  const beides = (firma + ' ' + person).toLowerCase();
+  if (/aircall|unbekannter anrufer|new person|unknown caller/i.test(beides)) return 'Telefonanlagen-Eintrag';
+  if (firma.startsWith('[')) return 'Bild-Platzhalter';
+  // Firma oder Name ist in Wahrheit eine Telefonnummer
+  if (/^[+()\d][\d\s().\/-]{6,}$/.test(firma) || /^[+()\d][\d\s().\/-]{6,}$/.test(person)) return 'Nummer statt Name';
+  if (!firma && !person) return 'ohne Firma und Namen';
+  if (/^(diese e-?mail|ist ein service|powered by)/i.test(firma)) return 'Systemtext statt Firma';
+  return '';
+}
+
+/* Zeile berichtigen — Firma, Person, Nummer, E-Mail und Notiz an einer Stelle.
+
+   Beim Telefonieren fällt auf, was in den Daten falsch ist: die Firma heißt
+   anders, es ist jemand anderes zuständig, die Nummer stimmt nicht mehr. Wer
+   das nicht sofort festhalten kann, ruft beim nächsten Durchgang dieselbe
+   falsche Nummer an. */
+function _ccZeileBearbeiten(recordId) {
+  const r = (CC_STATE.leads || []).find(x => x.recordId === recordId);
+  if (!r) return;
+  let host = document.getElementById('subModalHost');
+  if (!host) { host = document.createElement('div'); host.id = 'subModalHost'; document.body.appendChild(host); }
+  window._CC_EDIT = recordId;
+  const feld = (id, label, wert, mono) =>
+    '<label class="block"><span class="text-[10px] uppercase font-semibold text-ink-600">' + label + '</span>'
+    + '<input id="' + id + '" value="' + escapeAttr(wert || '') + '" class="w-full mt-0.5 px-2 py-1.5 border border-ink-300 rounded text-sm'
+    + (mono ? ' font-mono' : '') + '"></label>';
+  host.innerHTML =
+    '<div class="fixed inset-0 z-[75] bg-black/40 flex items-start justify-center overflow-y-auto p-4" onclick="if(event.target===this)_ccZeileSchliessen()">'
+    + '<div class="bg-white rounded-2xl shadow-xl w-full max-w-md my-8">'
+      + '<div class="flex items-center justify-between p-4 border-b border-ink-200">'
+        + '<div><h3 class="font-bold text-ink-900">Kontakt berichtigen</h3>'
+        + '<p class="text-[11px] text-ink-500">Gilt sofort für die Anrufliste</p></div>'
+        + '<button onclick="_ccZeileSchliessen()" class="text-ink-400 hover:text-ink-700"><i data-lucide="x" class="w-5 h-5"></i></button></div>'
+      + '<div class="p-4 space-y-2">'
+        + (_ccZeileFehlerhaft(r)
+            ? '<div class="bg-rose-50 border border-rose-200 rounded-lg px-2.5 py-1.5 text-[12px] text-rose-800">Auffällig: ' + escapeHtml(_ccZeileFehlerhaft(r)) + '</div>' : '')
+        + feld('ccEdFirma', 'Firma', r.firma)
+        + feld('ccEdPerson', 'Ansprechpartner', r.ansprechpartner)
+        + feld('ccEdPosition', 'Position', r.position)
+        + '<div class="grid grid-cols-2 gap-2">'
+          + feld('ccEdTel', 'Telefon', r.telefon, true)
+          + feld('ccEdOrt', 'Ort', r.ort)
+        + '</div>'
+        + feld('ccEdMail', 'E-Mail', r.email)
+        + '<label class="block"><span class="text-[10px] uppercase font-semibold text-ink-600">Notiz</span>'
+          + '<textarea id="ccEdNotiz" rows="2" class="w-full mt-0.5 px-2 py-1.5 border border-ink-300 rounded text-sm">' + escapeHtml(String(r.notiz || '')) + '</textarea></label>'
+        + '<div class="flex gap-2 justify-end pt-1">'
+          + '<button onclick="_ccZeileSchliessen()" class="px-3 py-2 rounded-lg text-[12px] font-bold bg-white border border-ink-300 text-ink-700">Abbrechen</button>'
+          + '<button onclick="_ccZeileSpeichern(this)" class="px-4 py-2 rounded-lg text-[12px] font-bold bg-brand-600 hover:bg-brand-700 text-white">Speichern</button>'
+        + '</div>'
+        + '<p class="text-[10px] text-ink-500">Leeres Feld speichern löscht den Wert. Die Nummer wird auf die einheitliche Schreibweise gebracht.</p>'
+      + '</div></div></div>';
+  if (window.lucide) lucide.createIcons();
+}
+function _ccZeileSchliessen() { window._CC_EDIT = null; const h = document.getElementById('subModalHost'); if (h) h.innerHTML = ''; }
+
+async function _ccZeileSpeichern(btn) {
+  const recordId = window._CC_EDIT;
+  const r = (CC_STATE.leads || []).find(x => x.recordId === recordId);
+  if (!r) return;
+  const hole = (id) => (document.getElementById(id)?.value || '').trim();
+  const telRoh = hole('ccEdTel');
+  const tel = telRoh ? (_ccNummerNormalisieren(telRoh) || telRoh) : '';
+  setBusy(btn, true, 'Speichere…');
+  try {
+    const patch = {
+      firma: hole('ccEdFirma'), ansprechpartner: hole('ccEdPerson'), position: hole('ccEdPosition'),
+      telefon: tel, ort: hole('ccEdOrt'), email: hole('ccEdMail'), notiz: hole('ccEdNotiz'),
+      dedupe_tel: tel ? 't:' + tel : '', updated_at: nowIso(),
+    };
+    await _ccSpeichern(recordId, patch);
+    Object.assign(r, patch);
+    setBusy(btn, false);
+    _ccZeileSchliessen();
+    _ccZeichnen();
+    toast('Kontakt berichtigt', 'success', 3000);
+  } catch (e) {
+    setBusy(btn, false);
+    toast('Speichern fehlgeschlagen: ' + (e.message || e), 'error', 8000);
+  }
+}
+
 function _ccTabelle(rows) {
   const ich = (APP_KEYS.user && APP_KEYS.user.name) || '';
   // Jede Zelle schneidet ab statt umzubrechen — sonst hilft die feste Breite nichts.
@@ -46132,7 +46236,8 @@ function _ccTabelle(rows) {
         + '" ' + (belegt ? '' : 'onclick="_ccAktiv(\'' + r.recordId + '\')"') + '>'
       + '<td class="' + td + ' text-[11px] text-ink-400 tabular-nums">' + (i + 1) + '</td>'
       + '<td class="' + td + '">' + _ccLed(r) + '</td>'
-      + '<td class="' + td + '" title="' + escapeAttr(firmaText) + '">'
+      + '<td class="' + td + '" title="' + escapeAttr(firmaText + (_ccZeileFehlerhaft(r) ? ' — auffällig: ' + _ccZeileFehlerhaft(r) : '')) + '">'
+        + (_ccZeileFehlerhaft(r) ? '<span class="text-rose-600 mr-1" title="' + escapeAttr(_ccZeileFehlerhaft(r)) + '">⚠</span>' : '')
         + '<span class="font-bold text-ink-900 text-[14px]">' + escapeHtml(r.firma || '—') + '</span>'
         + (String(r.bestand || '') === 'ja' ? ' <span class="text-[10px] px-1 py-0.5 rounded bg-emerald-100 text-emerald-700 font-bold align-middle">Kunde</span>' : '')
         + (r.ort ? ' <span class="text-[12px] text-ink-400">· ' + escapeHtml(r.ort) + '</span>' : '')
@@ -46160,6 +46265,7 @@ function _ccTabelle(rows) {
         + (r.versuche && +r.versuche > 0 ? ' <span class="text-[11px] text-ink-400">' + r.versuche + '×</span>' : '') + '</td>'
       + '<td class="' + td + ' text-[12px] text-ink-600" title="' + escapeAttr(String(r.notiz || '')) + '">' + escapeHtml(String(r.notiz || '')) + '</td>'
       + '<td class="px-1 py-1.5 border-b border-ink-100 text-right">'
+        + '<button onclick="event.stopPropagation(); _ccZeileBearbeiten(\'' + r.recordId + '\')" class="text-ink-300 hover:text-brand-700 p-1" title="Firma, Ansprechpartner, Nummer und E-Mail berichtigen"><i data-lucide="pencil" class="w-4 h-4"></i></button>'
         + '<button onclick="event.stopPropagation(); _ccVerstecken(\'' + r.recordId + '\', ' + (aus ? 'false' : 'true') + ', this)" class="text-ink-300 hover:text-ink-700 p-1" title="' + (aus ? 'Wieder aufnehmen' : 'Aus dieser Kampagne ausblenden') + '"><i data-lucide="' + (aus ? 'eye' : 'eye-off') + '" class="w-4 h-4"></i></button>'
         + '</td>'
       + '</tr>'
