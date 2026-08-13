@@ -824,7 +824,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v3.4.0';
+const APP_VERSION = 'v3.5.0';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -14653,6 +14653,8 @@ function _ticketActionBarIcons(accountId, ticketId) {
     btn('split',          'sky',     'Ticket aufteilen (mehrere Anlagen in einer Anfrage)',    `openTicketSplitModal('${accIdAttr}', ${ticketId})`),
     // v2.46.70: Angebots-Button nur für Aufzug-Service-Accounts (Aufzugshandwerk/Aszendio)
     (accountHasAngebotsModul(acc) ? btn('file-text', 'indigo', 'Angebot erstellen (KI-gestützt)', `openAngebotsModal('${accIdAttr}', ${ticketId})`) : ''),
+    // v3.5.0: Kunde + mehrere Anlagen im ERP anlegen — Vorbereitung fürs Angebot.
+    (accountHasAngebotsModul(acc) ? btn('building-2', 'emerald', 'Kunde und mehrere Anlagen im ERP anlegen (KI liest die Aufstellung aus dem Ticket)', `openErpMehrfachAnlagen('${accIdAttr}', ${ticketId})`) : ''),
     // v2.46.152: Schnellanalyse-Icon — KI analysiert Ticket + Anhänge nach Mandanten-Prompt
     (_angebotsProfilKey(acc) === 'aufzug-service' ? btn('scan-search', 'purple', 'Schnellanalyse (KI) → interne Notiz', `runQuickAnalysis('${accIdAttr}', ${ticketId}, this)`) : ''),
     // v2.46.147: Stellungnahme — KI-gestützter Brief auf Briefpapier (für alle Accounts)
@@ -33160,6 +33162,244 @@ async function pickErpAnlage(idx) {
 }
 
 /* === v2.46.198: Anlage (+ optional Kunde) im ERP anlegen ================= */
+/* ===== Kunde + mehrere Anlagen im ERP anlegen (v3.5.0) ===================
+   Ein Ticket wie #3091 nennt sechs Aufzüge an fünf Adressen. Der bisherige
+   Weg legt genau EINE Anlage an — für so ein Ticket also sechs Durchgänge, in
+   denen jedes Mal Kunde, Adresse und Fabriknummer neu einzutippen sind.
+
+   Hier liest die KI die Aufstellung aus dem Ticket und schlägt Kunde und
+   Anlagen vor. Angelegt wird erst nach Prüfung, Zeile für Zeile abwählbar:
+   Ein ERP ist ein produktives System, und eine versehentlich angelegte Anlage
+   wieder loszuwerden ist mühsamer als ein zweiter Blick vorher.
+
+   Bereits vorhandene Fabriknummern werden erkannt und nicht doppelt angelegt. */
+let ERP_MEHRFACH = null;
+
+async function openErpMehrfachAnlagen(accountId, ticketId) {
+  const acc = (APP_STATE.accounts || []).find(a => String(a.id) === String(accountId));
+  const slug = _erpFirmaSlugForAccount(acc || {});
+  if (!slug) return toast('Für diesen Mandanten ist kein Aufzug-ERP hinterlegt.', 'warn', 6000);
+  if (!APP_KEYS.erpProxyUrl) return toast('ERP-Proxy nicht eingerichtet (Admin → Einstellungen).', 'warn', 6000);
+
+  let host = document.getElementById('subModalHost');
+  if (!host) { host = document.createElement('div'); host.id = 'subModalHost'; document.body.appendChild(host); }
+  ERP_MEHRFACH = { accountId, ticketId, slug, kunde: null, kunden: [], anlagen: [], laden: true };
+  _erpMehrfachZeichnen('<div class="text-center py-10 text-sm text-ink-500">'
+    + '<span class="spinner inline-block w-5 h-5 border-[2px] text-emerald-500"></span>'
+    + '<p class="mt-2">Ticket und Anhänge werden gelesen …</p></div>');
+
+  try {
+    const t = await fetchTicketDetail(accountId, ticketId);
+    ERP_MEHRFACH.ticket = t;
+    const [kunden, vorschlag] = await Promise.all([
+      erpLoadKunden(slug).catch(() => []),
+      _erpMehrfachAnalyse(accountId, ticketId, t),
+    ]);
+    ERP_MEHRFACH.kunden = kunden || [];
+    ERP_MEHRFACH.kundeVorschlag = vorschlag.kunde || {};
+    ERP_MEHRFACH.anlagen = (vorschlag.anlagen || []).map(a => Object.assign({ nehmen: true, status: '' }, a));
+
+    // Vorhandene Anlagen erkennen — Fabriknummern doppelt anzulegen wäre der
+    // schlimmere Fehler: Danach hängen Aufträge an zwei Anlagen derselben Kabine.
+    for (const a of ERP_MEHRFACH.anlagen) {
+      if (!a.fabriknummer) continue;
+      try {
+        const treffer = await erpFindAnlageByFabriknummer(slug, a.fabriknummer);
+        if (treffer) { a.nehmen = false; a.status = 'gibt es schon (ID ' + treffer.id + ')'; a.vorhandenId = treffer.id; }
+      } catch (_) {}
+    }
+    // Passenden Bestandskunden vorschlagen
+    const suchName = String(ERP_MEHRFACH.kundeVorschlag.firmenname || '').toLowerCase().trim();
+    if (suchName) {
+      const k = (kunden || []).find(x => String(x.firmenname || '').toLowerCase().includes(suchName.split(' ')[0]));
+      if (k) ERP_MEHRFACH.kunde = k;
+    }
+    ERP_MEHRFACH.laden = false;
+    _erpMehrfachZeichnen();
+  } catch (e) {
+    _erpMehrfachZeichnen('<div class="bg-red-50 border border-red-200 rounded-xl p-3 text-sm text-red-800">'
+      + escapeHtml(e.message || String(e)) + '</div>');
+  }
+}
+
+/* Die KI liest Ticket UND Anhänge — Aufstellungen stehen oft in einer Tabelle
+   im Anhang, nicht im Mailtext. */
+async function _erpMehrfachAnalyse(accountId, ticketId, t) {
+  let dateien = [];
+  try {
+    dateien = await _qaCollectAttachments(accountId, ticketId, t,
+      { maxCount: 6, maxBytes: 20 * 1024 * 1024, maxPerFile: 12 * 1024 * 1024 });
+  } catch (_) {}
+  const sys =
+    'Du liest eine Kundenanfrage eines Aufzug-Serviceunternehmens und ziehst daraus die AUFZUGSANLAGEN heraus, '
+    + 'die beim Kunden stehen — als Vorbereitung, sie im ERP anzulegen.\n\n'
+    + 'REGELN:\n'
+    + '1. Eine Anlage je AUFZUG, nicht je Adresse. Steht „Alexandrinenstr. 35 = 2 Aufzüge (11776024 + 11776025)", sind das ZWEI Anlagen mit je einer Fabriknummer.\n'
+    + '2. Fabriknummer nur, wenn sie dasteht. Nicht raten, nicht aus Auftragsnummern ableiten.\n'
+    + '3. Adresse vollständig mit Hausnummer, PLZ und Ort — sie wird für die Adresssuche gebraucht.\n'
+    + '4. Der Kunde ist der ANFRAGENDE (Auftraggeber), nicht der Aufzugshersteller. „von KONE" beschreibt das Fabrikat, nicht den Kunden.\n'
+    + '5. Nichts erfinden. Fehlt etwas, lass das Feld leer.\n\n'
+    + 'ANTWORTE NUR MIT JSON:\n'
+    + '{"kunde":{"firmenname":"…","adresse":"…","email":"…","telefon":"…"},'
+    + '"anlagen":[{"adresse":"Straße Nr, PLZ Ort","fabriknummer":"…","hinweis":"z.B. Fabrikat oder Bemerkung"}]}';
+  const inhalt = [{ type: 'text', text:
+    'BETREFF: ' + (t.subject || '') + '\n\n'
+    + 'ANFRAGENDER: ' + (t.requester?.name || '') + (t.requester?.email ? ' <' + t.requester.email + '>' : '') + '\n\n'
+    + 'ERSTE ANFRAGE:\n' + htmlToText(t.description_text || t.description || '').slice(0, 8000) }];
+  dateien.forEach(a => {
+    if (a.mediaType === 'application/pdf') {
+      inhalt.push({ type: 'text', text: 'Anhang: ' + a.name });
+      inhalt.push({ type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: a.base64 } });
+    } else if (String(a.mediaType || '').startsWith('image/')) {
+      inhalt.push({ type: 'text', text: 'Anhang: ' + a.name });
+      inhalt.push({ type: 'image', source: { type: 'base64', media_type: a.mediaType, data: a.base64 } });
+    }
+  });
+  const data = await _callAnthropicWithRetry({
+    model: 'claude-sonnet-4-5-20250929', max_tokens: 4000, system: sys,
+    messages: [{ role: 'user', content: inhalt }],
+  });
+  return parseAIJson((data.content && data.content[0] && data.content[0].text) || '') || {};
+}
+
+function _erpMehrfachZeichnen(platzhalter) {
+  const s = ERP_MEHRFACH;
+  const host = document.getElementById('subModalHost');
+  if (!s || !host) return;
+  const rahmen = (inhalt) =>
+    '<div class="fixed inset-0 z-[75] bg-black/40 flex items-start justify-center overflow-y-auto p-4" onclick="if(event.target===this)closeErpMehrfach()">'
+    + '<div class="bg-white rounded-2xl shadow-xl w-full max-w-2xl my-8">'
+      + '<div class="flex items-center justify-between p-4 border-b border-ink-200">'
+        + '<div><h3 class="font-bold text-ink-900 inline-flex items-center gap-2"><i data-lucide="building-2" class="w-5 h-5 text-emerald-600"></i> Kunde + Anlagen im ERP anlegen</h3>'
+        + '<p class="text-[11px] text-ink-500">Ticket #' + s.ticketId + ' · ' + escapeHtml((s.ticket && s.ticket.subject) || '') + '</p></div>'
+        + '<button onclick="closeErpMehrfach()" class="text-ink-400 hover:text-ink-700"><i data-lucide="x" class="w-5 h-5"></i></button></div>'
+      + '<div class="p-4 space-y-3">' + inhalt + '</div>'
+    + '</div></div>';
+  if (platzhalter) { host.innerHTML = rahmen(platzhalter); if (window.lucide) lucide.createIcons(); return; }
+
+  const kv = s.kundeVorschlag || {};
+  const kundenOpts = '<option value="">— neuen Kunden anlegen —</option>'
+    + (s.kunden || []).slice().sort((a, b) => String(a.firmenname || '').localeCompare(String(b.firmenname || ''), 'de'))
+        .map(k => '<option value="' + escapeAttr(String(k.kundennummer || k.id)) + '"'
+          + (s.kunde && String(s.kunde.kundennummer || s.kunde.id) === String(k.kundennummer || k.id) ? ' selected' : '') + '>'
+          + escapeHtml(k.firmenname || '?') + ' (Kd. ' + escapeHtml(String(k.kundennummer || k.id)) + ')</option>').join('');
+
+  const kundeBlock = '<div class="border border-ink-200 rounded-xl p-3 space-y-2">'
+    + '<p class="text-[10px] uppercase font-semibold text-ink-600">Kunde</p>'
+    + '<select id="emKunde" onchange="_erpMehrfachKundeWechsel(this.value)" class="w-full px-2 py-1.5 border border-ink-300 rounded text-sm bg-white">' + kundenOpts + '</select>'
+    + (s.kunde ? '' :
+        '<div class="grid grid-cols-2 gap-2">'
+        + '<label class="block col-span-2"><span class="text-[10px] text-ink-500">Firmenname</span>'
+          + '<input id="emKFirma" value="' + escapeAttr(kv.firmenname || '') + '" class="w-full mt-0.5 px-2 py-1.5 border border-ink-300 rounded text-sm"></label>'
+        + '<label class="block col-span-2"><span class="text-[10px] text-ink-500">Anschrift (Straße Nr, PLZ Ort)</span>'
+          + '<input id="emKAdresse" value="' + escapeAttr(kv.adresse || '') + '" class="w-full mt-0.5 px-2 py-1.5 border border-ink-300 rounded text-sm"></label>'
+        + '<label class="block"><span class="text-[10px] text-ink-500">E-Mail</span>'
+          + '<input id="emKMail" value="' + escapeAttr(kv.email || (s.ticket && s.ticket.requester && s.ticket.requester.email) || '') + '" class="w-full mt-0.5 px-2 py-1.5 border border-ink-300 rounded text-sm"></label>'
+        + '<label class="block"><span class="text-[10px] text-ink-500">Telefon</span>'
+          + '<input id="emKTel" value="' + escapeAttr(kv.telefon || '') + '" class="w-full mt-0.5 px-2 py-1.5 border border-ink-300 rounded text-sm"></label>'
+        + '</div>')
+    + '</div>';
+
+  const zeilen = s.anlagen.length ? s.anlagen.map((a, i) =>
+    '<div class="border ' + (a.vorhandenId ? 'border-amber-300 bg-amber-50/50' : 'border-ink-200') + ' rounded-lg p-2.5 space-y-1.5">'
+    + '<label class="flex items-center gap-2 cursor-pointer">'
+      + '<input type="checkbox"' + (a.nehmen ? ' checked' : '') + ' onchange="_erpMehrfachFeld(' + i + ',\'nehmen\',this.checked)" class="w-4 h-4">'
+      + '<span class="text-[11px] font-bold text-ink-700">Anlage ' + (i + 1) + '</span>'
+      + (a.status ? '<span class="text-[10px] text-amber-800 font-semibold">' + escapeHtml(a.status) + '</span>' : '')
+      + (a.hinweis ? '<span class="text-[10px] text-ink-400 truncate">' + escapeHtml(a.hinweis) + '</span>' : '')
+    + '</label>'
+    + '<div class="grid grid-cols-3 gap-2">'
+      + '<label class="block col-span-2"><span class="text-[10px] text-ink-500">Standort</span>'
+        + '<input value="' + escapeAttr(a.adresse || '') + '" oninput="_erpMehrfachFeld(' + i + ',\'adresse\',this.value)" class="w-full mt-0.5 px-2 py-1 border border-ink-300 rounded text-[12px]"></label>'
+      + '<label class="block"><span class="text-[10px] text-ink-500">Fabriknummer</span>'
+        + '<input value="' + escapeAttr(a.fabriknummer || '') + '" oninput="_erpMehrfachFeld(' + i + ',\'fabriknummer\',this.value)" class="w-full mt-0.5 px-2 py-1 border border-ink-300 rounded text-[12px] font-mono"></label>'
+    + '</div></div>').join('')
+    : '<p class="text-[12px] text-ink-500 italic">Aus dem Ticket ließen sich keine Anlagen herauslesen. Über „+ Anlage" von Hand ergänzen.</p>';
+
+  const offen = s.anlagen.filter(a => a.nehmen).length;
+  host.innerHTML = rahmen(
+    kundeBlock
+    + '<div><div class="flex items-center justify-between mb-1">'
+      + '<p class="text-[10px] uppercase font-semibold text-ink-600">Anlagen (' + s.anlagen.length + ')</p>'
+      + '<button onclick="_erpMehrfachZeile()" class="text-[11px] font-bold text-emerald-700 hover:underline">+ Anlage</button></div>'
+      + '<div class="space-y-2">' + zeilen + '</div></div>'
+    + '<div class="flex items-center gap-2 justify-end pt-1">'
+      + '<button onclick="closeErpMehrfach()" class="px-3 py-2 rounded-lg text-[12px] font-bold bg-white border border-ink-300 text-ink-700 hover:bg-ink-50">Abbrechen</button>'
+      + '<button onclick="_erpMehrfachAnlegen(this)" class="px-4 py-2 rounded-lg text-[12px] font-bold text-white ' + (offen ? 'bg-emerald-600 hover:bg-emerald-700' : 'bg-ink-300 cursor-not-allowed') + '"' + (offen ? '' : ' disabled') + '>'
+      + (offen ? offen + ' Anlage' + (offen === 1 ? '' : 'n') + ' anlegen' : 'Nichts ausgewählt') + '</button>'
+    + '</div>'
+    + '<p class="text-[10px] text-ink-500">Angelegt wird im produktiven ERP. Bereits vorhandene Fabriknummern sind abgewählt — dieselbe Kabine zweimal anzulegen bringt später Aufträge durcheinander.</p>');
+  if (window.lucide) lucide.createIcons();
+}
+
+function closeErpMehrfach() { ERP_MEHRFACH = null; const h = document.getElementById('subModalHost'); if (h) h.innerHTML = ''; }
+function _erpMehrfachFeld(i, feld, wert) { if (ERP_MEHRFACH?.anlagen?.[i]) { ERP_MEHRFACH.anlagen[i][feld] = wert; if (feld === 'nehmen') _erpMehrfachZeichnen(); } }
+function _erpMehrfachZeile() { ERP_MEHRFACH.anlagen.push({ adresse: '', fabriknummer: '', nehmen: true, status: '' }); _erpMehrfachZeichnen(); }
+function _erpMehrfachKundeWechsel(nr) {
+  const s = ERP_MEHRFACH;
+  s.kunde = nr ? (s.kunden || []).find(k => String(k.kundennummer || k.id) === String(nr)) || null : null;
+  _erpMehrfachZeichnen();
+}
+
+async function _erpMehrfachAnlegen(btn) {
+  const s = ERP_MEHRFACH;
+  if (!s) return;
+  const ziel = s.anlagen.filter(a => a.nehmen && String(a.adresse || '').trim());
+  if (!ziel.length) return toast('Keine Anlage mit Standort ausgewählt.', 'warn', 5000);
+
+  let kunde = s.kunde;
+  const neuKunde = !kunde;
+  const kd = neuKunde ? {
+    firmenname: (document.getElementById('emKFirma')?.value || '').trim(),
+    adresse: (document.getElementById('emKAdresse')?.value || '').trim(),
+    email: (document.getElementById('emKMail')?.value || '').trim(),
+    telefon: (document.getElementById('emKTel')?.value || '').trim(),
+  } : null;
+  if (neuKunde && (!kd.firmenname || !kd.adresse)) return toast('Für einen neuen Kunden braucht das ERP Firmenname und Anschrift.', 'warn', 7000);
+
+  if (!confirm((neuKunde ? 'Kunde „' + kd.firmenname + '" neu anlegen und ' : 'Bei „' + (kunde.firmenname || '') + '" ')
+    + ziel.length + ' Anlage' + (ziel.length === 1 ? '' : 'n') + ' im ERP anlegen?\n\n'
+    + ziel.map((a, i) => (i + 1) + '. ' + a.adresse + (a.fabriknummer ? ' · Fabr.-Nr. ' + a.fabriknummer : ' · ohne Fabriknummer')).join('\n')
+    + '\n\nDas schreibt ins produktive ERP.')) return;
+
+  setBusy(btn, true, 'Lege an …');
+  try {
+    if (neuKunde) {
+      kunde = await erpCreateKunde(s.slug, kd);
+      toast('Kunde „' + kd.firmenname + '" angelegt (Kd. ' + (kunde.kundennummer || kunde.id) + ')', 'success', 5000);
+    }
+    let ok = 0; const fehler = [];
+    for (let i = 0; i < ziel.length; i++) {
+      const a = ziel[i];
+      setBusy(btn, true, (i + 1) + '/' + ziel.length);
+      try {
+        const created = await erpCreateAnlage(s.slug, {
+          kunde, adresse: a.adresse, fabriknummer: a.fabriknummer || '',
+          stundensatz: 0, einsatzPauschale: 0,
+        });
+        a.status = 'angelegt (ID ' + (created && created.id) + ')';
+        a.nehmen = false;
+        ok++;
+      } catch (e) {
+        a.status = 'Fehler: ' + String(e.message || e).slice(0, 80);
+        fehler.push(a.adresse + ': ' + (e.message || e));
+      }
+    }
+    setBusy(btn, false);
+    _ERP_ANLAGEN_CACHE.delete(s.slug);   // frisch laden, damit die neuen sofort auffindbar sind
+    _erpMehrfachZeichnen();
+    if (fehler.length) {
+      console.warn('[ERP-Mehrfach]', fehler);
+      toast(ok + ' Anlagen angelegt · ' + fehler.length + ' fehlgeschlagen — erster Fehler: ' + fehler[0], 'error', 12000);
+    } else {
+      toast(ok + ' Anlagen im ERP angelegt. Im Angebot lässt sich die passende jetzt über die Fabriknummer wählen.', 'success', 9000);
+    }
+  } catch (e) {
+    setBusy(btn, false);
+    toast('Anlegen fehlgeschlagen: ' + (e.message || e), 'error', 10000);
+  }
+}
+
 function openErpAnlageCreate(prefillFabrik) {
   const picker = window._ERP_PICKER;
   const firmaSlug = picker?.firmaSlug || _erpFirmaSlugForAccount(window._ANG_CHAT?.account);
