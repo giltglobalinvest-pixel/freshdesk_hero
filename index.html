@@ -824,7 +824,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.99.5';
+const APP_VERSION = 'v2.99.6';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -43082,20 +43082,28 @@ async function _zdbRead(tableName, opts) {
   opts = opts || {};
   const base = 'https://api.airtable.com/v0/' + ZDB_BASE_ID + '/' + _zdbTab(tableName);
   const H = { Authorization: 'Bearer ' + APP_KEYS.airtableWriteKey };
+  /* Der Blättern-Abbruch war falsch: `if (!offset || opts.maxRecords) break;`
+     hörte nach der ERSTEN Seite auf, sobald maxRecords gesetzt war — und
+     Airtable liefert je Seite höchstens hundert Sätze. Wer 5000 anforderte,
+     bekam 100. Die zentrale DB zeigte deshalb nie mehr als hundert Kontakte,
+     die Dublettenprüfung sah nur den Anfang, und Suchen liefen ins Leere,
+     obwohl der Datensatz existierte. Gedeckelt wird jetzt an der ZAHL, nicht
+     an der ersten Seite. */
+  const ziel = opts.maxRecords ? (parseInt(opts.maxRecords, 10) || 0) : Infinity;
   const all = [];
   let offset = null;
-  for (let g = 0; g < 60; g++) {
+  for (let g = 0; g < 200; g++) {
     const p = new URLSearchParams();
     if (opts.filter) p.set('filterByFormula', opts.filter);
     if (opts.maxRecords) p.set('maxRecords', String(opts.maxRecords));
-    if (!opts.maxRecords) p.set('pageSize', '100');
+    p.set('pageSize', '100');
     if (offset) p.set('offset', offset);
     const d = await _zdbFetchJson(base + '?' + p.toString(), { headers: H });
     (d.records || []).forEach(x => all.push(x));
     offset = d.offset || null;
-    if (!offset || opts.maxRecords) break;
+    if (!offset || all.length >= ziel) break;
   }
-  return all;
+  return ziel === Infinity ? all : all.slice(0, ziel);
 }
 async function _zdbSelect(tableName, opts) {
   for (let i = 0; i < 3; i++) {
@@ -44411,7 +44419,12 @@ function _zdbKontakteBody(d) {
          : escapeHtml(String(cells[c[0]] || ''))) + '</td>').join('') + '</tr>';
   }).join('');
   return '<div class="bg-white rounded-xl border border-ink-200 p-4">' + chip +
-    '<p class="text-[11px] text-ink-500 mb-1.5 font-semibold">' + rows.length + ' Kontakte <span class="font-normal text-ink-400">· Zeile tippen = bearbeiten</span></p>' +
+    /* Gefiltert/gesamt getrennt ausweisen — sonst hält man die Trefferzahl einer
+       Suche für den Bestand. */
+    '<p class="text-[11px] text-ink-500 mb-1.5 font-semibold">' + rows.length + ' Kontakte'
+      + (((ZDB_VIEW_STATE.data || {}).kontakte || []).length !== rows.length
+          ? ' <span class="font-normal text-ink-400">von ' + ((ZDB_VIEW_STATE.data || {}).kontakte || []).length + '</span>' : '')
+      + ' <span class="font-normal text-ink-400">· Zeile tippen = bearbeiten</span></p>' +
     '<div class="overflow-x-auto"><table class="w-full text-[12px] border-collapse"><thead><tr><th class="border-b border-ink-200 bg-ink-50 w-8"></th>' + _zdbHeadCells(cols) + '</tr></thead><tbody>' + trs + '</tbody></table></div></div>';
 }
 function _zdbFirmenBody(d) {
@@ -44432,7 +44445,10 @@ function _zdbFirmenBody(d) {
       ' <button onclick="event.stopPropagation();_zdbFirmaEntfernen(\'' + r.id + '\', this)" class="ml-1 text-[11px] bg-white border border-rose-300 text-rose-700 hover:bg-rose-50 px-2 py-0.5 rounded-full font-bold" title="Firma aus der zentralen DB entfernen — verkn\u00fcpfte Kontakte bleiben bestehen">\u2715</button></td></tr>';
   }).join('');
   return '<div class="bg-white rounded-xl border border-ink-200 p-4">' +
-    '<p class="text-[11px] text-ink-500 mb-1.5 font-semibold">' + rows.length + ' Firmen <span class="font-normal text-ink-400">· Zeile tippen = bearbeiten</span></p>' +
+    '<p class="text-[11px] text-ink-500 mb-1.5 font-semibold">' + rows.length + ' Firmen'
+      + (((ZDB_VIEW_STATE.data || {}).firmen || []).length !== rows.length
+          ? ' <span class="font-normal text-ink-400">von ' + ((ZDB_VIEW_STATE.data || {}).firmen || []).length + '</span>' : '')
+      + ' <span class="font-normal text-ink-400">· Zeile tippen = bearbeiten</span></p>' +
     '<div class="overflow-x-auto"><table class="w-full text-[12px] border-collapse"><thead><tr><th class="border-b border-ink-200 bg-ink-50 w-8"></th>' + _zdbHeadCells(cols) + '<th class="text-left font-semibold text-ink-600 px-2 py-1.5 border-b border-ink-200 bg-ink-50">Kontakte</th></tr></thead><tbody>' + trs + '</tbody></table></div></div>';
 }
 
