@@ -2739,6 +2739,16 @@ function _fdMarkAccountRateLimited(accountId) {
   }
 }
 
+/* Zweiter Anlauf nach einem Netzwerkfehler. Bewusst als eigene Funktion, damit
+   das `finally` des ersten Versuchs seinen Drossel-Platz zuerst zurückgibt. */
+let _fdhWartenDann = 0;
+async function _proxyErneut(path, init, versuch) {
+  const warten = _fdhWartenDann || 700;
+  _fdhWartenDann = 0;
+  await new Promise(r => setTimeout(r, warten));
+  return proxyFetch(path, Object.assign({}, init, { _versuch: versuch }));
+}
+
 async function proxyFetch(path, init = {}) {
   if (!APP_KEYS.apiProxyUrl) throw new Error('Val.town-Proxy nicht eingerichtet — Admin → Einstellungen');
   const token = APP_KEYS.sessionToken || _getStoredToken();
@@ -2765,6 +2775,24 @@ async function proxyFetch(path, init = {}) {
   } catch (e) {
     if (e.name === 'AbortError') {
       throw new Error('Zeitüberschreitung nach ' + Math.round(timeoutMs / 1000) + 's — Proxy antwortet nicht (evtl. Cold-Start). Bitte erneut versuchen.');
+    }
+    /* „Failed to fetch" ist ein Netzwerkfehler ohne HTTP-Status: Der Proxy war
+       nicht erreichbar — Cold-Start, kurzer Aussetzer, WLAN-Wechsel. Bei
+       lesenden Anfragen ist eine Wiederholung gefahrlos und behebt fast alle
+       dieser Fälle; bei schreibenden NICHT, dort könnte der erste Versuch
+       durchgegangen sein und die Wiederholung legte etwas doppelt an. */
+    const lesend = !init.method || String(init.method).toUpperCase() === 'GET';
+    const versuch = (init._versuch || 0) + 1;
+    if (lesend && versuch <= 2 && /failed to fetch|networkerror|load failed/i.test(String(e.message || ''))) {
+      /* Aufräumen übernimmt das finally — hier NICHT selbst freigeben, sonst
+         zählt der Drossel-Platz doppelt zurück und die Bremse öffnet zu weit.
+         Gewartet wird deshalb erst im nächsten Anlauf, nicht hier. */
+      _fdhWartenDann = 700 * versuch;
+      return _proxyErneut(path, init, versuch);
+    }
+    if (/failed to fetch|networkerror|load failed/i.test(String(e.message || ''))) {
+      throw new Error('Der Proxy ist nicht erreichbar (Netzwerkfehler nach ' + versuch + ' Versuchen). '
+        + 'Meist ein Cold-Start von val.town oder eine kurze Unterbrechung — „Neu laden" hilft in aller Regel.');
     }
     throw e;
   } finally {
