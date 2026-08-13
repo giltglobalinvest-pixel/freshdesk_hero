@@ -824,7 +824,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v3.3.0';
+const APP_VERSION = 'v3.4.0';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -43084,6 +43084,11 @@ function _zdbKontaktFieldSpecs(firmaTableId) {
     { name: 'mailchimp', type: 'singleLineText' },     // v2.68.14: 'gepusht <Zeit> via Hero'
     { name: 'freshsales', type: 'singleLineText' },    // v2.68.21: 'gepusht <Zeit> via Hero'
     { name: 'pipedrive_person_id', type: 'singleLineText' },
+    /* v3.4.0: Archivieren statt löschen. „ja" heißt: aus der Arbeitsliste
+       heraus, aber weiterhin da. Ein gelöschter Kontakt kommt beim nächsten
+       Abgleich womöglich wieder — ein archivierter bleibt sichtbar
+       archiviert und wird nicht erneut vorgelegt. */
+    { name: 'archiviert', type: 'singleLineText' },
     { name: 'quelle', type: 'singleLineText' },
     { name: 'freshdesk_contact_id', type: 'singleLineText' },
     { name: 'created_at', type: 'singleLineText' },
@@ -43505,7 +43510,7 @@ async function _zdbShowCounts(accId, btn) {
    Zeigt die Firma_/Kontakt_-Tabellen des gewählten Mandanten live aus Airtable.
    Bewusst einfach gehalten; Spalten später erweiterbar. Ersetzt langfristig die
    Freshsales-Kontaktansicht. */
-const ZDB_VIEW_STATE = { accountId: null, tab: 'kontakte', firmaFilter: null, typFilter: '', data: null, search: '', mcStand: null };
+const ZDB_VIEW_STATE = { accountId: null, tab: 'kontakte', firmaFilter: null, typFilter: '', zeigeArchiv: false, data: null, search: '', mcStand: null };
 const _ZDB_FIRMA_EDIT = [['name', 'Name'], ['strasse', 'Strasse'], ['plz', 'PLZ'], ['ort', 'Ort'], ['land', 'Land'], ['email', 'E-Mail'], ['telefon', 'Telefon'], ['webseite', 'Webseite'], ['ust_id', 'USt-ID'], ['quelle', 'Quelle']];
 
 function showZdbTableView(btn) {
@@ -44642,6 +44647,8 @@ function _zdbAuswahlLeeren() { ZDB_AUSWAHL.clear(); _zdbPaintView(); }
 function _zdbSichtbareKontakte() {
   const d = ZDB_VIEW_STATE.data || {};
   let rows = d.kontakte || [];
+  // Archivierte sind aus der Arbeitsliste heraus — außer man will sie sehen.
+  rows = rows.filter(r => (String((r.fields || {}).archiviert || '').toLowerCase() === 'ja') === !!ZDB_VIEW_STATE.zeigeArchiv);
   const filter = ZDB_VIEW_STATE.firmaFilter;
   if (filter) rows = rows.filter(r => ((r.fields && r.fields.firma) || []).includes(filter));
   const q = String(ZDB_VIEW_STATE.search || '').trim().toLowerCase();
@@ -44651,6 +44658,47 @@ function _zdbSichtbareKontakte() {
   if (tf === '__ohne__') rows = rows.filter(r => !String((r.fields || {}).typ || '').trim());
   else if (tf) rows = rows.filter(r => String((r.fields || {}).typ || '') === tf);
   return rows;
+}
+
+/* Archivieren = ausblenden, aber nicht löschen.
+
+   Löschen wäre der falsche Griff: Der Kontakt käme beim nächsten Abgleich aus
+   Korb, ERP oder Freshsales womöglich zurück, und niemand wüsste mehr, dass
+   er schon einmal aussortiert wurde. Archiviert bleibt er auffindbar und wird
+   nicht erneut vorgelegt. */
+async function _zdbArchivieren(zurueck, btn) {
+  const acc = _zdbCurrentAccount();
+  if (!acc) return;
+  /* Das Feld `archiviert` ist neu. Bei Mandanten, deren Tabelle vor dieser
+     Fassung angelegt wurde, fehlt es — der erste Schreibversuch liefe auf 422.
+     Deshalb hier einmal sicherstellen, bevor geschrieben wird. */
+  try { _ZDB_TABLE_CACHE.delete(_zdbTableNames(acc).slug); await _zdbEnsureTables(acc); }
+  catch (e) { return toast('Archiv-Feld konnte nicht angelegt werden: ' + (e.message || e), 'error', 9000); }
+  const ziel = _zdbSichtbareKontakte().filter(r => ZDB_AUSWAHL.has(r.id));
+  if (!ziel.length) return toast('Nichts markiert.', 'warn', 4000);
+  if (!confirm(ziel.length + (zurueck ? ' Kontakte aus dem Archiv holen?' : ' Kontakte archivieren?') + '\n\n'
+    + (zurueck
+        ? 'Sie erscheinen wieder in der Arbeitsliste.'
+        : 'Sie verschwinden aus der Arbeitsliste, bleiben aber vollständig erhalten und über „Archiv anzeigen" erreichbar. Gelöscht wird nichts.')
+    + '\n\nDas gilt für alle Benutzer.')) return;
+
+  const namen = _zdbTableNames(acc);
+  setBusy(btn, true, '0/' + ziel.length);
+  let ok = 0, fehler = 0;
+  for (const r of ziel) {
+    try {
+      await _zdbUpdateSafe(namen.kontakt, r.id, { archiviert: zurueck ? '' : 'ja', updated_at: nowIso() });
+      r.fields = Object.assign({}, r.fields, { archiviert: zurueck ? '' : 'ja' });
+      ZDB_AUSWAHL.delete(r.id);
+      ok++;
+    } catch (e) { fehler++; console.warn('[ZDB] Archivieren:', e.message); }
+    setBusy(btn, true, (ok + fehler) + '/' + ziel.length);
+    await new Promise(x => setTimeout(x, 140));
+  }
+  setBusy(btn, false);
+  _zdbPaintView();
+  toast(ok + (zurueck ? ' zurückgeholt' : ' archiviert') + (fehler ? ' · ' + fehler + ' fehlgeschlagen' : ''),
+    fehler ? 'warn' : 'success', 7000);
 }
 
 async function _zdbTypKi(btn) {
@@ -44790,7 +44838,17 @@ function _zdbKontakteBody(d) {
         + '<label class="inline-flex items-center gap-1.5 text-[11px] text-ink-700 cursor-pointer bg-white border border-ink-200 rounded-lg px-2 py-1">'
           + '<input type="checkbox"' + (markiert === rows.length && rows.length ? ' checked' : '')
           + ' onchange="_zdbAlleMarkieren(this.checked)"> alle ' + rows.length + ' markieren</label>'
+        + (() => {
+            const archivGesamt = alleK.filter(r => String((r.fields || {}).archiviert || '').toLowerCase() === 'ja').length;
+            if (!archivGesamt && !ZDB_VIEW_STATE.zeigeArchiv) return '';
+            return '<label class="inline-flex items-center gap-1.5 text-[11px] text-ink-700 cursor-pointer bg-white border border-ink-200 rounded-lg px-2 py-1">'
+              + '<input type="checkbox"' + (ZDB_VIEW_STATE.zeigeArchiv ? ' checked' : '')
+              + ' onchange="ZDB_VIEW_STATE.zeigeArchiv=this.checked;ZDB_AUSWAHL.clear();_zdbPaintView()"> Archiv anzeigen (' + archivGesamt + ')</label>';
+          })()
         + (markiert ? '<span class="text-[11px] font-bold text-indigo-700">' + markiert + ' markiert</span>'
+            + (ZDB_VIEW_STATE.zeigeArchiv
+                ? '<button onclick="_zdbArchivieren(true, this)" class="px-2.5 py-1 rounded-lg text-[11px] font-bold bg-emerald-600 hover:bg-emerald-700 text-white inline-flex items-center gap-1"><i data-lucide="archive-restore" class="w-3.5 h-3.5"></i> ' + markiert + ' zurückholen</button>'
+                : '<button onclick="_zdbArchivieren(false, this)" class="px-2.5 py-1 rounded-lg text-[11px] font-bold bg-ink-600 hover:bg-ink-700 text-white inline-flex items-center gap-1" title="Aus der Arbeitsliste nehmen — gelöscht wird nichts"><i data-lucide="archive" class="w-3.5 h-3.5"></i> ' + markiert + ' archivieren</button>')
             + '<button onclick="_zdbAuswahlLeeren()" class="px-2 py-1 rounded-lg text-[11px] font-bold bg-white border border-ink-300 text-ink-600 hover:bg-ink-50">Markierung aufheben</button>' : '')
         + (ohneTyp ? '<button onclick="_zdbTypKi(this)" class="px-2.5 py-1 rounded-lg text-[11px] font-bold bg-violet-600 hover:bg-violet-700 text-white inline-flex items-center gap-1" title="Kontakttyp aus Firmenname, Position und Domain ableiten — nur aus der gepflegten Liste, im Zweifel leer">'
             + '<i data-lucide="sparkles" class="w-3.5 h-3.5"></i> Typ per KI (' + ohneTyp + ' offen)</button>'
