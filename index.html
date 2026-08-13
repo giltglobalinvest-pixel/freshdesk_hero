@@ -44443,6 +44443,156 @@ async function _zdbMcStandUebernehmen(btn) {
   toast(n + ' Vermerk' + (n === 1 ? '' : 'e') + ' berichtigt' + (fehler ? ' · ' + fehler + ' fehlgeschlagen (siehe Fehler-Pille)' : ' ✓'), fehler ? 'warn' : 'success', 6000);
 }
 
+/* ===== Fehlende E-Mail-Adressen im Netz suchen (v3.2.0) ==================
+   Von allen KI-Ergänzungen ist diese die heikelste. Ein falscher Firmenname
+   steht nur falsch da; eine falsche E-Mail-Adresse führt dazu, dass Post an
+   einen Fremden geht — und bei einer Marketingaktion an hunderte.
+
+   Deshalb wird hier NICHTS automatisch geschrieben. Der Lauf sammelt
+   Vorschläge, zeigt sie mit Quelle und Art (persönlich oder Sammeladresse),
+   und erst ein Klick übernimmt sie. Vorausgewählt sind nur persönliche
+   Adressen: „info@" ist selten die Person, die man meint.
+
+   Begrenzt auf 25 je Lauf. Jede Suche ist ein Websuche-Aufruf; hunderte davon
+   auf einen Knopf wären teuer, langsam und kaum noch zu prüfen. */
+async function _zdbMailKi(btn) {
+  const acc = _zdbCurrentAccount();
+  if (!acc) return toast('Kein Mandant gewählt', 'warn', 4000);
+  const sichtbar = _zdbSichtbareKontakte();
+  const markiert = sichtbar.filter(r => ZDB_AUSWAHL.has(r.id));
+  const grund = markiert.length ? markiert : sichtbar;
+  const ohne = grund.filter(r => !String((r.fields || {}).email || '').trim());
+  if (!ohne.length) return toast('Alle betroffenen Kontakte haben eine E-Mail-Adresse.', 'info', 5000);
+
+  const MAX = 25;
+  const nehmen = ohne.slice(0, MAX);
+  if (!confirm('Für ' + nehmen.length + ' Kontakte ohne E-Mail im Internet suchen?'
+    + (ohne.length > MAX ? '\n\n' + ohne.length + ' hätten keine Adresse — je Lauf werden ' + MAX + ' bearbeitet.' : '')
+    + '\n\nGesucht wird nur, was auf einer aufgerufenen Seite steht. Nichts wird sofort gespeichert: '
+    + 'Du bekommst die Funde mit Quelle zur Prüfung und entscheidest, was übernommen wird.')) return;
+
+  const d = ZDB_VIEW_STATE.data || {};
+  const sys =
+    'Du recherchierst im Web die E-Mail-Adresse einer bestimmten Person in einem bestimmten Unternehmen '
+    + 'und antwortest AUSSCHLIESSLICH mit JSON.\n\n'
+    + 'HARTE REGELN:\n'
+    + '1. Gib NUR eine Adresse zurück, die du auf einer aufgerufenen Seite WÖRTLICH gelesen hast.\n'
+    + '2. RATE NIEMALS ein Muster. „vorname.nachname@firma.de" ist geraten, auch wenn es plausibel wirkt — solche Adressen führen zu Zustellfehlern oder zu fremden Personen.\n'
+    + '3. Prüfe, dass die Seite zu DIESEM Unternehmen gehört (Ort, Firmierung, Domain). Gleichnamige Firmen anderswo: nichts zurückgeben.\n'
+    + '4. Gib an, ob es die persönliche Adresse der Person ist ("art":"person") oder eine allgemeine Sammeladresse wie info@ ("art":"sammel").\n'
+    + '5. Zu jeder Adresse gehört die URL der Seite. Ohne Quelle keine Adresse.\n'
+    + '6. Findest du nichts Belegbares, gib {} zurück. Eine fehlende Adresse ist harmlos, eine falsche schreibt an einen Fremden.\n\n'
+    + 'JSON: {"email":"…","art":"person|sammel","quelle":"https://…","hinweis":"optional, ein Satz"}';
+
+  setBusy(btn, true, '0/' + nehmen.length);
+  const funde = [];
+  for (let i = 0; i < nehmen.length; i++) {
+    const r = nehmen[i];
+    const f = r.fields || {};
+    const firma = ((f.firma || []).map(id => (d.firmaName || {})[id]).filter(Boolean).join(', ') || '').trim();
+    const person = (f.name || [f.vorname, f.nachname].filter(Boolean).join(' ') || '').trim();
+    try {
+      if (!firma && !person) { continue; }
+      const frage = 'Gesucht ist die E-Mail-Adresse dieser Person:\n'
+        + (person ? 'Person: ' + person + '\n' : '')
+        + (f.position ? 'Position: ' + f.position + '\n' : '')
+        + (firma ? 'Firma: ' + firma + '\n' : '')
+        + ([f.plz, f.ort].filter(Boolean).join(' ') ? 'Ort: ' + [f.plz, f.ort].filter(Boolean).join(' ') + '\n' : '')
+        + (f.telefon ? 'Telefon: ' + f.telefon + '\n' : '');
+      const antwort = await _callAnthropicWithRetry({
+        model: 'claude-sonnet-4-5-20250929', max_tokens: 1200, system: sys,
+        tools: [{ type: 'web_search_20250305', name: 'web_search', max_uses: 5 }],
+        messages: [{ role: 'user', content: frage }],
+      });
+      const bloecke = (antwort && antwort.content) || [];
+      const gesucht = bloecke.some(b => b.type === 'server_tool_use' || b.type === 'web_search_tool_result');
+      const daten = parseAIJson(bloecke.filter(b => b.type === 'text').map(b => b.text).join('\n')) || {};
+      if (!gesucht) {
+        setBusy(btn, false);
+        return toast('Die Websuche stand nicht zur Verfügung — der Proxy hat das Werkzeug nicht durchgereicht. '
+          + 'Ohne echte Recherche wird hier bewusst nichts vorgeschlagen.', 'error', 12000);
+      }
+      const mail = String(daten.email || '').trim().toLowerCase();
+      if (/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(mail)) {
+        funde.push({ rec: r, person, firma, email: mail,
+                     art: daten.art === 'person' ? 'person' : 'sammel',
+                     quelle: String(daten.quelle || ''), hinweis: String(daten.hinweis || '') });
+      }
+    } catch (e) { console.warn('[ZDB-Mail-KI]', e.message); }
+    setBusy(btn, true, (i + 1) + '/' + nehmen.length);
+  }
+  setBusy(btn, false);
+  if (!funde.length) return toast('Nichts Belegbares gefunden — es wurde nichts gespeichert.', 'warn', 8000);
+  _zdbMailFundeZeigen(funde);
+}
+
+function _zdbMailFundeZeigen(funde) {
+  window._ZDB_MAIL_FUNDE = funde;
+  let host = document.getElementById('subModalHost');
+  if (!host) { host = document.createElement('div'); host.id = 'subModalHost'; document.body.appendChild(host); }
+  const zeilen = funde.map((x, i) =>
+    '<label class="flex items-start gap-2 border border-ink-200 rounded-lg px-2 py-1.5 cursor-pointer hover:bg-ink-50">'
+    + '<input type="checkbox" data-mailfund="' + i + '"' + (x.art === 'person' ? ' checked' : '') + ' class="mt-1 w-4 h-4">'
+    + '<span class="flex-1 min-w-0">'
+      + '<span class="text-[12px] font-semibold text-ink-900">' + escapeHtml(x.person || '(ohne Namen)') + '</span>'
+      + (x.firma ? '<span class="text-[11px] text-ink-500"> · ' + escapeHtml(x.firma) + '</span>' : '')
+      + '<br><span class="text-[12px] font-mono text-brand-700">' + escapeHtml(x.email) + '</span> '
+      + (x.art === 'person'
+          ? '<span class="text-[10px] font-bold text-emerald-700">persönlich</span>'
+          : '<span class="text-[10px] font-bold text-amber-700">Sammeladresse</span>')
+      + (x.hinweis ? '<br><span class="text-[10px] text-ink-500">' + escapeHtml(x.hinweis) + '</span>' : '')
+    + '</span>'
+    + (x.quelle ? '<a href="' + escapeAttr(x.quelle) + '" target="_blank" rel="noopener" onclick="event.stopPropagation()" class="text-[10px] text-brand-600 hover:underline shrink-0">Quelle</a>' : '')
+    + '</label>').join('');
+  host.innerHTML =
+    '<div class="fixed inset-0 z-[75] bg-black/40 flex items-start justify-center overflow-y-auto p-4" onclick="if(event.target===this)document.getElementById(\'subModalHost\').innerHTML=\'\'">'
+    + '<div class="bg-white rounded-2xl shadow-xl w-full max-w-xl my-8">'
+      + '<div class="flex items-center justify-between p-4 border-b border-ink-200">'
+        + '<div><h3 class="font-bold text-ink-900">' + funde.length + ' Adressen gefunden</h3>'
+        + '<p class="text-[11px] text-ink-500">Ungeprüft — bitte Quellen ansehen, bevor du übernimmst</p></div>'
+        + '<button onclick="document.getElementById(\'subModalHost\').innerHTML=\'\'" class="text-ink-400 hover:text-ink-700"><i data-lucide="x" class="w-5 h-5"></i></button></div>'
+      + '<div class="p-4 space-y-1.5 max-h-[60vh] overflow-y-auto">' + zeilen + '</div>'
+      + '<div class="p-4 border-t border-ink-200 flex items-center gap-2">'
+        + '<p class="text-[10px] text-ink-500 flex-1">Sammeladressen sind bewusst nicht vorausgewählt — „info@" ist selten die gemeinte Person.</p>'
+        + '<button onclick="document.getElementById(\'subModalHost\').innerHTML=\'\'" class="px-3 py-2 rounded-lg text-[12px] font-bold bg-white border border-ink-300 text-ink-700">Verwerfen</button>'
+        + '<button onclick="_zdbMailFundeUebernehmen(this)" class="px-4 py-2 rounded-lg text-[12px] font-bold bg-emerald-600 hover:bg-emerald-700 text-white">Ausgewählte übernehmen</button>'
+      + '</div></div></div>';
+  if (window.lucide) lucide.createIcons();
+}
+
+async function _zdbMailFundeUebernehmen(btn) {
+  const funde = window._ZDB_MAIL_FUNDE || [];
+  const acc = _zdbCurrentAccount();
+  if (!acc) return;
+  const gewaehlt = Array.from(document.querySelectorAll('[data-mailfund]:checked'))
+    .map(el => funde[+el.getAttribute('data-mailfund')]).filter(Boolean);
+  if (!gewaehlt.length) return toast('Nichts ausgewählt.', 'warn', 4000);
+  const namen = _zdbTableNames(acc);
+  setBusy(btn, true, '0/' + gewaehlt.length);
+  let ok = 0, fehler = 0;
+  for (const x of gewaehlt) {
+    try {
+      await _zdbUpdateSafe(namen.kontakt, x.rec.id, {
+        email: x.email,
+        // Herkunft festhalten: Eine im Netz gefundene Adresse ist etwas anderes
+        // als eine, mit der jemand geschrieben hat.
+        sync_konflikt: '',
+        notiz: ((x.rec.fields || {}).notiz ? (x.rec.fields.notiz + ' · ') : '')
+          + 'E-Mail aus Internetrecherche' + (x.quelle ? ' (' + x.quelle.slice(0, 120) + ')' : ''),
+        updated_at: nowIso(),
+      });
+      x.rec.fields = Object.assign({}, x.rec.fields, { email: x.email });
+      ok++;
+    } catch (e) { fehler++; console.warn('[ZDB-Mail-KI] Speichern:', e.message); }
+    setBusy(btn, true, (ok + fehler) + '/' + gewaehlt.length);
+  }
+  setBusy(btn, false);
+  document.getElementById('subModalHost').innerHTML = '';
+  _zdbPaintView();
+  toast(ok + ' Adressen übernommen' + (fehler ? ' · ' + fehler + ' fehlgeschlagen' : '')
+    + ' · Herkunft in der Notiz vermerkt', fehler ? 'warn' : 'success', 8000);
+}
+
 /* ===== Markieren + Typ per KI in der zentralen DB (v3.1.0) ===============
    Dieselbe Bedienung wie im Korb: Häkchen je Zeile, „alle markieren", und ein
    Knopf, der auf die Markierten wirkt — oder auf alle sichtbaren, wenn nichts
@@ -44595,6 +44745,13 @@ function _zdbKontakteBody(d) {
         + (ohneTyp ? '<button onclick="_zdbTypKi(this)" class="px-2.5 py-1 rounded-lg text-[11px] font-bold bg-violet-600 hover:bg-violet-700 text-white inline-flex items-center gap-1" title="Kontakttyp aus Firmenname, Position und Domain ableiten — nur aus der gepflegten Liste, im Zweifel leer">'
             + '<i data-lucide="sparkles" class="w-3.5 h-3.5"></i> Typ per KI (' + ohneTyp + ' offen)</button>'
             : '<span class="text-[11px] text-ink-400 italic">alle haben einen Typ</span>')
+        + (() => {
+            const ohneMail = (markiert ? rows.filter(r => ZDB_AUSWAHL.has(r.id)) : rows)
+              .filter(r => !String((r.fields || {}).email || '').trim()).length;
+            if (!ohneMail) return '';
+            return '<button onclick="_zdbMailKi(this)" class="px-2.5 py-1 rounded-lg text-[11px] font-bold bg-white border border-violet-300 text-violet-700 hover:bg-violet-50 inline-flex items-center gap-1" title="Fehlende E-Mail-Adressen im Internet suchen — Funde werden zur Prüfung vorgelegt, nichts wird sofort gespeichert">'
+              + '<i data-lucide="mail-search" class="w-3.5 h-3.5"></i> E-Mail per KI (' + ohneMail + ' ohne)</button>';
+          })()
       + '</div>';
     })() +
     '<div class="overflow-x-auto"><table class="w-full text-[12px] border-collapse"><thead><tr><th class="border-b border-ink-200 bg-ink-50 w-8"></th><th class="border-b border-ink-200 bg-ink-50 w-8"></th>' + _zdbHeadCells(cols) + '</tr></thead><tbody>' + trs + '</tbody></table></div></div>';
