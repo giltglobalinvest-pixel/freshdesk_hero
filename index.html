@@ -824,7 +824,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v3.11.0';
+const APP_VERSION = 'v3.11.1';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -15460,32 +15460,40 @@ async function _kontaktSuche(begriff, accountId, max) {
     const m = String(email || '').trim().toLowerCase();
     if (!m || !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(m) || gesehen.has(m)) return;
     gesehen.add(m);
-    treffer.push({ name: String(name || '').trim(), email: m, zusatz: zusatz || '', quelle });
+    treffer.push({ name: String(name || '').trim(), email: m, zusatz: zusatz || '', quelle: quelle || '' });
   };
 
-  const lit = _zdbLit(q.toLowerCase());
-  for (const a of (APP_STATE.accounts || [])) {
-    if (treffer.length >= grenze) break;
-    if (!_zdbIsEnabled(a)) continue;
-    try {
-      const rows = await airtableRead(_zdbTableNames(a).kontakt, {
-        // FIND statt SEARCH: gleiche Wirkung, aber SEARCH liefert bei leerem
-        // Feld einen Fehler statt 0. Das &"" fängt leere Felder ab.
-        filter: 'OR(FIND(' + lit + ',LOWER({name}&"")),FIND(' + lit + ',LOWER({email}&"")),FIND(' + lit + ',LOWER({nachname}&"")))',
-        maxRecords: grenze, fields: ['name', 'vorname', 'nachname', 'email', 'position'],
-      });
-      (rows || []).forEach(r => {
-        const f = r.fields || {};
-        add(f.name || [f.vorname, f.nachname].filter(Boolean).join(' '), f.email,
-          [a.name || a.id, f.position].filter(Boolean).join(' · '), 'DB');
-      });
-    } catch (_) { /* Tabelle fehlt bei diesem Mandanten */ }
-  }
+  /* Zuerst die gemeinsame Suche über Freshdesk, zentrale DB UND Archiv.
+     Das Archiv ist die breiteste Quelle: Wer je geschrieben hat, steht dort —
+     auch wenn ihn weder der Freshdesk-Kontaktstamm noch die Stammdaten kennen.
+     Genau daran scheiterte die Suche nach „Baumgarten". */
+  try {
+    (await _kontaktSuchenAlleQuellen(accountId, q)).forEach(t =>
+      add(t.name, t.email, [t.quelle, t.zusatz].filter(Boolean).join(' · '), t.quelle));
+  } catch (e) { console.warn('[Empfängersuche]', e.message); }
 
-  if (treffer.length < grenze && accountId) {
-    try {
-      (await searchContactsByKeyword(accountId, q)).forEach(c => add(c.name, c.email, c._accountName, 'FD'));
-    } catch (_) {}
+  /* Danach die zentrale DB der ÜBRIGEN Mandanten. Die gemeinsame Suche sieht
+     nur den Mandanten des Tickets; ein Ansprechpartner steht aber oft in den
+     Stammdaten einer Schwesterfirma. */
+  if (treffer.length < grenze) {
+    const lit = _zdbLit(q.toLowerCase());
+    for (const a of (APP_STATE.accounts || [])) {
+      if (treffer.length >= grenze) break;
+      if (String(a.id) === String(accountId)) continue;
+      try {
+        const rows = await airtableRead(_zdbTableNames(a).kontakt, {
+          // FIND statt SEARCH: gleiche Wirkung, aber SEARCH bricht bei leerem
+          // Feld ab. Das &"" fängt leere Felder ab.
+          filter: 'OR(FIND(' + lit + ',LOWER({nachname}&"")),FIND(' + lit + ',LOWER({vorname}&"")),FIND(' + lit + ',LOWER({email}&"")))',
+          maxRecords: grenze, fields: ['name', 'vorname', 'nachname', 'email', 'position'],
+        });
+        (rows || []).forEach(r => {
+          const f = r.fields || {};
+          add(f.name || [f.vorname, f.nachname].filter(Boolean).join(' '), f.email,
+            ['zentrale DB', a.name || a.id, f.position].filter(Boolean).join(' · '), 'zentrale DB');
+        });
+      } catch (_) { /* Tabelle bei diesem Mandanten nicht angelegt */ }
+    }
   }
   return treffer.slice(0, grenze);
 }
