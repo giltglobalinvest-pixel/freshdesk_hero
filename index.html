@@ -827,7 +827,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v3.20.0';
+const APP_VERSION = 'v3.20.1';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -17934,29 +17934,59 @@ async function _akteSammeln(btn) {
   s.vorgaenge = []; s.bericht = '';
   const ids = new Map();
   try {
-    for (const w of worte) {
-      _akteZeichnen('Suche nach „' + escapeHtml(w) + '" …');
-      // Nach Datum sortiert, nicht nach Textrelevanz: Eine Akte ist eine
-      // Zeitfrage, und die 100 Treffer sollen die jüngsten sein.
-      const p = new URLSearchParams({ q: w, limit: '100', mandant: s.slug, sort: 'datum' });
-      if (s.von) p.set('von', s.von);
-      if (s.bis) p.set('bis', s.bis);
+    /* Das Archiv liefert je Anfrage höchstens 100 Treffer und kennt kein
+       Blättern. Bei einem Kunden mit vielen Vorgängen fiel damit alles Ältere
+       heraus — die Vereinbarung vom Januar war schlicht nicht dabei.
+
+       Deshalb wird der Zeitraum halbiert, sobald eine Anfrage ans Limit stößt:
+       Wer 100 zurückbekommt, hat vermutlich mehr, und die beiden Hälften
+       werden einzeln gefragt. Bei wenigen Treffern bleibt es bei einer
+       Anfrage — geteilt wird nur dort, wo es nötig ist. */
+    const vonStd = s.von || '2015-01-01';
+    const bisStd = s.bis || new Date().toISOString().slice(0, 10);
+    let anfragen = 0;
+    const holen = async (wort, von, bis, tiefe) => {
+      anfragen++;
+      _akteZeichnen('Suche „' + escapeHtml(wort) + '" · ' + von + ' bis ' + bis + ' … (' + ids.size + ' Vorgänge)');
+      const p = new URLSearchParams({ q: wort, limit: '100', mandant: s.slug, sort: 'datum', von, bis: bis + 'T23:59:59Z' });
       const res = await fetch(ARCHIV_URL + '/suche?' + p.toString(), { headers: { 'X-Hero-Key': key } });
-      if (!res.ok) { console.warn('[Akte] Suche', w, res.status); continue; }
+      if (!res.ok) { console.warn('[Akte] Suche', wort, von, res.status); return; }
       const d = await res.json();
+      let anzahl = 0;
       (d.ergebnisse || []).forEach(e => (e.treffer || e.tickets || []).forEach(t => {
+        anzahl++;
         if (t && t.id != null && !ids.has(String(t.id))) ids.set(String(t.id), t);
       }));
-    }
+      // Volles Ergebnis heißt: da war vermutlich mehr. Zeitraum teilen.
+      if (anzahl >= 100 && tiefe < 7) {
+        const a = new Date(von + 'T00:00:00Z').getTime();
+        const b = new Date(bis + 'T00:00:00Z').getTime();
+        if (b - a > 86400000) {
+          const mitte = new Date(a + Math.floor((b - a) / 2)).toISOString().slice(0, 10);
+          await holen(wort, von, mitte, tiefe + 1);
+          await holen(wort, mitte, bis, tiefe + 1);
+        }
+      }
+    };
+    for (const w of worte) await holen(w, vonStd, bisStd, 0);
+    console.log('[Akte] ' + anfragen + ' Archiv-Anfragen, ' + ids.size + ' Vorgänge');
     const liste = [...ids.values()];
     if (!liste.length) {
       setBusy(btn, false);
       return _akteZeichnen('<span class="text-amber-700">Keine Vorgänge gefunden. Andere Schreibweise oder Zeitraum versuchen.</span>');
     }
-    // Vollständig laden — einzeln, mit Fortschritt.
-    for (let i = 0; i < liste.length && i < 60; i++) {
-      _akteZeichnen('Lade Vorgang ' + (i + 1) + '/' + Math.min(liste.length, 60) + ' …');
-      setBusy(btn, true, (i + 1) + '/' + Math.min(liste.length, 60));
+    /* Vollständig laden — einzeln, mit Fortschritt. Gedeckelt, weil jede Datei
+       einen eigenen Abruf kostet; wird gekappt, steht es unten ausdrücklich da,
+       statt dass die Akte still unvollständig bleibt. */
+    const GRENZE = 120;
+    liste.sort((a, b) => String(a.erstellt_am || '').localeCompare(String(b.erstellt_am || '')));
+    if (liste.length > GRENZE) {
+      toast(liste.length + ' Vorgänge gefunden — geladen werden die ' + GRENZE + ' ältesten. '
+        + 'Für den Rest den Zeitraum eingrenzen.', 'warn', 12000);
+    }
+    for (let i = 0; i < liste.length && i < GRENZE; i++) {
+      _akteZeichnen('Lade Vorgang ' + (i + 1) + '/' + Math.min(liste.length, GRENZE) + ' …');
+      setBusy(btn, true, (i + 1) + '/' + Math.min(liste.length, GRENZE));
       try {
         const r = await fetch(ARCHIV_URL + '/ticket/' + s.slug + '/' + encodeURIComponent(liste[i].id), { headers: { 'X-Hero-Key': key } });
         if (r.ok) s.vorgaenge.push(await r.json());
