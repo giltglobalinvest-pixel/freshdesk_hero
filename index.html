@@ -824,7 +824,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v3.18.1';
+const APP_VERSION = 'v3.18.2';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -47379,12 +47379,17 @@ function _ccTypFilter(alle) {
 function _ccStatusFilter(basis) {
   const zaehl = {};
   basis.forEach(r => { const st = _ccStatusVon(r); zaehl[st] = (zaehl[st] || 0) + 1; });
-  const keys = Object.keys(CC_STATUS).filter(k => zaehl[k]);
-  if (keys.length < 2) return '';
+  /* ALLE Status zeigen, auch die mit null Treffern. Anders als bei Quellen und
+     Typen ist das hier ein festes, kurzes Vokabular — „kein Interesse (0)" ist
+     eine Auskunft und kein Rauschen. Leere Einträge sind gesperrt, damit
+     niemand in eine leere Liste filtert. */
   return '<select onchange="_ccStatusWahl(this.value)" class="px-2.5 py-1.5 border border-ink-200 rounded-lg text-[12px] bg-white font-semibold text-ink-700" title="Nach Status filtern">'
     + '<option value="">Alle Status (' + basis.length + ')</option>'
-    + keys.map(k => '<option value="' + escapeAttr(k) + '"' + (CC_STATE.status === k ? ' selected' : '') + '>'
-        + escapeHtml(CC_STATUS[k].label) + ' (' + zaehl[k] + ')</option>').join('')
+    + Object.keys(CC_STATUS).map(k => {
+        const n = zaehl[k] || 0;
+        return '<option value="' + escapeAttr(k) + '"' + (CC_STATE.status === k ? ' selected' : '')
+          + (n ? '' : ' disabled') + '>' + escapeHtml(CC_STATUS[k].label) + ' (' + n + ')</option>';
+      }).join('')
     + '</select>';
 }
 
