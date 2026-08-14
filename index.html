@@ -824,7 +824,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v3.17.0';
+const APP_VERSION = 'v3.17.1';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -33657,6 +33657,9 @@ async function _erpMehrfachAnalyse(accountId, ticketId, t, melden) {
       + '\nDeren Inhalt bekommst du gleich einzeln — hier nur den Text auswerten.',
   });
   const anlagen = (basis.anlagen || []).map(a => Object.assign({}, a));
+  let kunde = Object.assign({}, basis.kunde || {});
+  let kontakt = Object.assign({}, basis.kontakt || {});
+  if (_erpKundeBrauchbar(kunde)) kunde._quelle = 'Anfrage';
 
   /* ── Schritt 2: Anhang für Anhang ─────────────────────────────────────
      Alle Dateien in einem Aufruf sprengten die Grenze des Modells (204 536
@@ -33672,8 +33675,17 @@ async function _erpMehrfachAnalyse(accountId, ticketId, t, melden) {
     + '1. Die Nummer heißt je nach Dokument „Fabriknummer", „Fabrik-Nr.", „Werk-Nr.", „Anlagennummer", „Equipmentnummer", „Seriennummer", „ID-Nr." — alle meinen dasselbe.\n'
     + '2. Vertrags-, Rechnungs-, Angebots-, Kunden- und Auftragsnummern sind KEINE Fabriknummern.\n'
     + '3. Adresse so vollständig, wie sie im Dokument steht (Straße Hausnummer, PLZ Ort).\n'
-    + '4. Steht keine Fabriknummer drin, antworte mit leerer Liste. Nichts erfinden, nichts raten.\n\n'
-    + 'ANTWORTE NUR MIT JSON: {"treffer":[{"adresse":"…","fabriknummer":"…","hinweis":"z.B. Fabrikat"}]}';
+    + '4. Steht keine Fabriknummer drin, gib eine leere Liste zurück. Nichts erfinden, nichts raten.\n\n'
+    + 'AUSSERDEM: DER BETREIBER (Kunde).\n'
+    + 'In einem Wartungsvertrag stehen ZWEI Seiten: die Aufzugsfirma (Auftragnehmer) und der Betreiber/Eigentümer (Auftraggeber).\n'
+    + 'a) Gesucht ist der BETREIBER — der Auftraggeber, Vertragspartner, Eigentümer oder die Hausverwaltung, die den Vertrag abschließt.\n'
+    + 'b) NICHT die Aufzugsfirma: Schindler, KONE, Otis, ThyssenKrupp/TK Elevator, Aszendio und Ähnliche sind Auftragnehmer, niemals der Kunde.\n'
+    + 'c) „firmenname" ist der Name, unter dem der Betreiber Rechnungen bekommt. Rollenwörter („Eigentümer", „Hausverwaltung", „WEG", „Betreiber") sind KEINE Firmennamen — dann das Feld leer lassen.\n'
+    + 'd) „adresse" ist die POSTANSCHRIFT des Betreibers, nicht der Standort des Aufzugs.\n'
+    + 'e) Steht im Dokument kein Betreiber, lass die Felder leer.\n\n'
+    + 'ANTWORTE NUR MIT JSON: {"treffer":[{"adresse":"…","fabriknummer":"…","hinweis":"z.B. Fabrikat"}],'
+    + '"kunde":{"firmenname":"…","adresse":"…","email":"…","telefon":"…"},'
+    + '"kontakt":{"anrede":"Herr|Frau|","vorname":"…","nachname":"…","email":"…","telefon":"…","position":"…"}}';
 
   for (let i = 0; i < dateien.length; i++) {
     const d = dateien[i];
@@ -33693,6 +33705,16 @@ async function _erpMehrfachAnalyse(accountId, ticketId, t, melden) {
       });
       const treffer = Array.isArray(r.treffer) ? r.treffer : [];
       treffer.forEach(x => _erpAnlageEinsortieren(anlagen, x, d.name));
+      /* Betreiber aus dem Vertrag. Der Mailtext nennt oft nur eine Rolle
+         („Eigentümer") oder gar nichts — im Wartungsvertrag steht der
+         Vertragspartner dagegen ausgeschrieben, mit Anschrift. Übernommen wird
+         nur, was der Text nicht schon brauchbar geliefert hat. */
+      if (!_erpKundeBrauchbar(kunde) && _erpKundeBrauchbar(r.kunde)) {
+        kunde = Object.assign({}, r.kunde, { _quelle: d.name });
+      }
+      if (!kontakt.nachname && r.kontakt && String(r.kontakt.nachname || '').trim()) {
+        kontakt = Object.assign({}, r.kontakt, { _quelle: d.name });
+      }
       gelesen.push(d.name);
     } catch (e) {
       const msg = String((e && e.message) || e);
@@ -33702,10 +33724,20 @@ async function _erpMehrfachAnalyse(accountId, ticketId, t, melden) {
     }
   }
 
-  return {
-    kunde: basis.kunde || {}, kontakt: basis.kontakt || {},
-    anlagen, _dateien: gelesen, _uebersprungen: uebersprungen,
-  };
+  return { kunde, kontakt, anlagen, _dateien: gelesen, _uebersprungen: uebersprungen };
+}
+
+/* Taugt das, was die KI als Kunde geliefert hat? Ein Rollenwort taugt nicht,
+   und der Name einer Aufzugsfirma erst recht nicht — in einem Wartungsvertrag
+   steht sie als Auftragnehmerin, nicht als Kundin. Genau dieser Verwechslung
+   verdankt sich sonst ein ERP-Kunde namens „Schindler". */
+const _ERP_AUFZUGSFIRMEN = /\b(schindler|kone|otis|thyssen ?krupp|tk ?elevator|aszendio|orona|liftec|osma|hütter|huetter)\b/i;
+function _erpKundeBrauchbar(k) {
+  const name = String((k && k.firmenname) || '').trim();
+  if (name.length < 3) return false;
+  if (_ERP_AUFZUGSFIRMEN.test(name)) return false;
+  if (typeof _zdbIstRolleKeineFirma === 'function' && _zdbIstRolleKeineFirma(name)) return false;
+  return true;
 }
 
 /* Ein Fund aus einem Dokument in die Liste einsortieren: bevorzugt in eine
@@ -33865,9 +33897,14 @@ function _erpMehrfachKundeBlock(s, kv) {
   // 3 · Suche — Startzustand, vorbelegt mit dem Namen aus dem Ticket
   const term = s.kundeSuche != null ? s.kundeSuche : (kv.firmenname || '');
   const treffer = _erpKundenSuchen(s.kunden, term);
+  const herkunft = kv.firmenname
+    ? '<p class="text-[10px] text-ink-500">Aus dem Ticket gelesen: <b>' + escapeHtml(kv.firmenname) + '</b>'
+      + (kv._quelle ? ' <span class="text-ink-400">(' + escapeHtml(kv._quelle) + ')</span>' : '') + '</p>'
+    : '<p class="text-[10px] text-amber-700">Kein verwertbarer Kundenname gefunden — in Anfrage und Anhängen stand nur eine Rolle oder die Aufzugsfirma. Bitte selbst suchen.</p>';
   const vorschlag = s.kunde && !s.kundeBestaetigt ? s.kunde : null;
   return '<div class="border border-ink-200 rounded-xl p-3 space-y-2">'
     + '<p class="text-[10px] uppercase font-semibold text-ink-600">Kunde im ERP suchen und bestätigen</p>'
+    + herkunft
     + (vorschlag
         ? '<div class="rounded-lg border border-emerald-200 bg-emerald-50/60 p-2">'
           + '<p class="text-[11px] font-semibold text-emerald-900 mb-1">Vorschlag aus dem Ticket:</p>'
