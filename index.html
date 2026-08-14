@@ -824,7 +824,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v3.18.0';
+const APP_VERSION = 'v3.18.1';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -47027,6 +47027,7 @@ function _ccSichtbar() {
   else if (CC_STATE.filter === 'interessiert') l = l.filter(r => _ccStatusVon(r) === 'interessiert');
   if (CC_STATE.quelle) l = l.filter(r => String(r.quelle || '').toLowerCase() === CC_STATE.quelle);
   if (CC_STATE.typ) l = l.filter(r => String(r.typ || '') === CC_STATE.typ);
+  if (CC_STATE.status) l = l.filter(r => _ccStatusVon(r) === CC_STATE.status);
   if (CC_STATE.ohneBestand) l = l.filter(r => String(r.bestand || '') !== 'ja');
   // Auffällige Zeilen gezielt herausgreifen — sie sind der Aufräumvorrat.
   if (CC_STATE.nurFehler) l = l.filter(r => !!_ccZeileFehlerhaft(r));
@@ -47092,6 +47093,7 @@ function _ccZeichnen() {
       + reiter('offen', 'Zu tun', offen) + reiter('interessiert', 'Interessiert', interessiert) + reiter('alle', 'Alle', alle.length)
       + _ccQuellenFilter(alle)
       + _ccTypFilter(alle)
+      + _ccStatusFilter(alle)
       + (CC_STATE.typ ? '<button onclick="_ccTypAusblenden(this)" class="px-2.5 py-1.5 rounded-lg text-[11px] font-bold bg-white border border-ink-300 text-ink-600 hover:bg-ink-50" title="Alle dieses Typs aus der Kampagne nehmen">Typ ausblenden</button>' : '')
       + (APP_KEYS.user?.is_admin ? '<button onclick="_ccTypenVerwalten()" class="px-2 py-1.5 rounded-lg text-[11px] bg-white border border-ink-200 text-ink-500 hover:bg-ink-50" title="Kontakttypen verwalten"><i data-lucide="settings-2" class="w-3.5 h-3.5"></i></button>' : '')
       + (alle.some(r => String(r.bestand || '') === 'ja')
@@ -47215,6 +47217,7 @@ function _ccZustandMerken() {
       filter: CC_STATE.filter || 'offen',
       quelle: CC_STATE.quelle || '',
       typ: CC_STATE.typ || '',
+      status: CC_STATE.status || '',
       ohneBestand: !!CC_STATE.ohneBestand,
       nurMitNummer: !!CC_STATE.nurMitNummer,
       zeigeVersteckte: !!CC_STATE.zeigeVersteckte,
@@ -47237,6 +47240,7 @@ function _ccZustandHolen() {
     CC_STATE.filter = g.filter || 'offen';
     CC_STATE.quelle = g.quelle || '';
     CC_STATE.typ = g.typ || '';
+    CC_STATE.status = g.status || '';
     CC_STATE.ohneBestand = !!g.ohneBestand;
     CC_STATE.nurMitNummer = !!g.nurMitNummer;
     CC_STATE.zeigeVersteckte = !!g.zeigeVersteckte;
@@ -47362,6 +47366,38 @@ function _ccTypFilter(alle) {
     + keys.map(t => '<option value="' + escapeAttr(t === '—' ? '' : t) + '"' + (CC_STATE.typ === t ? ' selected' : '') + '>'
         + escapeHtml(t === '—' ? 'ohne Typ' : t) + ' (' + zaehl[t] + ')</option>').join('')
     + '</select>';
+}
+
+/* Statusfilter. Die Reiter oben fassen zusammen („Zu tun" = offen, Rückruf und
+   nicht erreicht), das reicht zum Abarbeiten. Wer aber sehen will, wie viele
+   „kein Interesse" gesagt haben oder welche Nummern falsch waren, braucht den
+   einzelnen Status — und zwar mit Anzahl, sonst filtert man ins Leere.
+
+   Gezählt wird auf dem Stand VOR dem Statusfilter, aber nach allen anderen:
+   Sonst zeigte die Liste beim Umschalten Zahlen, die es unter dem aktuellen
+   Typ- oder Quellenfilter gar nicht gibt. */
+function _ccStatusFilter(basis) {
+  const zaehl = {};
+  basis.forEach(r => { const st = _ccStatusVon(r); zaehl[st] = (zaehl[st] || 0) + 1; });
+  const keys = Object.keys(CC_STATUS).filter(k => zaehl[k]);
+  if (keys.length < 2) return '';
+  return '<select onchange="_ccStatusWahl(this.value)" class="px-2.5 py-1.5 border border-ink-200 rounded-lg text-[12px] bg-white font-semibold text-ink-700" title="Nach Status filtern">'
+    + '<option value="">Alle Status (' + basis.length + ')</option>'
+    + keys.map(k => '<option value="' + escapeAttr(k) + '"' + (CC_STATE.status === k ? ' selected' : '') + '>'
+        + escapeHtml(CC_STATUS[k].label) + ' (' + zaehl[k] + ')</option>').join('')
+    + '</select>';
+}
+
+function _ccStatusWahl(v) {
+  CC_STATE.status = v || '';
+  /* „Zu tun" zeigt nur offen/Rückruf/nicht erreicht. Wer dort gezielt nach
+     „kein Interesse" filtert, bekäme eine leere Liste — deshalb schaltet die
+     Auswahl auf „Alle" um, wenn der gewählte Status dort nicht vorkommt. */
+  if (v && CC_STATE.filter === 'offen' && !['offen', 'rueckruf', 'kein_kontakt'].includes(v)) CC_STATE.filter = 'alle';
+  if (v && CC_STATE.filter === 'interessiert' && v !== 'interessiert') CC_STATE.filter = 'alle';
+  CC_STATE.aktiv = null;
+  _ccZustandMerken();
+  _ccZeichnen();
 }
 
 /* Kampagnenwahl. Eine Anrufliste ist eine Kampagne — mehrere nebeneinander sind
