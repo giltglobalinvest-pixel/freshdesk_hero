@@ -827,7 +827,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v3.20.1';
+const APP_VERSION = 'v3.20.2';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -17832,8 +17832,9 @@ function _akteZeichnen(status) {
         + '<button onclick="closeKundenakte()" class="text-ink-400 hover:text-ink-700"><i data-lucide="x" class="w-5 h-5"></i></button></div>'
       + '<div class="p-4 space-y-3">'
         + '<div class="grid grid-cols-1 sm:grid-cols-2 gap-2">'
-          + '<label class="block sm:col-span-2"><span class="text-[11px] font-semibold text-ink-700">Suchbegriffe — Firmennamen, Schreibweisen, Domains (mit Komma trennen)</span>'
-            + '<input id="akteBegriffe" value="' + escapeAttr(s.begriffe) + '" placeholder="Digital Spine, Aufzugshelden, @aufzugshelden.de" class="w-full mt-0.5 px-2.5 py-1.5 border border-ink-300 rounded-lg text-sm"></label>'
+          + '<label class="block sm:col-span-2"><span class="text-[11px] font-semibold text-ink-700">Suchbegriffe — je Zeile ein eigener Suchlauf (mit Komma trennen)</span>'
+            + '<input id="akteBegriffe" value="' + escapeAttr(s.begriffe) + '" placeholder="Aufzugshelden, Digital Spine, aufzugshelden.de, Wartungsvertrag" class="w-full mt-0.5 px-2.5 py-1.5 border border-ink-300 rounded-lg text-sm">'
+            + '<span class="text-[10px] text-ink-500">Mehrere Wörter in einem Begriff werden mit UND gesucht — „Digital Spine" findet nur Vorgänge mit <b>beiden</b> Wörtern. Einzelne Namen und die Domain zusätzlich eintragen.</span></label>'
           + '<label class="block"><span class="text-[11px] font-semibold text-ink-700">Person (optional)</span>'
             + '<input id="aktePerson" value="' + escapeAttr(s.person) + '" placeholder="Fichtner" class="w-full mt-0.5 px-2.5 py-1.5 border border-ink-300 rounded-lg text-sm"></label>'
           + '<label class="block"><span class="text-[11px] font-semibold text-ink-700">Mandant</span>'
@@ -17973,7 +17974,31 @@ async function _akteSammeln(btn) {
     const liste = [...ids.values()];
     if (!liste.length) {
       setBusy(btn, false);
-      return _akteZeichnen('<span class="text-amber-700">Keine Vorgänge gefunden. Andere Schreibweise oder Zeitraum versuchen.</span>');
+      /* Kein Treffer hat zwei völlig verschiedene Ursachen, und ohne sie zu
+         trennen sucht man an der falschen Stelle weiter: Entweder die Wörter
+         passen nicht — oder das Archiv reicht gar nicht so weit. Der Dienst
+         kennt seinen eigenen Stand, also wird er gefragt. */
+      let hinweis = '';
+      try {
+        const st = await fetch(ARCHIV_URL + '/status', { headers: { 'X-Hero-Key': key } });
+        if (st.ok) {
+          const d = await st.json();
+          const m = (d.mandanten || []).find(x => x.mandant === s.slug);
+          if (m) {
+            hinweis = '<br><span class="text-ink-600">Archivstand ' + escapeHtml(m.name || m.mandant) + ': '
+              + (m.tickets || 0) + ' Vorgänge, neuester vom '
+              + escapeHtml(String(m.neuestes || '?').slice(0, 10)) + '.</span>';
+            if (s.von && m.neuestes && String(m.neuestes).slice(0, 10) < s.von) {
+              hinweis += '<br><span class="text-amber-800 font-semibold">Der gewählte Zeitraum liegt NACH dem letzten archivierten Vorgang — '
+                + 'das Archiv ist für diesen Zeitraum noch nicht gefüllt.</span>';
+            }
+          }
+        }
+      } catch (_) {}
+      return _akteZeichnen('<span class="text-amber-700">Keine Vorgänge gefunden.</span>'
+        + '<br><span class="text-ink-600">Die Wörter werden mit UND verknüpft — „Digital Spine" sucht Vorgänge, '
+        + 'die <b>beide</b> Wörter enthalten. Einzeln suchen („Aufzugshelden") findet mehr. '
+        + 'Auch die E-Mail-Domain und Sachbegriffe wie „Wartungsvertrag" versuchen.</span>' + hinweis);
     }
     /* Vollständig laden — einzeln, mit Fortschritt. Gedeckelt, weil jede Datei
        einen eigenen Abruf kostet; wird gekappt, steht es unten ausdrücklich da,
@@ -17994,7 +18019,14 @@ async function _akteSammeln(btn) {
     }
     s.vorgaenge.sort((a, b) => String(a.erstellt_am || '').localeCompare(String(b.erstellt_am || '')));
     setBusy(btn, false);
-    _akteZeichnen('<span class="text-emerald-700">' + s.vorgaenge.length + ' Vorgänge geladen.</span>');
+    /* Zeitspanne mitmelden: Wer eine Vereinbarung vom Januar sucht und hier
+       „ältester Vorgang: März" liest, weiß sofort, dass die Suchwörter nicht
+       passen — statt die Akte für vollständig zu halten. */
+    const aeltest = String(s.vorgaenge[0]?.erstellt_am || '').slice(0, 10);
+    const neuest = String(s.vorgaenge[s.vorgaenge.length - 1]?.erstellt_am || '').slice(0, 10);
+    _akteZeichnen('<span class="text-emerald-700">' + s.vorgaenge.length + ' Vorgänge geladen'
+      + (aeltest ? ' · von ' + escapeHtml(aeltest) + ' bis ' + escapeHtml(neuest) : '') + '.</span>'
+      + (ids.size > s.vorgaenge.length ? '<br><span class="text-amber-700">' + ids.size + ' gefunden, ' + s.vorgaenge.length + ' geladen.</span>' : ''));
   } catch (e) {
     setBusy(btn, false);
     _akteZeichnen('<span class="text-red-700">' + escapeHtml(e.message || String(e)) + '</span>');
