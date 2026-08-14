@@ -707,6 +707,9 @@
     <button onclick="navTo('stellungnahmen'); closeMenu();" class="w-full text-left px-3 py-2 text-sm hover:bg-ink-50 flex items-center gap-2">
       <i data-lucide="file-text" class="w-4 h-4 text-emerald-500"></i> Stellungnahmen
     </button>
+    <button onclick="openKundenakte(); closeMenu();" class="w-full text-left px-3 py-2 text-sm hover:bg-ink-50 flex items-center gap-2">
+      <i data-lucide="folder-search" class="w-4 h-4 text-rose-500"></i> Kundenakte (Archiv)
+    </button>
     <button onclick="openPositionskatalog(); closeMenu();" class="w-full text-left px-3 py-2 text-sm hover:bg-ink-50 flex items-center gap-2">
       <i data-lucide="book-marked" class="w-4 h-4 text-amber-500"></i> Positionskatalog
     </button>
@@ -824,7 +827,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v3.18.2';
+const APP_VERSION = 'v3.19.0';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -17786,6 +17789,238 @@ async function runSearch(useAI) {
   // aus „letzte Bestellung von KONE" nur „KONE" ans Archiv — zurück kam alles,
   // was je eine kone.com-Adresse enthielt, sortiert nach Worthäufigkeit.
   _archivSucheAnzeigen(raw, keyword);
+}
+
+/* ===================== KUNDENAKTE (v3.19.0) ==============================
+   Wenn ein Vorgang streitig wird, zählt nicht die Erinnerung, sondern was
+   wann geschrieben wurde. Freshdesk kann das nicht liefern: Seine Suche greift
+   nur auf die Erstnachricht und deckelt bei 300 Treffern. Das Archiv hat den
+   Volltext aller Nachrichten — hier wird er zu einer Akte.
+
+   Der Ablauf ist bewusst zweistufig: erst SAMMELN (nachvollziehbar, jeder
+   Vorgang mit Nummer und Datum), dann AUSWERTEN. Wer eine Akte an den Anwalt
+   gibt, muss die Rohdaten danebenlegen können — eine KI-Zusammenfassung ohne
+   Belege ist vor Gericht nichts wert. */
+let AKTE = null;
+
+function openKundenakte() {
+  const acc = (APP_STATE.accounts || []).find(a => String(a.id) === String(APP_STATE.currentAccount))
+    || (APP_STATE.accounts || [])[0] || null;
+  AKTE = AKTE || { begriffe: '', person: '', von: '', bis: '', slug: _archivSlugFuer(acc && acc.id) || '', vorgaenge: [], bericht: '' };
+  _akteZeichnen();
+}
+
+function _akteHost() {
+  let h = document.getElementById('akteHost');
+  if (!h) { h = document.createElement('div'); h.id = 'akteHost'; document.body.appendChild(h); }
+  return h;
+}
+function closeKundenakte() { const h = document.getElementById('akteHost'); if (h) h.innerHTML = ''; }
+
+function _akteZeichnen(status) {
+  const s = AKTE;
+  const host = _akteHost();
+  if (!s) return;
+  const slugs = (APP_STATE.accounts || []).map(a => ({ slug: _archivSlugFuer(a.id), name: a.name || a.id }))
+    .filter(x => x.slug);
+  host.innerHTML =
+    '<div class="fixed inset-0 z-[80] bg-black/40 flex items-start justify-center overflow-y-auto p-4" onclick="if(event.target===this)closeKundenakte()">'
+    + '<div class="bg-white rounded-2xl shadow-xl w-full max-w-3xl my-8">'
+      + '<div class="flex items-center justify-between p-4 border-b border-ink-200">'
+        + '<div><h3 class="font-bold text-ink-900 inline-flex items-center gap-2"><i data-lucide="folder-search" class="w-5 h-5 text-rose-600"></i> Kundenakte aus dem Archiv</h3>'
+        + '<p class="text-[11px] text-ink-500">Alle Vorgänge zu einem Kunden — chronologisch, mit Belegstellen</p></div>'
+        + '<button onclick="closeKundenakte()" class="text-ink-400 hover:text-ink-700"><i data-lucide="x" class="w-5 h-5"></i></button></div>'
+      + '<div class="p-4 space-y-3">'
+        + '<div class="grid grid-cols-1 sm:grid-cols-2 gap-2">'
+          + '<label class="block sm:col-span-2"><span class="text-[11px] font-semibold text-ink-700">Suchbegriffe — Firmennamen, Schreibweisen, Domains (mit Komma trennen)</span>'
+            + '<input id="akteBegriffe" value="' + escapeAttr(s.begriffe) + '" placeholder="Digital Spine, Aufzugshelden, @aufzugshelden.de" class="w-full mt-0.5 px-2.5 py-1.5 border border-ink-300 rounded-lg text-sm"></label>'
+          + '<label class="block"><span class="text-[11px] font-semibold text-ink-700">Person (optional)</span>'
+            + '<input id="aktePerson" value="' + escapeAttr(s.person) + '" placeholder="Fichtner" class="w-full mt-0.5 px-2.5 py-1.5 border border-ink-300 rounded-lg text-sm"></label>'
+          + '<label class="block"><span class="text-[11px] font-semibold text-ink-700">Mandant</span>'
+            + '<select id="akteSlug" class="w-full mt-0.5 px-2.5 py-1.5 border border-ink-300 rounded-lg text-sm bg-white">'
+              + slugs.map(x => '<option value="' + escapeAttr(x.slug) + '"' + (x.slug === s.slug ? ' selected' : '') + '>' + escapeHtml(x.name) + '</option>').join('')
+            + '</select></label>'
+          + '<label class="block"><span class="text-[11px] font-semibold text-ink-700">von (optional)</span>'
+            + '<input id="akteVon" type="date" value="' + escapeAttr(s.von) + '" class="w-full mt-0.5 px-2.5 py-1.5 border border-ink-300 rounded-lg text-sm"></label>'
+          + '<label class="block"><span class="text-[11px] font-semibold text-ink-700">bis (optional)</span>'
+            + '<input id="akteBis" type="date" value="' + escapeAttr(s.bis) + '" class="w-full mt-0.5 px-2.5 py-1.5 border border-ink-300 rounded-lg text-sm"></label>'
+        + '</div>'
+        + '<button onclick="_akteSammeln(this)" class="w-full px-3 py-2 rounded-lg text-[13px] font-bold bg-rose-600 hover:bg-rose-700 text-white inline-flex items-center justify-center gap-1.5"><i data-lucide="search" class="w-4 h-4"></i> Vorgänge sammeln</button>'
+        + (status ? '<div class="text-[12px] text-ink-600">' + status + '</div>' : '')
+        + (s.vorgaenge.length
+            ? '<div class="rounded-xl border border-ink-200">'
+              + '<div class="flex items-center justify-between px-3 py-2 border-b border-ink-200 bg-ink-50">'
+                + '<b class="text-[12px] text-ink-800">' + s.vorgaenge.length + ' Vorgänge · '
+                + s.vorgaenge.reduce((n, v) => n + (v.nachrichten || []).length, 0) + ' Nachrichten</b>'
+                + '<div class="flex gap-2">'
+                  + '<button onclick="_akteExport()" class="px-2.5 py-1 rounded-lg text-[11px] font-bold bg-white border border-ink-300 text-ink-700 hover:bg-ink-50">Akte laden (.md)</button>'
+                  + '<button onclick="_akteAuswerten(this)" class="px-2.5 py-1 rounded-lg text-[11px] font-bold bg-violet-600 hover:bg-violet-700 text-white">Auswerten (KI)</button>'
+                + '</div></div>'
+              + '<div class="max-h-72 overflow-y-auto divide-y divide-ink-100">'
+                + s.vorgaenge.map(v => '<div class="px-3 py-2">'
+                    + '<p class="text-[12px] font-semibold text-ink-900">#' + escapeHtml(String(v.id)) + ' · ' + escapeHtml(String(v.erstellt_am || '').slice(0, 10)) + ' · ' + escapeHtml(v.betreff || '(ohne Betreff)') + '</p>'
+                    + '<p class="text-[11px] text-ink-500">' + escapeHtml(v.absender_email || '') + ' · ' + ((v.nachrichten || []).length) + ' Nachrichten</p>'
+                  + '</div>').join('')
+              + '</div></div>'
+            : '')
+        + (s.bericht
+            ? '<div class="rounded-xl border border-violet-300 bg-violet-50/50 p-3">'
+              + '<div class="flex items-center justify-between mb-1">'
+                + '<b class="text-[12px] text-violet-900">Auswertung</b>'
+                + '<button onclick="_akteBerichtKopieren(this)" class="px-2.5 py-1 rounded-lg text-[11px] font-bold bg-white border border-violet-300 text-violet-700">Kopieren</button></div>'
+              + '<div class="bg-white rounded-lg border border-violet-200 p-3 text-[12px] whitespace-pre-wrap max-h-96 overflow-y-auto">' + escapeHtml(s.bericht) + '</div></div>'
+            : '')
+      + '</div></div></div>';
+  if (window.lucide) lucide.createIcons();
+}
+
+/* Sammeln: je Suchbegriff das Archiv fragen, Treffer zusammenführen, dann jeden
+   Vorgang VOLLSTÄNDIG holen. Der Volltext ist der Punkt — die Trefferliste
+   allein sagt nicht, was zugesagt oder angekündigt wurde. */
+async function _akteSammeln(btn) {
+  const s = AKTE;
+  const key = APP_KEYS.user?.api_key;
+  if (!key) return toast('Nicht angemeldet.', 'error', 6000);
+  s.begriffe = (document.getElementById('akteBegriffe')?.value || '').trim();
+  s.person   = (document.getElementById('aktePerson')?.value || '').trim();
+  s.slug     = (document.getElementById('akteSlug')?.value || '').trim();
+  s.von      = (document.getElementById('akteVon')?.value || '').trim();
+  s.bis      = (document.getElementById('akteBis')?.value || '').trim();
+  const worte = s.begriffe.split(',').map(x => x.trim()).filter(Boolean);
+  if (s.person) worte.push(s.person);
+  if (!worte.length) return toast('Mindestens einen Suchbegriff angeben.', 'warn', 6000);
+  if (!s.slug) return toast('Für diesen Mandanten gibt es kein Archiv.', 'warn', 6000);
+
+  setBusy(btn, true, 'Suche …');
+  s.vorgaenge = []; s.bericht = '';
+  const ids = new Map();
+  try {
+    for (const w of worte) {
+      _akteZeichnen('Suche nach „' + escapeHtml(w) + '" …');
+      // Nach Datum sortiert, nicht nach Textrelevanz: Eine Akte ist eine
+      // Zeitfrage, und die 100 Treffer sollen die jüngsten sein.
+      const p = new URLSearchParams({ q: w, limit: '100', mandant: s.slug, sort: 'datum' });
+      if (s.von) p.set('von', s.von);
+      if (s.bis) p.set('bis', s.bis);
+      const res = await fetch(ARCHIV_URL + '/suche?' + p.toString(), { headers: { 'X-Hero-Key': key } });
+      if (!res.ok) { console.warn('[Akte] Suche', w, res.status); continue; }
+      const d = await res.json();
+      (d.ergebnisse || []).forEach(e => (e.treffer || e.tickets || []).forEach(t => {
+        if (t && t.id != null && !ids.has(String(t.id))) ids.set(String(t.id), t);
+      }));
+    }
+    const liste = [...ids.values()];
+    if (!liste.length) {
+      setBusy(btn, false);
+      return _akteZeichnen('<span class="text-amber-700">Keine Vorgänge gefunden. Andere Schreibweise oder Zeitraum versuchen.</span>');
+    }
+    // Vollständig laden — einzeln, mit Fortschritt.
+    for (let i = 0; i < liste.length && i < 60; i++) {
+      _akteZeichnen('Lade Vorgang ' + (i + 1) + '/' + Math.min(liste.length, 60) + ' …');
+      setBusy(btn, true, (i + 1) + '/' + Math.min(liste.length, 60));
+      try {
+        const r = await fetch(ARCHIV_URL + '/ticket/' + s.slug + '/' + encodeURIComponent(liste[i].id), { headers: { 'X-Hero-Key': key } });
+        if (r.ok) s.vorgaenge.push(await r.json());
+      } catch (e) { console.warn('[Akte] Ticket', liste[i].id, e.message); }
+    }
+    s.vorgaenge.sort((a, b) => String(a.erstellt_am || '').localeCompare(String(b.erstellt_am || '')));
+    setBusy(btn, false);
+    _akteZeichnen('<span class="text-emerald-700">' + s.vorgaenge.length + ' Vorgänge geladen.</span>');
+  } catch (e) {
+    setBusy(btn, false);
+    _akteZeichnen('<span class="text-red-700">' + escapeHtml(e.message || String(e)) + '</span>');
+  }
+}
+
+/* Die Akte als Text — das, was an den Anwalt geht. Bewusst Rohdaten mit
+   Datum, Absender und Wortlaut, nicht die Zusammenfassung. */
+function _akteText() {
+  const s = AKTE;
+  const kopf = 'KUNDENAKTE\nSuchbegriffe: ' + s.begriffe + (s.person ? '\nPerson: ' + s.person : '')
+    + '\nMandant: ' + s.slug + (s.von || s.bis ? '\nZeitraum: ' + (s.von || '…') + ' bis ' + (s.bis || '…') : '')
+    + '\nErstellt: ' + new Date().toLocaleString('de') + ' durch ' + (APP_KEYS.user?.name || '?')
+    + '\nVorgänge: ' + s.vorgaenge.length + '\n\n' + '='.repeat(70) + '\n\n';
+  return kopf + s.vorgaenge.map(v =>
+    '## Vorgang #' + v.id + ' · ' + String(v.erstellt_am || '').slice(0, 16).replace('T', ' ') + '\n'
+    + 'Betreff: ' + (v.betreff || '') + '\n'
+    + 'Absender: ' + (v.absender_email || '') + (v.firma_name ? ' · ' + v.firma_name : '') + '\n'
+    + 'Status: ' + (v.status || '') + '\n\n'
+    + (v.beschreibung ? '### Erstnachricht\n' + String(v.beschreibung).slice(0, 4000) + '\n\n' : '')
+    + (v.nachrichten || []).map(n =>
+        '### ' + String(n.erstellt_am || '').slice(0, 16).replace('T', ' ')
+        + ' · ' + (n.von_email || '?') + (n.privat ? ' · INTERNE NOTIZ' : (n.eingehend ? ' · vom Kunden' : ' · von uns')) + '\n'
+        + String(n.text || '').slice(0, 4000)).join('\n\n')
+  ).join('\n\n' + '-'.repeat(70) + '\n\n');
+}
+
+function _akteExport() {
+  const blob = new Blob([_akteText()], { type: 'text/markdown;charset=utf-8' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'Kundenakte_' + (AKTE.begriffe.split(',')[0] || 'Kunde').replace(/[^a-z0-9]+/gi, '_') + '_' + new Date().toISOString().slice(0, 10) + '.md';
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 60000);
+}
+
+function _akteBerichtKopieren(btn) {
+  try { navigator.clipboard.writeText(AKTE.bericht || ''); toast('Auswertung kopiert.', 'success', 4000); }
+  catch (_) { toast('Kopieren nicht möglich — Text markieren und kopieren.', 'warn', 6000); }
+}
+
+/* Auswertung. Vorgang für Vorgang, damit auch dreißig Vorgänge durchlaufen —
+   und weil eine Zusammenfassung je Vorgang belegbar bleibt. Am Ende eine
+   Gesamtsicht mit Zeitleiste und Risiken. */
+async function _akteAuswerten(btn) {
+  const s = AKTE;
+  if (!s.vorgaenge.length) return;
+  setBusy(btn, true, 'Werte aus …');
+  try {
+    const teile = [];
+    for (let i = 0; i < s.vorgaenge.length; i++) {
+      const v = s.vorgaenge[i];
+      setBusy(btn, true, (i + 1) + '/' + s.vorgaenge.length);
+      _akteZeichnen('Werte Vorgang ' + (i + 1) + '/' + s.vorgaenge.length + ' aus …');
+      const text = ('Betreff: ' + (v.betreff || '') + '\nErstellt: ' + (v.erstellt_am || '') + '\n\n'
+        + String(v.beschreibung || '').slice(0, 6000) + '\n\n'
+        + (v.nachrichten || []).map(n => '[' + String(n.erstellt_am || '').slice(0, 16) + ' · '
+            + (n.von_email || '?') + (n.privat ? ' · INTERN' : (n.eingehend ? ' · Kunde' : ' · wir')) + ']\n'
+            + String(n.text || '').slice(0, 3000)).join('\n\n')).slice(0, 40000);
+      const r = await _kiJsonSicher({
+        system: 'Du wertest EINEN Vorgang aus dem Schriftverkehr eines Aufzug-Serviceunternehmens aus — '
+          + 'als Vorbereitung einer rechtlichen Klärung.\n'
+          + 'Halte NUR fest, was im Text steht. Keine Vermutungen, keine rechtliche Bewertung.\n'
+          + 'Antworte NUR mit JSON: {"datum":"YYYY-MM-DD","thema":"kurz","kern":"1-3 Sätze, was sachlich passiert ist",'
+          + '"zusagen":["was WIR zugesagt haben, wörtlich sinngemäß, mit Datum"],'
+          + '"mitteilungen":["was wir dem Kunden MITGETEILT haben (z.B. Aussetzung, Mahnung), mit Datum"],'
+          + '"forderungen":["was der KUNDE verlangt oder beanstandet, mit Datum"],'
+          + '"geld":["Rechnungen, Beträge, Zahlungsfristen, Vorkasse — mit Datum und Nummer, wenn genannt"]}',
+        text: 'Vorgang #' + v.id + ':\n\n' + text,
+      });
+      teile.push(Object.assign({ id: v.id }, r));
+    }
+    _akteZeichnen('Fasse zusammen …');
+    const gesamt = await _kiJsonSicher({
+      system: 'Du bekommst Auswertungen einzelner Vorgänge und erstellst daraus eine Akte für das Gespräch mit einem Anwalt.\n'
+        + 'REGELN:\n'
+        + '- Nur was belegt ist. Jede Aussage mit Vorgangsnummer und Datum.\n'
+        + '- KEINE rechtliche Bewertung, keine Erfolgsaussichten, keine Paragraphen. Das ist Sache des Anwalts.\n'
+        + '- Benenne offen, was NICHT belegt ist (z.B. „eine schriftliche Ankündigung der Aussetzung ist im Archiv nicht auffindbar").\n'
+        + 'Antworte als reiner Text in dieser Gliederung:\n'
+        + '1. ZEITLEISTE (Datum · Vorgang · was geschah)\n'
+        + '2. WAS WIR MITGETEILT HABEN (mit Beleg)\n'
+        + '3. WAS WIR ZUGESAGT HABEN (mit Beleg)\n'
+        + '4. WAS DER KUNDE VERLANGT (mit Beleg)\n'
+        + '5. GELD: Rechnungen, Beträge, Fristen (mit Beleg)\n'
+        + '6. LÜCKEN: was für die Klärung fehlt oder im Archiv nicht auffindbar ist\n',
+      text: JSON.stringify(teile).slice(0, 120000),
+    });
+    s.bericht = typeof gesamt === 'string' ? gesamt : (gesamt.text || JSON.stringify(gesamt, null, 2));
+    setBusy(btn, false);
+    _akteZeichnen('<span class="text-emerald-700">Auswertung fertig.</span>');
+  } catch (e) {
+    setBusy(btn, false);
+    _akteZeichnen('<span class="text-red-700">Auswertung: ' + escapeHtml(e.message || String(e)) + '</span>');
+  }
 }
 
 /* ===================== v2.68.0: ARCHIV-SUCHE (Cloudflare) =================
