@@ -827,7 +827,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v3.19.1';
+const APP_VERSION = 'v3.20.0';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -17873,6 +17873,35 @@ function _akteZeichnen(status) {
                   }).join('')
               + '</div></div>'
             : '')
+        /* Fundstellen — der eigentliche Arbeitsplatz an einer streitigen Akte.
+           Erst wenn Vorgänge geladen sind, sonst gäbe es nichts zu durchsuchen. */
+        + (s.vorgaenge.length
+            ? '<div class="rounded-xl border border-rose-200 bg-rose-50/40 p-3 space-y-2">'
+              + '<p class="text-[11px] font-bold text-rose-900">Gezielt suchen — wo wurde etwas vereinbart, zugesagt oder angekündigt?</p>'
+              + '<div class="flex flex-wrap gap-1.5">'
+                + Object.keys(AKTE_VOKABULAR).map(k =>
+                    '<button onclick="_akteFundstellenSuchen(\'' + k + '\')" class="px-2.5 py-1 rounded-lg text-[11px] font-bold '
+                    + (s.fundGruppe === k ? 'bg-rose-600 text-white border border-rose-600' : 'bg-white border border-rose-300 text-rose-700 hover:bg-rose-100')
+                    + '">' + escapeHtml(AKTE_VOKABULAR[k].label) + '</button>').join('')
+              + '</div>'
+              + '<div class="flex gap-2 flex-wrap">'
+                + '<input id="akteFundWorte" value="' + escapeAttr((s.fundGruppe ? '' : (s.fundWorte || []).join(', '))) + '" placeholder="eigene Wörter, mit Komma — z. B. Wartungsvertrag, Pauschale, Kulanz" class="flex-1 min-w-[220px] px-2.5 py-1.5 border border-rose-300 rounded-lg text-[12px]">'
+                + '<button onclick="_akteFundstellenSuchen(\'\')" class="px-3 py-1.5 rounded-lg text-[12px] font-bold bg-rose-600 hover:bg-rose-700 text-white">Suchen</button>'
+              + '</div>'
+              + (Array.isArray(s.fund) && s.fund.length
+                  ? '<div class="flex items-center justify-between">'
+                    + '<b class="text-[12px] text-rose-900">' + s.fund.length + ' Fundstellen</b>'
+                    + '<button onclick="_akteFundExport()" class="px-2.5 py-1 rounded-lg text-[11px] font-bold bg-white border border-rose-300 text-rose-700">Fundstellen laden (.txt)</button></div>'
+                  + '<div class="max-h-80 overflow-y-auto space-y-1.5">'
+                    + s.fund.slice(0, 200).map(f =>
+                        '<div class="bg-white rounded-lg border border-rose-200 p-2">'
+                        + '<p class="text-[10px] text-ink-500">' + escapeHtml(String(f.wann).slice(0, 16).replace('T', ' '))
+                          + ' · <b>#' + escapeHtml(String(f.ticket)) + '</b> · ' + escapeHtml(f.art) + ' · ' + escapeHtml(f.wer || '') + '</p>'
+                        + '<p class="text-[12px] text-ink-800 mt-0.5">… ' + escapeHtml(f.zitat) + ' …</p></div>').join('')
+                  + '</div>'
+                  : '')
+            + '</div>'
+            : '')
         + (s.bericht
             ? '<div class="rounded-xl border border-violet-300 bg-violet-50/50 p-3">'
               + '<div class="flex items-center justify-between mb-1">'
@@ -17940,6 +17969,107 @@ async function _akteSammeln(btn) {
     setBusy(btn, false);
     _akteZeichnen('<span class="text-red-700">' + escapeHtml(e.message || String(e)) + '</span>');
   }
+}
+
+/* ── Fundstellen ─────────────────────────────────────────────────────────
+   Die eigentliche Arbeit an einer streitigen Akte ist nicht „welche Vorgänge
+   gibt es", sondern „wo genau wurde etwas vereinbart, zugesagt oder
+   angekündigt". Dafür taugt die Archivsuche nicht: Sie findet Vorgänge, nicht
+   Sätze, und liefert sie nach Relevanz statt nach Datum.
+
+   Hier wird deshalb im BEREITS GELADENEN Bestand gesucht — ohne KI, ohne
+   Netz, mit wörtlichem Zitat und Fundstelle. Was hier steht, steht wirklich
+   so da; das ist bei einer Auseinandersetzung der ganze Punkt. */
+/* Gesucht wird mit WORTSTÄMMEN, nicht mit ganzen Wörtern. Deutsch beugt und
+   dreht: „wir bestätigen", „bestätigt", „Bestätigung" — ein Stamm findet alle
+   drei, eine Wendung wie „bestätigen wir" nur eine davon. Genau daran ist der
+   erste Versuch gescheitert. */
+const AKTE_VOKABULAR = {
+  vereinbarung: {
+    label: 'Vereinbarungen & Zusagen',
+    worte: ['vereinbar', 'abgesproch', 'absprach', 'zugesag', 'zusag', 'besproch', 'telefonisch',
+      'bestätig', 'einig', 'festgehalten', 'halten wir fest', 'verbindlich', 'beauftrag', 'auftragsbestätig'],
+  },
+  zahlung: {
+    label: 'Zahlungen & Konditionen',
+    worte: ['vorkasse', 'vorschuss', 'anzahlung', 'zahlungsziel', 'zahlungsfrist', 'ratenzahl',
+      'stundung', 'mahn', 'überfällig', 'offene posten', 'rechnung', 'skonto', 'zahlbar', 'zahlungseingang'],
+  },
+  aussetzung: {
+    label: 'Aussetzung & Fristen',
+    worte: ['ausgesetzt', 'aussetz', 'eingestellt', 'einstellung der leistung', 'zurückbehalt',
+      'leistungsverweiger', 'frist', 'letztmal', 'androh', 'kündig', 'ruhen', 'bis zur klärung'],
+  },
+  forderung: {
+    label: 'Forderungen der Gegenseite',
+    worte: ['schadenersatz', 'schadensersatz', 'verzug', 'anwalt', 'juristisch', 'klage', 'gericht',
+      'haftbar', 'haftung', 'beanstand', 'reklamation', 'mangel', 'nachbesser', 'ersatzvornahme'],
+  },
+};
+
+function _akteFundstellen(worte) {
+  const s = AKTE;
+  const treffer = [];
+  const suchWorte = worte.map(w => w.toLowerCase()).filter(Boolean);
+  if (!suchWorte.length) return treffer;
+  const schau = (v, quelle, text, wann, wer, art) => {
+    const t = String(text || '');
+    if (!t) return;
+    const tl = t.toLowerCase();
+    suchWorte.forEach(w => {
+      let von = 0;
+      for (let n = 0; n < 3; n++) {              // höchstens drei Stellen je Wort und Nachricht
+        const i = tl.indexOf(w, von);
+        if (i < 0) break;
+        treffer.push({
+          ticket: v.id, betreff: v.betreff || '', wann: wann || v.erstellt_am || '',
+          wer: wer || v.absender_email || '', art, wort: w,
+          zitat: t.slice(Math.max(0, i - 220), Math.min(t.length, i + w.length + 260)).replace(/\s+/g, ' ').trim(),
+        });
+        von = i + w.length;
+      }
+    });
+  };
+  (s.vorgaenge || []).forEach(v => {
+    schau(v, 'beschreibung', v.beschreibung, v.erstellt_am, v.absender_email, 'Erstnachricht');
+    (v.nachrichten || []).forEach(n =>
+      schau(v, 'nachricht', n.text, n.erstellt_am, n.von_email,
+        n.privat ? 'INTERNE NOTIZ' : (n.eingehend ? 'vom Kunden' : 'von uns')));
+  });
+  return treffer.sort((a, b) => String(a.wann).localeCompare(String(b.wann)));
+}
+
+function _akteFundstellenSuchen(schluessel) {
+  const s = AKTE;
+  if (!s || !s.vorgaenge.length) return;
+  const eigen = (document.getElementById('akteFundWorte')?.value || '').split(',').map(x => x.trim()).filter(Boolean);
+  const worte = schluessel && AKTE_VOKABULAR[schluessel] ? AKTE_VOKABULAR[schluessel].worte : eigen;
+  if (!worte.length) return toast('Suchwörter eingeben oder eine der Gruppen wählen.', 'warn', 6000);
+  s.fundGruppe = schluessel || '';
+  s.fundWorte = worte;
+  s.fund = _akteFundstellen(worte);
+  _akteZeichnen(s.fund.length
+    ? '<span class="text-emerald-700">' + s.fund.length + ' Fundstellen.</span>'
+    : '<span class="text-amber-700">Keine Fundstelle zu diesen Wörtern.</span>');
+}
+
+function _akteFundExport() {
+  const s = AKTE;
+  const txt = 'FUNDSTELLEN\nSuchwörter: ' + (s.fundWorte || []).join(', ')
+    + '\nAkte: ' + s.begriffe + ' · Mandant ' + s.slug
+    + '\nErstellt: ' + new Date().toLocaleString('de') + ' durch ' + (APP_KEYS.user?.name || '?')
+    + '\n\n' + '='.repeat(70) + '\n\n'
+    + (s.fund || []).map(f =>
+        '[' + String(f.wann).slice(0, 16).replace('T', ' ') + '] Vorgang #' + f.ticket + ' · ' + f.art + ' · ' + f.wer + '\n'
+        + 'Betreff: ' + f.betreff + '\n'
+        + 'Suchwort: „' + f.wort + '"\n'
+        + '… ' + f.zitat + ' …\n').join('\n' + '-'.repeat(50) + '\n');
+  const blob = new Blob([txt], { type: 'text/plain;charset=utf-8' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'Fundstellen_' + (s.begriffe.split(',')[0] || 'Kunde').replace(/[^a-z0-9]+/gi, '_') + '_' + new Date().toISOString().slice(0, 10) + '.txt';
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 60000);
 }
 
 /* Alle Anhänge eines Vorgangs, entdoppelt. Das Archiv speichert je Nachricht
