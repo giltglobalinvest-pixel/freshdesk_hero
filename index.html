@@ -827,7 +827,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v3.19.0';
+const APP_VERSION = 'v3.19.1';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -17857,10 +17857,20 @@ function _akteZeichnen(status) {
                   + '<button onclick="_akteAuswerten(this)" class="px-2.5 py-1 rounded-lg text-[11px] font-bold bg-violet-600 hover:bg-violet-700 text-white">Auswerten (KI)</button>'
                 + '</div></div>'
               + '<div class="max-h-72 overflow-y-auto divide-y divide-ink-100">'
-                + s.vorgaenge.map(v => '<div class="px-3 py-2">'
+                + s.vorgaenge.map(v => {
+                    const dat = _akteAnhaenge(v);
+                    return '<div class="px-3 py-2">'
                     + '<p class="text-[12px] font-semibold text-ink-900">#' + escapeHtml(String(v.id)) + ' · ' + escapeHtml(String(v.erstellt_am || '').slice(0, 10)) + ' · ' + escapeHtml(v.betreff || '(ohne Betreff)') + '</p>'
                     + '<p class="text-[11px] text-ink-500">' + escapeHtml(v.absender_email || '') + ' · ' + ((v.nachrichten || []).length) + ' Nachrichten</p>'
-                  + '</div>').join('')
+                    /* Anhangsnamen sichtbar machen: Der Vertrag, den man sucht,
+                       steht nicht im Text — er heißt „Wartungsvertrag_2026.pdf"
+                       und hängt an einer Mail mit drei Zeilen Inhalt. */
+                    + (dat.length
+                        ? '<p class="text-[11px] text-rose-700 mt-0.5 inline-flex items-start gap-1"><i data-lucide="paperclip" class="w-3 h-3 mt-0.5 shrink-0"></i><span>'
+                          + dat.map(a => escapeHtml(a.name)).join(' · ') + '</span></p>'
+                        : '')
+                  + '</div>';
+                  }).join('')
               + '</div></div>'
             : '')
         + (s.bericht
@@ -17932,6 +17942,25 @@ async function _akteSammeln(btn) {
   }
 }
 
+/* Alle Anhänge eines Vorgangs, entdoppelt. Das Archiv speichert je Nachricht
+   Name, Größe und Typ — die URLs bewusst nicht, weil Freshdesks Anhanglinks
+   signiert sind und verfallen. Für „welcher Vorgang trägt den Vertrag?" reicht
+   der Name; zum Öffnen führt der Weg über Freshdesk. */
+function _akteAnhaenge(v) {
+  const raus = [], gesehen = new Set();
+  (v.nachrichten || []).forEach(n => {
+    let liste = [];
+    try { liste = JSON.parse(n.anhaenge || '[]') || []; } catch (_) {}
+    liste.forEach(a => {
+      const name = String((a && a.name) || '').trim();
+      if (!name || gesehen.has(name)) return;
+      gesehen.add(name);
+      raus.push({ name, groesse: a.groesse, typ: a.typ, wann: n.erstellt_am });
+    });
+  });
+  return raus;
+}
+
 /* Die Akte als Text — das, was an den Anwalt geht. Bewusst Rohdaten mit
    Datum, Absender und Wortlaut, nicht die Zusammenfassung. */
 function _akteText() {
@@ -17944,7 +17973,12 @@ function _akteText() {
     '## Vorgang #' + v.id + ' · ' + String(v.erstellt_am || '').slice(0, 16).replace('T', ' ') + '\n'
     + 'Betreff: ' + (v.betreff || '') + '\n'
     + 'Absender: ' + (v.absender_email || '') + (v.firma_name ? ' · ' + v.firma_name : '') + '\n'
-    + 'Status: ' + (v.status || '') + '\n\n'
+    + 'Status: ' + (v.status || '') + '\n'
+    + (_akteAnhaenge(v).length
+        ? 'Anhänge: ' + _akteAnhaenge(v).map(a => a.name + (a.groesse ? ' (' + Math.round(a.groesse / 1024) + ' KB)' : '')).join(', ')
+          + '\n  → Inhalt der Anhänge ist NICHT im Archiv; zum Öffnen den Vorgang in Freshdesk aufrufen.\n'
+        : '')
+    + '\n'
     + (v.beschreibung ? '### Erstnachricht\n' + String(v.beschreibung).slice(0, 4000) + '\n\n' : '')
     + (v.nachrichten || []).map(n =>
         '### ' + String(n.erstellt_am || '').slice(0, 16).replace('T', ' ')
