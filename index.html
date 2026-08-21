@@ -827,7 +827,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v3.21.1';
+const APP_VERSION = 'v3.21.2';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -47888,10 +47888,13 @@ function openCcExport() {
   const gesamt = _ccKampagnenLeads();
   CC_EXPORT = CC_EXPORT || {
     umfang: 'sichtbar',
+    nurVollstaendig: true,
     spalten: CC_EXPORT_SPALTEN.map(s => s[0]),
   };
   CC_EXPORT.zahlSichtbar = sichtbar.length;
   CC_EXPORT.zahlGesamt = gesamt.length;
+  CC_EXPORT.vollSichtbar = sichtbar.filter(_ccExportVollstaendig).length;
+  CC_EXPORT.vollGesamt = gesamt.filter(_ccExportVollstaendig).length;
   _ccExportZeichnen();
 }
 
@@ -47905,6 +47908,9 @@ function closeCcExport() { const h = document.getElementById('ccExportHost'); if
 function _ccExportZeichnen(status) {
   const s = CC_EXPORT;
   if (!s) return;
+  const roh = s.umfang === 'sichtbar' ? s.zahlSichtbar : s.zahlGesamt;
+  const voll = s.umfang === 'sichtbar' ? s.vollSichtbar : s.vollGesamt;
+  const anzahl = s.nurVollstaendig !== false ? voll : roh;
   const wahl = (feld, wert, label, zusatz) =>
     '<label class="flex-1 min-w-[150px] flex items-start gap-2 px-3 py-2 rounded-lg border cursor-pointer '
     + (s[feld] === wert ? 'border-brand-500 bg-brand-50' : 'border-ink-200 bg-white hover:bg-ink-50') + '">'
@@ -47925,7 +47931,20 @@ function _ccExportZeichnen(status) {
           + '<div class="flex gap-2 flex-wrap">'
             + wahl('umfang', 'sichtbar', 'Aktuelle Auswahl', s.zahlSichtbar + ' Kontakte — so, wie die Liste gerade gefiltert ist')
             + wahl('umfang', 'kampagne', 'Ganze Kampagne', s.zahlGesamt + ' Kontakte — ohne Rücksicht auf Filter')
-          + '</div></div>'
+          + '</div>'
+          /* Der Vollständigkeitsfilter steht sichtbar da, mit der Zahl der
+             Ausgelassenen. Still zu filtern wäre der schlechtere Weg: Wer
+             später 1 800 statt 2 730 Zeilen in der Datei sieht, hält sie für
+             kaputt. */
+          + '<label class="flex items-start gap-2 mt-2 px-3 py-2 rounded-lg border border-ink-200 bg-ink-50 cursor-pointer">'
+            + '<input type="checkbox" class="mt-0.5 w-4 h-4 accent-brand-500"' + (s.nurVollstaendig !== false ? ' checked' : '')
+            + ' onchange="_ccExportSetzen(\'nurVollstaendig\', this.checked)">'
+            + '<span class="min-w-0"><b class="text-[13px] text-ink-900 block">Nur vollständige Kontakte</b>'
+            + '<span class="text-[11px] text-ink-600">Firma, Ansprechpartner, Telefon, E-Mail und Typ müssen vorhanden sein. '
+            + (voll < roh
+                ? '<b>' + (roh - voll) + ' von ' + roh + '</b> Kontakten fehlt mindestens eine Angabe — sie bleiben draußen.'
+                : 'Alle ' + roh + ' Kontakte erfüllen das.') + '</span></span></label>'
+          + '</div>'
         + '<div><div class="flex items-center justify-between mb-1.5">'
             + '<p class="text-[10px] uppercase font-semibold text-ink-600">Spalten (' + s.spalten.length + ')</p>'
             + '<div class="flex gap-2">'
@@ -47944,8 +47963,7 @@ function _ccExportZeichnen(status) {
       + '<div class="flex items-center justify-end gap-2 p-4 border-t border-ink-200">'
         + '<button onclick="closeCcExport()" class="px-3 py-2 rounded-lg text-[12px] font-bold bg-white border border-ink-300 text-ink-700 hover:bg-ink-50">Abbrechen</button>'
         + '<button onclick="_ccExportStarten(this)" class="px-4 py-2 rounded-lg text-[12px] font-bold bg-brand-600 hover:bg-brand-700 text-white inline-flex items-center gap-1.5">'
-          + '<i data-lucide="download" class="w-4 h-4"></i> ' + (s.umfang === 'sichtbar' ? s.zahlSichtbar : s.zahlGesamt)
-          + ' Kontakte als Excel</button>'
+          + '<i data-lucide="download" class="w-4 h-4"></i> ' + anzahl + ' Kontakte als Excel</button>'
       + '</div>'
     + '</div></div>';
   if (window.lucide) lucide.createIcons();
@@ -47967,13 +47985,29 @@ function _ccExportSpaltenSatz(art) {
   _ccExportZeichnen();
 }
 
+/* Vollständig heißt: Firma, Ansprechpartner, Telefon, E-Mail und Kontakttyp
+   sind da. Ein Datensatz ohne diese fünf taugt weder zum Anrufen noch zum
+   Anschreiben — er bläht nur die Datei auf und sieht in Excel aus wie ein
+   Fehler. Die Telefonnummer wird dabei normalisiert geprüft: „—" oder eine
+   vierstellige Durchwahl ist keine Rufnummer. */
+function _ccExportVollstaendig(r) {
+  const da = (v) => String(v == null ? '' : v).trim().length > 1;
+  return da(r.firma)
+    && da(r.ansprechpartner)
+    && da(r.typ)
+    && _ccNummerNormal(r.telefon).length >= 6
+    && /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(String(r.email || '').trim());
+}
+
 /* Die Zeilen in der Reihenfolge, in der sie auch auf dem Bildschirm stehen —
    wer exportiert, erwartet dieselbe Sortierung wie in der Liste. */
 function _ccExportZeilen() {
   const s = CC_EXPORT;
-  const roh = s.umfang === 'sichtbar' ? _ccSichtbar() : _ccSortiert(_ccKampagnenLeads());
+  let roh = s.umfang === 'sichtbar' ? _ccSichtbar() : _ccSortiert(_ccKampagnenLeads());
+  const gesamt = roh.length;
+  if (s.nurVollstaendig !== false) roh = roh.filter(_ccExportVollstaendig);
   const spalten = CC_EXPORT_SPALTEN.filter(x => s.spalten.includes(x[0]));
-  return { spalten, daten: roh.map(r => spalten.map(([k]) => _ccExportWert(r, k))) };
+  return { spalten, daten: roh.map(r => spalten.map(([k]) => _ccExportWert(r, k))), gesamt, ausgelassen: gesamt - roh.length };
 }
 
 function _ccExportWert(r, k) {
@@ -48027,14 +48061,19 @@ async function _ccExportStarten(btn) {
   // gesamte Kampagne aus dem Haus, das bleibt bei den Admins.
   if (!APP_KEYS.user?.is_admin) return toast('Der Export ist Admins vorbehalten.', 'warn', 6000);
   if (!s.spalten.length) return toast('Mindestens eine Spalte wählen.', 'warn', 5000);
-  const { spalten, daten } = _ccExportZeilen();
-  if (!daten.length) return toast('Kein Kontakt im gewählten Umfang.', 'warn', 5000);
+  const { spalten, daten, ausgelassen } = _ccExportZeilen();
+  if (!daten.length) {
+    return toast(ausgelassen
+      ? 'Kein Kontakt hat Firma, Ansprechpartner, Telefon, E-Mail und Typ zusammen — Haken bei „Nur vollständige Kontakte" entfernen.'
+      : 'Kein Kontakt im gewählten Umfang.', 'warn', 9000);
+  }
   setBusy(btn, true, 'Baue …');
   try {
-    await _ccExportExcel(spalten, daten);
+    await _ccExportExcel(spalten, daten, ausgelassen);
     setBusy(btn, false);
     closeCcExport();
-    toast(daten.length + ' Kontakte exportiert.', 'success', 6000);
+    toast(daten.length + ' Kontakte exportiert'
+      + (ausgelassen ? ' · ' + ausgelassen + ' unvollständige ausgelassen' : '') + '.', 'success', 7000);
   } catch (e) {
     setBusy(btn, false);
     console.error('[CC-Export]', e);
@@ -48046,7 +48085,7 @@ async function _ccExportStarten(btn) {
    Zwei Blätter: die Kontakte und ein Deckblatt mit den Randbedingungen des
    Auszugs. Ohne das weiß in drei Wochen niemand mehr, welcher Filter aktiv
    war — und ob die Datei vollständig ist oder ein Ausschnitt. */
-async function _ccExportExcel(spalten, daten) {
+async function _ccExportExcel(spalten, daten, ausgelassen) {
   await _loadScriptOnce(XLSX_URL);
   if (!window.XLSX) throw new Error('Die Excel-Bibliothek konnte nicht geladen werden.');
   const X = window.XLSX;
@@ -48076,6 +48115,7 @@ async function _ccExportExcel(spalten, daten) {
     ['Umfang', kopf.umfang],
     ['Filter', kopf.filter],
     ['Kontakte', String(daten.length)],
+    ['Nur vollständige', CC_EXPORT.nurVollstaendig !== false ? 'ja — ' + (ausgelassen || 0) + ' unvollständige ausgelassen' : 'nein — auch unvollständige enthalten'],
     ['Spalten', spalten.map(s => s[1]).join(', ')],
     ['Erstellt', kopf.erstellt],
     ['Erstellt von', kopf.von],
