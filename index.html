@@ -827,7 +827,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v3.21.0';
+const APP_VERSION = 'v3.21.1';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -47579,7 +47579,9 @@ function _ccZeichnen() {
       + '<button onclick="renderCallcenterPage()" class="px-3 py-1.5 rounded-lg text-[12px] font-bold bg-white border border-ink-200 text-ink-600 hover:bg-ink-50" title="Liste neu laden"><i data-lucide="refresh-cw" class="w-3.5 h-3.5"></i></button>'
       // Export: gehört neben das Aktualisieren, nicht in ein Untermenü — wer
       // eine Liste weitergeben will, sucht ihn dort.
-      + '<button onclick="openCcExport()" class="px-3 py-1.5 rounded-lg text-[12px] font-bold bg-white border border-ink-200 text-ink-600 hover:bg-ink-50 inline-flex items-center gap-1" title="Liste als Excel oder PDF herunterladen"><i data-lucide="download" class="w-3.5 h-3.5"></i> Export</button>'
+      + (APP_KEYS.user?.is_admin
+          ? '<button onclick="openCcExport()" class="px-3 py-1.5 rounded-lg text-[12px] font-bold bg-white border border-ink-200 text-ink-600 hover:bg-ink-50 inline-flex items-center gap-1" title="Liste als Excel herunterladen"><i data-lucide="download" class="w-3.5 h-3.5"></i> Export</button>'
+          : '')
       // Eigenes Fenster: bleibt die ganze Schicht offen, auch auf dem zweiten
       // Bildschirm, und meldet von selbst, wenn der Leitfaden geändert wurde.
       + '<button onclick="_ccLeitfadenFenster()" class="px-3 py-1.5 rounded-lg text-[12px] font-bold bg-white border border-violet-300 text-violet-700 hover:bg-violet-50 inline-flex items-center gap-1" title="Gesprächsleitfaden in einem eigenen Fenster öffnen"><i data-lucide="book-open" class="w-3.5 h-3.5"></i> Leitfaden</button>'
@@ -47875,17 +47877,17 @@ const CC_EXPORT_SPALTEN = [
   ['created_at',      'angelegt',           18],
   ['updated_at',      'geändert',           18],
 ];
-/* Fürs PDF taugt nicht alles: Quer auf A4 sind etwa neun Spalten lesbar.
-   Mehr hineinzuquetschen erzeugt eine Tabelle, die niemand liest. */
-const CC_EXPORT_PDF_STANDARD = ['firma', 'ansprechpartner', 'telefon', 'email', 'ort', 'typ', 'status', 'versuche', 'notiz'];
+/* Kompaktsatz: die Spalten, die man beim Abtelefonieren wirklich braucht. */
+const CC_EXPORT_KOMPAKT = ['firma', 'ansprechpartner', 'telefon', 'email', 'ort', 'typ', 'status', 'versuche', 'notiz'];
 
 let CC_EXPORT = null;
 
 function openCcExport() {
+  if (!APP_KEYS.user?.is_admin) return toast('Der Export ist Admins vorbehalten.', 'warn', 6000);
   const sichtbar = _ccSichtbar();
   const gesamt = _ccKampagnenLeads();
   CC_EXPORT = CC_EXPORT || {
-    umfang: 'sichtbar', format: 'xlsx',
+    umfang: 'sichtbar',
     spalten: CC_EXPORT_SPALTEN.map(s => s[0]),
   };
   CC_EXPORT.zahlSichtbar = sichtbar.length;
@@ -47911,24 +47913,18 @@ function _ccExportZeichnen(status) {
     + '<span class="min-w-0"><b class="text-[13px] text-ink-900 block">' + label + '</b>'
     + '<span class="text-[11px] text-ink-500">' + zusatz + '</span></span></label>';
 
-  const pdf = s.format === 'pdf';
   _ccExportHost().innerHTML =
     '<div class="fixed inset-0 z-[80] bg-black/40 flex items-start justify-center overflow-y-auto p-4" onclick="if(event.target===this)closeCcExport()">'
     + '<div class="bg-white rounded-2xl shadow-xl w-full max-w-2xl my-8">'
       + '<div class="flex items-center justify-between p-4 border-b border-ink-200">'
         + '<div><h3 class="font-bold text-ink-900 inline-flex items-center gap-2"><i data-lucide="download" class="w-5 h-5 text-brand-600"></i> Anrufliste exportieren</h3>'
-        + '<p class="text-[11px] text-ink-500">Kampagne „' + escapeHtml(CC_STATE.kampagne || CC_KAMPAGNE_STANDARD) + '" · ' + escapeHtml((_ccAccount() || {}).name || '') + '</p></div>'
+        + '<p class="text-[11px] text-ink-500">Kampagne „' + escapeHtml(CC_STATE.kampagne || CC_KAMPAGNE_STANDARD) + '" · ' + escapeHtml((_ccAccount() || {}).name || '') + ' · Excel (.xlsx)</p></div>'
         + '<button onclick="closeCcExport()" class="text-ink-400 hover:text-ink-700"><i data-lucide="x" class="w-5 h-5"></i></button></div>'
       + '<div class="p-4 space-y-4">'
         + '<div><p class="text-[10px] uppercase font-semibold text-ink-600 mb-1.5">Umfang</p>'
           + '<div class="flex gap-2 flex-wrap">'
             + wahl('umfang', 'sichtbar', 'Aktuelle Auswahl', s.zahlSichtbar + ' Kontakte — so, wie die Liste gerade gefiltert ist')
             + wahl('umfang', 'kampagne', 'Ganze Kampagne', s.zahlGesamt + ' Kontakte — ohne Rücksicht auf Filter')
-          + '</div></div>'
-        + '<div><p class="text-[10px] uppercase font-semibold text-ink-600 mb-1.5">Format</p>'
-          + '<div class="flex gap-2 flex-wrap">'
-            + wahl('format', 'xlsx', 'Excel (.xlsx)', 'Zum Weiterarbeiten: filterbar, sortierbar, alle Felder')
-            + wahl('format', 'pdf', 'PDF', 'Zum Lesen und Weitergeben: quer, mit Seitenzahlen')
           + '</div></div>'
         + '<div><div class="flex items-center justify-between mb-1.5">'
             + '<p class="text-[10px] uppercase font-semibold text-ink-600">Spalten (' + s.spalten.length + ')</p>'
@@ -47942,9 +47938,6 @@ function _ccExportZeichnen(status) {
                 + '<input type="checkbox" class="w-3.5 h-3.5 accent-brand-500"' + (s.spalten.includes(k) ? ' checked' : '')
                 + ' onchange="_ccExportSpalte(\'' + k + '\',this.checked)"> ' + escapeHtml(label) + '</label>').join('')
           + '</div>'
-          + (pdf && s.spalten.length > 10
-              ? '<p class="text-[11px] text-amber-700 mt-1">' + s.spalten.length + ' Spalten sind fürs PDF viel — quer auf A4 bleiben etwa neun lesbar. Über „kompakt" auf das Wesentliche.</p>'
-              : '')
         + '</div>'
         + (status ? '<div class="text-[12px] text-ink-600">' + status + '</div>' : '')
       + '</div>'
@@ -47952,7 +47945,7 @@ function _ccExportZeichnen(status) {
         + '<button onclick="closeCcExport()" class="px-3 py-2 rounded-lg text-[12px] font-bold bg-white border border-ink-300 text-ink-700 hover:bg-ink-50">Abbrechen</button>'
         + '<button onclick="_ccExportStarten(this)" class="px-4 py-2 rounded-lg text-[12px] font-bold bg-brand-600 hover:bg-brand-700 text-white inline-flex items-center gap-1.5">'
           + '<i data-lucide="download" class="w-4 h-4"></i> ' + (s.umfang === 'sichtbar' ? s.zahlSichtbar : s.zahlGesamt)
-          + ' Kontakte als ' + (pdf ? 'PDF' : 'Excel') + '</button>'
+          + ' Kontakte als Excel</button>'
       + '</div>'
     + '</div></div>';
   if (window.lucide) lucide.createIcons();
@@ -47961,11 +47954,6 @@ function _ccExportZeichnen(status) {
 function _ccExportSetzen(feld, wert) {
   if (!CC_EXPORT) return;
   CC_EXPORT[feld] = wert;
-  // Beim Umschalten auf PDF automatisch auf die lesbare Auswahl gehen — aber
-  // nur, wenn noch die Vollauswahl steht; eine bewusste Auswahl bleibt.
-  if (feld === 'format' && wert === 'pdf' && CC_EXPORT.spalten.length === CC_EXPORT_SPALTEN.length) {
-    CC_EXPORT.spalten = CC_EXPORT_PDF_STANDARD.slice();
-  }
   _ccExportZeichnen();
 }
 function _ccExportSpalte(k, an) {
@@ -47975,7 +47963,7 @@ function _ccExportSpalte(k, an) {
 }
 function _ccExportSpaltenSatz(art) {
   if (!CC_EXPORT) return;
-  CC_EXPORT.spalten = art === 'kompakt' ? CC_EXPORT_PDF_STANDARD.slice() : CC_EXPORT_SPALTEN.map(s => s[0]);
+  CC_EXPORT.spalten = art === 'kompakt' ? CC_EXPORT_KOMPAKT.slice() : CC_EXPORT_SPALTEN.map(s => s[0]);
   _ccExportZeichnen();
 }
 
@@ -48035,13 +48023,15 @@ function _ccExportKopfzeilen() {
 
 async function _ccExportStarten(btn) {
   const s = CC_EXPORT;
+  // Zweite Schranke neben dem ausgeblendeten Knopf: Ein Export zieht die
+  // gesamte Kampagne aus dem Haus, das bleibt bei den Admins.
+  if (!APP_KEYS.user?.is_admin) return toast('Der Export ist Admins vorbehalten.', 'warn', 6000);
   if (!s.spalten.length) return toast('Mindestens eine Spalte wählen.', 'warn', 5000);
   const { spalten, daten } = _ccExportZeilen();
   if (!daten.length) return toast('Kein Kontakt im gewählten Umfang.', 'warn', 5000);
   setBusy(btn, true, 'Baue …');
   try {
-    if (s.format === 'xlsx') await _ccExportExcel(spalten, daten);
-    else await _ccExportPdf(spalten, daten);
+    await _ccExportExcel(spalten, daten);
     setBusy(btn, false);
     closeCcExport();
     toast(daten.length + ' Kontakte exportiert.', 'success', 6000);
@@ -48096,64 +48086,6 @@ async function _ccExportExcel(spalten, daten) {
   X.utils.book_append_sheet(wb, ws, 'Kontakte');
   X.utils.book_append_sheet(wb, info, 'Auszug');
   X.writeFile(wb, _ccExportName('xlsx'));
-}
-
-/* --- PDF -----------------------------------------------------------------
-   Quer, mit wiederholtem Tabellenkopf und Seitenzahlen. Ohne beides ist ein
-   Ausdruck über zwanzig Seiten wertlos: Ab Seite zwei weiß niemand mehr,
-   welche Spalte was ist. */
-const JSPDF_AUTOTABLE_URL = 'https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.8.2/jspdf.plugin.autotable.min.js';
-
-async function _ccExportPdf(spalten, daten) {
-  await _loadScriptOnce(JSPDF_URL);
-  await _loadScriptOnce(JSPDF_AUTOTABLE_URL);
-  const jsPDFCls = window.jspdf && window.jspdf.jsPDF;
-  if (!jsPDFCls) throw new Error('jsPDF konnte nicht geladen werden.');
-  const doc = new jsPDFCls({ unit: 'mm', format: 'a4', orientation: 'landscape' });
-  if (typeof doc.autoTable !== 'function') throw new Error('Die Tabellen-Erweiterung für PDF konnte nicht geladen werden.');
-  const kopf = _ccExportKopfzeilen();
-  const breite = doc.internal.pageSize.getWidth();
-
-  /* Notizen im PDF kürzen: Eine Zeile mit 400 Zeichen sprengt jede Tabelle
-     und macht die Seite unlesbar. Vollständig stehen sie im Excel. */
-  const iNotiz = spalten.findIndex(s => s[0] === 'notiz');
-  const zeilen = iNotiz < 0 ? daten : daten.map(z => {
-    const k = z.slice();
-    if (String(k[iNotiz]).length > 160) k[iNotiz] = String(k[iNotiz]).slice(0, 157) + '…';
-    return k;
-  });
-
-  doc.autoTable({
-    head: [spalten.map(s => s[1])],
-    body: zeilen,
-    startY: 26,
-    margin: { top: 26, left: 8, right: 8, bottom: 14 },
-    styles: { fontSize: 7.2, cellPadding: 1.4, overflow: 'linebreak', valign: 'top' },
-    headStyles: { fillColor: [30, 58, 92], textColor: 255, fontStyle: 'bold', fontSize: 7.4 },
-    alternateRowStyles: { fillColor: [244, 247, 250] },
-    columnStyles: spalten.reduce((o, s, i) => {
-      // Verhältnis der Spaltenbreiten aus der Excel-Vorgabe übernehmen
-      o[i] = { cellWidth: Math.max(12, Math.min(70, s[2] * 1.55)) };
-      return o;
-    }, {}),
-    didDrawPage: () => {
-      doc.setFontSize(12); doc.setTextColor(30, 58, 92); doc.setFont(undefined, 'bold');
-      doc.text('Anrufliste · ' + kopf.kampagne, 8, 12);
-      doc.setFontSize(7.6); doc.setTextColor(90, 100, 115); doc.setFont(undefined, 'normal');
-      doc.text(kopf.mandant + ' · ' + kopf.umfang + ' · ' + daten.length + ' Kontakte · Filter: ' + kopf.filter, 8, 17);
-      doc.text('Erstellt ' + kopf.erstellt + (kopf.von ? ' von ' + kopf.von : ''), 8, 21);
-      doc.setDrawColor(210, 216, 224); doc.line(8, 23, breite - 8, 23);
-    },
-  });
-
-  // Seitenzahlen erst am Ende — vorher ist die Gesamtzahl nicht bekannt.
-  const seiten = doc.internal.getNumberOfPages();
-  for (let i = 1; i <= seiten; i++) {
-    doc.setPage(i);
-    doc.setFontSize(7.5); doc.setTextColor(120, 130, 145);
-    doc.text('Seite ' + i + ' von ' + seiten, breite - 8, doc.internal.pageSize.getHeight() - 6, { align: 'right' });
-  }
-  doc.save(_ccExportName('pdf'));
 }
 
 /* Statusfilter. Die Reiter oben fassen zusammen („Zu tun" = offen, Rückruf und
