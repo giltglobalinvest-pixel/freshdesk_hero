@@ -48,48 +48,83 @@ loaderEl.innerHTML=html;
 }
 window.loadCached=function(){if(window._cachedApp){document.open();document.write(window._cachedApp);document.close();}};
 var cacheKey='app_cache_'+REPO;
-var cachedHtml=null,cachedAt=null;
-try{cachedHtml=localStorage.getItem(cacheKey);cachedAt=localStorage.getItem(cacheKey+'_at');}catch(e){}
-if(cachedHtml)window._cachedApp=cachedHtml;
-function injectMonitor(html){
-var mon='<script>(function(){try{var R="'+REPO+'",F="'+FILENAME+'",CK="app_cache_"+R,P='+POLL_MIN+'*60*1000;'
-+'function isSuppressed(){try{return Date.now()<parseInt(localStorage.getItem(CK+"_suppress")||"0",10);}catch(e){return false;}}'
-+'function suppress(min){try{localStorage.setItem(CK+"_suppress",String(Date.now()+min*60000));}catch(e){}}'
-+'function hidePill(){var p=document.getElementById("__upd_pill");if(!p)return;p.style.opacity="0";p.style.transform="translateY(-150%)";setTimeout(function(){if(p.parentNode)p.remove();},400);}'
-+'function markSeen(sha){try{localStorage.setItem(CK+"_seen_sha",sha);}catch(e){}}'
-+'function showUpdateBanner(sha){if(isSuppressed())return;if(document.getElementById("__upd_pill"))return;var p=document.createElement("div");p.id="__upd_pill";p.style.cssText="position:fixed;top:calc(10px + env(safe-area-inset-top, 0px));right:12px;background:rgba(0,230,118,0.95);color:#0a3d20;padding:7px 14px;border-radius:999px;font-family:-apple-system,sans-serif;font-size:11px;font-weight:700;z-index:999999;cursor:pointer;box-shadow:0 4px 14px rgba(0,0,0,0.3);transition:opacity 0.35s,transform 0.35s;transform:translateY(-150%);opacity:0;display:flex;align-items:center;gap:6px;backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px)";p.innerHTML=\'\\u2728 Update<span style="margin-left:4px;opacity:0.6;font-size:14px;line-height:1;padding:0 2px" id="__upd_x">\\u00d7</span>\';p.onclick=function(e){if(e.target&&e.target.id==="__upd_x"){e.stopPropagation();markSeen(sha);suppress(60);hidePill();}else{location.reload();}};document.body.appendChild(p);setTimeout(function(){p.style.transform="translateY(0)";p.style.opacity="1";},10);setTimeout(function(){if(document.getElementById("__upd_pill")){markSeen(sha);hidePill();suppress(15);}},7000);}'
-+'function chk(){fetch("https://api.github.com/repos/"+R+"/commits?path="+F+"&per_page=1").then(function(r){return r.ok?r.json():null;}).then(function(d){if(!d||!d[0])return;var latest=d[0].sha;var seen=null;try{seen=localStorage.getItem(CK+"_seen_sha");}catch(e){}if(!seen){markSeen(latest);return;}if(seen!==latest){showUpdateBanner(latest);}}).catch(function(){});}'
-+'setTimeout(chk,30000);setInterval(chk,P);'
-+'document.addEventListener("visibilitychange",function(){if(!document.hidden)chk();});'
-+'window.addEventListener("focus",chk);'
-+'}catch(e){}})();<\/script>';
-var idx=html.toLowerCase().lastIndexOf('</body>');
-if(idx>=0)return html.slice(0,idx)+mon+html.slice(idx);
-return html+mon;
+var shaKey=cacheKey+'_sha';
+var CACHE_NAME='fdh-app-v1';
+var cachedHtml=null,cachedAt=null,cachedSha=null;
+try{cachedAt=localStorage.getItem(cacheKey+'_at');cachedSha=localStorage.getItem(shaKey);}catch(e){}
+
+/* Der Anwendungsquelltext ist mehrere Megabyte gross. Er gehoert nicht in den
+   localStorage: Dort teilen sich ALLE Apps derselben Domain rund 5 MB, und ein
+   3-MB-Eintrag sprengt das Budget fuer jede andere. Die Cache-Storage-API ist
+   genau dafuer da und kennt diese Grenze nicht. Faellt sie aus, wird geladen
+   wie bisher. */
+async function cacheLesen(){
+  try{
+    if(!window.caches)return null;
+    var c=await caches.open(CACHE_NAME);
+    var r=await c.match('app');
+    return r?await r.text():null;
+  }catch(e){return null;}
 }
+async function cacheSchreiben(html,sha){
+  try{
+    if(!window.caches)return;
+    var c=await caches.open(CACHE_NAME);
+    await c.put('app',new Response(html,{headers:{'Content-Type':'text/html; charset=utf-8'}}));
+    try{localStorage.setItem(cacheKey+'_at',new Date().toISOString());localStorage.setItem(shaKey,sha||'');}catch(e){}
+    /* Altlast aus der localStorage-Zeit wegraeumen — sie blockiert sonst
+       dauerhaft Platz, den andere Apps derselben Domain brauchen. */
+    try{localStorage.removeItem(cacheKey);}catch(e){}
+  }catch(e){}
+}
+async function shaHolen(){
+  var c=new AbortController();
+  var t=setTimeout(function(){c.abort();},4000);   // haengt die API, wird geladen wie bisher
+  try{
+    var r=await fetch('https://api.github.com/repos/'+REPO+'/commits?path='+FILENAME+'&per_page=1',{signal:c.signal});
+    if(!r.ok)return null;
+    var d=await r.json();
+    return (d&&d[0]&&d[0].sha)||null;
+  }catch(e){return null;}finally{clearTimeout(t);}
+}
+function starten(html){
+  setStatus('Starte App');
+  var fertig=injectMonitor(html);
+  setTimeout(function(){document.open();document.write(fertig);document.close();},60);
+}
+
 try{
+/* Schneller Weg: Erst fragen, OB sich etwas geaendert hat (ein knappes
+   Kilobyte), statt jedes Mal blind die ganze Datei zu ziehen. Unveraendert
+   und im Cache? Dann sofort starten. Genau das hat auf dem Handy bei jedem
+   Start mehrere Megabyte gekostet. */
+setStatus('Pruefe Version');
+var sha=await shaHolen();
+if(sha&&cachedSha&&sha===cachedSha){
+  var ausCache=await cacheLesen();
+  if(ausCache&&ausCache.length>100){
+    try{localStorage.setItem(cacheKey+'_seen_sha',sha);}catch(e){}
+    window._cachedApp=ausCache;
+    setStatus('Aus dem Zwischenspeicher');
+    starten(ausCache);
+    return;
+  }
+}
+
 setStatus('Lade neueste Version');
 var url='https://raw.githubusercontent.com/'+REPO+'/main/'+FILENAME+'?t='+Date.now();
 var res=await fetch(url,{cache:'no-store'});
 if(!res.ok)throw new Error('HTTP '+res.status);
 var html=await res.text();
-if(!html||html.length<100)throw new Error('Datei leer oder ungültig');
-try{localStorage.setItem(cacheKey,html);localStorage.setItem(cacheKey+'_at',new Date().toISOString());}catch(e){}
-// Aktuelle Commit-SHA als "gesehen" markieren — verhindert False-Positive im Monitor
-try{
-  var sRes=await fetch('https://api.github.com/repos/'+REPO+'/commits?path='+FILENAME+'&per_page=1');
-  if(sRes.ok){
-    var sData=await sRes.json();
-    if(sData&&sData[0]&&sData[0].sha){
-      localStorage.setItem(cacheKey+'_seen_sha',sData[0].sha);
-    }
-  }
-}catch(e){}
-var withMonitor=injectMonitor(html);
-setStatus('Starte App');
-setTimeout(function(){document.open();document.write(withMonitor);document.close();},150);
+if(!html||html.length<100)throw new Error('Datei leer oder ungueltig');
+window._cachedApp=html;
+await cacheSchreiben(html,sha);
+try{if(sha)localStorage.setItem(cacheKey+'_seen_sha',sha);}catch(e){}
+starten(html);
 }catch(err){
 console.error('Loader error:',err);
+cachedHtml=await cacheLesen();
+if(cachedHtml)window._cachedApp=cachedHtml;
 if(cachedHtml){
 setStatus('Offline-Modus');
 var d=cachedAt?new Date(cachedAt).toLocaleString('de-DE'):'unbekannt';
