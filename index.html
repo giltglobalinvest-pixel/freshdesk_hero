@@ -827,7 +827,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v3.21.2';
+const APP_VERSION = 'v3.22.0';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -23103,6 +23103,8 @@ function closeModal() {
 
 /* ===================== PROFILE PAGE ===================== */
 function renderProfilePage() {
+  // Die Kostenkacheln unten brauchen das Log — nachladen und neu zeichnen.
+  ladeAiCostLogBeiBedarf(() => { if (APP_STATE.page === 'profile') renderProfilePage(); });
   setPageTitle('Profil', '');
   setActiveNav('profile');
   const u = APP_KEYS.user || {};
@@ -23682,6 +23684,8 @@ function _renderHistorieAnalyse(list, gesamtAnzahl, fertig) {
 function renderCostsPage() {
   setPageTitle('KI-Kosten', 'API + Modell-Verbrauch');
   setActiveNav('');
+  // Erst hier gebraucht — beim Start wäre es fünfzig Anfragen für nichts.
+  ladeAiCostLogBeiBedarf(() => { if (APP_STATE.page === 'costs') renderCostsPage(); });
   const log = APP_STATE.aiCostLog || [];
 
   // Zeitperioden
@@ -58139,6 +58143,24 @@ export default async function (req) {
 /* ============================================================
    BOOT
    ============================================================ */
+/* Arbeit, die erst nach dem ersten Bild passieren darf. requestIdleCallback,
+   wo es das gibt — sonst ein kurzer Timer. Beides ist besser als „sofort",
+   denn sofort heißt auf dem Handy: gleichzeitig mit dem, worauf gewartet wird. */
+function _nachDemStart(fn, verzoegerung) {
+  const los = () => { try { fn(); } catch (e) { console.warn('[Start] Nacharbeit:', e.message); } };
+  if (typeof requestIdleCallback === 'function') requestIdleCallback(los, { timeout: (verzoegerung || 2500) });
+  else setTimeout(los, verzoegerung || 1500);
+}
+
+/* Das Kosten-Log bei Bedarf — einmal je Sitzung, und der Aufrufer zeichnet
+   danach neu. Ohne Merker würde jeder Seitenwechsel es erneut holen. */
+let _AI_COST_GELADEN = null;
+function ladeAiCostLogBeiBedarf(danach) {
+  if (Array.isArray(APP_STATE.aiCostLog) && APP_STATE.aiCostLog.length) return;
+  if (!_AI_COST_GELADEN) _AI_COST_GELADEN = loadAiCostLog().catch(e => console.warn('AI-Cost-Load:', e.message));
+  if (danach) _AI_COST_GELADEN.then(() => { try { danach(); } catch (_) {} });
+}
+
 async function showApp() {
   $('loginScreen').style.display = 'none';
   $('appShell').hidden = false;
@@ -58154,15 +58176,23 @@ async function showApp() {
   await loadWiedervorlage().catch(e => console.warn('Wiedervorlage-Load:', e.message));
   // Regel-Stopp-Cache hat ähnliche Sichtbarkeits-Bedeutung — auch await
   await loadRegelStopp().catch(e => console.warn('RegelStopp-Load:', e.message));
-  // Rules-Cache laden (im Hintergrund — Tabelle muss noch nicht existieren)
-  loadRules().catch(e => console.warn('Rules-Load:', e.message));
-  // Meine-Notizen-Index laden (im Hintergrund)
-  loadMyNotes().catch(e => console.warn('MyNotes-Load:', e.message));
-  // Team-Wissen-Index laden (im Hintergrund — Tabelle wird beim ersten Bedarf via ensureAppTables erstellt)
-  loadKnowledge().catch(e => console.warn('Wissen-Load:', e.message));
-  // KI-Kosten-Log laden (im Hintergrund — fürs Dashboard)
-  loadAiCostLog().catch(e => console.warn('AI-Cost-Load:', e.message));
-  loadAufgaben().catch(e => console.warn('Aufgaben-Load:', e.message));
+  /* v3.22.0: Diese vier Ladevorgänge hingen früher direkt hier — „im
+     Hintergrund", aber gleichzeitig mit dem Laden der Tickets. Auf dem Handy
+     ist das kein Hintergrund, sondern Konkurrenz um dieselbe Leitung: Wissen
+     (~1000 Datensätze) und Aufgaben paginieren Airtable in Hunderterschritten,
+     macht ein Dutzend Anfragen, bevor die erste Ticketliste steht.
+
+     Jetzt laufen sie NACH dem ersten Zeichnen. Gebraucht wird keiner davon,
+     um die Liste zu zeigen. */
+  _nachDemStart(() => {
+    loadRules().catch(e => console.warn('Rules-Load:', e.message));
+    loadMyNotes().catch(e => console.warn('MyNotes-Load:', e.message));
+    loadKnowledge().catch(e => console.warn('Wissen-Load:', e.message));
+    loadAufgaben().catch(e => console.warn('Aufgaben-Load:', e.message));
+  });
+  /* Das KI-Kosten-Log holte beim Start bis zu 5000 Datensätze — fünfzig
+     Airtable-Seiten nacheinander, für eine Zahl, die nur auf zwei Seiten
+     steht. Es wird jetzt erst geladen, wenn jemand sie ansieht. */
   // v2.46.57: User-Wunsch — App startet IMMER in normaler Listen-Ansicht.
   // Wer den Stack/Tinder-Modus will, schaltet ihn manuell in der Filter-Leiste um.
   // Persistente Vorauswahl wird ignoriert, damit der Start immer vorhersagbar ist.
