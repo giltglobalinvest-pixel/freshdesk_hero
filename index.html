@@ -827,7 +827,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v3.22.0';
+const APP_VERSION = 'v3.23.0';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -1355,6 +1355,68 @@ function confirmDialog(title, message, opts = {}) {
 /* ============================================================
    AIRTABLE — DIRECT (read via embedded read-key, write via APP_KEYS.airtableWriteKey)
    ============================================================ */
+/* ===== Airtable-Drossel (v3.23.0) =====================================
+   Airtable lässt fünf Anfragen je Sekunde und Base zu. Wer darüber geht,
+   bekommt 429 — und danach eine Sperre von rund 30 Sekunden, die JEDE weitere
+   Anfrage trifft, auch die harmlosen Leseaufrufe. Genau das passierte beim
+   Start: Zwei Aufräumroutinen schickten Dutzende Einzel-Löschungen gleichzeitig
+   los, die Base ging in die Sperre, und Aufgaben, Regeln und Wissen scheiterten
+   reihenweise mit 429. Die App wirkte hängend, obwohl sie nur wartete.
+
+   Deshalb läuft ab hier JEDER Airtable-Aufruf durch dieses Nadelöhr: mindestens
+   220 ms Abstand (gut vier je Sekunde) und bei 429 automatisch ein zweiter
+   Versuch mit wachsender Pause. Eine Drossel an einer Stelle ist verlässlicher
+   als Disziplin an fünfzig Aufrufstellen. */
+let _AT_LETZTE = 0;
+let _AT_KETTE = Promise.resolve();
+const _AT_ABSTAND = 250;   // vier je Sekunde — mit Sicherheitsabstand zum Limit von fünf
+
+function _atPlatz() {
+  _AT_KETTE = _AT_KETTE.then(async () => {
+    const warten = _AT_ABSTAND - (Date.now() - _AT_LETZTE);
+    if (warten > 0) await new Promise(r => setTimeout(r, warten));
+    _AT_LETZTE = Date.now();
+  });
+  return _AT_KETTE;
+}
+
+async function _atFetch(url, opts, versuche) {
+  const max = versuche == null ? 3 : versuche;
+  for (let i = 0; i <= max; i++) {
+    await _atPlatz();
+    const res = await fetch(url, opts);
+    if (res.status !== 429) return res;
+    if (i === max) return res;
+    // Airtable nennt die Wartezeit nicht immer — dann selbst hochzählen.
+    const kopf = parseInt(res.headers.get('Retry-After') || '', 10);
+    const pause = Number.isFinite(kopf) ? kopf * 1000 : Math.min(8000, 700 * Math.pow(2, i));
+    console.warn('[Airtable] 429 — warte ' + pause + ' ms (Versuch ' + (i + 1) + '/' + max + ')');
+    await new Promise(r => setTimeout(r, pause));
+  }
+}
+
+/* Löschen im Stapel: Airtable nimmt zehn Datensätze je Anfrage. Aus dreißig
+   Einzelaufrufen werden drei — der Unterschied zwischen „Sperre" und „fällt
+   nicht auf". */
+async function airtableDeleteMany(table, ids) {
+  const liste = (ids || []).filter(Boolean);
+  if (!liste.length || !APP_KEYS.airtableWriteKey) return 0;
+  const basis = 'https://api.airtable.com/v0/' + APP_CONFIG.APP_BASE_ID + '/' + encodeURIComponent(table);
+  let weg = 0;
+  for (let i = 0; i < liste.length; i += 10) {
+    const teil = liste.slice(i, i + 10);
+    const p = teil.map(id => 'records[]=' + encodeURIComponent(id)).join('&');
+    try {
+      const res = await _atFetch(basis + '?' + p, {
+        method: 'DELETE', headers: { 'Authorization': 'Bearer ' + APP_KEYS.airtableWriteKey },
+      });
+      if (res.ok) weg += teil.length;
+      else console.warn('[Airtable] Stapel-Löschung ' + res.status);
+    } catch (e) { console.warn('[Airtable] Stapel-Löschung:', e.message); }
+  }
+  return weg;
+}
+
 async function airtableRead(table, opts = {}) {
   // Pagination-fähig: Airtable liefert pro Page max. 100 Records + ggf. `offset`.
   // Vor v2.45.5 ging nur die erste Page — d.h. ab 101 WV-/Regel-/Notiz-Records waren
@@ -1384,7 +1446,7 @@ async function airtableRead(table, opts = {}) {
     if (offset) params.set('offset', offset);
     const qs = params.toString();
     const url = qs ? baseUrl + '?' + qs : baseUrl;
-    const res = await fetch(url, { headers: { 'Authorization': 'Bearer ' + token } });
+    const res = await _atFetch(url, { headers: { 'Authorization': 'Bearer ' + token } });
     if (!res.ok) {
       // Permissions/Scope-Fallback: bei 403/404 mit Write-Key nochmal versuchen
       if ((res.status === 403 || res.status === 404) && !triedFallback && APP_KEYS.airtableWriteKey && APP_KEYS.airtableWriteKey !== token) {
@@ -1404,7 +1466,7 @@ async function airtableRead(table, opts = {}) {
 async function airtableWrite(table, fields) {
   if (!APP_KEYS.airtableWriteKey) throw new Error('Schreibzugriff fehlt — bitte einloggen oder Master-Base/Keys prüfen');
   const url = 'https://api.airtable.com/v0/' + APP_CONFIG.APP_BASE_ID + '/' + encodeURIComponent(table);
-  const res = await fetch(url, {
+  const res = await _atFetch(url, {
     method: 'POST',
     headers: { 'Authorization': 'Bearer ' + APP_KEYS.airtableWriteKey, 'Content-Type': 'application/json' },
     body: JSON.stringify({ fields, typecast: true }),
@@ -1417,7 +1479,7 @@ async function airtableWrite(table, fields) {
 async function airtableUpdate(table, id, fields) {
   if (!APP_KEYS.airtableWriteKey) throw new Error('Schreibzugriff fehlt');
   const url = 'https://api.airtable.com/v0/' + APP_CONFIG.APP_BASE_ID + '/' + encodeURIComponent(table) + '/' + id;
-  const res = await fetch(url, {
+  const res = await _atFetch(url, {
     method: 'PATCH',
     headers: { 'Authorization': 'Bearer ' + APP_KEYS.airtableWriteKey, 'Content-Type': 'application/json' },
     body: JSON.stringify({ fields, typecast: true }),
@@ -1428,7 +1490,7 @@ async function airtableUpdate(table, id, fields) {
 async function airtableDelete(table, id) {
   if (!APP_KEYS.airtableWriteKey) throw new Error('Schreibzugriff fehlt');
   const url = 'https://api.airtable.com/v0/' + APP_CONFIG.APP_BASE_ID + '/' + encodeURIComponent(table) + '/' + id;
-  const res = await fetch(url, {
+  const res = await _atFetch(url, {
     method: 'DELETE',
     headers: { 'Authorization': 'Bearer ' + APP_KEYS.airtableWriteKey }
   });
@@ -3354,15 +3416,23 @@ async function loadWiedervorlage() {
       angelegt_am: f.angelegt_am || '',
     });
   });
-  // Auto-Cleanup: Einträge älter als 30 Tage löschen (Frist lange vorbei)
+  /* Auto-Cleanup: Einträge älter als 30 Tage. Aus der Map fliegen sie sofort,
+     gelöscht wird im STAPEL und erst nach dem Start — Aufräumen ist Hausarbeit
+     und darf den ersten Bildaufbau nicht ausbremsen. Vorher ging je Eintrag
+     eine eigene Löschanfrage gleichzeitig raus; bei dreißig alten Einträgen
+     lief Airtable damit in die Sperre und riss den ganzen Start mit. */
   const cutoff = Date.now() - 30 * 86400e3;
-  let cleaned = 0;
+  const wegDamit = [];
   for (const [k, v] of APP_STATE.wiedervorlageMap.entries()) {
     if (new Date(v.frist_am).getTime() < cutoff) {
-      airtableDelete(WIEDERVORLAGE_TABLE, v.recordId).catch(() => {});
+      wegDamit.push(v.recordId);
       APP_STATE.wiedervorlageMap.delete(k);
-      cleaned++;
     }
+  }
+  const cleaned = wegDamit.length;
+  if (cleaned && typeof _nachDemStart === 'function') {
+    _nachDemStart(() => airtableDeleteMany(WIEDERVORLAGE_TABLE, wegDamit)
+      .then(n => n && console.log('[Wiedervorlage] ' + n + ' alte Einträge aufgeräumt')), 6000);
   }
   console.log('[loadWiedervorlage] ' + recs.length + ' records geladen, ' + APP_STATE.wiedervorlageMap.size + ' aktiv in Map' + (skipped ? ', ' + skipped + ' übersprungen (Felder fehlen)' : '') + (cleaned ? ', ' + cleaned + ' alte gelöscht' : '') + (readError ? ' — READ-FEHLER: ' + readError.message : ''));
 }
@@ -3489,18 +3559,21 @@ async function loadMyNotes() {
     });
     APP_STATE.myNotesMap.set(key, list);
   });
-  // Auto-Cleanup älterer Einträge (>90 Tage) — nicht blockierend
+  /* Auto-Cleanup älterer Einträge (>90 Tage). Gesammelt und im Stapel gelöscht,
+     nach dem Start — hier standen die meisten der Hunderten Einzelanfragen, die
+     Airtable beim Start in die 429-Sperre trieben. */
   const cutoff = Date.now() - 90 * 86400e3;
+  const wegDamit = [];
   for (const [key, list] of APP_STATE.myNotesMap.entries()) {
     const fresh = list.filter(n => new Date(n.created).getTime() > cutoff);
-    if (fresh.length === 0) {
-      list.forEach(n => airtableDelete(NOTIZEN_TABLE, n.recordId).catch(() => {}));
-      APP_STATE.myNotesMap.delete(key);
-    } else if (fresh.length < list.length) {
-      const stale = list.filter(n => new Date(n.created).getTime() <= cutoff);
-      stale.forEach(n => airtableDelete(NOTIZEN_TABLE, n.recordId).catch(() => {}));
-      APP_STATE.myNotesMap.set(key, fresh);
-    }
+    if (fresh.length === list.length) continue;
+    list.filter(n => new Date(n.created).getTime() <= cutoff).forEach(n => wegDamit.push(n.recordId));
+    if (fresh.length) APP_STATE.myNotesMap.set(key, fresh);
+    else APP_STATE.myNotesMap.delete(key);
+  }
+  if (wegDamit.length && typeof _nachDemStart === 'function') {
+    _nachDemStart(() => airtableDeleteMany(NOTIZEN_TABLE, wegDamit)
+      .then(n => n && console.log('[Notizen] ' + n + ' alte Einträge aufgeräumt')), 9000);
   }
 }
 
