@@ -827,7 +827,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v3.23.0';
+const APP_VERSION = 'v3.23.1';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -39901,7 +39901,8 @@ async function _buildAngebotPdf(rec) {
   const metaY = 40;
   doc.text('Datum:', mr-50, metaY);
   doc.setTextColor(...GREY);
-  doc.text(_sanPdf(today), mr-2, metaY, { align:'right' });
+  const _todayDE = String(today).replace(/^(\d{4})-(\d{1,2})-(\d{1,2}).*$/, (m,y,mo,d)=> String(d).padStart(2,'0')+'-'+String(mo).padStart(2,'0')+'-'+y);   // tt-mm-jjjj
+  doc.text(_sanPdf(_todayDE), mr-2, metaY, { align:'right' });
   doc.setTextColor(...GREY_L);
   doc.text('Angebot-Nr.:', mr-50, metaY+5);
   doc.setTextColor(...NAVY); doc.setFont('helvetica','bold'); doc.setFontSize(9.5);
