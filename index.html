@@ -827,7 +827,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v3.23.1';
+const APP_VERSION = 'v3.24.0';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -46997,6 +46997,201 @@ async function _zdbResolveConflict(kind, recId, action, btn) {
   } catch (e) { if (btn) setBusy(btn, false); toast('Fehler: ' + e.message, 'error', 6000); }
 }
 
+/* ===== Firma/Kontakt aus einem Screenshot (v3.24.0) =====================
+   Eine E-Mail-Signatur enthält alles, was der Datensatz braucht — Name, Firma,
+   Anschrift, Telefon, Web. Es abzutippen ist die Sorte Arbeit, bei der man sich
+   vertippt und es erst Wochen später merkt, wenn die Post zurückkommt.
+
+   Deshalb: Screenshot einfügen (Cmd/Strg+V), ablegen oder auswählen — die KI
+   liest ihn aus und füllt die Felder. Geschrieben wird nichts: Der Dialog
+   bleibt offen, alles ist überschreibbar, und gespeichert wird erst auf Knopf-
+   druck. Eine automatische Übernahme wäre hier falsch; ein falsch gelesener
+   Firmenname landet sonst ungeprüft im Stammsatz. */
+let _ZDB_BILD = null;   // { kind, paste-Handler }
+
+function _zdbBildBereichHtml(kind) {
+  return '<div id="zdbBildZone" ondragover="event.preventDefault();this.classList.add(\'ring-2\',\'ring-indigo-400\')"'
+    + ' ondragleave="this.classList.remove(\'ring-2\',\'ring-indigo-400\')"'
+    + ' ondrop="_zdbBildAbgelegt(event)"'
+    + ' class="mb-3 rounded-xl border-2 border-dashed border-indigo-300 bg-indigo-50/50 p-3 text-center">'
+    + '<p class="text-[12px] font-semibold text-indigo-900 inline-flex items-center gap-1.5">'
+      + '<i data-lucide="image-plus" class="w-4 h-4"></i> Screenshot einfügen und Felder füllen</p>'
+    + '<p class="text-[11px] text-indigo-800/80 mt-0.5">Cmd/Strg+V · hierher ziehen · '
+      + '<button type="button" onclick="document.getElementById(\'zdbBildDatei\').click()" class="underline font-semibold">Datei wählen</button></p>'
+    + '<p class="text-[10px] text-ink-500 mt-1">'
+      + (kind === 'firma' ? 'Aus Briefkopf, Impressum oder Signatur' : 'Aus E-Mail-Signatur oder Visitenkarte')
+      + ' — nichts wird gespeichert, bis du auf Speichern drückst.</p>'
+    + '<input id="zdbBildDatei" type="file" accept="image/*" class="hidden" onchange="_zdbBildDateiGewaehlt(this)">'
+    + '<div id="zdbBildStatus" class="text-[11px] mt-1"></div>'
+  + '</div>';
+}
+
+/* Einfügen per Tastatur: Der Zwischenablage-Inhalt landet am fokussierten
+   Element, und das ist meist eines der Eingabefelder. Deshalb hört das
+   Dokument mit, solange der Dialog offen ist — und nur so lange. */
+function _zdbBildHandlerAn(kind) {
+  _zdbBildHandlerAus();
+  const h = (e) => {
+    const items = (e.clipboardData && e.clipboardData.items) || [];
+    for (const it of items) {
+      if (it.type && it.type.startsWith('image/')) {
+        const datei = it.getAsFile();
+        if (datei) { e.preventDefault(); _zdbBildLesen(datei, kind); return; }
+      }
+    }
+  };
+  document.addEventListener('paste', h);
+  _ZDB_BILD = { kind, handler: h };
+}
+function _zdbBildHandlerAus() {
+  if (_ZDB_BILD && _ZDB_BILD.handler) document.removeEventListener('paste', _ZDB_BILD.handler);
+  _ZDB_BILD = null;
+}
+
+function _zdbBildAbgelegt(e) {
+  e.preventDefault();
+  const zone = document.getElementById('zdbBildZone');
+  if (zone) zone.classList.remove('ring-2', 'ring-indigo-400');
+  const datei = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0];
+  if (datei) _zdbBildLesen(datei, _ZDB_BILD && _ZDB_BILD.kind);
+}
+function _zdbBildDateiGewaehlt(input) {
+  const datei = input && input.files && input.files[0];
+  if (datei) _zdbBildLesen(datei, _ZDB_BILD && _ZDB_BILD.kind);
+  if (input) input.value = '';
+}
+
+function _zdbBildStatus(html) {
+  const el = document.getElementById('zdbBildStatus');
+  if (el) el.innerHTML = html;
+}
+
+async function _zdbBildLesen(datei, kind) {
+  if (!datei || !datei.type || !datei.type.startsWith('image/')) {
+    return _zdbBildStatus('<span class="text-amber-700">Das ist kein Bild. PDF und Text gehen hier nicht.</span>');
+  }
+  /* Große Screenshots kosten Zeit und Token, ohne mehr zu zeigen: Ein Bild mit
+     1600 Pixel Breite ist für eine Signatur mehr als genug. */
+  _zdbBildStatus('<span class="text-ink-500">Bild wird gelesen …</span>');
+  let bild;
+  try { bild = await _zdbBildVerkleinern(datei, 1600); }
+  catch (e) { return _zdbBildStatus('<span class="text-red-700">' + escapeHtml(e.message || String(e)) + '</span>'); }
+
+  _zdbBildStatus('<span class="text-indigo-700"><span class="spinner inline-block w-3 h-3 border-[2px]"></span> Die KI liest den Screenshot …</span>');
+  try {
+    const felder = await _zdbBildAuswerten(bild, kind);
+    const gefuellt = _zdbFelderFuellen(felder, kind);
+    if (!gefuellt.length) {
+      _zdbBildStatus('<span class="text-amber-700">Nichts Verwertbares erkannt — oder alle Felder waren schon gefüllt.</span>');
+    } else {
+      _zdbBildStatus('<span class="text-emerald-700">Übernommen: <b>' + escapeHtml(gefuellt.join(', ')) + '</b> — bitte prüfen.</span>');
+    }
+  } catch (e) {
+    console.warn('[ZDB-Bild]', e);
+    _zdbBildStatus('<span class="text-red-700">' + escapeHtml((e.message || String(e)).slice(0, 200)) + '</span>');
+  }
+}
+
+/* Verkleinern über ein Canvas. Nebeneffekt, der hier zählt: Was aus der
+   Zwischenablage kommt, ist oft PNG in Bildschirmauflösung — als JPEG mit
+   85 % bleibt der Text lesbar, die Datei aber ein Bruchteil. */
+function _zdbBildVerkleinern(datei, maxBreite) {
+  return new Promise((ok, fehler) => {
+    const leser = new FileReader();
+    leser.onerror = () => fehler(new Error('Bild konnte nicht gelesen werden.'));
+    leser.onload = () => {
+      const img = new Image();
+      img.onerror = () => fehler(new Error('Bild konnte nicht geöffnet werden.'));
+      img.onload = () => {
+        const faktor = Math.min(1, maxBreite / (img.width || maxBreite));
+        const c = document.createElement('canvas');
+        c.width = Math.round((img.width || maxBreite) * faktor);
+        c.height = Math.round((img.height || maxBreite) * faktor);
+        c.getContext('2d').drawImage(img, 0, 0, c.width, c.height);
+        const daten = c.toDataURL('image/jpeg', 0.85);
+        ok({ mediaType: 'image/jpeg', base64: daten.split(',')[1] });
+      };
+      img.src = leser.result;
+    };
+    leser.readAsDataURL(datei);
+  });
+}
+
+async function _zdbBildAuswerten(bild, kind) {
+  const sys = kind === 'firma'
+    ? 'Du liest einen Screenshot (Briefkopf, Impressum, E-Mail-Signatur, Visitenkarte) und ziehst daraus die FIRMA heraus.\n'
+      + 'REGELN:\n'
+      + '1. „name" ist der vollständige Firmenname MIT Rechtsform (GmbH, AG, e.K., GbR, eG …), so wie er dasteht.\n'
+      + '2. Rollenwörter sind keine Firmennamen: „Hausverwaltung", „Eigentümer", „Betreiber", „WEG" allein — dann Feld leer lassen.\n'
+      + '3. Anschrift getrennt: strasse (mit Hausnummer), plz, ort, land (nur wenn genannt; „Deutschland" nicht erfinden).\n'
+      + '4. telefon: die Haupt- oder Zentralnummer, nicht die Mobilnummer einer Person.\n'
+      + '5. webseite ohne „http://", ust_id nur wenn ausdrücklich als USt-IdNr./VAT genannt.\n'
+      + '6. Nichts erfinden, nichts ergänzen, nichts übersetzen. Was nicht dasteht, bleibt leer.\n\n'
+      + 'ANTWORTE NUR MIT JSON: {"name":"","strasse":"","plz":"","ort":"","land":"","email":"","telefon":"","webseite":"","ust_id":""}'
+    : 'Du liest einen Screenshot (E-Mail-Signatur, Visitenkarte) und ziehst daraus die PERSON heraus.\n'
+      + 'REGELN:\n'
+      + '1. vorname und nachname getrennt. Akademische Titel (Dr., Prof.) gehören NICHT in den Vornamen, sondern weg.\n'
+      + '2. telefon ist die Festnetznummer, mobil die Mobilnummer — nicht vertauschen; Zentrale zählt als telefon.\n'
+      + '3. position ist die Funktion („Geschäftsführer", „Technische Leitung"), nicht die Abteilung allein.\n'
+      + '4. firma ist der Firmenname MIT Rechtsform, so wie er dasteht.\n'
+      + '5. Nichts erfinden. Was nicht dasteht, bleibt leer.\n\n'
+      + 'ANTWORTE NUR MIT JSON: {"vorname":"","nachname":"","email":"","telefon":"","mobil":"","position":"","firma":""}';
+
+  const data = await _callAnthropicWithRetry({
+    model: 'claude-sonnet-4-5-20250929', max_tokens: 800, system: sys,
+    messages: [{ role: 'user', content: [
+      { type: 'text', text: 'Screenshot:' },
+      { type: 'image', source: { type: 'base64', media_type: bild.mediaType, data: bild.base64 } },
+    ] }],
+  });
+  const roh = (data.content && data.content[0] && data.content[0].text || '').trim();
+  const o = parseAIJson(roh);
+  if (!o || typeof o !== 'object') throw new Error('Die Antwort der KI war nicht lesbar.');
+  return o;
+}
+
+/* Füllt nur LEERE Felder. Wer einen bestehenden Satz ergänzt, will nicht, dass
+   ein Screenshot die gepflegte Anschrift überschreibt — und beim neuen Satz
+   ist ohnehin alles leer. */
+function _zdbFelderFuellen(felder, kind) {
+  const gefuellt = [];
+  const labels = { name: 'Name', strasse: 'Straße', plz: 'PLZ', ort: 'Ort', land: 'Land',
+    email: 'E-Mail', telefon: 'Telefon', mobil: 'Mobil', webseite: 'Webseite', ust_id: 'USt-ID',
+    vorname: 'Vorname', nachname: 'Nachname', position: 'Position' };
+  document.querySelectorAll('[data-zf]').forEach(el => {
+    const k = el.getAttribute('data-zf');
+    if (k === 'firma' || k === 'typ' || k === 'quelle') return;      // gesondert behandelt
+    const wert = String(felder[k] == null ? '' : felder[k]).trim();
+    if (!wert || String(el.value || '').trim()) return;
+    el.value = wert;
+    el.classList.add('ring-2', 'ring-emerald-300');
+    gefuellt.push(labels[k] || k);
+  });
+
+  /* Beim Kontakt gibt es keine Firma zum Eintippen, sondern eine Verknüpfung.
+     Passt der gelesene Name auf eine vorhandene Firma, wird sie ausgewählt;
+     sonst bleibt es beim Hinweis — eine Firma nebenbei anzulegen wäre eine
+     Nebenwirkung, die niemand erwartet. */
+  if (kind === 'kontakt' && felder.firma) {
+    const sel = document.getElementById('zdbFirmaSelect');
+    const gesucht = String(felder.firma).toLowerCase().replace(/[^a-z0-9]/g, '');
+    if (sel && !sel.value) {
+      const treffer = [...sel.options].find(o => {
+        const n = String(o.textContent || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+        return n && gesucht && (n === gesucht || n.startsWith(gesucht.slice(0, 12)) || gesucht.startsWith(n.slice(0, 12)));
+      });
+      if (treffer) { sel.value = treffer.value; gefuellt.push('Firma'); }
+      else {
+        const such = document.getElementById('zdbFirmaSuche');
+        if (such) such.value = String(felder.firma);
+        _zdbFirmaFiltern(String(felder.firma));
+        gefuellt.push('Firma „' + felder.firma + '" nicht gefunden — bitte prüfen oder zuerst anlegen');
+      }
+    }
+  }
+  return gefuellt;
+}
+
 /* ---- Inline-Bearbeiten / Neu (Modal, schreibt zurück nach Airtable) ---- */
 function _zdbEditRecord(kind, recId) {
   const d = ZDB_VIEW_STATE.data;
@@ -47043,7 +47238,7 @@ function _zdbOpenEditModal(kind, recId, f) {
       '<div class="bg-white rounded-2xl shadow-xl w-full max-w-md my-8">' +
         '<div class="flex items-center justify-between p-4 border-b border-ink-200"><h3 class="font-bold text-ink-900">' + escapeHtml(title) + '</h3>' +
           '<button onclick="_zdbCloseEdit()" class="text-ink-400 hover:text-ink-700"><i data-lucide="x" class="w-5 h-5"></i></button></div>' +
-        '<div class="p-4">' + fieldsHtml + '</div>' +
+        '<div class="p-4">' + _zdbBildBereichHtml(kind) + fieldsHtml + '</div>' +
         '<div class="flex items-center justify-end gap-2 p-4 border-t border-ink-200">' +
           '<button onclick="_zdbCloseEdit()" class="px-3 py-2 text-sm text-ink-600 hover:bg-ink-100 rounded-lg">Abbrechen</button>' +
           '<button onclick="_zdbSaveEdit(\'' + kind + '\',\'' + (recId || '') + '\', this)" class="px-4 py-2 text-sm font-bold bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg inline-flex items-center gap-1"><i data-lucide="save" class="w-4 h-4"></i> Speichern</button>' +
@@ -47051,6 +47246,7 @@ function _zdbOpenEditModal(kind, recId, f) {
       '</div>' +
     '</div>';
   if (window.lucide) lucide.createIcons();
+  _zdbBildHandlerAn(kind);
 }
 /* Filtert die Firmenliste im Bearbeiten-Dialog. Die Auswahl selbst bleibt
    erhalten, auch wenn sie gerade herausgefiltert ist — sonst würde ein Tippen
@@ -47069,7 +47265,12 @@ function _zdbFirmaFiltern(text) {
   if (zaehler) zaehler.textContent = q ? (sichtbar + ' Treffer') : '';
 }
 
-function _zdbCloseEdit() { const h = document.getElementById('zdbEditHost'); if (h) h.innerHTML = ''; }
+function _zdbCloseEdit() {
+  // Der Einfüge-Horcher hängt am Dokument — er muss mit dem Dialog gehen,
+  // sonst fängt er später Bilder ab, die woanders hingehören.
+  _zdbBildHandlerAus();
+  const h = document.getElementById('zdbEditHost'); if (h) h.innerHTML = '';
+}
 async function _zdbSaveEdit(kind, recId, btn) {
   const d = ZDB_VIEW_STATE.data;
   const account = _zdbCurrentAccount();
