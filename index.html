@@ -827,7 +827,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v3.27.0';
+const APP_VERSION = 'v3.28.0';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -16556,9 +16556,11 @@ function _fdhKontaktPanelHtml() {
     + '</div>'
     + '<div class="flex items-start gap-2 border-t border-ink-200 pt-2">'
       + '<i data-lucide="phone-call" class="w-3.5 h-3.5 text-amber-600 mt-0.5 shrink-0"></i>'
-      + '<div class="flex-1 min-w-0">' + kampHtml + '</div>'
-      + knopf('_fdhKampagnePush(this)', k.length ? 'Weitere Kampagne' : 'Telefonkampagne', 'phone-outgoing',
-          k.length ? 'bg-white hover:bg-ink-50 border border-ink-300 text-ink-600' : 'bg-amber-50 hover:bg-amber-100 border border-amber-200 text-amber-800')
+      + '<div class="flex-1 min-w-0">' + kampHtml + _fdhKampInlineHtml() + '</div>'
+      + '<button onclick="_fdhKampPlus(this)" title="' + (s.inline ? 'Abbrechen' : 'In eine Telefonkampagne übernehmen')
+        + '" class="shrink-0 w-6 h-6 rounded-lg inline-flex items-center justify-center '
+        + (s.inline ? 'bg-ink-200 text-ink-700 hover:bg-ink-300' : 'bg-amber-50 hover:bg-amber-100 border border-amber-200 text-amber-800') + '">'
+        + '<i data-lucide="' + (s.inline ? 'x' : 'plus') + '" class="w-3.5 h-3.5"></i></button>'
     + '</div></div>';
 }
 
@@ -16810,17 +16812,90 @@ async function _fdhZdbSpeichern(btn) {
   }
 }
 
-/* Von hier direkt in eine Kampagne. Steht der Kontakt schon in der zentralen
-   DB, gelten deren Daten — sie sind gepflegt, die Freshdesk-Angaben kommen aus
-   einer Signatur. */
-async function _fdhKampagnePush(btn) {
+/* Ein Kontakt, eine Kampagne, ein Klick.
+
+   Der große Dialog aus der zentralen DB wäre hier fehl am Platz: Dort geht es
+   um Stapel und deren Dublettenvorschau, hier um genau diese eine Person,
+   während man das Ticket liest. Deshalb nur Auswahl, Notiz, fertig — geprüft
+   wird beim Übernehmen, nicht vorher in einer Vorschau, die niemand aufmacht. */
+let _FDH_KAMP_CACHE = null;
+
+function _fdhKampPlus(btn) {
   const s = _FDH_KONTAKT;
   if (!s) return;
+  s.inline = s.inline ? null : { laden: true, kampagnen: [], wahl: '', notiz: '', fehler: '' };
+  _fdhKontaktPanelZeichnen();
+  if (s.inline) _fdhKampListeLaden();
+}
+
+async function _fdhKampListeLaden() {
+  const s = _FDH_KONTAKT;
+  if (!s || !s.inline) return;
+  try {
+    if (_FDH_KAMP_CACHE && (Date.now() - _FDH_KAMP_CACHE.zeit) < 300000) {
+      s.inline.kampagnen = _FDH_KAMP_CACHE.liste;
+    } else {
+      const liste = _zdbKampListe(await _ccKampagnenUebersicht());
+      _FDH_KAMP_CACHE = { zeit: Date.now(), liste };
+      s.inline.kampagnen = liste;
+    }
+    /* Vorbelegt ist die zuletzt benutzte Kampagne — aber nur, wenn der Kontakt
+       dort noch nicht steht. Sonst klickt man auf Übernehmen und bekommt eine
+       Absage, die man vorher hätte sehen können. */
+    const drin = new Set((s.kamp || []).map(r => String(r.account_id || '') + '::' + String(r.kampagne || CC_KAMPAGNE_STANDARD)));
+    const frei = s.inline.kampagnen.filter(x => !drin.has(x.key));
+    const offen = (CC_STATE && CC_STATE.kampagne)
+      ? (String((_ccAccount() || {}).id || '') + '::' + CC_STATE.kampagne) : '';
+    s.inline.wahl = frei.some(x => x.key === offen) ? offen : (frei.length === 1 ? frei[0].key : '');
+  } catch (e) {
+    s.inline.fehler = e.message || String(e);
+  }
+  s.inline.laden = false;
+  _fdhKontaktPanelZeichnen();
+  const el = document.getElementById('fdhKampWahl');
+  if (el) el.focus();
+}
+
+function _fdhKampInlineHtml() {
+  const s = _FDH_KONTAKT;
+  if (!s || !s.inline) return '';
+  const i = s.inline;
+  if (i.laden) return '<p class="text-[11px] text-ink-400 mt-1.5"><span class="spinner inline-block w-3 h-3 border-[2px] text-brand-500"></span> Kampagnen werden geladen…</p>';
+  if (i.fehler) return '<p class="text-[11px] text-rose-700 mt-1.5">Kampagnen konnten nicht geladen werden: ' + escapeHtml(i.fehler) + '</p>';
+  if (!i.kampagnen.length) return '<p class="text-[11px] text-ink-500 mt-1.5">Es ist noch keine Kampagne angelegt.</p>';
+  const drin = new Set((s.kamp || []).map(r => String(r.account_id || '') + '::' + String(r.kampagne || CC_KAMPAGNE_STANDARD)));
+  const gruppen = {};
+  i.kampagnen.forEach(x => { (gruppen[x.firma] = gruppen[x.firma] || []).push(x); });
+  const wahl = '<select id="fdhKampWahl" onchange="_FDH_KONTAKT.inline.wahl=this.value" class="px-2 py-1 border border-ink-300 rounded-lg text-[11px] bg-white max-w-[190px]">'
+    + '<option value="">— Kampagne —</option>'
+    + Object.keys(gruppen).sort((a, b) => a.localeCompare(b, 'de')).map(firma =>
+        '<optgroup label="' + escapeAttr(firma) + '">'
+        + gruppen[firma].map(x => {
+            const schon = drin.has(x.key);
+            return '<option value="' + escapeAttr(x.key) + '"' + (i.wahl === x.key ? ' selected' : '') + (schon ? ' disabled' : '') + '>'
+              + escapeHtml(x.name) + (schon ? ' — steht schon drin' : '') + '</option>';
+          }).join('')
+        + '</optgroup>').join('')
+    + '</select>';
+  return '<div class="flex items-center gap-1.5 mt-1.5 flex-wrap">' + wahl
+    + '<input id="fdhKampNotiz" value="' + escapeAttr(i.notiz || '') + '" oninput="_FDH_KONTAKT.inline.notiz=this.value"'
+    + ' onkeydown="if(event.key===\'Enter\'){event.preventDefault();_fdhKampInlineSenden(this);}"'
+    + ' placeholder="Notiz für den Anrufer — optional"'
+    + ' class="flex-1 min-w-[150px] px-2 py-1 border border-ink-300 rounded-lg text-[11px]">'
+    + '<button onclick="_fdhKampInlineSenden(this)" class="px-2 py-1 rounded-lg text-[11px] font-bold bg-amber-600 hover:bg-amber-700 text-white inline-flex items-center gap-1 shrink-0">'
+      + '<i data-lucide="check" class="w-3 h-3"></i> Übernehmen</button>'
+    + '</div>';
+}
+
+/* Der Kontakt, wie er in die Anrufliste geht. Steht er in der zentralen DB,
+   gelten deren Daten — sie sind gepflegt, die Freshdesk-Angaben stammen aus
+   einer Signatur. */
+function _fdhKampLead() {
+  const s = _FDH_KONTAKT;
   const z = (s.zdb && s.zdb.f) ? s.zdb : null;
   const fi = (z && z.firma) || {};
-  const lead = z
+  return z
     ? {
-        recId: z.id,
         firma: fi.name || s.lead.firma || '',
         ansprechpartner: z.f.name || [z.f.vorname, z.f.nachname].filter(Boolean).join(' ') || s.lead.ansprechpartner,
         telefon: z.f.telefon || z.f.mobil || s.lead.telefon || '',
@@ -16834,10 +16909,73 @@ async function _fdhKampagnePush(btn) {
         telefon: s.lead.telefon, email: s.lead.email,
         position: '', strasse: '', plz: '', ort: '', typ: '',
       };
-  const herkunft = z
-    ? { art: 'zentrale-db', name: 'Zentrale DB', text: 'aus der zentralen DB von ' + (s.acc.name || s.acc.id) }
-    : { art: 'freshdesk', name: 'Freshdesk', text: 'aus Ticket #' + s.ticketId + ' (' + (s.acc.name || s.acc.id) + ')' };
-  await _kampDialogOeffnen([lead], s.acc, btn, herkunft);
+}
+
+async function _fdhKampInlineSenden(btn) {
+  const s = _FDH_KONTAKT;
+  if (!s || !s.inline) return;
+  const wahlEl = document.getElementById('fdhKampWahl');
+  const notizEl = document.getElementById('fdhKampNotiz');
+  const key = String((wahlEl && wahlEl.value) || s.inline.wahl || '');
+  const notiz = String((notizEl && notizEl.value) || s.inline.notiz || '').trim().slice(0, 500);
+  const ziel = s.inline.kampagnen.find(x => x.key === key);
+  if (!ziel) return toast('Bitte eine Kampagne wählen.', 'warn', 4000);
+  const lead = _fdhKampLead();
+  const kenn = _ccKennungen(lead);
+  if (!kenn.mail && !kenn.tel) return toast('Ohne Telefonnummer und E-Mail lässt sich der Kontakt nicht anrufen.', 'warn', 6000);
+  setBusy(btn, true, 'Prüfe…');
+  try {
+    // Gegen die Ziel-Kampagne und die Werbesperre prüfen — beides frisch, auch
+    // wenn es einen Wimpernschlag kostet. Ein zweiter Eintrag derselben Person
+    // fällt erst am Telefon auf, und dann beim Angerufenen.
+    const [vorhandenRows, sperre] = await Promise.all([
+      airtableRead(CC_TABLE, {
+        filter: "{account_id}='" + escapeFormula(ziel.accountId) + "'",
+        fields: ['kampagne', 'email', 'telefon', 'dedupe_key', 'dedupe_tel'],
+      }).catch(() => []),
+      _ccSperrlisteLaden(true).catch(() => new Set()),
+    ]);
+    const drin = (vorhandenRows || []).map(r => r.fields || {})
+      .filter(f => String(f.kampagne || CC_KAMPAGNE_STANDARD) === ziel.name);
+    if (_ccSchonBekannt(_ccKennungsSatz(drin), lead)) {
+      setBusy(btn, false);
+      return toast('Steht in „' + ziel.name + '" bereits — nichts angelegt.', 'warn', 6000);
+    }
+    if (_ccSchonBekannt(sperre, lead)) {
+      setBusy(btn, false);
+      return toast('Für diesen Kontakt liegt eine Werbesperre vor — nicht übernommen.', 'warn', 8000);
+    }
+    setBusy(btn, true, 'Übernehme…');
+    const fremd = String(ziel.accountId) !== String(s.acc.id);
+    const herkunft = (s.zdb && s.zdb.f) ? { art: 'zentrale-db', name: 'Zentrale DB' } : { art: 'freshdesk', name: 'Freshdesk' };
+    const stempel = _ccImportStempel();
+    const jetzt = nowIso();
+    const typen = await _ccTypenLaden(true).catch(() => null);
+    await _ccStapelSchreiben([{
+      firma: lead.firma, ansprechpartner: lead.ansprechpartner, telefon: lead.telefon,
+      email: lead.email, position: lead.position,
+      strasse: lead.strasse, plz: lead.plz, ort: lead.ort,
+      typ: (typen ? _ccTypBekannt(typen, lead) : '') || lead.typ || '',
+      account_id: ziel.accountId, kampagne: ziel.name,
+      quelle: fremd ? (herkunft.name + ' · ' + (s.acc.name || s.acc.id)) : herkunft.art,
+      dedupe_key: kenn.mail || kenn.tel, dedupe_tel: kenn.tel,
+      bestand: '', hinweis: notiz,
+      // Woher der Lead kam. NICHT `ticket_id` — das steht für den versendeten
+      // Preislisten-Brief, und die Anrufliste würde behaupten, es sei schon
+      // etwas hinausgegangen.
+      herkunft_ticket: String(s.ticketId || ''),
+      herkunft_account: String(s.acc.id || ''),
+      status: 'offen', versuche: '0', created_at: jetzt, updated_at: jetzt,
+      import_id: stempel.import_id, import_von: stempel.import_von, import_extern: stempel.import_extern,
+    }]);
+    setBusy(btn, false);
+    s.inline = null;
+    toast('In „' + ziel.name + '" übernommen' + (fremd ? ' (' + ziel.firma + ')' : '') + '.', 'success', 6000);
+    _fdhKontaktPanelAktualisieren();
+  } catch (e) {
+    setBusy(btn, false);
+    toast('Übernehmen fehlgeschlagen: ' + (e.message || e), 'error', 9000);
+  }
 }
 
 /* === Assignee-Modal (Bottom-Sheet) === */
@@ -48298,6 +48436,8 @@ const CC_TYPES = {
      Auftragsbeschreibung würde sie dort für etwas Gesagtes halten. */
   hinweis: 'multilineText',
   gesperrt_bis: 'singleLineText', preisliste_am: 'singleLineText', ticket_id: 'singleLineText',
+  // Das Ticket, aus dem der Lead übernommen wurde (nicht der versendete Brief).
+  herkunft_ticket: 'singleLineText', herkunft_account: 'singleLineText',
   created_at: 'singleLineText', updated_at: 'singleLineText',
   // Herkunft eines Imports — Grundlage für „Import rückgängig".
   import_id: 'singleLineText', import_von: 'singleLineText', import_extern: 'singleLineText',
@@ -49030,6 +49170,7 @@ const CC_EXPORT_SPALTEN = [
   ['bestand',         'Bestandskunde',      13],
   ['preisliste_am',   'Preisliste am',      18],
   ['ticket_id',       'Ticket',             10],
+  ['herkunft_ticket', 'aus Ticket',         10],
   ['bearbeiter',      'Bearbeiter',         18],
   ['anrede',          'Anrede',             26],
   ['zhd',             'z. Hd.',             26],
@@ -49967,6 +50108,11 @@ function _ccArbeitsbereich(r) {
         ? '<div class="mb-2 rounded-lg border border-amber-200 bg-amber-50 px-2.5 py-1.5 flex items-start gap-1.5">'
           + '<i data-lucide="sticky-note" class="w-3.5 h-3.5 text-amber-700 shrink-0 mt-0.5"></i>'
           + '<p class="text-[12px] text-amber-900 whitespace-pre-wrap"><b>Notiz zum Kontakt:</b> ' + escapeHtml(String(r.hinweis)) + '</p></div>'
+        : '')
+    + (String(r.herkunft_ticket || '').trim()
+        ? '<p class="text-[11px] text-ink-600 mb-2"><b class="text-ink-800">Aus Ticket:</b> '
+          + '<button onclick="event.stopPropagation(); openTicketDetail(\'' + escapeAttr(String(r.herkunft_account || '')) + '\', ' + Number(r.herkunft_ticket) + ')" class="text-brand-700 font-semibold hover:underline">#'
+          + escapeHtml(String(r.herkunft_ticket)) + '</button></p>'
         : '')
     + '<p class="text-[11px] text-ink-600 mb-2"><b class="text-ink-800">Vorgeschichte:</b> ' + histText + '</p>'
     + '<div class="flex flex-wrap items-center gap-1.5 mb-2">'
