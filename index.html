@@ -827,7 +827,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v3.26.0';
+const APP_VERSION = 'v3.27.0';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -16051,6 +16051,9 @@ function renderTicketDetailBody(ticket) {
     (ticket.conversations || []).map(c => htmlToText(c.body_text || c.body || '')).join('\n');
   const _extractedPhones = [];
   try { extractPhoneNumbers(_detailText).forEach(n => { _extractedPhones.push(n); _addD('gefunden', n, false, true); }); } catch (_) {}
+  // v3.27.0: Für den Dialog „In die zentrale DB" — dort stehen sie zum
+  // Anklicken, wenn Freshdesk beim Anfragenden keine Nummer führt.
+  try { ticket._detailPhones = detailPhones; } catch (_) {}
 
   // Regel-Stopp-Banner: zeigt ob Auto-Regeln für dieses Ticket gestoppt sind
   const _stopp = getRegelStopp(ticket._accountId, ticket.id);
@@ -16545,8 +16548,11 @@ function _fdhKontaktPanelHtml() {
     + '<div class="flex items-start gap-2">'
       + '<i data-lucide="database" class="w-3.5 h-3.5 text-indigo-600 mt-0.5 shrink-0"></i>'
       + '<div class="flex-1 min-w-0">' + zdbHtml + '</div>'
-      + (z && z.f ? '' : knopf('_fdhZdbPush(this)', 'Zentrale DB', 'database',
-          'bg-indigo-50 hover:bg-indigo-100 border border-indigo-200 text-indigo-700'))
+      + (z && z.f
+          ? knopf('_fdhZdbBearbeiten(this)', 'Bearbeiten', 'user-cog',
+              'bg-white hover:bg-ink-50 border border-ink-300 text-ink-600')
+          : knopf('_fdhZdbPush(this)', 'Ansehen und übernehmen', 'database',
+              'bg-indigo-50 hover:bg-indigo-100 border border-indigo-200 text-indigo-700'))
     + '</div>'
     + '<div class="flex items-start gap-2 border-t border-ink-200 pt-2">'
       + '<i data-lucide="phone-call" class="w-3.5 h-3.5 text-amber-600 mt-0.5 shrink-0"></i>'
@@ -16556,33 +16562,251 @@ function _fdhKontaktPanelHtml() {
     + '</div></div>';
 }
 
-/* Anfragenden in die zentrale DB übernehmen. Über denselben Weg wie der Korb:
-   vorhandene Datensätze werden ergänzt, nie doppelt angelegt. */
-async function _fdhZdbPush(btn) {
+/* Anfragenden in die zentrale DB übernehmen — aber erst ansehen und
+   berichtigen. Was Freshdesk führt, ist oft eine Sammeladresse ohne Nummer und
+   ohne Firma; ungeprüft angelegt entsteht daraus ein Datensatz, den später
+   niemand mehr zuordnen kann. Deshalb steht zwischen Knopf und Anlegen dieser
+   Dialog: alles sichtbar, alles änderbar, und die Nummern aus dem Ticket zum
+   Anklicken daneben. */
+let _FDH_ZDB_EDIT = null;
+
+const _FDH_ZDB_FELDER = [
+  ['vorname',  'Vorname',  'text'],
+  ['nachname', 'Nachname', 'text'],
+  ['email',    'E-Mail',   'email'],
+  ['telefon',  'Festnetz', 'tel'],
+  ['mobil',    'Mobil',    'tel'],
+  ['position', 'Position', 'text'],
+  ['firma',    'Firma',    'text'],
+  ['strasse',  'Straße',   'text'],
+  ['plz',      'PLZ',      'text'],
+  ['ort',      'Ort',      'text'],
+];
+
+function _fdhZdbPush(btn) { return _fdhZdbDialog(false, btn); }
+function _fdhZdbBearbeiten(btn) { return _fdhZdbDialog(true, btn); }
+
+function _fdhZdbDialog(bestand, btn) {
   const s = _FDH_KONTAKT;
   if (!s) return;
+  const z = (bestand && s.zdb && s.zdb.f) ? s.zdb : null;
   const teile = String(s.lead.ansprechpartner || '').trim().split(/\s+/).filter(Boolean);
-  setBusy(btn, true, 'Lege an…');
+  const fi = (z && z.firma) || {};
+  /* Aus dem Ticket gefundene Nummern: Freshdesk führt beim Anfragenden oft
+     keine, in der Signatur steht sie trotzdem. Sie werden nicht stillschweigend
+     eingesetzt — man sieht sie und klickt sie an. */
+  const gefunden = ((typeof CURRENT_TICKET !== 'undefined' && CURRENT_TICKET && CURRENT_TICKET._detailPhones) || [])
+    .map(p => String(p.num || '').trim()).filter(Boolean);
+  _FDH_ZDB_EDIT = {
+    bestand: !!z,
+    recId: z ? z.id : '',
+    gefunden: [...new Set(gefunden)].slice(0, 6),
+    werte: {
+      vorname:  z ? (z.f.vorname || '') : (teile.length > 1 ? teile.slice(0, -1).join(' ') : (teile[0] || '')),
+      nachname: z ? (z.f.nachname || '') : (teile.length > 1 ? teile[teile.length - 1] : ''),
+      email:    z ? (z.f.email || '') : (s.lead.email || ''),
+      telefon:  z ? (z.f.telefon || '') : (s.lead.telefon || ''),
+      mobil:    z ? (z.f.mobil || '') : (s.lead.mobil || ''),
+      position: z ? (z.f.position || '') : '',
+      firma:    z ? (fi.name || '') : (s.lead.firma || ''),
+      strasse:  z ? (fi.strasse || '') : '',
+      plz:      z ? (fi.plz || '') : '',
+      ort:      z ? (fi.ort || '') : '',
+      typ:      z ? (z.f.typ || '') : '',
+    },
+  };
+  _fdhZdbDialogZeichnen();
+}
+
+function _fdhZdbDialogHost() {
+  let h = document.getElementById('fdhZdbEditHost');
+  if (!h) { h = document.createElement('div'); h.id = 'fdhZdbEditHost'; document.body.appendChild(h); }
+  return h;
+}
+function _fdhZdbDialogSchliessen() {
+  const h = document.getElementById('fdhZdbEditHost');
+  if (h) h.innerHTML = '';
+  _FDH_ZDB_EDIT = null;
+}
+
+function _fdhZdbDialogZeichnen() {
+  const e = _FDH_ZDB_EDIT;
+  const s = _FDH_KONTAKT;
+  const host = _fdhZdbDialogHost();
+  if (!e || !s) { host.innerHTML = ''; return; }
+  const feld = (k, label, art) => '<label class="block"><span class="text-[10px] uppercase font-semibold text-ink-600">' + escapeHtml(label) + '</span>'
+    + '<input data-fz="' + k + '" type="' + art + '" value="' + escapeAttr(e.werte[k] || '') + '"'
+    + ' class="w-full mt-0.5 px-2 py-1.5 border border-ink-300 rounded-lg text-sm"></label>';
+  const typen = _ccTypenListe();
+  const typWahl = '<label class="block"><span class="text-[10px] uppercase font-semibold text-ink-600">Kontakttyp</span>'
+    + '<select data-fz="typ" class="w-full mt-0.5 px-2 py-1.5 border border-ink-300 rounded-lg text-sm bg-white">'
+    + [''].concat(typen, (e.werte.typ && !typen.includes(e.werte.typ)) ? [e.werte.typ] : [])
+        .map(t => '<option' + (String(e.werte.typ || '') === t ? ' selected' : '') + '>' + escapeHtml(t) + '</option>').join('')
+    + '</select></label>';
+
+  host.innerHTML =
+    '<div class="fixed inset-0 z-[85] bg-black/40 flex items-start justify-center overflow-y-auto p-4" onclick="if(event.target===this)_fdhZdbDialogSchliessen()">'
+      + '<div class="bg-white rounded-2xl shadow-xl w-full max-w-lg my-8">'
+        + '<div class="flex items-center justify-between p-4 border-b border-ink-200">'
+          + '<div><h3 class="font-bold text-ink-900">' + (e.bestand ? 'Kontakt in der zentralen DB bearbeiten' : 'In die zentrale DB übernehmen') + '</h3>'
+            + '<p class="text-[11px] text-ink-500">' + escapeHtml(s.acc.name || s.acc.id)
+            + ' · aus Ticket #' + escapeHtml(String(s.ticketId)) + '</p></div>'
+          + '<button onclick="_fdhZdbDialogSchliessen()" class="text-ink-400 hover:text-ink-700"><i data-lucide="x" class="w-5 h-5"></i></button>'
+        + '</div>'
+        + '<div class="p-4 space-y-2">'
+          + '<button onclick="_fdhZdbKiFuellen(this)" class="w-full px-3 py-2 rounded-lg text-[12px] font-bold bg-violet-50 hover:bg-violet-100 border border-violet-200 text-violet-700 inline-flex items-center justify-center gap-1.5">'
+            + '<i data-lucide="sparkles" class="w-3.5 h-3.5"></i> Leere Felder aus dem Ticket füllen</button>'
+          + '<p class="text-[10px] text-ink-400 -mt-1">Liest Signatur und Text des Tickets. Bereits ausgefüllte Felder bleiben unangetastet.</p>'
+          + (e.gefunden.length
+              ? '<div class="rounded-lg border border-emerald-200 bg-emerald-50 px-2.5 py-2">'
+                + '<p class="text-[10px] uppercase font-semibold text-emerald-800">Nummern im Ticket</p>'
+                + '<div class="flex flex-wrap gap-1 mt-1">'
+                + e.gefunden.map(n => '<span class="inline-flex items-center gap-1 text-[11px]">'
+                    + '<button onclick="_fdhZdbNummer(\'telefon\',' + JSON.stringify(n).replace(/"/g, '&quot;') + ')" class="px-1.5 py-0.5 rounded border border-emerald-300 bg-white font-mono text-emerald-800 hover:bg-emerald-100" title="Als Festnetz eintragen">' + escapeHtml(n) + '</button>'
+                    + '<button onclick="_fdhZdbNummer(\'mobil\',' + JSON.stringify(n).replace(/"/g, '&quot;') + ')" class="px-1 py-0.5 rounded border border-emerald-300 bg-white text-[10px] text-emerald-700 hover:bg-emerald-100" title="Als Mobilnummer eintragen">Mobil</button>'
+                  + '</span>').join('')
+                + '</div></div>'
+              : '')
+          + '<div class="grid grid-cols-2 gap-2">' + feld('vorname', 'Vorname', 'text') + feld('nachname', 'Nachname', 'text') + '</div>'
+          + feld('email', 'E-Mail', 'email')
+          + '<div class="grid grid-cols-2 gap-2">' + feld('telefon', 'Festnetz', 'tel') + feld('mobil', 'Mobil', 'tel') + '</div>'
+          + '<div class="grid grid-cols-2 gap-2">' + feld('position', 'Position', 'text') + typWahl + '</div>'
+          + feld('firma', 'Firma', 'text')
+          + '<div class="grid grid-cols-3 gap-2">' + feld('strasse', 'Straße', 'text') + feld('plz', 'PLZ', 'text') + feld('ort', 'Ort', 'text') + '</div>'
+          + '<p class="text-[10px] text-ink-500">'
+            + (e.bestand
+                ? 'Geändert wird der bestehende Datensatz. Die Firma wird nur verknüpft, wenn noch keine hinterlegt ist.'
+                : 'Ein vorhandener Datensatz wird ergänzt, nicht doppelt angelegt — geprüft wird über E-Mail und Namen. Die Firma wird angelegt, falls es sie noch nicht gibt.')
+          + '</p>'
+        + '</div>'
+        + '<div class="flex items-center justify-end gap-2 p-4 border-t border-ink-200">'
+          + '<button onclick="_fdhZdbDialogSchliessen()" class="px-3 py-2 text-sm text-ink-600 hover:bg-ink-100 rounded-lg">Abbrechen</button>'
+          + '<button onclick="_fdhZdbSpeichern(this)" class="px-4 py-2 rounded-lg text-sm font-bold bg-indigo-600 hover:bg-indigo-700 text-white">'
+            + (e.bestand ? 'Änderungen speichern' : 'In zentrale DB übernehmen') + '</button>'
+        + '</div>'
+      + '</div>'
+    + '</div>';
+  if (window.lucide) lucide.createIcons();
+}
+
+/** Aktuellen Stand aus den Eingabefeldern in den Zustand zurückholen. */
+function _fdhZdbLesen() {
+  const e = _FDH_ZDB_EDIT;
+  if (!e) return {};
+  document.querySelectorAll('#fdhZdbEditHost [data-fz]').forEach(el => {
+    e.werte[el.getAttribute('data-fz')] = String(el.value || '').trim();
+  });
+  return e.werte;
+}
+
+function _fdhZdbNummer(feld, nummer) {
+  const e = _FDH_ZDB_EDIT;
+  if (!e) return;
+  _fdhZdbLesen();
+  e.werte[feld] = _ccNummerNormalisieren(nummer) || nummer;
+  _fdhZdbDialogZeichnen();
+}
+
+/* Signatur und Text des Tickets auslesen. Gefüllt werden nur leere Felder —
+   was jemand von Hand eingetragen hat, ist verlässlicher als jede Ableitung. */
+async function _fdhZdbKiFuellen(btn) {
+  const e = _FDH_ZDB_EDIT;
+  const t = (typeof CURRENT_TICKET !== 'undefined') ? CURRENT_TICKET : null;
+  if (!e || !t) return toast('Kein Ticket geladen.', 'warn', 4000);
+  _fdhZdbLesen();
+  const text = [
+    'Betreff: ' + (t.subject || ''),
+    htmlToText(t.description_text || t.description || ''),
+    ...(t.conversations || []).slice(-4).map(c => htmlToText(c.body_text || c.body || '')),
+  ].join('\n\n').slice(0, 12000);
+  const sys = 'Du liest einen Support-Vorgang und ziehst die Kontaktdaten des ABSENDERS/ANFRAGENDEN heraus — '
+    + 'in aller Regel aus seiner E-Mail-Signatur.\n'
+    + 'REGELN:\n'
+    + '1. Es zählt der Absender des Anliegens, nicht ein in der Mail erwähnter Dritter und nicht unser eigenes Unternehmen.\n'
+    + '2. vorname und nachname getrennt; Titel (Dr., Prof.) weglassen.\n'
+    + '3. telefon ist Festnetz/Zentrale, mobil die Mobilnummer — nicht vertauschen.\n'
+    + '4. firma mit Rechtsform, so wie sie dasteht. Rollenwörter wie „Hausverwaltung" oder „Eigentümer" allein sind keine Firma.\n'
+    + '5. strasse mit Hausnummer, plz und ort getrennt. Die Anschrift des Absenders, nicht die einer im Text genannten Liegenschaft.\n'
+    + '6. position ist die Funktion („Geschäftsführer", „Technische Leitung").\n'
+    + '7. Nichts erfinden, nichts ergänzen. Was nicht dasteht, bleibt leer.\n\n'
+    + 'ANTWORTE NUR MIT JSON: {"vorname":"","nachname":"","email":"","telefon":"","mobil":"","position":"","firma":"","strasse":"","plz":"","ort":""}';
+  setBusy(btn, true, 'Lese Ticket…');
   try {
-    const res = await zdbSaveFirmaKontakt(s.acc,
-      s.lead.firma ? { name: s.lead.firma, quelle: 'freshdesk' } : null,
-      {
-        vorname: teile.length > 1 ? teile.slice(0, -1).join(' ') : (teile[0] || ''),
-        nachname: teile.length > 1 ? teile[teile.length - 1] : '',
-        email: s.lead.email,
-        telefon: _ccNummerNormalisieren(s.lead.telefon) || s.lead.telefon,
-        mobil: _ccNummerNormalisieren(s.lead.mobil) || s.lead.mobil,
-        quelle: 'freshdesk',
-        freshdesk_contact_id: s.requesterId ? String(s.requesterId) : '',
-      },
-      { erzwingen: true });
+    const data = await _callAnthropicWithRetry({
+      model: 'claude-sonnet-4-5-20250929', max_tokens: 700, system: sys,
+      messages: [{ role: 'user', content: text }],
+    });
+    try {
+      recordAiUsage({
+        model: 'claude-sonnet-4-5-20250929',
+        input_tokens: (data && data.usage && data.usage.input_tokens) || 0,
+        output_tokens: (data && data.usage && data.usage.output_tokens) || 0,
+        feature: 'zdb_kontakt_aus_ticket', accountId: (_FDH_KONTAKT && _FDH_KONTAKT.acc && _FDH_KONTAKT.acc.id) || '',
+      });
+    } catch (_) {}
+    const o = parseAIJson((data.content && data.content[0] && data.content[0].text) || '');
     setBusy(btn, false);
-    if (!res || !res.kontaktId) return toast('In die zentrale DB übernehmen ist fehlgeschlagen — siehe Konsole.', 'error', 9000);
-    toast('In die zentrale DB übernommen.', 'success', 5000);
+    if (!o || typeof o !== 'object') return toast('Die Antwort der KI war nicht lesbar.', 'warn', 6000);
+    const gefuellt = [];
+    for (const [k] of _FDH_ZDB_FELDER) {
+      const neu = String(o[k] == null ? '' : o[k]).trim();
+      if (!neu || String(e.werte[k] || '').trim()) continue;
+      e.werte[k] = (k === 'telefon' || k === 'mobil') ? (_ccNummerNormalisieren(neu) || neu) : neu;
+      gefuellt.push(k);
+    }
+    _fdhZdbDialogZeichnen();
+    toast(gefuellt.length ? (gefuellt.length + ' Feld(er) gefüllt: ' + gefuellt.join(', ') + ' — bitte prüfen.')
+                          : 'Im Ticket stand nichts, was noch gefehlt hätte.', gefuellt.length ? 'success' : 'info', 7000);
+  } catch (err) {
+    setBusy(btn, false);
+    toast('Auslesen fehlgeschlagen: ' + (err.message || err), 'error', 9000);
+  }
+}
+
+async function _fdhZdbSpeichern(btn) {
+  const e = _FDH_ZDB_EDIT;
+  const s = _FDH_KONTAKT;
+  if (!e || !s) return;
+  const w = _fdhZdbLesen();
+  if (!w.nachname && !w.email) return toast('Ohne Nachname oder E-Mail lässt sich der Kontakt später nicht wiederfinden.', 'warn', 7000);
+  setBusy(btn, true, e.bestand ? 'Speichere…' : 'Lege an…');
+  try {
+    if (e.bestand) {
+      const namen = _zdbTableNames(s.acc);
+      const patch = {
+        vorname: w.vorname, nachname: w.nachname, email: w.email,
+        telefon: w.telefon, mobil: w.mobil, position: w.position, typ: w.typ,
+        name: [w.vorname, w.nachname].filter(Boolean).join(' '),
+        updated_at: nowIso(),
+      };
+      // Firma nur anfassen, wenn noch keine verknüpft ist — sonst hinge der
+      // Kontakt plötzlich an einem anderen Haus, ohne dass jemand das wollte.
+      const hatFirma = !!((s.zdb.f.firma || [])[0]);
+      if (!hatFirma && w.firma) {
+        const voll = await _zdbEnsureTables(s.acc);
+        const fid = await _zdbUpsertFirma(voll, { name: w.firma, strasse: w.strasse, plz: w.plz, ort: w.ort, quelle: 'freshdesk' });
+        if (fid) patch.firma = [fid];
+      }
+      await _zdbUpdateSafe(namen.kontakt, e.recId, patch);
+    } else {
+      const res = await zdbSaveFirmaKontakt(s.acc,
+        w.firma ? { name: w.firma, strasse: w.strasse, plz: w.plz, ort: w.ort, quelle: 'freshdesk' } : null,
+        {
+          vorname: w.vorname, nachname: w.nachname, email: w.email,
+          telefon: w.telefon, mobil: w.mobil, position: w.position, typ: w.typ,
+          quelle: 'freshdesk',
+          freshdesk_contact_id: s.requesterId ? String(s.requesterId) : '',
+        },
+        { erzwingen: true });
+      if (!res || !res.kontaktId) throw new Error('Der Datensatz wurde nicht angelegt — siehe Konsole.');
+    }
+    setBusy(btn, false);
+    _fdhZdbDialogSchliessen();
+    toast(e.bestand ? 'Kontakt in der zentralen DB geändert.' : 'In die zentrale DB übernommen.', 'success', 6000);
     _fdhKontaktPanelAktualisieren();
-  } catch (e) {
+  } catch (err) {
     setBusy(btn, false);
-    toast('In die zentrale DB übernehmen ist fehlgeschlagen: ' + (e.message || e), 'error', 9000);
+    toast((e.bestand ? 'Speichern' : 'Übernehmen') + ' fehlgeschlagen: ' + (err.message || err), 'error', 9000);
   }
 }
 
