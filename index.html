@@ -827,7 +827,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v3.25.0';
+const APP_VERSION = 'v3.26.0';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -16116,6 +16116,8 @@ function renderTicketDetailBody(ticket) {
                   <span>Keine Telefonnummer hinterlegt</span>
                 </span>
               </div>`}
+            <!-- v3.26.0: Zentrale DB + Kampagnen-Zugehörigkeit, nach dem Rendern gefüllt -->
+            <div id="fdhZdbBlock"></div>
           </div>
           <div class="grid grid-cols-3 gap-2 lg:hidden">
             ${_detailFieldDropdown('Zugewiesen', assigneeName || 'niemand', assigneeName ? 'text-ink-900' : 'text-amber-700', _detailAssigneeSelectInner(ticket), 'detailAssignee')}
@@ -16277,6 +16279,9 @@ function renderTicketDetailBody(ticket) {
   // Formatierung bleibt). Deutsche Inhalte werden per Heuristik übersprungen.
   try { _autoTranslateForeignAreas($('ticketDetailBody')); } catch (_) {}
 
+  // Zentrale DB und Kampagnen zum Anfragenden nachschlagen (nebenläufig).
+  try { _fdhKontaktPanel(ticket); } catch (_) {}
+
   // KI-Validierung der „gefundenen" Tel-Nummern: prüft ob sie zum Anfragenden gehören
   // oder z.B. aus einer Signatur einer dritten Person in einer weitergeleiteten Mail
   // stammen. Pills mit data-tel-pending werden nach Antwort entweder bestätigt
@@ -16334,6 +16339,281 @@ function renderTicketDetailBody(ticket) {
       if (window.lucide) lucide.createIcons();
     });
   }
+}
+
+/* ===== Kontakt-Panel im Ticket (v3.26.0) ================================
+   Im Ticket steht bisher, was Freshdesk über den Anfragenden weiß: Name und
+   E-Mail, mit Glück eine Nummer. Alles andere — Durchwahl, Firma, Kontakttyp,
+   Anschrift — liegt in der zentralen DB, und ob wir die Person gerade
+   anrufen, weiß nur die Kampagnentabelle.
+
+   Beides wird hier nachgeschlagen und unter dem Anfragenden gezeigt, samt der
+   beiden Wege weiter: in die zentrale DB und von dort in eine Telefonkampagne.
+   Der Abgleich läuft NACH dem Rendern des Tickets — das Ticket darf nie auf
+   Airtable warten. */
+let _FDH_KONTAKT = null;
+/* Kurzes Gedächtnis: Wer zwischen den Tickets einer Firma hin- und herspringt,
+   fragte sonst für jeden Aufschlag dieselben zwei Abfragen erneut an. Zwei
+   Minuten sind lang genug dafür und kurz genug, dass eine Änderung in der
+   zentralen DB nicht lange verborgen bleibt. */
+const _FDH_KONTAKT_CACHE = new Map();
+const _FDH_KONTAKT_TTL = 120000;
+
+async function _fdhKontaktPanel(ticket, frisch) {
+  const host = document.getElementById('fdhZdbBlock');
+  if (!host || !ticket) return;
+  const acc = (APP_STATE.accounts || []).find(a => String(a.id) === String(ticket._accountId));
+  const req = ticket.requester || {};
+  const lead = {
+    ansprechpartner: String(req.name || '').trim(),
+    email: String(req.email || '').trim(),
+    telefon: String(req.phone || req.mobile || '').trim(),
+    mobil: String(req.mobile || '').trim(),
+    firma: String((req.company && req.company.name) || '').trim(),
+  };
+  // Ohne E-Mail und ohne brauchbare Nummer gibt es nichts nachzuschlagen —
+  // dann bleibt der Platz leer statt mit „nicht gefunden" zu behaupten, es
+  // sei gesucht worden.
+  if (!acc || (!lead.email && _ccNummerNormal(lead.telefon).length < 6)) { host.innerHTML = ''; return; }
+  _FDH_KONTAKT = { ticketId: ticket.id, acc, lead, requesterId: ticket.requester_id || '', laden: true };
+  const schluessel = String(acc.id) + '|' + lead.email.toLowerCase() + '|' + _ccNummerNormal(lead.telefon);
+  const gemerkt = _FDH_KONTAKT_CACHE.get(schluessel);
+  if (!frisch && gemerkt && (Date.now() - gemerkt.zeit) < _FDH_KONTAKT_TTL) {
+    Object.assign(_FDH_KONTAKT, { zdb: gemerkt.zdb, kamp: gemerkt.kamp, fehler: '', laden: false });
+    _fdhKontaktPanelZeichnen();
+    return;
+  }
+  host.innerHTML = '<div class="mt-2 text-[11px] text-ink-400 inline-flex items-center gap-1.5">'
+    + '<span class="spinner inline-block w-3 h-3 border-[2px] text-brand-500"></span>'
+    + ' Zentrale DB und Kampagnen werden geprüft…</div>';
+  let zdb = null, kamp = [], fehler = '';
+  try {
+    const erg = await Promise.all([_fdhZdbSuchen(acc, lead), _fdhKampagnenTreffer(lead)]);
+    zdb = erg[0]; kamp = erg[1];
+  } catch (e) { fehler = e.message || String(e); }
+  // Zwischendurch ein anderes Ticket geöffnet? Dann gehört das Ergebnis nicht
+  // mehr hierher.
+  if (!fehler) {
+    // Nicht unbegrenzt wachsen lassen — der älteste Eintrag fliegt raus.
+    if (_FDH_KONTAKT_CACHE.size > 50) _FDH_KONTAKT_CACHE.delete(_FDH_KONTAKT_CACHE.keys().next().value);
+    _FDH_KONTAKT_CACHE.set(schluessel, { zeit: Date.now(), zdb, kamp });
+  }
+  if (!_FDH_KONTAKT || String(_FDH_KONTAKT.ticketId) !== String(ticket.id)) return;
+  Object.assign(_FDH_KONTAKT, { zdb, kamp, fehler, laden: false });
+  _fdhKontaktPanelZeichnen();
+}
+
+/** Neu nachschlagen, ohne das Ticket neu zu zeichnen. */
+function _fdhKontaktPanelAktualisieren() {
+  const s = _FDH_KONTAKT;
+  if (!s || !document.getElementById('fdhZdbBlock')) return;
+  const t = (typeof CURRENT_TICKET !== 'undefined' && CURRENT_TICKET && String(CURRENT_TICKET.id) === String(s.ticketId))
+    ? CURRENT_TICKET : null;
+  if (t) _fdhKontaktPanel(t, true);
+}
+
+/* Kontakt in der zentralen DB des Mandanten. E-Mail ist der belastbare
+   Schlüssel; die Nummer nur, wenn keine E-Mail da ist — gleiche Nummer heißt
+   in einer Firma nicht gleiche Person, aber ohne E-Mail ist sie das Einzige,
+   was wir haben. */
+async function _fdhZdbSuchen(acc, lead) {
+  const namen = _zdbTableNames(acc);
+  const mail = String(lead.email || '').trim().toLowerCase();
+  const tel = String(lead.telefon || '').trim();
+  let hit = null;
+  try {
+    if (mail) hit = (await _zdbSelect(namen.kontakt, { filter: 'LOWER({email})=' + _zdbLit(mail), maxRecords: 1 }))[0] || null;
+    if (!hit && tel) hit = (await _zdbSelect(namen.kontakt, { filter: 'OR({telefon}=' + _zdbLit(tel) + ',{mobil}=' + _zdbLit(tel) + ')', maxRecords: 1 }))[0] || null;
+  } catch (e) {
+    // Für diesen Mandanten gibt es die Tabellen noch nicht.
+    if (/404|NOT_FOUND|could not be found/i.test(String(e.message || ''))) return { fehlt: true };
+    throw e;
+  }
+  if (!hit) return null;
+  const f = hit.fields || {};
+  let firma = null;
+  const fid = (f.firma || [])[0];
+  if (fid) {
+    try {
+      const rows = await _zdbSelect(namen.firma, { filter: 'RECORD_ID()=' + _zdbLit(fid), maxRecords: 1 });
+      firma = (rows[0] && rows[0].fields) || null;
+    } catch (_) { /* Anschrift ist Beiwerk — ihr Fehlen darf den Block nicht kippen */ }
+  }
+  return { id: hit.id, f, firma };
+}
+
+/* In welchen Kampagnen steht diese Person? Bewusst ÜBER ALLE Mandanten: Dass
+   ein Aszendio-Kunde gerade in einer Liftaro-Liste angerufen wird, ist genau
+   das, was man vor der nächsten Mail wissen will. */
+async function _fdhKampagnenTreffer(lead) {
+  const k = _ccKennungen(lead);
+  const teile = [];
+  if (k.mail) { teile.push('{dedupe_key}=' + _zdbLit(k.mail)); teile.push('LOWER({email})=' + _zdbLit(k.mail.slice(2))); }
+  if (k.tel) { teile.push('{dedupe_key}=' + _zdbLit(k.tel)); teile.push('{dedupe_tel}=' + _zdbLit(k.tel)); }
+  if (!teile.length) return [];
+  const filter = 'OR(' + teile.join(',') + ')';
+  const felder = ['kampagne', 'account_id', 'status', 'versuche', 'letzter_versuch', 'notiz', 'hinweis', 'versteckt'];
+  let rows;
+  try {
+    rows = await airtableRead(CC_TABLE, { filter, fields: felder });
+  } catch (e) {
+    /* `hinweis` entsteht erst, wenn der erste Kontakt mit Notiz übernommen
+       wurde. Fragt man eine Spalte ab, die es noch nicht gibt, antwortet
+       Airtable mit 422 — und der ganze Block behauptete dann, die Person sei
+       in keiner Kampagne. Also ohne sie nachfassen statt schweigen. */
+    rows = await airtableRead(CC_TABLE, { filter, fields: felder.filter(f => f !== 'hinweis') }).catch(() => []);
+  }
+  return (rows || []).map(r => Object.assign({ recordId: r.id }, r.fields || {}));
+}
+
+function _fdhKontaktPanelZeichnen() {
+  const host = document.getElementById('fdhZdbBlock');
+  if (!host) return;
+  host.innerHTML = _fdhKontaktPanelHtml();
+  if (window.lucide) lucide.createIcons();
+}
+
+function _fdhKontaktPanelHtml() {
+  const s = _FDH_KONTAKT;
+  if (!s || s.laden) return '';
+  if (s.fehler) {
+    return '<div class="mt-2 text-[11px] text-amber-700">Zentrale DB konnte nicht geprüft werden: ' + escapeHtml(s.fehler) + '</div>';
+  }
+  const knopf = (fn, text, icon, cls) => '<button onclick="' + fn + '" class="inline-flex items-center gap-1 px-2 py-1 rounded-lg text-[11px] font-medium shrink-0 ' + cls + '">'
+    + '<i data-lucide="' + icon + '" class="w-3 h-3"></i> ' + text + '</button>';
+
+  /* --- zentrale DB --- */
+  const z = s.zdb;
+  let zdbHtml;
+  if (z && z.f) {
+    const f = z.f;
+    const fi = z.firma || {};
+    const nummern = [['Festnetz', f.telefon], ['Mobil', f.mobil]].filter(x => String(x[1] || '').trim());
+    const anschrift = [fi.strasse, [fi.plz, fi.ort].filter(Boolean).join(' ')].filter(Boolean).join(', ');
+    zdbHtml = '<p class="text-[11px] font-semibold text-indigo-800">In der zentralen DB'
+        + (fi.name ? ' <span class="font-normal text-ink-600">· ' + escapeHtml(fi.name) + '</span>' : '')
+        + (f.typ ? ' <span class="text-[10px] px-1 py-0.5 rounded bg-white border border-indigo-200 text-indigo-700 align-middle">' + escapeHtml(f.typ) + '</span>' : '')
+        + '</p>'
+      + (nummern.length
+          ? '<div class="flex flex-wrap gap-1 mt-1">' + nummern.map(n =>
+              '<a href="tel:' + escapeAttr(_ccNummerNormalisieren(n[1]) || n[1]) + '" class="inline-flex items-center gap-1 px-1.5 py-0.5 rounded border border-emerald-200 bg-emerald-50 text-emerald-800 font-mono text-[11px]">'
+              + '<i data-lucide="phone-call" class="w-3 h-3"></i>' + escapeHtml(n[1])
+              + '<span class="text-[9px] uppercase tracking-wider opacity-70 font-sans">' + n[0] + '</span></a>').join('')
+            + '</div>'
+          : '<p class="text-[11px] text-ink-400 mt-0.5">Auch dort keine Nummer hinterlegt.</p>')
+      + ((f.position || anschrift)
+          ? '<p class="text-[11px] text-ink-500 mt-0.5">' + [f.position, anschrift].filter(Boolean).map(escapeHtml).join(' · ') + '</p>'
+          : '');
+  } else if (z && z.fehlt) {
+    zdbHtml = '<p class="text-[11px] text-ink-600">Für diesen Mandanten ist noch keine zentrale DB angelegt.</p>';
+  } else {
+    zdbHtml = '<p class="text-[11px] text-ink-600">Nicht in der zentralen DB.</p>';
+  }
+
+  /* --- Kampagnen --- */
+  const namen = {};
+  (APP_STATE.accounts || []).forEach(a => { namen[String(a.id)] = a.name || a.id; });
+  const k = (s.kamp || []);
+  let kampHtml;
+  if (k.length) {
+    kampHtml = '<p class="text-[11px] font-semibold text-amber-900">' + (k.length === 1 ? 'In einer Telefonkampagne' : 'In ' + k.length + ' Telefonkampagnen') + '</p>'
+      + '<div class="flex flex-wrap gap-1 mt-1">' + k.slice(0, 4).map(r => {
+          const st = CC_STATUS[_ccStatusVon(r)] || CC_STATUS.offen;
+          const firma = namen[String(r.account_id)] || '–';
+          const zusatz = [(+r.versuche > 0 ? r.versuche + '× angerufen' : ''),
+                          (r.letzter_versuch ? 'zuletzt ' + String(r.letzter_versuch).slice(0, 10) : ''),
+                          (String(r.versteckt || '') === 'ja' ? 'ausgeblendet' : '')].filter(Boolean).join(' · ');
+          return '<span class="inline-flex items-center gap-1 px-1.5 py-0.5 rounded border bg-white border-ink-200 text-[11px] text-ink-700"'
+            + (zusatz ? ' title="' + escapeAttr(zusatz) + '"' : '') + '>'
+            + escapeHtml(String(r.kampagne || CC_KAMPAGNE_STANDARD))
+            + ' <span class="text-ink-400">' + escapeHtml(firma) + '</span>'
+            + ' <span class="text-[10px] px-1 py-0.5 rounded border ' + st.cls + '">' + escapeHtml(st.label) + '</span></span>';
+        }).join('') + '</div>'
+      + (k.some(r => String(r.hinweis || '').trim())
+          ? '<p class="text-[11px] text-amber-900 mt-1"><b>Notiz zum Kontakt:</b> '
+            + escapeHtml(String((k.find(r => String(r.hinweis || '').trim()) || {}).hinweis)) + '</p>'
+          : '')
+      + (k.some(r => String(r.notiz || '').trim())
+          ? '<p class="text-[11px] text-ink-500 mt-0.5"><b>Zuletzt gesagt:</b> '
+            + escapeHtml(String((k.find(r => String(r.notiz || '').trim()) || {}).notiz)) + '</p>'
+          : '');
+  } else {
+    kampHtml = '<p class="text-[11px] text-ink-600">Keiner Telefonkampagne zugewiesen.</p>';
+  }
+
+  return '<div class="mt-2 rounded-xl border border-ink-200 bg-ink-50/70 p-2.5 space-y-2">'
+    + '<div class="flex items-start gap-2">'
+      + '<i data-lucide="database" class="w-3.5 h-3.5 text-indigo-600 mt-0.5 shrink-0"></i>'
+      + '<div class="flex-1 min-w-0">' + zdbHtml + '</div>'
+      + (z && z.f ? '' : knopf('_fdhZdbPush(this)', 'Zentrale DB', 'database',
+          'bg-indigo-50 hover:bg-indigo-100 border border-indigo-200 text-indigo-700'))
+    + '</div>'
+    + '<div class="flex items-start gap-2 border-t border-ink-200 pt-2">'
+      + '<i data-lucide="phone-call" class="w-3.5 h-3.5 text-amber-600 mt-0.5 shrink-0"></i>'
+      + '<div class="flex-1 min-w-0">' + kampHtml + '</div>'
+      + knopf('_fdhKampagnePush(this)', k.length ? 'Weitere Kampagne' : 'Telefonkampagne', 'phone-outgoing',
+          k.length ? 'bg-white hover:bg-ink-50 border border-ink-300 text-ink-600' : 'bg-amber-50 hover:bg-amber-100 border border-amber-200 text-amber-800')
+    + '</div></div>';
+}
+
+/* Anfragenden in die zentrale DB übernehmen. Über denselben Weg wie der Korb:
+   vorhandene Datensätze werden ergänzt, nie doppelt angelegt. */
+async function _fdhZdbPush(btn) {
+  const s = _FDH_KONTAKT;
+  if (!s) return;
+  const teile = String(s.lead.ansprechpartner || '').trim().split(/\s+/).filter(Boolean);
+  setBusy(btn, true, 'Lege an…');
+  try {
+    const res = await zdbSaveFirmaKontakt(s.acc,
+      s.lead.firma ? { name: s.lead.firma, quelle: 'freshdesk' } : null,
+      {
+        vorname: teile.length > 1 ? teile.slice(0, -1).join(' ') : (teile[0] || ''),
+        nachname: teile.length > 1 ? teile[teile.length - 1] : '',
+        email: s.lead.email,
+        telefon: _ccNummerNormalisieren(s.lead.telefon) || s.lead.telefon,
+        mobil: _ccNummerNormalisieren(s.lead.mobil) || s.lead.mobil,
+        quelle: 'freshdesk',
+        freshdesk_contact_id: s.requesterId ? String(s.requesterId) : '',
+      },
+      { erzwingen: true });
+    setBusy(btn, false);
+    if (!res || !res.kontaktId) return toast('In die zentrale DB übernehmen ist fehlgeschlagen — siehe Konsole.', 'error', 9000);
+    toast('In die zentrale DB übernommen.', 'success', 5000);
+    _fdhKontaktPanelAktualisieren();
+  } catch (e) {
+    setBusy(btn, false);
+    toast('In die zentrale DB übernehmen ist fehlgeschlagen: ' + (e.message || e), 'error', 9000);
+  }
+}
+
+/* Von hier direkt in eine Kampagne. Steht der Kontakt schon in der zentralen
+   DB, gelten deren Daten — sie sind gepflegt, die Freshdesk-Angaben kommen aus
+   einer Signatur. */
+async function _fdhKampagnePush(btn) {
+  const s = _FDH_KONTAKT;
+  if (!s) return;
+  const z = (s.zdb && s.zdb.f) ? s.zdb : null;
+  const fi = (z && z.firma) || {};
+  const lead = z
+    ? {
+        recId: z.id,
+        firma: fi.name || s.lead.firma || '',
+        ansprechpartner: z.f.name || [z.f.vorname, z.f.nachname].filter(Boolean).join(' ') || s.lead.ansprechpartner,
+        telefon: z.f.telefon || z.f.mobil || s.lead.telefon || '',
+        email: z.f.email || s.lead.email || '',
+        position: z.f.position || '',
+        strasse: fi.strasse || '', plz: fi.plz || '', ort: fi.ort || '',
+        typ: z.f.typ || '',
+      }
+    : {
+        firma: s.lead.firma, ansprechpartner: s.lead.ansprechpartner,
+        telefon: s.lead.telefon, email: s.lead.email,
+        position: '', strasse: '', plz: '', ort: '', typ: '',
+      };
+  const herkunft = z
+    ? { art: 'zentrale-db', name: 'Zentrale DB', text: 'aus der zentralen DB von ' + (s.acc.name || s.acc.id) }
+    : { art: 'freshdesk', name: 'Freshdesk', text: 'aus Ticket #' + s.ticketId + ' (' + (s.acc.name || s.acc.id) + ')' };
+  await _kampDialogOeffnen([lead], s.acc, btn, herkunft);
 }
 
 /* === Assignee-Modal (Bottom-Sheet) === */
@@ -46737,6 +47017,16 @@ async function _zdbKampagneOeffnen(recId, btn) {
   if (!ids.length) return toast('Nichts markiert.', 'warn', 4000);
   const rows = ids.map(id => alle.find(r => r.id === id)).filter(Boolean);
   if (!rows.length) return toast('Kontakt nicht gefunden — bitte die Ansicht neu laden.', 'warn', 6000);
+  return _kampDialogOeffnen(rows.map(_zdbKampLead), acc, btn);
+}
+
+/* Derselbe Dialog, aber ohne die Tabellenansicht: Er bekommt die Kontakte
+   fertig gereicht. So kann ihn auch das Ticket öffnen — dort gibt es keine
+   geladene ZDB-Ansicht, aus der sich etwas einsammeln ließe.
+   `herkunft` beschreibt, woher die Kontakte stammen; sie landet als Quelle am
+   Kampagnen-Datensatz und im Kopf des Dialogs. */
+async function _kampDialogOeffnen(leads, quellAcc, btn, herkunft) {
+  if (!leads || !leads.length) return toast('Kein Kontakt zum Übernehmen.', 'warn', 4000);
   setBusy(btn, true, 'Lade…');
   let kampagnen = [];
   try { kampagnen = _zdbKampListe(await _ccKampagnenUebersicht()); }
@@ -46749,8 +47039,9 @@ async function _zdbKampagneOeffnen(recId, btn) {
     ? (String((_ccAccount() || {}).id || '') + '::' + CC_STATE.kampagne) : '';
   const wahl = kampagnen.some(k => k.key === offen) ? offen : (kampagnen.length === 1 ? kampagnen[0].key : '');
   _ZDB_KAMP = {
-    quelle: acc, leads: rows.map(_zdbKampLead), kampagnen, wahl,
-    neuAcc: String(acc.id), neuName: '', nurTel: false, pruef: null, laden: false,
+    quelle: quellAcc, leads, kampagnen, wahl,
+    herkunft: herkunft || { art: 'zentrale-db', name: 'Zentrale DB', text: 'aus der zentralen DB von ' + (quellAcc.name || quellAcc.id) },
+    neuAcc: String(quellAcc.id), neuName: '', nurTel: false, hinweis: '', pruef: null, laden: false,
   };
   _zdbKampZeichnen();
   if (wahl) _zdbKampPruefen();
@@ -46911,8 +47202,8 @@ function _zdbKampZeichnen() {
       + '<div class="bg-white rounded-2xl shadow-xl w-full max-w-lg my-8">'
         + '<div class="flex items-center justify-between p-4 border-b border-ink-200">'
           + '<div><h3 class="font-bold text-ink-900">In Telefonkampagne übernehmen</h3>'
-            + '<p class="text-[11px] text-ink-500">' + plan.length + (plan.length === 1 ? ' Kontakt' : ' Kontakte')
-            + ' aus der zentralen DB von ' + escapeHtml(s.quelle.name || s.quelle.id) + '</p></div>'
+            + '<p class="text-[11px] text-ink-500">' + plan.length + (plan.length === 1 ? ' Kontakt ' : ' Kontakte ')
+            + escapeHtml((s.herkunft && s.herkunft.text) || ('aus der zentralen DB von ' + (s.quelle.name || s.quelle.id))) + '</p></div>'
           + '<button onclick="_zdbKampSchliessen()" class="text-ink-400 hover:text-ink-700"><i data-lucide="x" class="w-5 h-5"></i></button>'
         + '</div>'
         + '<div class="p-4">'
@@ -46920,6 +47211,12 @@ function _zdbKampZeichnen() {
           + '<label class="inline-flex items-center gap-1.5 text-[12px] text-ink-700 cursor-pointer mt-3">'
             + '<input type="checkbox"' + (s.nurTel ? ' checked' : '') + ' onchange="_ZDB_KAMP.nurTel=this.checked;_zdbKampZeichnen()">'
             + ' Nur Kontakte mit Telefonnummer übernehmen</label>'
+          + '<label class="block mt-3"><span class="text-[11px] font-semibold text-ink-600">Notiz für die Anrufliste'
+            + ' <span class="font-normal text-ink-400">— optional' + (plan.length > 1 ? ', gilt für alle Übernommenen' : '') + '</span></span>'
+            + '<textarea id="zdbKampHinweis" rows="2" maxlength="500" oninput="_ZDB_KAMP.hinweis=this.value"'
+            + ' placeholder="Warum dieser Kontakt? Was soll der Anrufer wissen?"'
+            + ' class="w-full mt-0.5 px-2.5 py-1.5 border border-ink-300 rounded-lg text-[13px]">' + escapeHtml(s.hinweis || '') + '</textarea></label>'
+          + '<p class="text-[10px] text-ink-400 mt-0.5">Steht in der Anrufliste über dem Gesprächsfeld und bleibt dort stehen — die Gesprächsnotiz des Anrufers überschreibt sie nicht.</p>'
           + '<div class="mt-3 border border-ink-200 rounded-xl p-2.5 max-h-64 overflow-y-auto">' + zeilen + rest + '</div>'
           + '<p class="text-[11px] text-ink-500 mt-2">' + escapeHtml(summe) + '</p>'
           + '<p class="text-[10px] text-ink-400 mt-1">Der Kontakt bleibt in der zentralen DB — er wird kopiert, nicht verschoben. Der ganze Schub lässt sich in der Anrufliste unter „Import rückgängig" wieder ausblenden.</p>'
@@ -46959,6 +47256,9 @@ async function _zdbKampUebernehmen(btn) {
   const stempel = _ccImportStempel();
   const jetzt = nowIso();
   const fremd = String(ziel.accountId) !== String(s.quelle.id);
+  // Aus dem Feld selbst, nicht nur aus dem Zustand: Wer tippt und sofort
+  // klickt, hat noch kein `input`-Ereignis ausgelöst.
+  const hinweis = String((document.getElementById('zdbKampHinweis') || {}).value || s.hinweis || '').trim().slice(0, 500);
   // Ein von Hand gesetzter Typ schlägt den aus der zentralen DB — er wurde
   // beim Telefonieren vergeben, die Stammdaten raten nur.
   const typen = await _ccTypenLaden(true).catch(() => null);
@@ -46972,9 +47272,12 @@ async function _zdbKampUebernehmen(btn) {
       strasse: lead.strasse, plz: lead.plz, ort: lead.ort,
       typ: gemerkt || lead.typ || '',
       account_id: ziel.accountId, kampagne: ziel.name,
-      quelle: fremd ? ('Zentrale DB · ' + (s.quelle.name || s.quelle.id)) : 'zentrale-db',
+      quelle: fremd
+        ? (((s.herkunft && s.herkunft.name) || 'Zentrale DB') + ' · ' + (s.quelle.name || s.quelle.id))
+        : ((s.herkunft && s.herkunft.art) || 'zentrale-db'),
       dedupe_key: kenn.mail || kenn.tel, dedupe_tel: kenn.tel,
       bestand: (s.pruef.bestand && _ccSchonBekannt(s.pruef.bestand, lead)) ? 'ja' : '',
+      hinweis: hinweis,
       status: 'offen', versuche: '0', created_at: jetzt, updated_at: jetzt,
       import_id: stempel.import_id, import_von: stempel.import_von, import_extern: stempel.import_extern,
     };
@@ -47003,6 +47306,9 @@ async function _zdbKampUebernehmen(btn) {
     _ccZustandMerken();
     ZDB_AUSWAHL.clear();
     _zdbPaintView();
+    // Kam der Kontakt aus einem Ticket, steht dort noch „noch keiner Kampagne
+    // zugewiesen" — das wäre ab jetzt falsch.
+    if (typeof _fdhKontaktPanelAktualisieren === 'function') _fdhKontaktPanelAktualisieren();
     toast(n + (n === 1 ? ' Kontakt' : ' Kontakte') + ' in „' + ziel.name + '" übernommen'
       + (fremd ? ' (' + ((APP_STATE.accounts || []).find(a => String(a.id) === String(ziel.accountId)) || {}).name + ')' : '') + '.'
       + (weg.size ? ' In der Anrufliste abgeschaltet: ' + [...weg].join(', ') + ' — sonst wäre der Schub dort unsichtbar.' : ''),
@@ -47761,6 +48067,12 @@ const CC_TYPES = {
   typ: 'singleLineText', versteckt: 'singleLineText',
   status: 'singleLineText', versuche: 'singleLineText',
   letzter_versuch: 'singleLineText', notiz: 'multilineText', bearbeiter: 'singleLineText',
+  /* Notiz, die beim Übernehmen mitgegeben wird — bewusst NICHT `notiz`:
+     Dort schreibt der Anrufer nach dem Gespräch hinein, und sein Eintrag
+     ersetzt das Feld vollständig. Die Vorgabe wäre nach dem ersten Anruf weg.
+     Außerdem liest die Leitfaden-KI `notiz` als Gesprächsnotiz aus; eine
+     Auftragsbeschreibung würde sie dort für etwas Gesagtes halten. */
+  hinweis: 'multilineText',
   gesperrt_bis: 'singleLineText', preisliste_am: 'singleLineText', ticket_id: 'singleLineText',
   created_at: 'singleLineText', updated_at: 'singleLineText',
   // Herkunft eines Imports — Grundlage für „Import rückgängig".
@@ -48488,7 +48800,8 @@ const CC_EXPORT_SPALTEN = [
   ['status',          'Status',             16],
   ['versuche',        'Versuche',            9],
   ['letzter_versuch', 'letzter Versuch',    18],
-  ['notiz',           'Notiz',              46],
+  ['notiz',           'Gesprächsnotiz',     46],
+  ['hinweis',         'Notiz zum Kontakt',  40],
   ['quelle',          'Quelle',             22],
   ['bestand',         'Bestandskunde',      13],
   ['preisliste_am',   'Preisliste am',      18],
@@ -49084,7 +49397,9 @@ function _ccZeileBearbeiten(recordId) {
           + feld('ccEdOrt', 'Ort', r.ort)
         + '</div>'
         + feld('ccEdMail', 'E-Mail', r.email)
-        + '<label class="block"><span class="text-[10px] uppercase font-semibold text-ink-600">Notiz</span>'
+        + '<label class="block"><span class="text-[10px] uppercase font-semibold text-ink-600">Notiz zum Kontakt <span class="normal-case font-normal text-ink-400">— aus der Übernahme, bleibt stehen</span></span>'
+          + '<textarea id="ccEdHinweis" rows="2" class="w-full mt-0.5 px-2 py-1.5 border border-amber-300 bg-amber-50/40 rounded text-sm">' + escapeHtml(String(r.hinweis || '')) + '</textarea></label>'
+        + '<label class="block"><span class="text-[10px] uppercase font-semibold text-ink-600">Gesprächsnotiz</span>'
           + '<textarea id="ccEdNotiz" rows="2" class="w-full mt-0.5 px-2 py-1.5 border border-ink-300 rounded text-sm">' + escapeHtml(String(r.notiz || '')) + '</textarea></label>'
         + '<div class="flex gap-2 justify-end pt-1">'
           + '<button onclick="_ccZeileSchliessen()" class="px-3 py-2 rounded-lg text-[12px] font-bold bg-white border border-ink-300 text-ink-700">Abbrechen</button>'
@@ -49108,6 +49423,7 @@ async function _ccZeileSpeichern(btn) {
     const patch = {
       firma: hole('ccEdFirma'), ansprechpartner: hole('ccEdPerson'), position: hole('ccEdPosition'),
       telefon: tel, ort: hole('ccEdOrt'), email: hole('ccEdMail'), notiz: hole('ccEdNotiz'),
+      hinweis: hole('ccEdHinweis'),
       dedupe_tel: tel ? 't:' + tel : '', updated_at: nowIso(),
     };
     await _ccSpeichern(recordId, patch);
@@ -49171,7 +49487,12 @@ function _ccTabelle(rows) {
       + '<td class="' + td + '" title="' + escapeAttr(r.quelle || '') + '">' + _ccQuelleBadge(r) + '</td>'
       + '<td class="' + td + '">' + _ccStatusBadge(r)
         + (r.versuche && +r.versuche > 0 ? ' <span class="text-[11px] text-ink-400">' + r.versuche + '×</span>' : '') + '</td>'
-      + '<td class="' + td + ' text-[12px] text-ink-600" title="' + escapeAttr(String(r.notiz || '')) + '">' + escapeHtml(String(r.notiz || '')) + '</td>'
+      + '<td class="' + td + ' text-[12px] text-ink-600" title="' + escapeAttr((String(r.hinweis || '').trim() ? 'Notiz zum Kontakt: ' + r.hinweis + (r.notiz ? '\n\nGespräch: ' : '') : '') + String(r.notiz || '')) + '">'
+        + (String(r.hinweis || '').trim() ? '<i data-lucide="sticky-note" class="w-3.5 h-3.5 text-amber-600 inline-block align-text-bottom mr-1"></i>' : '')
+        + (String(r.notiz || '').trim()
+            ? escapeHtml(String(r.notiz))
+            : (String(r.hinweis || '').trim() ? '<span class="text-ink-400 italic">' + escapeHtml(String(r.hinweis)) + '</span>' : ''))
+        + '</td>'
       + '<td class="px-1 py-1.5 border-b border-ink-100 text-right">'
         + '<button onclick="event.stopPropagation(); _ccZeileBearbeiten(\'' + r.recordId + '\')" class="text-ink-300 hover:text-brand-700 p-1" title="Firma, Ansprechpartner, Nummer und E-Mail berichtigen"><i data-lucide="pencil" class="w-4 h-4"></i></button>'
         + '<button onclick="event.stopPropagation(); _ccVerstecken(\'' + r.recordId + '\', ' + (aus ? 'false' : 'true') + ', this)" class="text-ink-300 hover:text-ink-700 p-1" title="' + (aus ? 'Wieder aufnehmen' : 'Aus dieser Kampagne ausblenden') + '"><i data-lucide="' + (aus ? 'eye' : 'eye-off') + '" class="w-4 h-4"></i></button>'
@@ -49415,6 +49736,14 @@ function _ccArbeitsbereich(r) {
     : (hist ? escapeHtml(hist) : '<span class="text-ink-400">Kein früherer Schriftwechsel im Archiv.</span>');
   const erg = (key, text, cls) => '<button onclick="event.stopPropagation(); _ccErgebnis(\'' + r.recordId + '\',\'' + key + '\', this)" class="px-2.5 py-1.5 rounded-lg text-[11px] font-bold ' + cls + '">' + escapeHtml(text) + '</button>';
   return '<div class="rounded-xl border border-brand-200 bg-white p-3">'
+    /* Die Notiz aus der Übernahme steht ganz oben — sie ist der Grund, warum
+       dieser Kontakt überhaupt in der Liste steht, und muss vor dem Wählen
+       gelesen sein, nicht nach dem Gespräch gefunden werden. */
+    + (String(r.hinweis || '').trim()
+        ? '<div class="mb-2 rounded-lg border border-amber-200 bg-amber-50 px-2.5 py-1.5 flex items-start gap-1.5">'
+          + '<i data-lucide="sticky-note" class="w-3.5 h-3.5 text-amber-700 shrink-0 mt-0.5"></i>'
+          + '<p class="text-[12px] text-amber-900 whitespace-pre-wrap"><b>Notiz zum Kontakt:</b> ' + escapeHtml(String(r.hinweis)) + '</p></div>'
+        : '')
     + '<p class="text-[11px] text-ink-600 mb-2"><b class="text-ink-800">Vorgeschichte:</b> ' + histText + '</p>'
     + '<div class="flex flex-wrap items-center gap-1.5 mb-2">'
       + erg('interessiert',   'Interessiert',    'bg-emerald-600 hover:bg-emerald-700 text-white')
