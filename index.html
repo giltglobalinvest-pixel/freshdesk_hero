@@ -827,7 +827,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v3.28.0';
+const APP_VERSION = 'v3.29.0';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -48490,7 +48490,17 @@ function _ccIstCallcenter() {
    Auswahlliste in der Userverwaltung: Ein Kampagnenname allein sagt nicht, wen
    er betrifft — „Preisliste" gibt es bei mehreren Mandanten. */
 async function _ccKampagnenUebersicht() {
-  const rows = await airtableRead(CC_TABLE, { fields: ['kampagne', 'account_id'] });
+  /* Zwei Quellen, und beide braucht es.
+
+     Die Kampagnen-Tabelle kennt nur Kampagnen, die schon einen Kontakt haben —
+     eine frisch angelegte, leere Kampagne steht dort nicht. Genau die will man
+     aber als Erstes befüllen, etwa aus einem Ticket heraus. Die Vorlagen-
+     Tabelle führt je Kampagne einen Satz und ist damit das Verzeichnis; seit
+     v3.29.0 wird dort beim Anlegen einer Kampagne einer geschrieben. */
+  const [rows, vorlagen] = await Promise.all([
+    airtableRead(CC_TABLE, { fields: ['kampagne', 'account_id'] }),
+    airtableRead(CC_VORLAGE_TABLE, { fields: ['kampagne', 'account_id'] }).catch(() => []),
+  ]);
   /* Geführt wird JE FIRMA, nicht je Name. Dass zwei Mandanten ihre Kampagne
      gleich nennen, ist Zufall und darf keine Freigabe für beide bedeuten —
      die Anrufliste der einen Firma hat mit der anderen nichts zu tun. */
@@ -48510,7 +48520,45 @@ async function _ccKampagnenUebersicht() {
     }
     map.get(key).anzahl++;
   }
+  for (const r of (vorlagen || [])) {
+    const f = r.fields || {};
+    const name = String(f.kampagne || '').trim();
+    const accId = String(f.account_id || '');
+    if (!name || !accId) continue;
+    const key = accId + '::' + name;
+    if (map.has(key)) continue;
+    const acc = (APP_STATE.accounts || []).find(a => String(a.id) === accId);
+    map.set(key, {
+      key, name, accountId: accId, anzahl: 0,
+      firma: acc ? (acc.name || acc.id) : 'unbekannter Mandant',
+    });
+  }
   return [...map.values()].sort((a, b) => a.firma.localeCompare(b.firma, 'de') || a.name.localeCompare(b.name, 'de'));
+}
+
+/* Eine Kampagne anlegen, damit sie überall sichtbar ist — auch ohne Kontakte
+   und auch auf anderen Geräten. Vorher lebte der Name allein im localStorage
+   dessen, der ihn eingetippt hat; im Ticket und in der zentralen DB stand er
+   deshalb nicht zur Auswahl. Liefert die Datensatz-Kennung zurück, damit die
+   Vorlage danach nicht ein zweites Mal angelegt wird. */
+async function _ccKampagneRegistrieren(accId, name) {
+  const n = String(name || '').trim();
+  const a = String(accId || '');
+  if (!n || !a) return null;
+  const da = await airtableRead(CC_VORLAGE_TABLE, {
+    filter: "AND({account_id}='" + escapeFormula(a) + "',{kampagne}='" + escapeFormula(n) + "')", maxRecords: 1,
+  }).catch(() => []);
+  if ((da || []).length) return da[0].id;
+  const rec = await airtableWriteWithAutoField(CC_VORLAGE_TABLE, {
+    kampagne: n, account_id: a,
+    betreff: 'Ihre Preisliste — Sonderkonditionen',
+    anschreiben: CC_ANSCHREIBEN_STANDARD,
+    updated_at: nowIso(),
+  }, CC_VORLAGE_TYPEN);
+  // Die Auswahl im Ticket hält die Liste fünf Minuten — nach einer neuen
+  // Kampagne wäre sie sonst so lange unvollständig.
+  try { _FDH_KAMP_CACHE = null; } catch (_) {}
+  return (rec && rec.id) || null;
 }
 
 /* Auf welche Kampagnen ist dieser Benutzer freigegeben? null = alle.
@@ -49594,6 +49642,19 @@ async function _ccKampagneUmbenennen(btn) {
     const aenderungen = betroffen.map(r => ({ id: r.recordId, fields: { kampagne: neu, updated_at: nowIso() } }));
     if (aenderungen.length) await _ccStapelAendern(aenderungen);
     betroffen.forEach(r => { r.kampagne = neu; });
+    /* Der Vorlagen-Satz trägt den Namen ebenfalls — bleibt er stehen, taucht
+       die Kampagne unter dem alten Namen weiter in jeder Auswahl auf. */
+    if (acc) {
+      try {
+        const vor = await airtableRead(CC_VORLAGE_TABLE, {
+          filter: "AND({account_id}='" + escapeFormula(acc.id) + "',{kampagne}='" + escapeFormula(alt) + "')", maxRecords: 1,
+        }).catch(() => []);
+        if ((vor || []).length) await airtableUpdateWithAutoField(CC_VORLAGE_TABLE, vor[0].id, { kampagne: neu, updated_at: nowIso() }, CC_VORLAGE_TYPEN);
+        else await _ccKampagneRegistrieren(acc.id, neu);
+        _CC_VORLAGE = null;
+        try { _FDH_KAMP_CACHE = null; } catch (_) {}
+      } catch (e) { console.warn('[CC] Vorlage umbenennen:', e.message); }
+    }
     CC_STATE.kampagne = neu;
     lsSetzen('fdh_cc_kampagne', neu);
     if (btn) setBusy(btn, false);
@@ -49615,6 +49676,16 @@ function _ccKampagneWechseln(wert) {
     if (!name) return _ccZeichnen();
     if (name === '__neu__') return _ccZeichnen();
     CC_STATE.kampagne = name;
+    /* Sofort als Datensatz anlegen. Sonst kennt die Kampagne nur dieser
+       Browser, und im Ticket oder in der zentralen DB steht sie nicht zur
+       Auswahl, solange sie keinen einzigen Kontakt hat. */
+    const _acc = _ccAccount();
+    if (_acc) {
+      _ccKampagneRegistrieren(_acc.id, name)
+        .then(() => { _CC_VORLAGE = null; })
+        .catch(e => toast('Kampagne „' + name + '" konnte nicht gespeichert werden: ' + (e.message || e)
+          + ' — sie ist dann nur hier sichtbar.', 'warn', 9000));
+    }
   } else {
     if (!_ccKampagneErlaubt(wert)) return _ccZeichnen();
     CC_STATE.kampagne = wert;
@@ -50513,9 +50584,21 @@ async function _ccVorlageLaden(neu) {
     filter: "AND({account_id}='" + escapeFormula(acc.id) + "',{kampagne}='" + escapeFormula(kampagne) + "')", maxRecords: 1,
   }).catch(() => []);
   const r = (rows || [])[0];
-  _CC_VORLAGE = r
-    ? Object.assign({ recordId: r.id, _kampagne: kampagne }, r.fields)
-    : { recordId: null, _kampagne: kampagne, betreff: 'Ihre Preisliste — Sonderkonditionen', anschreiben: CC_ANSCHREIBEN_STANDARD, pdf_name: '' };
+  if (r) {
+    _CC_VORLAGE = Object.assign({ recordId: r.id, _kampagne: kampagne }, r.fields);
+    // Ein Satz, der nur als Verzeichnis-Eintrag entstanden ist, hat weder
+    // Betreff noch Anschreiben — sonst ginge ein Brief ohne Betreff hinaus.
+    if (!String(_CC_VORLAGE.betreff || '').trim()) _CC_VORLAGE.betreff = 'Ihre Preisliste — Sonderkonditionen';
+    if (!String(_CC_VORLAGE.anschreiben || '').trim()) _CC_VORLAGE.anschreiben = CC_ANSCHREIBEN_STANDARD;
+  } else {
+    /* Kein Vorlagen-Satz: Diese Kampagne steht in keinem Verzeichnis und wäre
+       außerhalb dieses Browsers unsichtbar. Beim ersten Öffnen nachtragen —
+       das holt auch die Kampagnen nach, die vor v3.29.0 angelegt wurden. */
+    let neuId = null;
+    try { neuId = await _ccKampagneRegistrieren(acc.id, kampagne); }
+    catch (e) { console.warn('[CC] Kampagne nachtragen:', e.message); }
+    _CC_VORLAGE = { recordId: neuId, _kampagne: kampagne, betreff: 'Ihre Preisliste — Sonderkonditionen', anschreiben: CC_ANSCHREIBEN_STANDARD, pdf_name: '' };
+  }
   // Ohne hinterlegten Leitfaden der Standard — besser als ein leeres Feld,
   // und jede Kampagne kann ihn überschreiben.
   if (!String(_CC_VORLAGE.leitfaden || '').trim()) _CC_VORLAGE.leitfaden = CC_LEITFADEN_STANDARD;
