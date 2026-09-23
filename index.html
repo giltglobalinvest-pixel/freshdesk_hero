@@ -827,7 +827,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const APP_VERSION = 'v3.24.0';
+const APP_VERSION = 'v3.25.0';
 
 // Beim Öffnen eines Tickets fremdsprachige Inhalte automatisch übersetzen (in-place).
 // Auf false setzen, um das Auto-Übersetzen abzuschalten.
@@ -46296,7 +46296,15 @@ function _zdbFirmaZelle(f, name) {
 }
 
 function _zdbAktionenZelle(r, f) {
-  if (!f.email) return '<span class="text-[10px] text-ink-300">—</span>';
+  /* Der Weg in die Anrufliste braucht keine E-Mail — eine Telefonnummer
+     genügt. Deshalb steht dieser Knopf auch bei Kontakten, bei denen sonst
+     nur ein Gedankenstrich stünde. */
+  const kampagne = '<button onclick="event.stopPropagation(); _zdbKampagneOeffnen(\'' + r.id + '\', this)" class="px-1.5 py-0.5 bg-white border border-indigo-300 text-indigo-700 hover:bg-indigo-50 rounded text-[10px] font-bold" title="Diesen Kontakt in eine Telefonkampagne \u00fcbernehmen \u2014 er bleibt in der zentralen DB">\u260E Kampagne</button>';
+  if (!f.email) {
+    return (f.telefon || f.mobil)
+      ? '<span class="inline-flex items-center gap-1">' + kampagne + '</span>'
+      : '<span class="text-[10px] text-ink-300">—</span>';
+  }
   const fd = f.freshdesk_contact_id
     ? '<button onclick="event.stopPropagation(); _zdbPushFd(\'' + r.id + '\', this)" class="px-1.5 py-0.5 bg-white border border-blue-300 text-blue-700 hover:bg-blue-50 rounded text-[10px] font-bold" title="In Freshdesk aktualisieren (vorhanden: #' + escapeAttr(String(f.freshdesk_contact_id)) + ')">\u2192 FD</button>'
     : '<button onclick="event.stopPropagation(); _zdbPushFd(\'' + r.id + '\', this)" class="px-1.5 py-0.5 bg-blue-600 hover:bg-blue-700 text-white rounded text-[10px] font-bold" title="In Freshdesk anlegen">\u2192 FD</button>';
@@ -46312,7 +46320,7 @@ function _zdbAktionenZelle(r, f) {
   // v2.69.3: KI-Zusammenfassung des Schriftverkehrs aus dem Archiv.
   const hatHist = String(f.historie_ki || '').trim();
   const historie = '<button onclick="event.stopPropagation(); _zdbHistorieOeffnen(\'' + r.id + '\', this)" class="px-1.5 py-0.5 ' + (hatHist ? 'bg-teal-600 hover:bg-teal-700 text-white' : 'bg-white border border-teal-300 text-teal-700 hover:bg-teal-50') + ' rounded text-[10px] font-bold" title="' + (hatHist ? 'Zusammenfassung der Historie ansehen' : 'Historie aus dem Archiv zusammenfassen lassen') + '">∑</button>';
-  return '<span class="inline-flex items-center gap-1">' + historie + werbung + fd + fs + zurueck + zurueckAus + '</span>';
+  return '<span class="inline-flex items-center gap-1">' + historie + werbung + kampagne + fd + fs + zurueck + zurueckAus + '</span>';
 }
 
 /* v2.68.20: Arbeitsansicht für den Mailchimp-Übertrag.
@@ -46667,6 +46675,344 @@ function _zdbSichtbareKontakte() {
   return rows;
 }
 
+/* ===== Gezielt in eine Telefonkampagne (v3.25.0) ==========================
+   Der Import bei der Anrufliste holt einen ganzen Bestand auf einmal. Hier
+   geht es um den umgekehrten Fall: Man steht in der zentralen DB, hat genau
+   den einen Kontakt (oder die zwölf markierten) vor sich und will ihn
+   anrufen lassen — ohne einen Import, der alles andere gleich mitnimmt.
+
+   Geschrieben wird in dieselbe Kampagnen-Tabelle, mit derselben Dubletten-
+   prüfung und derselben Werbesperre wie beim Import. Jeder Schub bekommt eine
+   Import-Kennung und lässt sich darüber in der Anrufliste wieder ausblenden —
+   sonst wäre ein versehentlicher Schub nur von Hand zurückzunehmen. */
+let _ZDB_KAMP = null;
+
+function _zdbKampHost() {
+  let h = document.getElementById('zdbKampHost');
+  if (!h) { h = document.createElement('div'); h.id = 'zdbKampHost'; document.body.appendChild(h); }
+  return h;
+}
+function _zdbKampSchliessen() {
+  const h = document.getElementById('zdbKampHost');
+  if (h) h.innerHTML = '';
+  _ZDB_KAMP = null;
+}
+
+/* Ein Kontakt der zentralen DB in der Form, die die Kampagnen-Tabelle kennt.
+   Die Anschrift kommt von der verknüpften Firma — der Kontakt selbst führt
+   keine; ohne sie wäre der Brief nach dem Telefonat nicht adressierbar. */
+function _zdbKampLead(r) {
+  const d = ZDB_VIEW_STATE.data || {};
+  const f = r.fields || {};
+  const fid = (f.firma || [])[0];
+  const ff = (((d.firmen || []).find(x => x.id === fid) || {}).fields) || {};
+  return {
+    recId: r.id,
+    firma: ((f.firma || []).map(id => (d.firmaName || {})[id]).filter(Boolean))[0] || '',
+    ansprechpartner: f.name || [f.vorname, f.nachname].filter(Boolean).join(' '),
+    telefon: f.telefon || f.mobil || '',
+    email: f.email || '',
+    position: f.position || '',
+    strasse: ff.strasse || '', plz: ff.plz || '', ort: ff.ort || '',
+    typ: f.typ || '',
+  };
+}
+
+/* Welche Kampagnen darf dieser Benutzer befüllen? Nur die von Mandanten, die
+   er ohnehin sieht — und bei eingeschränkten Benutzern nur die freigegebenen.
+   Sonst schiebt eine Agentur Kontakte in eine fremde Liste. */
+function _zdbKampListe(alle) {
+  const bekannt = new Set((APP_STATE.accounts || []).map(a => String(a.id)));
+  const frei = _ccKampagnenFreigabe();
+  return (alle || []).filter(k => bekannt.has(String(k.accountId))
+    && (!frei || frei.some(e => (!e.accountId || e.accountId === String(k.accountId))
+        && e.name.trim().toLowerCase() === k.name.trim().toLowerCase())));
+}
+
+async function _zdbKampagneOeffnen(recId, btn) {
+  const acc = _zdbCurrentAccount();
+  if (!acc) return toast('Kein Mandant gewählt', 'warn', 4000);
+  const alle = (ZDB_VIEW_STATE.data || {}).kontakte || [];
+  const ids = recId ? [recId] : _zdbSichtbareKontakte().filter(r => ZDB_AUSWAHL.has(r.id)).map(r => r.id);
+  if (!ids.length) return toast('Nichts markiert.', 'warn', 4000);
+  const rows = ids.map(id => alle.find(r => r.id === id)).filter(Boolean);
+  if (!rows.length) return toast('Kontakt nicht gefunden — bitte die Ansicht neu laden.', 'warn', 6000);
+  setBusy(btn, true, 'Lade…');
+  let kampagnen = [];
+  try { kampagnen = _zdbKampListe(await _ccKampagnenUebersicht()); }
+  catch (e) { setBusy(btn, false); return toast('Kampagnen konnten nicht gelesen werden: ' + (e.message || e), 'error', 9000); }
+  setBusy(btn, false);
+  /* Vorbelegt ist die Kampagne, die in der Anrufliste zuletzt offen war — in
+     aller Regel genau die, in die der Kontakt soll. Gibt es nur eine einzige,
+     steht die drin. Sonst bleibt die Auswahl bewusst leer. */
+  const offen = (CC_STATE && CC_STATE.kampagne)
+    ? (String((_ccAccount() || {}).id || '') + '::' + CC_STATE.kampagne) : '';
+  const wahl = kampagnen.some(k => k.key === offen) ? offen : (kampagnen.length === 1 ? kampagnen[0].key : '');
+  _ZDB_KAMP = {
+    quelle: acc, leads: rows.map(_zdbKampLead), kampagnen, wahl,
+    neuAcc: String(acc.id), neuName: '', nurTel: false, pruef: null, laden: false,
+  };
+  _zdbKampZeichnen();
+  if (wahl) _zdbKampPruefen();
+}
+
+/** Ziel-Kampagne aus dem Zustand — null, solange nichts Vollständiges dasteht. */
+function _zdbKampZiel() {
+  const s = _ZDB_KAMP;
+  if (!s) return null;
+  if (s.wahl === '__neu__') {
+    const name = String(s.neuName || '').trim();
+    return (name && s.neuAcc) ? { accountId: String(s.neuAcc), name, neu: true } : null;
+  }
+  const k = s.kampagnen.find(x => x.key === s.wahl);
+  return k ? { accountId: String(k.accountId), name: k.name, neu: false } : null;
+}
+
+/* Abgleich mit dem, was in der Ziel-Kampagne schon steht. Bewusst frisch aus
+   Airtable und nicht aus CC_STATE: Die Anrufliste kann eine andere Kampagne
+   geladen haben oder seit Stunden offen sein. */
+async function _zdbKampPruefen() {
+  const s = _ZDB_KAMP;
+  if (!s) return;
+  const ziel = _zdbKampZiel();
+  s.pruef = null;
+  if (!ziel) { _zdbKampZeichnen(); return; }
+  s.laden = true;
+  _zdbKampZeichnen();
+  try {
+    const rows = await airtableRead(CC_TABLE, {
+      filter: "{account_id}='" + escapeFormula(ziel.accountId) + "'",
+      fields: ['kampagne', 'email', 'telefon', 'dedupe_key', 'dedupe_tel'],
+    });
+    const drin = (rows || []).map(r => r.fields || {})
+      .filter(f => String(f.kampagne || CC_KAMPAGNE_STANDARD) === ziel.name);
+    const sperre = await _ccSperrlisteLaden(true).catch(() => new Set());
+    /* Bestandskennzeichen nur bei fremder Herkunft. Schiebt man Kontakte
+       innerhalb desselben Mandanten, stünde sonst an jedem „bereits Kunde" —
+       er steht ja per Definition in genau dieser zentralen DB. Das wäre kein
+       Hinweis, sondern Rauschen, und der Filter „ohne Bestand" in der
+       Anrufliste würde den frisch übernommenen Kontakt gleich verstecken. */
+    let bestand = null;
+    if (String(ziel.accountId) !== String(s.quelle.id)) {
+      const zielAcc = (APP_STATE.accounts || []).find(a => String(a.id) === String(ziel.accountId));
+      if (zielAcc) bestand = await _ccBestandsKennungen(zielAcc);
+    }
+    s.pruef = { vorhanden: _ccKennungsSatz(drin), sperre, bestand, anzahl: drin.length };
+  } catch (e) {
+    s.pruef = { fehler: e.message || String(e) };
+  }
+  s.laden = false;
+  _zdbKampZeichnen();
+}
+
+/* Was mit jedem einzelnen Kontakt geschieht — dieselbe Reihenfolge, die auch
+   geschrieben wird. Ein Durchgang für Vorschau und Übernahme, damit die
+   Anzeige nicht etwas anderes verspricht, als danach passiert. */
+function _zdbKampPlan() {
+  const s = _ZDB_KAMP;
+  if (!s) return [];
+  const gesehen = new Set();
+  const plan = [];
+  for (const lead of (s.leads || [])) {
+    const k = _ccKennungen(lead);
+    let art = 'neu', text = '';
+    if (!k.mail && !k.tel) { art = 'leer'; text = 'ohne Telefonnummer und E-Mail'; }
+    else if (s.nurTel && !k.tel) { art = 'ohneTel'; text = 'keine Telefonnummer'; }
+    else if (_ccSchonBekannt(gesehen, lead)) { art = 'doppelt'; text = 'doppelt in der Auswahl'; }
+    else if (s.pruef && !s.pruef.fehler && _ccSchonBekannt(s.pruef.sperre, lead)) { art = 'sperre'; text = 'Werbesperre'; }
+    else if (s.pruef && !s.pruef.fehler && _ccSchonBekannt(s.pruef.vorhanden, lead)) { art = 'doppelt'; text = 'steht schon in der Kampagne'; }
+    if (art === 'neu') {
+      _ccKennungenMerken(gesehen, lead);
+      text = k.tel ? '' : 'ohne Telefonnummer — nur Anschrift und E-Mail';
+    }
+    plan.push({ lead, art, text });
+  }
+  return plan;
+}
+
+const _ZDB_KAMP_ART = {
+  neu:     { label: 'wird übernommen', cls: 'bg-emerald-50 text-emerald-700 border-emerald-200' },
+  doppelt: { label: 'übersprungen',    cls: 'bg-ink-100 text-ink-500 border-ink-300' },
+  sperre:  { label: 'gesperrt',        cls: 'bg-rose-50 text-rose-700 border-rose-200' },
+  leer:    { label: 'ohne Kennung',    cls: 'bg-amber-50 text-amber-800 border-amber-200' },
+  ohneTel: { label: 'ohne Nummer',     cls: 'bg-amber-50 text-amber-800 border-amber-200' },
+};
+
+function _zdbKampZeichnen() {
+  const host = _zdbKampHost();
+  const s = _ZDB_KAMP;
+  if (!s) { host.innerHTML = ''; return; }
+  const ziel = _zdbKampZiel();
+  const plan = _zdbKampPlan();
+  const zahl = {};
+  plan.forEach(p => { zahl[p.art] = (zahl[p.art] || 0) + 1; });
+  const nehmen = zahl.neu || 0;
+
+  const gruppen = {};
+  s.kampagnen.forEach(k => { (gruppen[k.firma] = gruppen[k.firma] || []).push(k); });
+  const darfNeu = !_ccKampagnenFreigabe();
+  const auswahl = '<select onchange="_zdbKampWahl(this.value)" class="w-full px-2.5 py-2 border border-ink-300 rounded-lg text-sm bg-white">'
+    + '<option value=""' + (s.wahl ? '' : ' selected') + '>— Kampagne wählen —</option>'
+    + Object.keys(gruppen).sort((a, b) => a.localeCompare(b, 'de')).map(firma =>
+        '<optgroup label="' + escapeAttr(firma) + '">'
+        + gruppen[firma].map(k => '<option value="' + escapeAttr(k.key) + '"' + (s.wahl === k.key ? ' selected' : '') + '>'
+            + escapeHtml(k.name) + ' (' + k.anzahl + ' Kontakte)</option>').join('')
+        + '</optgroup>').join('')
+    + (darfNeu ? '<option value="__neu__"' + (s.wahl === '__neu__' ? ' selected' : '') + '>+ neue Kampagne anlegen</option>' : '')
+    + '</select>';
+
+  const neuBlock = s.wahl === '__neu__'
+    ? '<div class="grid grid-cols-1 sm:grid-cols-2 gap-2 mt-2">'
+      + '<label class="block"><span class="text-[11px] font-semibold text-ink-600">Mandant</span>'
+        + '<select onchange="_ZDB_KAMP.neuAcc=this.value;_zdbKampPruefen()" class="w-full mt-0.5 px-2.5 py-1.5 border border-ink-300 rounded-lg text-sm bg-white">'
+        + (APP_STATE.accounts || []).map(a => '<option value="' + escapeAttr(String(a.id)) + '"' + (String(s.neuAcc) === String(a.id) ? ' selected' : '') + '>' + escapeHtml(a.name || a.id) + '</option>').join('')
+        + '</select></label>'
+      + '<label class="block"><span class="text-[11px] font-semibold text-ink-600">Name der Kampagne</span>'
+        + '<input value="' + escapeAttr(s.neuName || '') + '" placeholder="' + escapeAttr(CC_KAMPAGNE_STANDARD) + '"'
+        + ' onchange="_ZDB_KAMP.neuName=this.value;_zdbKampPruefen()"'
+        + ' class="w-full mt-0.5 px-2.5 py-1.5 border border-ink-300 rounded-lg text-sm"></label>'
+      + '</div>'
+      + '<p class="text-[11px] text-ink-500 mt-1">Ein bereits vorhandener Name führt die Kontakte in die bestehende Kampagne — angelegt wird nichts doppelt.</p>'
+    : '';
+
+  const stand = s.laden
+    ? '<p class="text-[12px] text-ink-500 mt-2"><span class="spinner inline-block w-3 h-3 border-[2px] text-brand-500"></span> Gleiche mit der Kampagne ab…</p>'
+    : (s.pruef && s.pruef.fehler
+        ? '<p class="text-[12px] text-rose-700 mt-2">Abgleich fehlgeschlagen: ' + escapeHtml(s.pruef.fehler) + ' — bitte erneut wählen.</p>'
+        : (s.pruef
+            ? '<p class="text-[11px] text-ink-500 mt-2">In dieser Kampagne ' + (s.pruef.anzahl === 1 ? 'steht bereits 1 Kontakt' : 'stehen bereits ' + s.pruef.anzahl + ' Kontakte') + '. Dubletten werden daran und an der Werbesperre geprüft.</p>'
+            : ''));
+
+  const MAX = 40;
+  const zeilen = plan.slice(0, MAX).map(p => {
+    const a = _ZDB_KAMP_ART[p.art] || _ZDB_KAMP_ART.neu;
+    return '<div class="flex items-center gap-2 py-1.5 border-b border-ink-100 last:border-0">'
+      + '<div class="flex-1 min-w-0">'
+        + '<p class="text-[12px] font-semibold text-ink-900 truncate">' + escapeHtml(p.lead.ansprechpartner || '(ohne Namen)')
+        + (p.lead.firma ? ' <span class="font-normal text-ink-500">· ' + escapeHtml(p.lead.firma) + '</span>' : '') + '</p>'
+        + '<p class="text-[11px] text-ink-500 truncate">' + escapeHtml(p.lead.telefon || 'keine Nummer')
+        + (p.lead.email ? ' · ' + escapeHtml(p.lead.email) : '') + '</p>'
+      + '</div>'
+      + '<span class="text-[10px] px-1.5 py-0.5 rounded border font-bold shrink-0 ' + a.cls + '" title="' + escapeAttr(p.text || a.label) + '">' + a.label + '</span>'
+      + '</div>';
+  }).join('');
+  const rest = plan.length > MAX ? '<p class="text-[11px] text-ink-400 pt-1.5">… und ' + (plan.length - MAX) + ' weitere</p>' : '';
+
+  const summe = [
+    nehmen + ' werden übernommen',
+    (zahl.doppelt ? zahl.doppelt + ' bereits vorhanden' : ''),
+    (zahl.sperre ? zahl.sperre + ' wegen Werbesperre ausgelassen' : ''),
+    (zahl.ohneTel ? zahl.ohneTel + ' ohne Telefonnummer ausgelassen' : ''),
+    (zahl.leer ? zahl.leer + ' ohne Nummer und E-Mail' : ''),
+  ].filter(Boolean).join(' · ');
+
+  host.innerHTML =
+    '<div class="fixed inset-0 z-[85] bg-black/40 flex items-start justify-center overflow-y-auto p-4" onclick="if(event.target===this)_zdbKampSchliessen()">'
+      + '<div class="bg-white rounded-2xl shadow-xl w-full max-w-lg my-8">'
+        + '<div class="flex items-center justify-between p-4 border-b border-ink-200">'
+          + '<div><h3 class="font-bold text-ink-900">In Telefonkampagne übernehmen</h3>'
+            + '<p class="text-[11px] text-ink-500">' + plan.length + (plan.length === 1 ? ' Kontakt' : ' Kontakte')
+            + ' aus der zentralen DB von ' + escapeHtml(s.quelle.name || s.quelle.id) + '</p></div>'
+          + '<button onclick="_zdbKampSchliessen()" class="text-ink-400 hover:text-ink-700"><i data-lucide="x" class="w-5 h-5"></i></button>'
+        + '</div>'
+        + '<div class="p-4">'
+          + auswahl + neuBlock + stand
+          + '<label class="inline-flex items-center gap-1.5 text-[12px] text-ink-700 cursor-pointer mt-3">'
+            + '<input type="checkbox"' + (s.nurTel ? ' checked' : '') + ' onchange="_ZDB_KAMP.nurTel=this.checked;_zdbKampZeichnen()">'
+            + ' Nur Kontakte mit Telefonnummer übernehmen</label>'
+          + '<div class="mt-3 border border-ink-200 rounded-xl p-2.5 max-h-64 overflow-y-auto">' + zeilen + rest + '</div>'
+          + '<p class="text-[11px] text-ink-500 mt-2">' + escapeHtml(summe) + '</p>'
+          + '<p class="text-[10px] text-ink-400 mt-1">Der Kontakt bleibt in der zentralen DB — er wird kopiert, nicht verschoben. Der ganze Schub lässt sich in der Anrufliste unter „Import rückgängig" wieder ausblenden.</p>'
+        + '</div>'
+        + '<div class="flex items-center justify-end gap-2 p-4 border-t border-ink-200">'
+          + '<button onclick="_zdbKampSchliessen()" class="px-3 py-2 text-sm text-ink-600 hover:bg-ink-100 rounded-lg">Abbrechen</button>'
+          + '<button onclick="_zdbKampUebernehmen(this)"' + ((!ziel || s.laden || !nehmen) ? ' disabled' : '')
+            + ' class="px-4 py-2 rounded-lg text-sm font-bold text-white ' + ((!ziel || s.laden || !nehmen) ? 'bg-ink-300 cursor-not-allowed' : 'bg-indigo-600 hover:bg-indigo-700') + '">'
+            + (!ziel ? 'Kampagne wählen' : (nehmen ? (nehmen + ' in „' + escapeHtml(ziel.name) + '"') : 'Nichts zu übernehmen')) + '</button>'
+        + '</div>'
+      + '</div>'
+    + '</div>';
+  if (window.lucide) lucide.createIcons();
+}
+
+function _zdbKampWahl(v) {
+  const s = _ZDB_KAMP;
+  if (!s) return;
+  s.wahl = v;
+  s.pruef = null;
+  _zdbKampZeichnen();
+  if (v && v !== '__neu__') _zdbKampPruefen();
+}
+
+async function _zdbKampUebernehmen(btn) {
+  const s = _ZDB_KAMP;
+  if (!s) return;
+  const ziel = _zdbKampZiel();
+  if (!ziel) return toast('Bitte eine Kampagne wählen.', 'warn', 4000);
+  /* Wer den Kampagnennamen tippt und sofort hierher klickt, löst mit dem
+     Fokuswechsel gerade erst den Abgleich aus — dann wird er hier nachgeholt,
+     statt den Klick mit einer Fehlermeldung zu beantworten. */
+  if (!s.pruef) await _zdbKampPruefen();
+  if (!s.pruef || s.pruef.fehler) return toast('Abgleich mit der Kampagne fehlgeschlagen — bitte die Kampagne erneut wählen.', 'warn', 6000);
+  const nehmen = _zdbKampPlan().filter(p => p.art === 'neu');
+  if (!nehmen.length) return toast('Nichts zu übernehmen.', 'warn', 5000);
+  const stempel = _ccImportStempel();
+  const jetzt = nowIso();
+  const fremd = String(ziel.accountId) !== String(s.quelle.id);
+  // Ein von Hand gesetzter Typ schlägt den aus der zentralen DB — er wurde
+  // beim Telefonieren vergeben, die Stammdaten raten nur.
+  const typen = await _ccTypenLaden(true).catch(() => null);
+  const saetze = nehmen.map(p => {
+    const lead = p.lead;
+    const kenn = _ccKennungen(lead);
+    const gemerkt = typen ? _ccTypBekannt(typen, lead) : '';
+    return {
+      firma: lead.firma, ansprechpartner: lead.ansprechpartner, telefon: lead.telefon,
+      email: lead.email, position: lead.position,
+      strasse: lead.strasse, plz: lead.plz, ort: lead.ort,
+      typ: gemerkt || lead.typ || '',
+      account_id: ziel.accountId, kampagne: ziel.name,
+      quelle: fremd ? ('Zentrale DB · ' + (s.quelle.name || s.quelle.id)) : 'zentrale-db',
+      dedupe_key: kenn.mail || kenn.tel, dedupe_tel: kenn.tel,
+      bestand: (s.pruef.bestand && _ccSchonBekannt(s.pruef.bestand, lead)) ? 'ja' : '',
+      status: 'offen', versuche: '0', created_at: jetzt, updated_at: jetzt,
+      import_id: stempel.import_id, import_von: stempel.import_von, import_extern: stempel.import_extern,
+    };
+  });
+  setBusy(btn, true, '0/' + saetze.length);
+  try {
+    const n = await _ccStapelSchreiben(saetze);
+    setBusy(btn, false);
+    _zdbKampSchliessen();
+    /* Die Anrufliste lädt bei jedem Aufruf neu — der Zustand hier sorgt nur
+       dafür, dass sie beim nächsten Öffnen auf der richtigen Kampagne steht.
+       Abgeschaltet werden nur die Filter, die den frischen Schub tatsächlich
+       verstecken würden: Wer sonst nichts Neues sieht, sucht den Fehler bei
+       der Übernahme statt beim Filter. Und gesagt wird es auch. */
+    CC_STATE.accountId = ziel.accountId;
+    CC_STATE.kampagne = ziel.name;
+    const weg = new Set();
+    if (CC_STATE.filter !== 'offen') { CC_STATE.filter = 'offen'; weg.add('Status'); }
+    if (CC_STATE.status && CC_STATE.status !== 'offen') { CC_STATE.status = ''; weg.add('Status'); }
+    const quelleNeu = String(saetze[0].quelle || '').toLowerCase();
+    if (CC_STATE.quelle && CC_STATE.quelle !== quelleNeu) { CC_STATE.quelle = ''; weg.add('Herkunft'); }
+    if (CC_STATE.typ && !saetze.some(x => String(x.typ || '') === CC_STATE.typ)) { CC_STATE.typ = ''; weg.add('Typ'); }
+    if (CC_STATE.nurMitNummer && saetze.some(x => _ccNummerNormal(x.telefon).length < 6)) { CC_STATE.nurMitNummer = false; weg.add('nur mit Nummer'); }
+    if (CC_STATE.ohneBestand && saetze.some(x => x.bestand === 'ja')) { CC_STATE.ohneBestand = false; weg.add('ohne Bestand'); }
+    if (CC_STATE.nurFehler) { CC_STATE.nurFehler = false; weg.add('nur auffällige'); }
+    _ccZustandMerken();
+    ZDB_AUSWAHL.clear();
+    _zdbPaintView();
+    toast(n + (n === 1 ? ' Kontakt' : ' Kontakte') + ' in „' + ziel.name + '" übernommen'
+      + (fremd ? ' (' + ((APP_STATE.accounts || []).find(a => String(a.id) === String(ziel.accountId)) || {}).name + ')' : '') + '.'
+      + (weg.size ? ' In der Anrufliste abgeschaltet: ' + [...weg].join(', ') + ' — sonst wäre der Schub dort unsichtbar.' : ''),
+      'success', weg.size ? 11000 : 7000);
+  } catch (e) {
+    setBusy(btn, false);
+    toast('Übernahme fehlgeschlagen: ' + (e.message || e), 'error', 9000);
+  }
+}
+
 /* Archivieren = ausblenden, aber nicht löschen.
 
    Löschen wäre der falsche Griff: Der Kontakt käme beim nächsten Abgleich aus
@@ -46853,6 +47199,7 @@ function _zdbKontakteBody(d) {
               + ' onchange="ZDB_VIEW_STATE.zeigeArchiv=this.checked;ZDB_AUSWAHL.clear();_zdbPaintView()"> Archiv anzeigen (' + archivGesamt + ')</label>';
           })()
         + (markiert ? '<span class="text-[11px] font-bold text-indigo-700">' + markiert + ' markiert</span>'
+            + '<button onclick="_zdbKampagneOeffnen(null, this)" class="px-2.5 py-1 rounded-lg text-[11px] font-bold bg-indigo-600 hover:bg-indigo-700 text-white inline-flex items-center gap-1" title="Die markierten Kontakte in eine Telefonkampagne \u00fcbernehmen \u2014 sie bleiben in der zentralen DB"><i data-lucide="phone-call" class="w-3.5 h-3.5"></i> ' + markiert + ' in Kampagne</button>'
             + (ZDB_VIEW_STATE.zeigeArchiv
                 ? '<button onclick="_zdbArchivieren(true, this)" class="px-2.5 py-1 rounded-lg text-[11px] font-bold bg-emerald-600 hover:bg-emerald-700 text-white inline-flex items-center gap-1"><i data-lucide="archive-restore" class="w-3.5 h-3.5"></i> ' + markiert + ' zurückholen</button>'
                 : '<button onclick="_zdbArchivieren(false, this)" class="px-2.5 py-1 rounded-lg text-[11px] font-bold bg-ink-600 hover:bg-ink-700 text-white inline-flex items-center gap-1" title="Aus der Arbeitsliste nehmen — gelöscht wird nichts"><i data-lucide="archive" class="w-3.5 h-3.5"></i> ' + markiert + ' archivieren</button>')
